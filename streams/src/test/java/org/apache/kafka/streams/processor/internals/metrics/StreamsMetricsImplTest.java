@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.processor.internals.metrics;
 
+import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.metrics.Gauge;
 import org.apache.kafka.common.metrics.KafkaMetric;
@@ -1424,5 +1425,66 @@ public class StreamsMetricsImplTest {
             Collections.singletonMap("thread-id", "t1")
         );
         assertThat(metrics.metric(name), nullValue());
+    }
+
+    @Test
+    public void shouldIncludeApplicationIdTagInAllClientLevelMetrics() {
+        final Metrics metrics = new Metrics();
+        final StreamsMetricsImpl streamsMetrics = new StreamsMetricsImpl(
+            metrics,
+            CLIENT_ID,
+            PROCESS_ID,
+            APPLICATION_ID,
+            time
+        );
+
+        // Add various client-level metrics
+        streamsMetrics.addClientLevelImmutableMetric(
+            "test-immutable-metric",
+            "Test immutable metric",
+            RecordingLevel.INFO,
+            "test-value"
+        );
+
+        streamsMetrics.addClientLevelMutableMetric(
+            "test-mutable-metric",
+            "Test mutable metric",
+            RecordingLevel.INFO,
+            (config, now) -> 42
+        );
+
+        // Verify all client-level metrics have application-id tag
+        int clientLevelMetricsCount = 0;
+        int metricsWithApplicationId = 0;
+
+        for (final Map.Entry<MetricName, ? extends Metric> entry : metrics.metrics().entrySet()) {
+            final MetricName metricName = entry.getKey();
+
+            if (CLIENT_LEVEL_GROUP.equals(metricName.group())) {
+                clientLevelMetricsCount++;
+                final Map<String, String> tags = metricName.tags();
+
+                // Verify the metric has all three required tags
+                assertTrue(tags.containsKey(CLIENT_ID_TAG),
+                    "Metric " + metricName.name() + " missing client-id tag");
+                assertTrue(tags.containsKey(PROCESS_ID_TAG),
+                    "Metric " + metricName.name() + " missing process-id tag");
+                assertTrue(tags.containsKey(APPLICATION_ID_TAG),
+                    "Metric " + metricName.name() + " missing application-id tag");
+
+                // Verify tag values
+                assertThat(tags.get(CLIENT_ID_TAG), equalTo(CLIENT_ID));
+                assertThat(tags.get(PROCESS_ID_TAG), equalTo(PROCESS_ID));
+                assertThat(tags.get(APPLICATION_ID_TAG), equalTo(APPLICATION_ID));
+
+                metricsWithApplicationId++;
+            }
+        }
+
+        // Ensure we actually tested some metrics
+        assertThat("Should have at least 2 client-level metrics",
+            clientLevelMetricsCount, greaterThan(1));
+        assertThat("All client-level metrics should have application-id tag",
+            metricsWithApplicationId, equalTo(clientLevelMetricsCount));
     }
 }
