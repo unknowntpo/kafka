@@ -11,8 +11,8 @@ TOPIC COMMANDS:
   topics                Manage Kafka topics (create, list, describe, delete, alter)
 
 PRODUCER/CONSUMER COMMANDS:
-  produce               Send messages to a topic
-  consume               Read messages from a topic
+  produce               Send messages to a topic (read from standard input)
+  consume               Read messages from a topic and output to standard output
   share-consume         Read messages from a topic using share groups
 
 GROUP COMMANDS:
