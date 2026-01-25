@@ -61,3 +61,8 @@ storage/kafka-tiered-storage/
 docker/test/report_*.html
 kafka.Kafka
 __pycache__
+
+# Node/Bun
+node_modules/
+bun.lockb
+.bun/
