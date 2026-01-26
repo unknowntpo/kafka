@@ -1,0 +1,31 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Use local Kafka Streams from parent project
+    implementation project(':streams')
+
+    // Logging
+    implementation 'org.slf4j:slf4j-api:2.0.9'
+    implementation 'org.slf4j:slf4j-simple:2.0.9'
+}
+
+// Allow running with: ./gradlew :demo:run -PmainClass=demo.BeforeDlqDemo
+application {
+    mainClass = project.hasProperty('mainClass') ? project.getProperty('mainClass') : 'demo.BeforeDlqDemo'
+}
+
+run {
+    standardInput = System.in
+}

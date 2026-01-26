@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.integration;
 
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
@@ -53,7 +54,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 import static java.util.Collections.singletonList;
@@ -148,6 +151,7 @@ public class DeadLetterQueueIntegrationTest {
             assertEquals("1", new String(dlqRecords.get(0).headers().lastHeader(HEADER_ERRORS_OFFSET_NAME).value()));
         }
     }
+
 
     @Test
     public void shouldSendToDlqAndContinueFromDsl() throws Exception {
@@ -456,4 +460,6 @@ public class DeadLetterQueueIntegrationTest {
             timeout);
     }
 
+    private record myRecord(String key, String value) {
+    }
 }
