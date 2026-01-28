@@ -202,7 +202,39 @@ public class CustomDLQHandler implements DeserializationExceptionHandler {
 
 </v-clicks>
 
-FIXME: explain more about txn in kafka streams
+---
+
+# 交易一致性問題 (Transaction)
+
+<v-clicks>
+
+### Kafka Streams 的 Exactly-Once Semantics (EOS)
+
+- **KIP-98** 引入 Kafka Transaction - 原子性寫入多個 partition
+- **KIP-129** 將 EOS 帶入 Kafka Streams
+- **KIP-447** 改進為 `exactly_once_v2` (單一 Producer per thread)
+
+### 自己實作 DLQ 的交易問題
+
+```
+Input → Process → Output (Transaction A)
+           ↓
+        DLQ Send (Transaction B - 獨立！)
+```
+
+**問題：** DLQ 寫入不在同一個 Transaction，可能造成：
+- Output 寫入成功但 DLQ 失敗 → 錯誤訊息遺失
+- DLQ 寫入成功但 Output 失敗 → 重複的 DLQ record
+
+</v-clicks>
+
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [KIP-98](https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging) ·
+[KIP-129](https://cwiki.apache.org/confluence/display/KAFKA/KIP-129%3A+Streams+Exactly-Once+Semantics) ·
+[KIP-447](https://cwiki.apache.org/confluence/display/KAFKA/KIP-447:+Producer+scalability+for+exactly+once+semantics)
+
+</div>
 
 ---
 layout: center
@@ -256,6 +288,39 @@ Response.CONTINUE.withDeadLetterQueueRecord(record, "dlq-topic")
 | **設定方式** | 自定義 config | 統一的 `errors.deadletterqueue.topic.name` |
 | **錯誤處理** | 自己實作 | 統一送到 `uncaughtExceptionHandler` |
 | **程式碼量** | 大量重複 | 一行設定或簡單 Handler |
+
+---
+
+# KIP-1034 如何解決交易問題？
+
+<v-clicks>
+
+### DLQ 寫入納入同一個 Transaction
+
+```
+Input → Process → Output ─┐
+           ↓              │ 同一個 Transaction
+        DLQ Record ───────┘
+           ↓
+      Commit Offsets
+```
+
+### 原理：StreamsProducer 統一管理
+
+1. `maybeBeginTransaction()` - 開始 transaction
+2. `send()` - 送出 output records **和** DLQ records
+3. `sendOffsetsToTransaction()` - 加入 consumer offsets
+4. `commitTransaction()` - 原子性 commit 全部
+
+**結果：** Output、DLQ、Offset 三者原子性提交，不會有不一致狀態
+
+</v-clicks>
+
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [StreamsProducer.java#L185-L282](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/processor/internals/StreamsProducer.java#L185-L282)
+
+</div>
 
 ---
 layout: center
