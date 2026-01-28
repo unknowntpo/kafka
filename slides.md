@@ -132,6 +132,13 @@ public enum ProductionExceptionHandlerResponse {
 }
 ```
 
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [DeserializationExceptionHandler.java#L99-L119](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/DeserializationExceptionHandler.java#L99-L119) ·
+[ProductionExceptionHandler.java#L159-L199](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ProductionExceptionHandler.java#L159-L199)
+
+</div>
+
 <v-click>
 
 <div class="mt-4 p-4 bg-red-500 bg-opacity-20 rounded">
@@ -173,6 +180,12 @@ public class CustomDLQHandler implements DeserializationExceptionHandler {
 }
 ```
 
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [DeserializationExceptionHandler.java#L32](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/DeserializationExceptionHandler.java#L32)
+
+</div>
+
 ---
 
 # Before: 自己實作的問題
@@ -188,6 +201,8 @@ public class CustomDLQHandler implements DeserializationExceptionHandler {
 | **維護成本** | 不同 Handler (Deserialization, Production, Processing) 都要實作 |
 
 </v-clicks>
+
+FIXME: explain more about txn in kafka streams
 
 ---
 layout: center
@@ -219,6 +234,14 @@ Response.CONTINUE
 Response.FAIL.withDeadLetterQueueRecord(record, "dlq-topic")
 Response.CONTINUE.withDeadLetterQueueRecord(record, "dlq-topic")
 ```
+
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [KIP-1034 Wiki](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1034) ·
+[DeserializationExceptionHandler.java#L172-L253](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/DeserializationExceptionHandler.java#L172-L253) ·
+[ProcessingExceptionHandler.java](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ProcessingExceptionHandler.java)
+
+</div>
 
 </v-clicks>
 
@@ -261,6 +284,12 @@ props.put(StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
     LogAndContinueWithDLQExceptionHandler.class);
 ```
 
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [StreamsConfig.java#L579](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/StreamsConfig.java#L579) - `ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG`
+
+</div>
+
 <v-click>
 
 <div class="mt-4 p-4 bg-green-500 bg-opacity-20 rounded">
@@ -298,6 +327,13 @@ public class MyProcessingExceptionHandler implements ProcessingExceptionHandler 
 }
 ```
 
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [ProcessingExceptionHandler.java#L29](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ProcessingExceptionHandler.java#L29) ·
+[Response#L139-L220](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ProcessingExceptionHandler.java#L139-L220)
+
+</div>
+
 ---
 
 # DLQ Record 可以包含什麼？
@@ -317,6 +353,13 @@ ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
     )
 );
 ```
+
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [ErrorHandlerContext.java#L35](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ErrorHandlerContext.java#L35) ·
+[ExceptionHandlerUtils.java#L35-L40](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/internals/ExceptionHandlerUtils.java#L35-L40) (header constants)
+
+</div>
 
 <v-click>
 
@@ -354,6 +397,12 @@ props.put(StreamsConfig.PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG,
 props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG,
     StreamsConfig.EXACTLY_ONCE_V2);
 ```
+
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [StreamsConfig.java](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/StreamsConfig.java) - all handler config constants
+
+</div>
 
 ---
 
@@ -411,32 +460,24 @@ class: text-center
 
 # DLQ 整體架構圖
 
-```mermaid {scale: 0.8}
+```mermaid {scale: 0.55}
 flowchart LR
-    subgraph Input
-        A[Source Topic]
-    end
+    A[Source Topic] --> B[Consumer]
 
-    subgraph Kafka Streams App
-        B[Consumer] --> C[Deserializer]
-        C -->|DeserializationException| D[DLQ Handler]
+    subgraph App[Kafka Streams App]
+        B --> C[Deserializer]
         C -->|Success| E[Processor]
-        E -->|ProcessingException| D
         E -->|Success| F[Serializer]
-        F -->|ProductionException| D
         F -->|Success| G[Producer]
+        C -->|Error| D[DLQ Handler]
+        E -->|Error| D
+        F -->|Error| D
     end
 
-    subgraph Output
-        G --> H[Output Topic]
-        D --> I[DLQ Topic]
-    end
-
-    subgraph Ops
-        I --> J[監控告警]
-        I --> K[分析修復]
-        K --> A
-    end
+    G --> H[Output Topic]
+    D --> I[DLQ Topic]
+    I --> J[監控/分析]
+    J -.->|重試| A
 ```
 
 ---

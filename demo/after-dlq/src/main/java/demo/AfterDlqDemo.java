@@ -11,6 +11,7 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.errors.DeserializationExceptionHandler;
 import org.apache.kafka.streams.errors.ErrorHandlerContext;
 import org.apache.kafka.streams.errors.ProcessingExceptionHandler;
@@ -117,7 +118,13 @@ public class AfterDlqDemo {
 
         processed.to(OUTPUT_TOPIC);
 
-        KafkaStreams streams = new KafkaStreams(builder.build(), props);
+        // Build and print topology (for https://zz85.github.io/kafka-streams-viz/)
+        Topology topology = builder.build();
+        System.out.println("=== TOPOLOGY (paste into kafka-streams-viz) ===");
+        System.out.println(topology.describe());
+        System.out.println("=== END TOPOLOGY ===\n");
+
+        KafkaStreams streams = new KafkaStreams(topology, props);
         CountDownLatch latch = new CountDownLatch(1);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

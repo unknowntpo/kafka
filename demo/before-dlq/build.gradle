@@ -1,0 +1,61 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Reference JARs from kafka 4.0.0 release (no DLQ support)
+    implementation fileTree(dir: 'kafka_2.13-4.0.0/libs', include: '*.jar')
+
+    // SLF4J for logging
+    implementation 'org.slf4j:slf4j-simple:2.0.9'
+}
+
+application {
+    mainClass = 'demo.BeforeDlqDemo'
+}
+
+// Task to download JMX Prometheus agent
+task downloadJmxAgent {
+    def jmxAgentFile = file('jmx_prometheus_javaagent.jar')
+    outputs.file jmxAgentFile
+    doLast {
+        if (!jmxAgentFile.exists()) {
+            def url = 'https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.20.0/jmx_prometheus_javaagent-0.20.0.jar'
+            ant.get(src: url, dest: jmxAgentFile)
+            println "Downloaded JMX Prometheus agent to ${jmxAgentFile}"
+        }
+    }
+}
+
+// Copy JMX exporter config
+task copyJmxConfig(type: Copy) {
+    from '../monitoring/jmx-exporter/config.yml'
+    into layout.buildDirectory.dir('jmx')
+    rename 'config.yml', 'jmx-exporter-config.yml'
+}
+
+run {
+    dependsOn downloadJmxAgent, copyJmxConfig
+    standardInput = System.in
+
+    // Enable JMX for Prometheus scraping
+    jvmArgs = [
+        '-Dcom.sun.management.jmxremote',
+        '-Dcom.sun.management.jmxremote.port=9991',
+        '-Dcom.sun.management.jmxremote.rmi.port=9991',
+        '-Dcom.sun.management.jmxremote.authenticate=false',
+        '-Dcom.sun.management.jmxremote.ssl=false',
+        '-Djava.rmi.server.hostname=localhost',
+        "-javaagent:${projectDir}/jmx_prometheus_javaagent.jar=9401:${layout.buildDirectory.get()}/jmx/jmx-exporter-config.yml"
+    ]
+}

@@ -1,8 +1,0 @@
-rootProject.name = 'demo'
-
-// Include parent Kafka project to access :streams module
-includeBuild('..') {
-    dependencySubstitution {
-        substitute module('org.apache.kafka:kafka-streams') using project(':streams')
-    }
-}

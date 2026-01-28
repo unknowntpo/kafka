@@ -66,3 +66,7 @@ __pycache__
 node_modules/
 bun.lockb
 .bun/
+
+# Demo - JMX Exporter
+demo/*/jmx_prometheus_javaagent.jar
+demo/*/jmx-exporter-config.yml

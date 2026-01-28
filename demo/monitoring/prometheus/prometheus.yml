@@ -1,0 +1,23 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Kafka Streams before-dlq app (JMX Exporter)
+  - job_name: 'kafka-streams-before'
+    static_configs:
+      - targets: ['host.docker.internal:9401']
+        labels:
+          app: 'before-dlq'
+
+  # Kafka Streams after-dlq app (JMX Exporter)
+  - job_name: 'kafka-streams-after'
+    static_configs:
+      - targets: ['host.docker.internal:9402']
+        labels:
+          app: 'after-dlq'
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
