@@ -74,6 +74,8 @@ ls ../streams/src/main/java/org/apache/kafka/streams/errors/
 - [ ] 準備 demo 用的 docker-compose.yml
 - [ ] 準備 demo 用的 Java application
 - [ ] 加入 KIP-1034 實作細節的 slides (如果時間允許)
+- [ ] Clear topic data before starting demo (避免舊資料影響 demo)
+- [ ] Add more example data (100+ records) for better demo visualization
 
 ## Git Info
 

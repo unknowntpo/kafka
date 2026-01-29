@@ -70,3 +70,12 @@ bun.lockb
 # Demo - JMX Exporter
 demo/*/jmx_prometheus_javaagent.jar
 demo/*/jmx-exporter-config.yml
+
+# Demo - Runtime/Generated
+demo/*/gradle/
+demo/*/gradlew
+demo/*/jmx/
+demo/*/kafka_2.13-*/
+kafka_2.13-*/
+.claude/
+slides-export.pdf
