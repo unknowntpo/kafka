@@ -3996,8 +3996,17 @@ task aggregatedJavadoc(type: Javadoc, dependsOn: compileJava) {
 // ========================
 
 project(':demo:after-dlq') {
+  apply plugin: 'application'
+
   base {
     archivesName = "kip1034-demo-after-dlq"
+  }
+
+  application {
+    mainClass = 'org.apache.kafka.demo.AfterDlqDemo'
+    applicationDefaultJvmArgs = [
+      "-javaagent:${project.projectDir}/jmx_prometheus_javaagent.jar=9402:${project.rootDir}/demo/monitoring/jmx-exporter/config.yml"
+    ]
   }
 
   dependencies {
@@ -4022,8 +4031,17 @@ project(':demo:after-dlq') {
 }
 
 project(':demo:before-dlq') {
+  apply plugin: 'application'
+
   base {
     archivesName = "kip1034-demo-before-dlq"
+  }
+
+  application {
+    mainClass = 'org.apache.kafka.demo.BeforeDlqDemo'
+    applicationDefaultJvmArgs = [
+      "-javaagent:${project.projectDir}/jmx_prometheus_javaagent.jar=9401:${project.rootDir}/demo/monitoring/jmx-exporter/config.yml"
+    ]
   }
 
   dependencies {
@@ -4031,6 +4049,7 @@ project(':demo:before-dlq') {
     implementation 'org.apache.kafka:kafka-streams:4.0.0'
     implementation 'org.apache.kafka:kafka-clients:4.0.0'
     implementation 'org.slf4j:slf4j-simple:2.0.9'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.0'
   }
 
   // Demo code can use deprecated APIs
