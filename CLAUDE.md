@@ -27,16 +27,16 @@
 cd ~/repo/unknowntpo/kafka/kip1034-presentation
 
 # 安裝依賴
-npm install
+bun install
 
 # 啟動開發伺服器
-npm run dev
+bun run dev
 
 # 建置靜態檔案
-npm run build
+bun run build
 
 # 匯出 PDF
-npm run export
+bun run export
 ```
 
 ## Key References

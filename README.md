@@ -6,16 +6,16 @@ KIP-1034: Dead Letter Queue in Kafka Streams 介紹簡報
 
 ```bash
 # 安裝依賴
-npm install
+bun install
 
 # 啟動開發伺服器
-npm run dev
+bun run dev
 
 # 建置靜態檔案
-npm run build
+bun run build
 
 # 匯出 PDF
-npm run export
+bun run export
 ```
 
 ## 簡報內容

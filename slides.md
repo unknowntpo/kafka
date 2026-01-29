@@ -258,14 +258,22 @@ KIP-1034 帶來的改變
 2. **ProcessingExceptionHandler** - 處理邏輯失敗 (KIP-1033 新增)
 3. **ProductionExceptionHandler** - 寫入失敗
 
-### 新的 Response 設計：
+### 新的 Response 設計 (每個 Handler 都有自己的 Response class)：
+
+<div class="text-sm">
+
+| Handler.Response | 可用方法 |
+|------------------|----------|
+| `DeserializationExceptionHandler.Response` | `fail()`, `resume()`, `fail(dlqRecords)`, `resume(dlqRecords)` |
+| `ProcessingExceptionHandler.Response` | `fail()`, `resume()`, `fail(dlqRecords)`, `resume(dlqRecords)` |
+| `ProductionExceptionHandler.Response` | `fail()`, `resume()`, **`retry()`**, `fail(dlqRecords)`, `resume(dlqRecords)`, **`retry(dlqRecords)`** |
+
+</div>
 
 ```java
-// 可以選擇是否附帶 DLQ record
-Response.FAIL
-Response.CONTINUE
-Response.FAIL.withDeadLetterQueueRecord(record, "dlq-topic")
-Response.CONTINUE.withDeadLetterQueueRecord(record, "dlq-topic")
+// 範例用法
+return DeserializationExceptionHandler.Response.resume(dlqRecords);
+return ProductionExceptionHandler.Response.retry();  // 只有 Production 有 retry
 ```
 
 <div class="text-xs text-gray-400 mt-2">
@@ -376,9 +384,9 @@ props.put(StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
 public class MyProcessingExceptionHandler implements ProcessingExceptionHandler {
 
     @Override
-    public ProcessingHandlerResponse handle(ErrorHandlerContext context,
-                                            Record<?, ?> record,
-                                            Exception exception) {
+    public Response handleProcessingException(ErrorHandlerContext context,
+                                              Record<?, ?> record,
+                                              Exception exception) {
         // 建立要送到 DLQ 的 record
         ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
             "my-app-dlq",
@@ -387,8 +395,7 @@ public class MyProcessingExceptionHandler implements ProcessingExceptionHandler 
         );
 
         // 繼續處理，同時把失敗訊息送到 DLQ
-        return ProcessingHandlerResponse.CONTINUE
-            .withDeadLetterQueueRecord(dlqRecord);
+        return Response.resume(Collections.singletonList(dlqRecord));
     }
 }
 ```
@@ -397,6 +404,66 @@ public class MyProcessingExceptionHandler implements ProcessingExceptionHandler 
 
 📎 [ProcessingExceptionHandler.java#L29](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ProcessingExceptionHandler.java#L29) ·
 [Response#L139-L220](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ProcessingExceptionHandler.java#L139-L220)
+
+</div>
+
+---
+
+# 自定義 Handler：DeserializationExceptionHandler
+
+反序列化失敗時的處理
+
+```java
+public class MyDeserializationHandler implements DeserializationExceptionHandler {
+
+    @Override
+    public Response handleDeserializationException(ErrorHandlerContext context,
+                                                   ConsumerRecord<byte[], byte[]> record,
+                                                   Exception exception) {
+        ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
+            "my-app-dlq",
+            record.key(),    // 原始 bytes
+            record.value()   // 原始 bytes (無法反序列化的資料)
+        );
+        return Response.resume(Collections.singletonList(dlqRecord));
+    }
+}
+```
+
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [DeserializationExceptionHandler.java](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/DeserializationExceptionHandler.java)
+
+</div>
+
+---
+
+# 自定義 Handler：ProductionExceptionHandler
+
+寫入失敗時的處理（多了 `retry()` 選項）
+
+```java
+public class MyProductionHandler implements ProductionExceptionHandler {
+
+    @Override
+    public Response handleSerializationException(ErrorHandlerContext context,
+                                                 ProducerRecord<byte[], byte[]> record,
+                                                 Exception exception,
+                                                 SerializationExceptionOrigin origin) {
+        if (exception instanceof RetriableException) {
+            return Response.retry();  // 只有 ProductionExceptionHandler 有 retry
+        }
+        ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
+            "my-app-dlq", record.key(), record.value()
+        );
+        return Response.fail(Collections.singletonList(dlqRecord));
+    }
+}
+```
+
+<div class="text-xs text-gray-400 mt-2">
+
+📎 [ProductionExceptionHandler.java](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/errors/ProductionExceptionHandler.java)
 
 </div>
 
@@ -736,5 +803,5 @@ layout: end
 
 ### References:
 - [KIP-1034: Dead Letter Queue in Kafka Streams](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1034:+Dead+letter+queue+in+Kafka+Streams)
-- [KIP-1033: Processing Exception Handler](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1033)
+- [KIP-1033: Add Kafka Streams exception handler for exceptions occurring during processing](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1033%3A+Add+Kafka+Streams+exception+handler+for+exceptions+occurring+during+processing)
 - [Kafka Streams Documentation](https://kafka.apache.org/documentation/streams/)
