@@ -3990,3 +3990,60 @@ task aggregatedJavadoc(type: Javadoc, dependsOn: compileJava) {
   includes = projectsWithJavadoc.collectMany { it.javadoc.getIncludes() }
   excludes = projectsWithJavadoc.collectMany { it.javadoc.getExcludes() }
 }
+
+// ========================
+// KIP-1034 Demo Projects
+// ========================
+
+project(':demo:after-dlq') {
+  base {
+    archivesName = "kip1034-demo-after-dlq"
+  }
+
+  dependencies {
+    implementation project(':streams')
+    implementation project(':clients')
+    implementation 'org.slf4j:slf4j-simple:2.0.9'
+  }
+
+  // Demo code can use deprecated APIs
+  tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs.removeAll { it == '-Werror' }
+  }
+
+  // Exclude from main build
+  tasks.configureEach {
+    onlyIf {
+      gradle.startParameter.taskNames.any {
+        it.contains('demo') || it.contains('after-dlq')
+      }
+    }
+  }
+}
+
+project(':demo:before-dlq') {
+  base {
+    archivesName = "kip1034-demo-before-dlq"
+  }
+
+  dependencies {
+    // Use Maven coords for Kafka 4.0.0 (released version without DLQ)
+    implementation 'org.apache.kafka:kafka-streams:4.0.0'
+    implementation 'org.apache.kafka:kafka-clients:4.0.0'
+    implementation 'org.slf4j:slf4j-simple:2.0.9'
+  }
+
+  // Demo code can use deprecated APIs
+  tasks.withType(JavaCompile).configureEach {
+    options.compilerArgs.removeAll { it == '-Werror' }
+  }
+
+  // Exclude from main build
+  tasks.configureEach {
+    onlyIf {
+      gradle.startParameter.taskNames.any {
+        it.contains('demo') || it.contains('before-dlq')
+      }
+    }
+  }
+}
