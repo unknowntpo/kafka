@@ -125,10 +125,11 @@ public enum DeserializationHandlerResponse {
     FAIL       // 停止整個應用 (預設)
 }
 
-// ProductionExceptionHandler - 兩個選項
+// ProductionExceptionHandler - 三個選項
 public enum ProductionExceptionHandlerResponse {
     CONTINUE,  // 忽略寫入失敗
-    FAIL       // 停止整個應用 (預設)
+    FAIL,      // 停止整個應用 (預設)
+    RETRY      // 重試失敗的操作
 }
 ```
 
