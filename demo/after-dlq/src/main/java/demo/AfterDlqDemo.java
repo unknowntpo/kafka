@@ -189,6 +189,12 @@ public class AfterDlqDemo {
             headers.add(new RecordHeader("processor.node",
                     context.processorNodeId().getBytes(StandardCharsets.UTF_8)));
 
+            // Convert stacktrace to string
+            java.io.StringWriter sw = new java.io.StringWriter();
+            exception.printStackTrace(new java.io.PrintWriter(sw));
+            headers.add(new RecordHeader("error.stacktrace",
+                    sw.toString().getBytes(StandardCharsets.UTF_8)));
+
             // Create the DLQ record
             ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
                     DLQ_TOPIC,
@@ -241,6 +247,12 @@ public class AfterDlqDemo {
                     String.valueOf(record.partition()).getBytes(StandardCharsets.UTF_8)));
             headers.add(new RecordHeader("source.offset",
                     String.valueOf(record.offset()).getBytes(StandardCharsets.UTF_8)));
+
+            // Convert stacktrace to string
+            java.io.StringWriter sw = new java.io.StringWriter();
+            exception.printStackTrace(new java.io.PrintWriter(sw));
+            headers.add(new RecordHeader("error.stacktrace",
+                    sw.toString().getBytes(StandardCharsets.UTF_8)));
 
             // Create the DLQ record
             ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
