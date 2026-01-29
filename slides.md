@@ -77,6 +77,30 @@ flowchart TD
 </div>
 
 ---
+
+# DLQ 整體架構圖
+
+```mermaid {scale: 0.55}
+flowchart LR
+    A[Source Topic] --> B[Consumer]
+
+    subgraph App[Kafka Streams App]
+        B --> C[Deserializer]
+        C -->|Success| E[Processor]
+        E -->|Success| F[Serializer]
+        F -->|Success| G[Producer]
+        C -->|Error| D[DLQ Handler]
+        E -->|Error| D
+        F -->|Error| D
+    end
+
+    G --> H[Output Topic]
+    D --> I[DLQ Topic]
+    I --> J[監控/分析]
+    J -.->|重試| A
+```
+
+---
 layout: center
 class: text-center
 ---
@@ -579,39 +603,6 @@ for (ConsumerRecord<byte[], byte[]> record :
 </div>
 
 </div>
-
----
-layout: center
-class: text-center
----
-
-# Architecture Overview
-
-整體架構
-
----
-
-# DLQ 整體架構圖
-
-```mermaid {scale: 0.55}
-flowchart LR
-    A[Source Topic] --> B[Consumer]
-
-    subgraph App[Kafka Streams App]
-        B --> C[Deserializer]
-        C -->|Success| E[Processor]
-        E -->|Success| F[Serializer]
-        F -->|Success| G[Producer]
-        C -->|Error| D[DLQ Handler]
-        E -->|Error| D
-        F -->|Error| D
-    end
-
-    G --> H[Output Topic]
-    D --> I[DLQ Topic]
-    I --> J[監控/分析]
-    J -.->|重試| A
-```
 
 ---
 layout: center
