@@ -170,7 +170,7 @@ public class AfterDlqDemo {
                 DlqProcessingExceptionHandler.class);
 
         // NEW! Configure DeserializationExceptionHandler for deserialization errors
-        props.put(StreamsConfig.DEFAULT_DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
+        props.put(StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
                 DlqDeserializationExceptionHandler.class);
 
         StreamsBuilder builder = new StreamsBuilder();
