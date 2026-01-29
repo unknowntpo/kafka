@@ -318,9 +318,8 @@ return ProductionExceptionHandler.Response.retry();  // 只有 Production 有 re
 |------|------------------|------------------|
 | **Producer 管理** | 自己建立和關閉 | Kafka Streams 內建管理 |
 | **Transaction 支援** | 需額外處理 | 原生支援 EOS |
-| **設定方式** | 自定義 config | 統一的 `errors.deadletterqueue.topic.name` |
-| **錯誤處理** | 自己實作 | 統一送到 `uncaughtExceptionHandler` |
-| **程式碼量** | 大量重複 | 一行設定或簡單 Handler |
+| **設定方式** | 自定義 config | Handler 內指定 DLQ topic |
+| **錯誤處理** | 自己實作 | `ProcessingExceptionHandler` / `DeserializationExceptionHandler` |
 
 ---
 
@@ -621,18 +620,21 @@ class: text-center
 
 ### 我們將演示：
 
-1. **建立 Kafka Cluster** - 使用 Docker Compose
-2. **建立 Kafka Streams 應用** - 簡單的訂單處理
-3. **模擬錯誤** - 發送無法反序列化的訊息
-4. **觀察 DLQ** - 查看失敗訊息被送到 DLQ
+1. **Before DLQ** - 傳統方式：只能 CONTINUE 或 FAIL
+2. **After DLQ** - KIP-1034：錯誤訊息路由到 DLQ
 
 ### 架構：
 
 ```
-orders (input) → OrderProcessor → processed-orders (output)
-                      ↓
-                  orders-dlq (失敗訊息)
+input-topic → Kafka Streams → output-topic
+                   ↓
+              dlq-topic (KIP-1034)
 ```
+
+### Topics：
+- `input-topic` - 100 筆訊息 (~10% invalid JSON)
+- `output-topic` - 成功處理的訊息
+- `dlq-topic` - 失敗訊息 (含錯誤 headers)
 
 </v-clicks>
 
@@ -640,34 +642,36 @@ orders (input) → OrderProcessor → processed-orders (output)
 layout: two-cols
 ---
 
-# Demo: Application Code
+# Before vs After DLQ
 
+<div class="text-sm">
+
+### Before (LogAndContinueExceptionHandler)
 ```java
-public class OrderProcessor {
-  public static void main(String[] args) {
-    Properties props = new Properties();
-    props.put(APPLICATION_ID_CONFIG,
-        "order-processor");
-    props.put(BOOTSTRAP_SERVERS_CONFIG,
-        "localhost:9092");
-    props.put("errors.deadletterqueue.topic.name",
-        "orders-dlq");
-    props.put(DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
-        LogAndContinueExceptionHandler.class);
+// 只能 CONTINUE 或 FAIL，沒有 DLQ！
+props.put(DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
+    LogAndContinueExceptionHandler.class);
 
-    StreamsBuilder builder = new StreamsBuilder();
-    builder.stream("orders",
-            Consumed.with(Serdes.String(),
-                         orderSerde))
-           .mapValues(order ->
-               order.toUpperCase())
-           .to("processed-orders");
-
-    new KafkaStreams(builder.build(), props)
-        .start();
-  }
+public DeserializationHandlerResponse handle(...) {
+    System.out.println("⚠ Error: " + exception);
+    return DeserializationHandlerResponse.CONTINUE; // 跳過
 }
 ```
+
+### After (DlqProcessingExceptionHandler)
+```java
+// KIP-1034: 可以路由到 DLQ！
+props.put(PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG,
+    DlqProcessingExceptionHandler.class);
+
+public Response handleError(...) {
+    ProducerRecord<byte[], byte[]> dlqRecord =
+        new ProducerRecord<>(DLQ_TOPIC, ...);
+    return Response.resume(List.of(dlqRecord)); // 送到 DLQ
+}
+```
+
+</div>
 
 ::right::
 
@@ -677,34 +681,32 @@ public class OrderProcessor {
 
 <v-clicks>
 
-1. 啟動 Kafka Cluster
+1. 啟動 Kafka
 ```bash
-docker-compose up -d
+just up
 ```
 
-2. 建立 Topics
+2. Before DLQ Demo
 ```bash
-kafka-topics --create \
-  --topic orders \
-  --topic processed-orders \
-  --topic orders-dlq
+just before
+# 錯誤訊息被跳過，沒有 DLQ
 ```
 
-3. 執行應用程式
+3. After DLQ Demo
 ```bash
-./gradlew run
+just after
+# 錯誤訊息路由到 dlq-topic
 ```
 
-4. 發送正常訊息
+4. 查看 DLQ 訊息
 ```bash
-echo '{"id":1}' | kafka-console-producer \
-  --topic orders
+just consume-dlq
+# 含 error headers
 ```
 
-5. 發送錯誤訊息
+5. 查看輸出
 ```bash
-echo 'invalid json' | kafka-console-producer \
-  --topic orders
+just consume-output
 ```
 
 </v-clicks>
@@ -719,29 +721,28 @@ echo 'invalid json' | kafka-console-producer \
 
 <div>
 
-### processed-orders Topic
+### output-topic
 ```json
-{"id": 1, "status": "PROCESSED"}
+{"ID": 42, "PRODUCT": "PRODUCT-5", "AMOUNT": 123}
 ```
-正常訊息被處理
+正常訊息被處理 (轉大寫)
 
 </div>
 
 <div>
 
-### orders-dlq Topic
-```json
-{
-  "key": null,
-  "value": "invalid json",
-  "headers": {
-    "error.message": "JsonParseException",
-    "error.source.topic": "orders",
-    "error.timestamp": "2024-01-15T10:30:00Z"
-  }
-}
+### dlq-topic (with headers)
 ```
-錯誤訊息被送到 DLQ
+Headers:
+  error.message: Invalid JSON format
+  error.class: java.lang.RuntimeException
+  source.topic: input-topic
+  source.partition: 0
+  source.offset: 15
+  processor.node: KSTREAM-MAPVALUES-...
+
+Value: INVALID_JSON
+```
 
 </div>
 
@@ -751,7 +752,8 @@ echo 'invalid json' | kafka-console-producer \
 
 <div class="mt-8 p-4 bg-green-500 bg-opacity-20 rounded text-center">
 
-**應用程式持續運行，不會因為一個壞訊息而停止！**
+**Before**: 錯誤訊息被跳過，無法追蹤<br/>
+**After**: 錯誤訊息保留在 DLQ，可追蹤、可重試！
 
 </div>
 
@@ -767,11 +769,11 @@ echo 'invalid json' | kafka-console-producer \
 
 | 改進 | 說明 |
 |------|------|
-| **簡化開發** | 不需要自己管理 Producer 和 DLQ 邏輯 |
-| **統一介面** | 三種 Handler 都支援 DLQ |
+| **易於重試** | 錯誤訊息集中在 DLQ，方便存取和重放 |
+| **自動通知** | 可設定 DLQ 有訊息時自動告警 |
+| **豐富 Metadata** | Headers 含 stacktrace、source topic/partition/offset 等 |
+| **獨立 Retention** | DLQ topic 可設定不同於 app log 的保留時間 |
 | **交易一致性** | 原生支援 Exactly-Once Semantics |
-| **降低風險** | 不會因錯誤訊息停止處理 |
-| **可追蹤性** | 失敗訊息集中管理，方便分析重試 |
 
 ### 適用於 Kafka 4.2+
 
