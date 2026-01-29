@@ -379,7 +379,7 @@ props.put("errors.deadletterqueue.topic.name", "my-app-dlq");
 
 // 設定使用預設的 Handler (會自動送到 DLQ)
 props.put(StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
-    LogAndContinueWithDLQExceptionHandler.class);
+    LogAndContinueExceptionHandler.class);
 ```
 
 <div class="text-xs text-gray-400 mt-2">
@@ -544,11 +544,11 @@ props.put("errors.deadletterqueue.topic.name", "order-processor-dlq");
 
 // Exception Handlers 設定
 props.put(StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
-    LogAndContinueWithDLQExceptionHandler.class);
-props.put(StreamsConfig.PRODUCTION_EXCEPTION_HANDLER_CLASS_CONFIG,
-    LogAndContinueWithDLQExceptionHandler.class);
+    LogAndContinueExceptionHandler.class);
 props.put(StreamsConfig.PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG,
-    LogAndContinueWithDLQExceptionHandler.class);
+    LogAndContinueProcessingExceptionHandler.class);
+// Note: ProductionExceptionHandler 使用 DefaultProductionExceptionHandler (預設)
+// 它會 FAIL 但同時送到 DLQ
 
 // 啟用 Exactly-Once (建議)
 props.put(StreamsConfig.PROCESSING_GUARANTEE_CONFIG,
@@ -653,7 +653,7 @@ public class OrderProcessor {
     props.put("errors.deadletterqueue.topic.name",
         "orders-dlq");
     props.put(DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
-        LogAndContinueWithDLQExceptionHandler.class);
+        LogAndContinueExceptionHandler.class);
 
     StreamsBuilder builder = new StreamsBuilder();
     builder.stream("orders",
