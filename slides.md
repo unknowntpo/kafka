@@ -365,33 +365,30 @@ class: text-center
 
 ---
 
-# 方法一：使用預設 Handler + Config
+# 方法一：使用內建 Handler + Config
 
-最簡單的方式：只需設定一個 config
+最簡單的方式：設定 DLQ topic + 使用內建 Handler
 
-```java {all|4-5|all}
+```java {all|4-5|7-8|10-11|all}
 Properties props = new Properties();
 props.put(StreamsConfig.APPLICATION_ID_CONFIG, "my-app");
 props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
 // 設定 DLQ topic 名稱
-props.put("errors.deadletterqueue.topic.name", "my-app-dlq");
+props.put("errors.dead.letter.queue.topic.name", "my-app-dlq");
 
-// 設定使用預設的 Handler (會自動送到 DLQ)
-props.put(StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
+// 處理錯誤 (mapValues 等拋出例外)
+props.put(PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG,
+    LogAndContinueProcessingExceptionHandler.class);
+// 反序列化錯誤 (JSON parse 失敗等)
+props.put(DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
     LogAndContinueExceptionHandler.class);
 ```
-
-<div class="text-xs text-gray-400 mt-2">
-
-📎 [StreamsConfig.java#L579](https://github.com/apache/kafka/blob/trunk/streams/src/main/java/org/apache/kafka/streams/StreamsConfig.java#L579) - `ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG`
-
-</div>
 
 <v-click>
 
 <div class="mt-4 p-4 bg-green-500 bg-opacity-20 rounded">
 
-**就這樣！** 反序列化失敗的訊息會自動送到 `my-app-dlq` topic
+**就這樣！** 兩種錯誤都會自動送到 `my-app-dlq` topic
 
 </div>
 
