@@ -130,6 +130,85 @@ class: text-center
 </v-clicks>
 
 ---
+
+# 訊息失敗時的四個選擇
+
+<div class="grid grid-cols-2 gap-4">
+
+<div>
+
+### ❌ 不好的選擇
+
+| 策略 | 問題 |
+|------|------|
+| **FAIL (crash)** | 可用性 = 0，一個壞訊息癱瘓服務 |
+| **SKIP (continue)** | 資料遺失，違反資料完整性 |
+| **RETRY forever** | Throughput = 0，永遠卡住 |
+
+</div>
+
+<div>
+
+### ✅ DLQ 的設計哲學
+
+| 原則 | 說明 |
+|------|------|
+| **不丟資料** | 壞訊息保留在 DLQ，不會消失 |
+| **不停服務** | 繼續處理後續訊息 |
+| **可追蹤** | 集中管理，方便監控告警 |
+| **可恢復** | 修復後可重新處理 |
+
+</div>
+
+</div>
+
+<v-click>
+
+<div class="mt-4 p-4 bg-blue-500 bg-opacity-20 rounded text-center">
+
+**DLQ = 把「處理失敗」和「資料遺失」解耦**
+
+</div>
+
+</v-click>
+
+---
+
+# Transaction 的核心問題
+
+<v-clicks>
+
+### 自己管理 DLQ Producer 的風險
+
+```
+Streams Transaction:  process → output ✓ → commit offset ✓
+DLQ Producer:                              → send DLQ ✗ (失敗!)
+
+結果：offset 已 commit，但 DLQ 沒寫入 → 資料遺失！
+```
+
+### 為什麼自己管 Producer 無法保證 EOS？
+
+```java
+// 這個 Producer 不在 Streams 的 Transaction 裡！
+KafkaProducer dlqProducer = new KafkaProducer<>(...);
+
+// 如果 Streams transaction rollback...
+dlqProducer.send(dlqRecord);  // 已經送出去了，無法 rollback！
+```
+
+### KIP-1034 的解法
+
+```
+┌─────────────────── 同一個 Transaction ───────────────────┐
+│  process → output → DLQ record → commit offset          │
+└──────────────────────────────────────────────────────────┘
+全部成功或全部失敗，沒有中間狀態
+```
+
+</v-clicks>
+
+---
 layout: center
 class: text-center
 ---
@@ -374,7 +453,7 @@ Properties props = new Properties();
 props.put(StreamsConfig.APPLICATION_ID_CONFIG, "my-app");
 props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
 // 設定 DLQ topic 名稱
-props.put("errors.dead.letter.queue.topic.name", "my-app-dlq");
+props.put(StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG, "my-app-dlq");
 
 // 處理錯誤 (mapValues 等拋出例外)
 props.put(PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG,

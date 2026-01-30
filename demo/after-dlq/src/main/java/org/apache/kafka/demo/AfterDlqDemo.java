@@ -3,31 +3,22 @@ package org.apache.kafka.demo;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.header.Header;
-import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.Topology;
-import org.apache.kafka.streams.errors.DeserializationExceptionHandler;
-import org.apache.kafka.streams.errors.ErrorHandlerContext;
-import org.apache.kafka.streams.errors.ProcessingExceptionHandler;
+import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
+import org.apache.kafka.streams.errors.LogAndContinueProcessingExceptionHandler;
 import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.processor.api.Record;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
@@ -165,13 +156,14 @@ public class AfterDlqDemo {
         props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass());
 
-        // NEW! Configure ProcessingExceptionHandler for processing errors
-        props.put(StreamsConfig.PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG,
-                DlqProcessingExceptionHandler.class);
+        // KIP-1034: Set DLQ topic name
+        props.put(StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG, DLQ_TOPIC);
 
-        // NEW! Configure DeserializationExceptionHandler for deserialization errors
+        // Use built-in handlers that auto-send to DLQ
+        props.put(StreamsConfig.PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG,
+                LogAndContinueProcessingExceptionHandler.class);
         props.put(StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
-                DlqDeserializationExceptionHandler.class);
+                LogAndContinueExceptionHandler.class);
 
         StreamsBuilder builder = new StreamsBuilder();
         KStream<String, String> input = builder.stream(INPUT_TOPIC);
@@ -228,123 +220,5 @@ public class AfterDlqDemo {
         System.out.println("  5. Easy to inspect and replay failed messages\n");
 
         streams.close();
-    }
-
-    /**
-     * NEW! ProcessingExceptionHandler with DLQ support
-     *
-     * Handles errors that occur during message processing (after deserialization).
-     * Can route failed messages to a Dead Letter Queue with rich metadata.
-     */
-    public static class DlqProcessingExceptionHandler implements ProcessingExceptionHandler {
-
-        @Override
-        public Response handleError(ErrorHandlerContext context,
-                                    Record<?, ?> record,
-                                    Exception exception) {
-            System.out.println("✗ Processing error: " + exception.getMessage());
-            System.out.println("  Topic: " + context.topic() +
-                    ", Partition: " + context.partition() +
-                    ", Offset: " + context.offset());
-
-            // Create DLQ record with error metadata in headers
-            List<Header> headers = new ArrayList<>();
-            headers.add(new RecordHeader("error.message",
-                    exception.getMessage().getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("error.class",
-                    exception.getClass().getName().getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("source.topic",
-                    context.topic().getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("source.partition",
-                    String.valueOf(context.partition()).getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("source.offset",
-                    String.valueOf(context.offset()).getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("processor.node",
-                    context.processorNodeId().getBytes(StandardCharsets.UTF_8)));
-
-            // Convert stacktrace to string
-            java.io.StringWriter sw = new java.io.StringWriter();
-            exception.printStackTrace(new java.io.PrintWriter(sw));
-            headers.add(new RecordHeader("error.stacktrace",
-                    sw.toString().getBytes(StandardCharsets.UTF_8)));
-
-            // Create the DLQ record
-            ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
-                    DLQ_TOPIC,
-                    null,  // partition
-                    context.sourceRawKey(),
-                    context.sourceRawValue(),
-                    headers
-            );
-
-            System.out.println("  -> Routed to DLQ: " + DLQ_TOPIC);
-
-            // Resume processing and send to DLQ
-            return Response.resume(Collections.singletonList(dlqRecord));
-        }
-
-        @Override
-        public void configure(Map<String, ?> configs) {
-            // Configuration if needed
-        }
-    }
-
-    /**
-     * NEW! DeserializationExceptionHandler with DLQ support
-     *
-     * Handles errors that occur during message deserialization.
-     * Can route failed messages to a Dead Letter Queue with rich metadata.
-     */
-    public static class DlqDeserializationExceptionHandler implements DeserializationExceptionHandler {
-
-        @Override
-        public Response handleError(ErrorHandlerContext context,
-                                    ConsumerRecord<byte[], byte[]> record,
-                                    Exception exception) {
-            System.out.println("✗ Deserialization error: " + exception.getMessage());
-            System.out.println("  Topic: " + record.topic() +
-                    ", Partition: " + record.partition() +
-                    ", Offset: " + record.offset());
-
-            // Create DLQ record with error metadata in headers
-            List<Header> headers = new ArrayList<>();
-            headers.add(new RecordHeader("error.message",
-                    exception.getMessage().getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("error.class",
-                    exception.getClass().getName().getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("error.type",
-                    "deserialization".getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("source.topic",
-                    record.topic().getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("source.partition",
-                    String.valueOf(record.partition()).getBytes(StandardCharsets.UTF_8)));
-            headers.add(new RecordHeader("source.offset",
-                    String.valueOf(record.offset()).getBytes(StandardCharsets.UTF_8)));
-
-            // Convert stacktrace to string
-            java.io.StringWriter sw = new java.io.StringWriter();
-            exception.printStackTrace(new java.io.PrintWriter(sw));
-            headers.add(new RecordHeader("error.stacktrace",
-                    sw.toString().getBytes(StandardCharsets.UTF_8)));
-
-            // Create the DLQ record
-            ProducerRecord<byte[], byte[]> dlqRecord = new ProducerRecord<>(
-                    DLQ_TOPIC,
-                    null,  // partition
-                    record.key(),
-                    record.value(),
-                    headers
-            );
-
-            System.out.println("  -> Routed to DLQ: " + DLQ_TOPIC);
-
-            // Resume processing and send to DLQ
-            return Response.resume(Collections.singletonList(dlqRecord));
-        }
-
-        @Override
-        public void configure(Map<String, ?> configs) {
-            // Configuration if needed
-        }
     }
 }
