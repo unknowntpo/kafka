@@ -35,6 +35,8 @@ import org.apache.kafka.common.metadata.RegisterBrokerRecord.BrokerEndpoint;
 import org.apache.kafka.common.metadata.RegisterBrokerRecord.BrokerEndpointCollection;
 import org.apache.kafka.common.metadata.UnfenceBrokerRecord;
 import org.apache.kafka.common.metadata.UnregisterBrokerRecord;
+import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.requests.ApiError;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.internals.LogContext;
@@ -63,6 +65,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -615,6 +618,69 @@ public class ClusterControlManagerTest {
                     123L,
                     featureControl.finalizedFeatures(Long.MAX_VALUE),
                     false)).getMessage());
+    }
+
+    @Test
+    public void testFencedBrokerRegistrationStillBlocksFeatureUpdate() {
+        SnapshotRegistry snapshotRegistry = new SnapshotRegistry(new LogContext());
+        ClusterControlManager[] clusterControl = new ClusterControlManager[1];
+
+        Map<String, VersionRange> supportedFeatures = new HashMap<>();
+        supportedFeatures.put(MetadataVersion.FEATURE_NAME, VersionRange.of(
+            MetadataVersion.MINIMUM_VERSION.featureLevel(),
+            MetadataVersion.latestTesting().featureLevel()));
+        supportedFeatures.put(TestFeatureVersion.FEATURE_NAME, VersionRange.of(
+            TestFeatureVersion.TEST_0.featureLevel(),
+            TestFeatureVersion.TEST_2.featureLevel()));
+        FeatureControlManager featureControl = new FeatureControlManager.Builder().
+            setSnapshotRegistry(snapshotRegistry).
+            setQuorumFeatures(new QuorumFeatures(0, supportedFeatures, List.of(0))).
+            setClusterFeatureSupportDescriber(new ClusterFeatureSupportDescriber() {
+                @Override
+                public Iterator<Map.Entry<Integer, Map<String, VersionRange>>> brokerSupported() {
+                    return clusterControl[0].brokerSupportedFeatures();
+                }
+
+                @Override
+                public Iterator<Map.Entry<Integer, Map<String, VersionRange>>> controllerSupported() {
+                    return Collections.emptyIterator();
+                }
+            }).
+            build();
+        featureControl.replay(new FeatureLevelRecord().
+            setName(MetadataVersion.FEATURE_NAME).
+            setFeatureLevel(MetadataVersion.MINIMUM_VERSION.featureLevel()));
+        clusterControl[0] = new ClusterControlManager.Builder().
+            setSnapshotRegistry(snapshotRegistry).
+            setFeatureControlManager(featureControl).
+            setBrokerShutdownHandler((brokerId, isCleanShutdown, records) -> { }).
+            build();
+
+        RegisterBrokerRecord fencedBroker = new RegisterBrokerRecord().
+            setBrokerId(1).
+            setBrokerEpoch(100).
+            setIncarnationId(Uuid.fromString("nL7fL3C2QW28V8UZl1t3Hw")).
+            setFenced(true);
+        fencedBroker.features().add(new RegisterBrokerRecord.BrokerFeature().
+            setName(MetadataVersion.FEATURE_NAME).
+            setMinSupportedVersion(MetadataVersion.MINIMUM_VERSION.featureLevel()).
+            setMaxSupportedVersion(MetadataVersion.latestTesting().featureLevel()));
+        fencedBroker.features().add(new RegisterBrokerRecord.BrokerFeature().
+            setName(TestFeatureVersion.FEATURE_NAME).
+            setMinSupportedVersion(TestFeatureVersion.TEST_0.featureLevel()).
+            setMaxSupportedVersion(TestFeatureVersion.TEST_1.featureLevel()));
+        clusterControl[0].replay(fencedBroker, 100L);
+
+        ControllerResult<ApiError> result = featureControl.updateFeatures(
+            Map.of(TestFeatureVersion.FEATURE_NAME, TestFeatureVersion.TEST_2.featureLevel()),
+            Map.of(),
+            false,
+            0);
+        assertEquals(new ApiError(Errors.INVALID_UPDATE_VERSION,
+            "Invalid update version 2 for feature " + TestFeatureVersion.FEATURE_NAME +
+                ". Broker 1 only supports versions 0-1"),
+            result.response());
+        assertEquals(List.of(), result.records());
     }
 
     @Test

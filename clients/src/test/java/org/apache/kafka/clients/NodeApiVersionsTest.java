@@ -117,6 +117,26 @@ public class NodeApiVersionsTest {
     }
 
     @Test
+    public void testPlaygroundClientChoosesHighestCommonProduceVersion() {
+        NodeApiVersions brokerVersions = NodeApiVersions.create(ApiKeys.PRODUCE.id, (short) 0, (short) 10);
+
+        short chosenVersion = brokerVersions.latestUsableVersion(ApiKeys.PRODUCE, (short) 0, (short) 13);
+
+        assertEquals(10, chosenVersion);
+    }
+
+    @Test
+    public void testPlaygroundClientAbortsWhenProduceVersionsDoNotOverlap() {
+        NodeApiVersions brokerVersions = NodeApiVersions.create(ApiKeys.PRODUCE.id, (short) 0, (short) 10);
+
+        UnsupportedVersionException exception = assertThrows(UnsupportedVersionException.class,
+            () -> brokerVersions.latestUsableVersion(ApiKeys.PRODUCE, (short) 11, (short) 13));
+
+        assertEquals("The node does not support PRODUCE with version in range [11,13]. " +
+            "The supported range is [0,10].", exception.getMessage());
+    }
+
+    @Test
     public void testLatestUsableVersionOutOfRangeLow() {
         NodeApiVersions apiVersions = NodeApiVersions.create(ApiKeys.PRODUCE.id, (short) 1, (short) 2);
         assertThrows(UnsupportedVersionException.class,
