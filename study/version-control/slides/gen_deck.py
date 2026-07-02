@@ -223,19 +223,19 @@ add_content("Part 1 · 三層 scope", "一個版本號不夠：三種 scope 互�
     ("solve", "單一版本號無法同時表達三種 scope，只能拆成三層各自管"),
 ], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
-# §2a — 數線圖當主圖（協商取交集 vs finalized MV 決定）
-s2a = prs.slides.add_slide(BLANK)
-_, tf = tb(s2a, 0.7, 0.5, CW, 0.4); run(tf.paragraphs[0], "Part 1 · 具體例子", 13, ACCENT, bold=True)
-_, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "為什麼一個版本號不夠：同一支 Fetch，兩種選版", 30, DARK, bold=True)
-_, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "Fetch＝讀取 partition 資料的 RPC：consumer 拿來讀資料、follower（broker）拿來複製 log", 14, GRAY)
-s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), width=Inches(9.7))
-render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
-
-add_content("Part 1 · 選版機制", "三個角色，各自怎麼選版", [
+add_content("Part 1 · 選版機制", "回到三個角色：各自怎麼選版", [
     ("bullet", "底層都先做 ApiVersions 握手（共用同一顆 NetworkClient）；決定版本的是 request Builder 留多少空間", "arrows-split"),
     ("code", "client ↔ broker       協商，取交集最高\nbroker ↔ controller   也協商（broker 當 client：heartbeat / registration）\nbroker ↔ broker 複製   Fetch 由 MV 決定、ListOffsets 以 MV 為上限"),
     ("solve", "MV 只影響複製用的 Fetch / ListOffsets；client、controller 那兩條都是協商"),
 ], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("MetadataVersion.java",31,"javadoc")])
+
+# §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
+s2a = prs.slides.add_slide(BLANK)
+_, tf = tb(s2a, 0.7, 0.5, CW, 0.4); run(tf.paragraphs[0], "Part 1 · 舉例", 13, ACCENT, bold=True)
+_, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "以一支 Fetch 為例：cb 協商、bb 由 MV", 30, DARK, bold=True)
+_, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "同一支 Fetch 兩條線都會走：consumer fetch 是 cb、replica fetch 是 bb", 14, GRAY)
+s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), width=Inches(9.7))
+render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
 quiz_pair(0)  # 小測驗 1：能一版打天下嗎
 quiz_pair(2)  # 小測驗 2：replica fetch 版本誰決定
 

@@ -23,11 +23,7 @@
 - `metadata.version`：整個叢集一致認定、已 finalize 的「能力世代」（cluster-wide，手動 finalize）
 - wire protocol API version：這條連線實際講第幾版（per-connection）
 
-### 具體例子（一支 Fetch）
-
-- 同一顆 4.1 broker：對 Kafka 2.4 老 client（`validVersions` 0-11）協商出 Fetch v11、對 follower 由 finalized MV 決定 v17 → 同一個 release 同時存在多個 wire 版本。
-
-### 三個角色，各自怎麼選版
+### 三個角色，各自怎麼選版（先講架構）
 
 核心：**每條連線底層都先做 ApiVersions 握手（發起端共用同一顆 `NetworkClient`）；真正決定版本的是那支 request 的 Builder 留多少版本自由度。**
 
@@ -37,6 +33,12 @@
 - 收斂：**MV 只影響複製用的 `Fetch` / `ListOffsets`；client、controller 那兩條都是協商。**
 - 名詞：`Fetch`＝從指定 offset 讀 partition log；`ListOffsets`＝把時間戳／哨兵（earliest / latest）換算成 offset。
 - （更細的四路徑機制、feature vs RPC、honor、KRaft `kraft.version` 見 [rpc-version-selection.md](rpc-version-selection.md)，slide 不展開。）
+
+### 以 Fetch 為例（架構下的舉例，不搶題）
+
+- 放在三角色架構之後，當「cb 與 bb 兩條的選版」的具體視覺化，別當開場主圖。
+- 同一支 Fetch 兩條線都會走：consumer fetch 是 cb、replica fetch 是 bb。
+- 同一顆 4.1 broker：對 Kafka 2.4 老 client（`validVersions` 0-11）cb 協商出 Fetch v11、對 follower bb 由 finalized MV 決定 v17 → 同一個 release 同時存在多個 wire 版本。
 
 **小測驗 1**：可以「一個版本打天下」嗎？→ 不行（client 長壽 + 要不停機，只能連線當下協商）。
 **小測驗 2**：replica fetch 的 `Fetch` 版本怎麼決定？→ 由 finalized `metadata.version` 決定（`fetchRequestVersion(MV)`），不做 per-connection 協商。
