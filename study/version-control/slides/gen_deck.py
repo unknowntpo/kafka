@@ -218,8 +218,8 @@ add_content("Part 1 · 術語", "要談「怎麼選」，先分清楚「版本�
 add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 MV 事先釘版", [
     ("bullet", "機制一 · 協商（KIP-35）：連線後送 ApiVersionsRequest、取交集最高——多數路徑都是", "arrows-split"),
     ("bullet", "機制二 · 由叢集 MV 事先釘版（KIP-584）：只有 replica fetch（partition replication）這條不協商", "ban"),
-    ("code", "協商定版   client↔broker · broker↔controller · Raft · broker↔broker txn markers\nMV 釘版    replica fetch（follower → leader partition replication）—— 唯一一條"),
-    ("note", "所以「broker↔broker 不協商」並不精確：只有 replica fetch 這條；同是 broker↔broker 的 transaction markers 仍協商。"),
+    ("code", "協商定版   client↔broker · broker↔controller · Raft · broker↔broker txn markers\nMV 釘版    replica fetch（follower → leader partition replication）—— 唯一不協商的連線"),
+    ("note", "精確講：唯一不協商的是 replica fetch 這一「連線」——上面 Fetch/ListOffsets/OffsetsForLeaderEpoch 三支 RPC 都不協商；同是 broker↔broker 的 transaction markers 仍協商。"),
 ], [X("KIP-35",KIP35), X("KIP-584",KIP584), A("BrokerBlockingSender.scala",95,"replica fetch=false"), A("TransactionMarkerChannelManager.scala",99,"txn markers=true")])
 
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
@@ -282,7 +282,7 @@ quiz_pair(1)  # 小測驗 2：自刻不支援版本會怎樣
 
 add_content("Recap", "回到開場那個問題", [
     ("code", "想像中：client v4.1 ─── broker v4.1\n實際上：同一顆 4.1 broker，同時講 Fetch v11（對老 consumer）和 v17（對 replica）"),
-    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，唯一不協商、由 finalized MV 釘版的是 replica fetch（其餘 broker↔broker 仍協商）", "point"),
+    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，唯一不協商的「連線」是 replica fetch——上面 Fetch/ListOffsets 等由 MV 釘版（其餘 broker↔broker 仍協商）", "point"),
     ("bullet", "Part 2：協商不出版本 → UnsupportedVersionException（多在送出前中止）；finalize／升降的錯誤交給運行時那場", "point"),
     ("solve", "立場：per-API 細粒度協商＋replication 集中治理，是為「client 生態極度分散」量身的取捨——對 Kafka 划算，但不是通用解"),
 ])

@@ -4,7 +4,11 @@
 
 ## 一句話結論
 
-不是「client 協商、broker 之間用 metadata.version」這種二分。準確講：**每條連線底層都會做 ApiVersions 握手；真正決定版本的是那支 request 的 `Builder` 留多少版本自由度。** `metadata.version`（MV）的角色比一般認知窄很多——它只釘「複製用的 Fetch / ListOffsets」兩支 RPC。
+不是「client 協商、broker 之間用 metadata.version」這種二分。準確講：**大多數連線底層都會送 `ApiVersionsRequest` 協商；真正決定版本的是那支 request 的 `Builder` 留多少版本自由度。** 兩個常見誤解要先破：
+
+- **「broker↔broker 不協商」是錯的**：唯一不協商（`discoverBrokerVersions=false`）的是 **replica fetch 這一條連線**；同是 broker↔broker 的 **transaction markers**（`WriteTxnMarkers`）仍照 KIP-35 協商。
+- **「唯一不協商的 RPC」也是錯的**：replica fetch 是唯一不協商的**連線**，但這條連線上有 **三支** 不協商的 RPC（Fetch、ListOffsets、OffsetsForLeaderEpoch）——「唯一」只修飾連線，不修飾 RPC。
+- **「MV 只釘 replica fetch」還是錯的**：MV 在 **wire RPC 版本**上只釘 Fetch / ListOffsets 兩支；但它另外還釘一票 **metadata log record 版本**（`registerBrokerRecordVersion`、`partitionRecordVersion`… 見 §3 末），所以「由 MV 釘版」是通用機制、不等於「只有 replica fetch」。
 
 ## 關鍵機制：Builder 的版本範圍決定一切
 
@@ -22,7 +26,8 @@
 
 - client → broker：producer / consumer 直接用 `NetworkClient`，`discoverBrokerVersions=true` → 連線後先查詢。
 - broker → controller：`NodeToControllerChannelManagerImpl.java:115`（`new NetworkClient`）+ `:128`（**`true`**）+ `:129`（餵 `apiVersions`）→ 連線後先查詢。
-- broker → broker（replica fetch）：`BrokerBlockingSender.scala:82`（`new NetworkClient`）+ `:95`（**`false`**）+ `:96`（`new ApiVersions`）→ **不送 `ApiVersionsRequest`**。版本已由 finalized MV 決定，直接照該版本送；對方不支援即失敗。
+- broker → broker（replica fetch）：`BrokerBlockingSender.scala:82`（`new NetworkClient`）+ `:95`（**`false`**）+ `:96`（`new ApiVersions`）→ **不送 `ApiVersionsRequest`**。版本已由 finalized MV 決定，直接照該版本送；對方不支援即失敗。**這是四條裡唯一 `false` 的。**
+- broker → broker（transaction markers）：`TransactionMarkerChannelManager.scala:86`（`new NetworkClient`）+ `:99`（**`true`**）→ 連線後先查詢。**同是 broker↔broker，但走協商**——證明「broker↔broker」不是鐵板一塊。
 - KRaft（quorum 彼此 / broker 以 observer 抓 metadata log）：`KafkaRaftManager.scala:239`（`val discoverBrokerVersions = true`）+ `:241`（`new NetworkClient`）+ `:254`（餵 `apiVersions`）→ 連線後先查詢；再由 `:186` 注入 `KafkaNetworkChannel`（`KafkaNetworkChannel.java:99` 收 `KafkaClient`）。
 
 用語註：Kafka 沒有把這一步稱為「握手（handshake）」的官方用語（`SaslHandshake` 才是 handshake）；準確說法是「送 `ApiVersionsRequest` 查詢對方各 API 的支援版本區間」（KIP-35）。
@@ -50,9 +55,9 @@
 - `Fetch`：版本 = `metadataVersion.fetchRequestVersion`（`:215`）→ **exact pin**（`FetchRequest.java:170-172` 建 `[v, v]`）。
 - `ListOffsets`：`Builder.forReplica(metadataVersion.listOffsetRequestVersion, brokerId)`（`:122`）→ **MV 當上限的協商**，不是 exact pin：`ListOffsetsRequest.java:88-90` 建 `[oldestVersion(), allowedVersion]`，`allowedVersion` = MV 值只是上界，實際版本仍在此範圍內由 ApiVersions 挑。
 - `OffsetsForLeaderEpoch`：`Builder.forFollower(...)` → `new Builder((short)4, (short)4, data)`（`OffsetsForLeaderEpochRequest.java:60-65`）→ **寫死常數 v4**，非 MV、非協商。
-- 底層 `BrokerBlockingSender.scala:82/96` 仍是 `NetworkClient` + `ApiVersions`，握手照做，只是 Builder 已把版本鎖死。
+- 底層 `BrokerBlockingSender.scala:82/95` 是 `NetworkClient`，但 `discoverBrokerVersions=false` → **不送 `ApiVersionsRequest`**，版本全靠 Builder 鎖死。三支 RPC 共用 `RemoteLeaderEndPoint` 的**同一個 `blockingSender`**（Fetch `:78`、ListOffsets `:125`、OffsetsForLeaderEpoch `:156`）——所以「唯一不協商」講的是一條**連線**、上面三支 RPC，不是「一支 RPC」。
 
-`MetadataVersion` 裡跟 RPC 版本有關的方法**只有兩個**：`fetchRequestVersion()`（`:273`）與 `listOffsetRequestVersion()`（`:289`）。其餘 `registerBrokerRecordVersion` / `partitionRecordVersion` 等是 metadata log 的 **record 版本**，不是 RPC。
+`MetadataVersion` 裡跟 **RPC 版本**有關的方法**只有兩個**：`fetchRequestVersion()`（`:273`）與 `listOffsetRequestVersion()`（`:289`）。其餘是 metadata log 的 **record 版本**——由 controller 寫 record 時從 MV 取、同樣不協商，但不是 wire RPC：`registerBrokerRecordVersion`（`ClusterControlManager.java:462`）、`registerControllerRecordVersion`（`ControllerRegistration.java:192`）、`partitionRecordVersion`（`PartitionRegistration.java:408`）、`partitionChangeRecordVersion`（`PartitionChangeBuilder.java:464`）。
 
 ### 4. KRaft 層（Controller quorum + broker 以 observer 抓 metadata log）：協商 + 獨立 feature
 
@@ -67,7 +72,8 @@
 | --- | --- | --- |
 | Client → Broker | ApiVersions 協商 | `NodeApiVersions.latestUsableVersion`；`MetadataVersion.java:31` |
 | Broker → Controller | ApiVersions 協商（broker 當 client） | `NodeToControllerChannelManagerImpl.java:67/115`；`BrokerHeartbeatRequest.Builder` 未 pin |
-| Broker → Broker · Fetch | MV **exact pin**（`[v,v]`） | `RemoteLeaderEndPoint.scala:215`；`FetchRequest.java:170-172`；`MetadataVersion.java:273` |
+| Broker → Broker · transaction markers | ApiVersions **協商**（`WriteTxnMarkers`） | `TransactionMarkerChannelManager.scala:86/99`（`discoverBrokerVersions=true`） |
+| Broker → Broker · replica Fetch | MV **exact pin**（`[v,v]`）· 不協商 | `RemoteLeaderEndPoint.scala:215`；`FetchRequest.java:170-172`；`MetadataVersion.java:273` |
 | Broker → Broker · ListOffsets | MV 當**上限**再協商（`[oldest, MV]`） | `RemoteLeaderEndPoint.scala:122`；`ListOffsetsRequest.java:88-90`；`MetadataVersion.java:289` |
 | Broker → Broker · OffsetsForLeaderEpoch | 寫死常數 v4 | `OffsetsForLeaderEpochRequest.java:60-65` |
 | KRaft quorum / broker 抓 metadata log | ApiVersions 協商；能力由 `kraft.version` 治 | `KafkaNetworkChannel.java:192`；`FetchRequest.java:133`；`KRaftVersion.java`；`KafkaRaftClient.java:185` |
