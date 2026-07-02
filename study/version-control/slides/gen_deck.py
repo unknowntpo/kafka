@@ -226,7 +226,7 @@ add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 finali
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
     ("code", "協商                    取交集最高（client↔broker、broker↔controller、Raft、txn markers）\npartition replication   不協商——Fetch/ListOffsets 由 finalized MV、OffsetsForLeaderEpoch 寫死 v4"),
     ("bullet", "partition replication（follower→leader）連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：這條路上一整組 RPC 版本都不看對端能力，改由叢集事先決定", "ban"),
-    ("solve", "為什麼 partition replication 交給 MV？它要求 follower↔leader 全講同一版、沒法各連線各挑。代價『升級變兩階段』其實是 MV 治理的通性（凡版本由 MV 決定者皆然），非它專屬；協商連線則自動挑上去"),
+    ("solve", "為什麼交給 MV，不各連線協商？partition replication 搬的是實際 log data、要維持各 replica 一致——複製協定（截斷、epoch 對齊）得全叢集同一版，混版升級期行為才確定；各連線各挑會破壞一致性。代價是升級變兩階段，這是 MV 治理的通性、非它專屬"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("OffsetsForLeaderEpochRequest.java",65,"forFollower 寫死 v4"), A("RemoteLeaderEndPoint.scala",215)])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
@@ -244,12 +244,12 @@ add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什�
     ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
 ], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL)])
 
-add_content("Part 1 · 代價", "Kafka 這個選擇有多貴（實測數字）", [
-    ("code", "90 支 API × 308 個現役 wire 版本 → generator 吹成約 18× 生成碼（~18 萬行）\n每加一版：改 .json、逐版生 read/write/size、ApiKeys 補版號"),
-    ("bullet", "broker handler 還得逐版分岔：按協商版本讀/填欄位、回應用『同一版』序列化、老版缺的欄位給預設，連語意差異（如 topic-id 取代 topic-name）都要 if (version≥N)", "arrows-split"),
-    ("note", "這還只是「生成碼＋handler」；相容性測試是另一條隱形帳單（下兩張細看）——build 全版本 round-trip＋release 養一堆歷史版本。"),
+add_content("Part 1 · 代價", "代價：每支 API 的 handler 都要逐版分岔", [
+    ("code", "每支 API 的 broker handler 都逐版分岔，例如 Fetch：\n  if (version >= 13)  用 topic-id   else   用 topic-name\n  老版缺的欄位給預設 · 回應一律照「request 的版本」序列化"),
+    ("bullet", "讀寫欄位、語意差異、預設值全逐版 if (version ≥ N)，散在每支 API 的 handler 裡——加一版就多一堆分支要維護", "arrows-split"),
+    ("note", "另一條更大的隱形帳單是相容性測試（下兩張細看）——每個版本、每個歷史 release 都得長期盯著。"),
     ("solve", "貴到 Kafka 自己在 KIP-896 承認「maintenance cost up, value down」，4.0 砍掉 2.1 以前的舊版本止血"),
-], [X("KIP-896",KIP896), A("RequestContext.java",137,"buildResponseSend"), A("KafkaApis.scala",568,"fetch version()>=13"), A("FetchRequest.json",80,"MaxBytes v3+ default")])
+], [A("KafkaApis.scala",568,"version()>=13"), A("RequestContext.java",137,"回應=request 版本"), A("FetchRequest.json",80,"預設值"), X("KIP-896",KIP896)])
 add_content("Part 1 · 代價 · 測試", "「相容」到底要保證哪些事？", [
     ("bullet", "① 格式自洽：每個宣稱支援的 wire 版本，自己序列化都要來回讀寫無誤", "arrows-split"),
     ("bullet", "② 新 client → 舊 broker：client 肯協商降版、不假設對方有新功能", "point"),
