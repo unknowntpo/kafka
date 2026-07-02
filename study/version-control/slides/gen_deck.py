@@ -57,6 +57,7 @@ KIP896="https://cwiki.apache.org/confluence/display/KAFKA/KIP-896%3A+Remove+old+
 KIP35="https://cwiki.apache.org/confluence/display/KAFKA/KIP-35+-+Retrieving+protocol+version"
 KIP584="https://cwiki.apache.org/confluence/display/KAFKA/KIP-584%3A+Versioning+scheme+for+features"
 PGURL="https://www.postgresql.org/docs/current/protocol-flow.html"
+PGLOGREPL="https://www.postgresql.org/docs/current/logical-replication.html"
 MONGO="https://www.mongodb.com/docs/manual/reference/command/hello/"
 
 def A(name, line=None, disp=None):
@@ -226,7 +227,7 @@ add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 finali
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
     ("code", "協商                    取交集最高（client↔broker、broker↔controller、Raft、txn markers）\npartition replication   不協商——Fetch/ListOffsets 由 finalized MV、OffsetsForLeaderEpoch 寫死 v4"),
     ("bullet", "partition replication（follower→leader）連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：這條路上一整組 RPC 版本都不看對端能力，改由叢集事先決定", "ban"),
-    ("solve", "為什麼交給 MV，不各連線協商？partition replication 搬的是實際 log data、要維持各 replica 一致——複製協定（截斷、epoch 對齊）得全叢集同一版，混版升級期行為才確定；各連線各挑會破壞一致性。代價是升級變兩階段，這是 MV 治理的通性、非它專屬"),
+    ("solve", "為什麼交給 MV，不各連線協商？協商能讓 broker 互相『讀得懂』——但讀得懂不代表跨版本行為正確（如 KIP-903 replica-epoch fencing 要全叢集一致生效，才擋得住舊 epoch 的 follower 進 ISR）。MV 讓 operator 一次原子切換、與滾 binary 脫鉤，這就是升級兩階段的由來"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("OffsetsForLeaderEpochRequest.java",65,"forFollower 寫死 v4"), A("RemoteLeaderEndPoint.scala",215)])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
@@ -238,11 +239,11 @@ s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), wi
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
 
 add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什麼代價", [
-    ("bullet", "Kafka：per-API 協商，partition replication 交給 finalized MV 決定。買到單支 API 獨立演進、複製層可線上滾動升級；代價＝協定面積最大、相容性測試按 API × 版本數放大", "arrows-split"),
-    ("bullet", "MongoDB：全域一個 wire version＋FCV 治理叢集。實作簡單；代價＝粒度粗、無法單支 API 獨立演進（FCV 與 MV 同一套思路）", "database"),
-    ("bullet", "PostgreSQL：協定 v3 逾二十年極穩定；但實體複製鎖 major → 複製層無法線上滾動升級（得停機 pg_upgrade 或另建叢集）", "leaf"),
-    ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
-], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL)])
+    ("bullet", "Kafka：per-API 協商＋partition replication 由 finalized MV 決定——單支 API 獨立演進、複製層線上滾動升級；代價＝協定面積最大", "arrows-split"),
+    ("bullet", "MongoDB：全域一個 wire version＋FCV 治理叢集——實作簡單；代價＝粒度粗、無法單支 API 獨立演進", "database"),
+    ("bullet", "PostgreSQL：協定 v3 極穩定；physical replication 靠 WAL、跨大版不相容 → HA replica 不能就地跨 major 滾，近零停機得改搭 logical replication（bolt-on）", "leaf"),
+    ("solve", "沒有免費：Kafka 複製層內建線上滾動升級，PostgreSQL 得另搭 logical replication 才換得到"),
+], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL), X("PG logical replication",PGLOGREPL)])
 
 add_content("Part 1 · 代價", "代價：每支 API 的 handler 都要逐版分岔", [
     ("code", "每支 API 的 broker handler 都逐版分岔，例如 Fetch：\n  if (version >= 13)  用 topic-id   else   用 topic-name\n  老版缺的欄位給預設 · 回應一律照「request 的版本」序列化"),
