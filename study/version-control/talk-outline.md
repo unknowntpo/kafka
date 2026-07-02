@@ -13,10 +13,10 @@
 
 ## Part 1 — 版本為何對不齊，又是怎麼決定的
 
-### 動機：為什麼版本天生對不齊，只能連線當下協商
+### 點題＋動機（合併）：為什麼不能「一個版本打天下」
 
 - client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年；4.0／KIP-896 才把下限提到 2.1）；broker 逐台滾動升級、過程必然新舊並存。
-- 因果鏈：任一時刻各節點支援的版本範圍（supported versions）不同 → 不能鎖全叢集同一版（又要不停機）→ 只能在連線當下協商。這就是本場主題的由來。
+- 現實二：Kafka 要求 zero downtime → broker 一台一台滾動升級 → 混版。因果收在「不能鎖全叢集同一版（又要不停機）→ 版本無法事先統一，那要怎麼選？」——不寫「只能連線當下」（那只限 client↔broker／broker↔controller）。
 - 註：三種通訊角色（下一節）是「協商發生的地方」，不是對不齊的「原因」——別把兩者用因果綁一起。
 
 ### 術語：講「版本」時是指哪一個？分三層
@@ -27,7 +27,7 @@
 - **finalize 首現需一句話定義**：管理員手動宣告全叢集一致採用的 feature level；怎麼宣告是第一場《版本定義》主題，本場只需知道它是叢集共識的一個值。
 - 三個獨立的軸、各自變動；本場主角是 wire 版本。此節是「釐清術語」，不是再論「一個版本不夠」。
 
-### 架構 (a)：先認識叢集裡的三種連線（不是每條都協商）
+### 架構 (a)：三種連線，分成兩類（會協商的兩條 vs 不協商的 replication）
 
 - **ApiVersionsRequest 首現需定義**：連線建立後，發起端先送一支 `ApiVersionsRequest`，查詢對方「你每支 API 支援哪個版本區間？」（KIP-35；KIP-35 的 REF 放這張、不放動機）。
 - 三條線：`client ↔ broker`（讀寫資料、查 metadata…）、`broker ↔ controller`（註冊、心跳、轉發 admin…）、`broker ↔ broker`（partition replication）。各列僅代表性、非窮舉；replication 路徑不送 ApiVersionsRequest（discoverBrokerVersions=false），版本已由 finalized MV 決定。
@@ -53,7 +53,7 @@
 - Recap solve：立場句（為 client 生態極度分散量身的取捨，划算但非通用解）。
 - blog 對應更完整：§1 帳單（KIP-482 措辭注意：進入 flexible version 之後 tagged fields 才免升版）、§3 一次 RTT 代價、§4「MV 帳單＋PostgreSQL 反事實」小節、§5 dual-role 評價（KIP-903 broker epoch）、§7 為何關線（response 序列化依 request version、無法保證對方讀懂）、§8 KIP-896 結算、Recap 立場、附錄 A3 OffsetsForLeaderEpoch 解讀（KAFKA-18465 清理殘留、非文件化決策）、附錄 C 三家對照。
 
-### 以 Fetch 為例（架構下的舉例，不搶題）
+### 以 Fetch 為例（架構下的舉例，不搶題）；「對照」張排在此之後
 
 - 放在架構之後，當「client↔broker 與 broker↔broker 兩條選版」的具體視覺化，別當開場主圖。
 - 同一支 Fetch 兩種身分：consumer fetch 走 client↔broker、replica fetch 走 broker↔broker。

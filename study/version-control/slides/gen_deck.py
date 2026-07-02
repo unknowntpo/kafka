@@ -173,7 +173,7 @@ QUIZ = [
   [A("RemoteLeaderEndPoint.scala",215), A("MetadataVersion.java",273)]),
  ("核心", "client 繞過協商、直接送出 broker 不支援的 API version，會怎樣？",
   ["一律回 UNSUPPORTED_VERSION 錯誤碼", "只有 ApiVersions 例外回錯誤碼+支援範圍；其他 API 直接關閉連線", "broker 自動降版處理", "忽略版本照常處理"], 1,
-  "ApiVersions 是協商的第一支 request（此時雙方還不知道彼此版本），若它也關線，client 永遠問不到支援範圍，故回 v0+錯誤碼讓 client 重新協商；其他 API 在 RequestContext 解析失敗、SocketServer 關閉連線。",
+  "ApiVersions 是協商的第一支 request（此時雙方還不知道彼此版本），若它也關閉連線，client 永遠問不到支援範圍，故回 v0+錯誤碼讓 client 重新協商；其他 API 在 RequestContext 解析失敗、SocketServer 關閉連線。",
   [A("RequestContext.java",112), A("SocketServer.scala",781)]),
 ]
 # ---- Title ----
@@ -186,34 +186,27 @@ _, tf = tb(s, 1.2, 4.2, 11.3, 0.9); run(tf.paragraphs[0], "長壽的 client、�
 _, tf = tb(s, 1.2, 6.65, 11.3, 0.5); run(tf.paragraphs[0], "Eric Chang · 2026", 14, MUTED)
 
 add_content("議程", "本場範圍", [
-    ("bullet", "Part 1 — 版本為何對不齊，又是怎麼決定的", "point"),
+    ("bullet", "Part 1 — 為什麼不能「一個版本打天下」，版本又是怎麼選出來的", "point"),
     ("bullet", "Part 2 — 協商失敗時，會看到什麼訊息", "point"),
 ])
 
-add_content("點題", "為什麼不「一個版本打天下」？", [
-    ("bullet", "初學者常有的直覺：client 與 broker 使用同一個版本，升級時一併更新", "bulb"),
-    ("code", "想像中：  client v4.1 ─────── broker v4.1"),
-    ("bullet", "但生產環境的 Kafka 通常是資料主幹道——訂單事件、log、metrics pipeline 都在上面，停機升級＝整條資料鏈路停擺，這個假設不成立", "help-circle"),
-], [A("protocol.md",94)])
-
-add_content("Part 1 · 動機", "為什麼版本天生對不齊，只能連線當下協商", [
-    ("bullet", "client 是內嵌在應用程式裡的函式庫：IoT 裝置、車載系統、多年前的 batch job——隨應用長期運行、難以更新", "clock-hour-4"),
-    ("bullet", "broker 逐台滾動升級，過程必然新舊並存", "server-2"),
-    ("note", "有多長壽？Kafka 曾為舊 client 保留每個 protocol 版本近九年，直到 4.0（KIP-896）才把下限提到 2.1。"),
-    ("code", "任一時刻：各節點支援的版本範圍（supported versions）不同\n        → 不能鎖全叢集同一版（又要不停機）\n        → 只能在「連線當下」決定"),
-    ("solve", "這就是本場主題「溝通當下的版本選擇」的由來"),
+add_content("點題", "為什麼不能「一個版本打天下」？", [
+    ("code", "直覺（想像中）：  client v4.1 ─────── broker v4.1   同版、一起升"),
+    ("bullet", "現實一：client 是內嵌在應用裡的函式庫——IoT 裝置、車載系統、多年前的 batch job，隨應用長期運行、難更新（Kafka 曾為此保留每個 protocol 版本近九年，4.0／KIP-896 才把下限提到 2.1）", "clock-hour-4"),
+    ("bullet", "現實二：Kafka 要求 zero downtime → broker 只能一台一台滾動升級 → 過程必然新舊混版", "server-2"),
+    ("solve", "兩個現實加起來：不能鎖全叢集同一版（又要不停機）——版本無法事先統一，那要怎麼選？"),
 ], [X("KIP-896",KIP896), A("protocol.md",94)])
 
-add_content("Part 1 · 術語", "講「版本」時，其實是指哪一個？分三層", [
+add_content("Part 1 · 術語", "要談「怎麼選」，先分清楚「版本」是哪一層", [
+    ("bullet", "上一頁的結論是「版本無法事先統一」；但在講機制前得先知道，日常講的『版本』其實混了三個東西", "arrows-split"),
     ("code", "release version   = 我裝了哪版 binary            (per-node)\nmetadata.version  = 叢集 finalized 的 feature level (cluster-wide)\nwire API version  = 這條連線講第幾版               (per-connection)"),
-    ("bullet", "三個獨立的軸、各自變動；後面提到「版本」都要先分清楚是哪一層", "arrows-split"),
-    ("note", "finalize＝管理員手動宣告全叢集一致採用的 feature level；怎麼宣告是第一場《版本定義》的主題。本場主角是 wire 版本。"),
+    ("note", "finalize＝管理員手動宣告全叢集一致採用的 feature level（第一場《版本定義》的主題）。本場主角是 wire 版本。"),
 ], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
-add_content("Part 1 · 架構 (a)", "先認識叢集裡的三種連線", [
-    ("bullet", "要協商的連線，會在建立後先送一支 ApiVersionsRequest 查詢對方「每支 API 支援哪個版本區間？」（KIP-35）——但不是每條都協商", "arrows-split"),
-    ("code", "client ─▶ broker        讀寫資料、查 metadata…      連線後先查詢\nbroker ─▶ controller    註冊、心跳、轉發 admin…      連線後先查詢\nbroker ◀▶ broker        partition replication        不查詢（下一張說明）"),
-    ("note", "每列的 RPC 只列代表性的幾種、非窮舉。"),
+add_content("Part 1 · 架構 (a)", "三種連線，分成兩類", [
+    ("bullet", "會協商的兩條：client ↔ broker、broker ↔ controller——連線後先送 ApiVersionsRequest 查對方每支 API 的版本區間（KIP-35）", "arrows-split"),
+    ("bullet", "不協商的一條：broker ↔ broker 的 partition replication——連 ApiVersionsRequest 都不送，版本由 MV 事先決定（下一張）", "ban"),
+    ("code", "client ─▶ broker        讀寫資料、查 metadata…\nbroker ─▶ controller    註冊、心跳、轉發 admin…\nbroker ◀▶ broker        partition replication"),
 ], [X("KIP-35",KIP35), A("NodeApiVersions.java",149,"latestUsableVersion")])
 
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
@@ -223,13 +216,6 @@ add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？"
     ("note", "機制上，決定權在組出 request 的程式碼宣告的允許版本範圍；ListOffsets 等更細差異見 blog 附錄。"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("RemoteLeaderEndPoint.scala",215)])
 
-add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什麼代價", [
-    ("bullet", "Kafka：per-API 協商＋MV 治理 replication。買到單支 API 獨立演進、複製層可線上滾動升級；代價＝協定面積最大、相容性測試按 API 數放大", "arrows-split"),
-    ("bullet", "MongoDB：全域一個 wire version＋FCV 治理叢集。實作簡單；代價＝粒度粗、無法單支 API 獨立演進（FCV 與 MV 同一套思路）", "database"),
-    ("bullet", "PostgreSQL：協定 v3 逾二十年極穩定；但實體複製鎖 major → 複製層無法線上滾動升級（得停機 pg_upgrade 或另建叢集）", "leaf"),
-    ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
-], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL)])
-
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
 s2a = prs.slides.add_slide(BLANK)
 _, tf = tb(s2a, 0.7, 0.5, CW, 0.4); run(tf.paragraphs[0], "Part 1 · 舉例", 13, ACCENT, bold=True)
@@ -237,6 +223,13 @@ _, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "以一支 Fetch 為�
 _, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "同一支 Fetch 兩種身分：consumer fetch 走 client↔broker、replica fetch 走 broker↔broker", 14, GRAY)
 s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), width=Inches(9.7))
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
+
+add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什麼代價", [
+    ("bullet", "Kafka：per-API 協商＋MV 治理 replication。買到單支 API 獨立演進、複製層可線上滾動升級；代價＝協定面積最大、相容性測試按 API 數放大", "arrows-split"),
+    ("bullet", "MongoDB：全域一個 wire version＋FCV 治理叢集。實作簡單；代價＝粒度粗、無法單支 API 獨立演進（FCV 與 MV 同一套思路）", "database"),
+    ("bullet", "PostgreSQL：協定 v3 逾二十年極穩定；但實體複製鎖 major → 複製層無法線上滾動升級（得停機 pg_upgrade 或另建叢集）", "leaf"),
+    ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
+], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL)])
 quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 
 # ---- Part 2：失敗會有什麼訊息 ----
