@@ -216,10 +216,10 @@ add_content("Part 1 · 術語", "要談「怎麼選」，先分清楚「版本�
     ("note", "finalize＝管理員手動宣告全叢集一致採用的 feature level（第一場《版本定義》的主題）。本場主角是 wire 版本。"),
 ], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
-add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 MV 事先釘版", [
+add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 finalized MV 決定", [
     ("bullet", "機制一 · 協商（KIP-35）：連線後送 ApiVersionsRequest、取交集最高——多數路徑都是", "arrows-split"),
-    ("bullet", "機制二 · 由叢集 MV 事先釘版（KIP-584）：只有 partition replication（follower→leader）這條不協商", "ban"),
-    ("code", "協商定版   client↔broker · broker↔controller · Raft · broker↔broker txn markers\nMV 釘版    partition replication（follower→leader，replica fetcher）—— 唯一不協商"),
+    ("bullet", "機制二 · 由 finalized MV 事先決定（KIP-584）：只有 partition replication（follower→leader）這條不協商", "ban"),
+    ("code", "協商           client↔broker · broker↔controller · Raft · broker↔broker txn markers\nfinalized MV   partition replication（follower→leader，replica fetcher）—— 唯一不協商"),
     ("note", "唯一不協商的是 partition replication（follower→leader）——這條流程發三支 RPC：OffsetsForLeaderEpoch 對齊、ListOffsets 定位、Fetch 抓資料，版本都由 MV／寫死；同是 broker↔broker 的 transaction markers 仍協商。"),
 ], [X("KIP-35",KIP35), X("KIP-584",KIP584), A("BrokerBlockingSender.scala",95,"replica fetch=false"), A("TransactionMarkerChannelManager.scala",99,"txn markers=true")])
 
@@ -238,7 +238,7 @@ s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), wi
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
 
 add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什麼代價", [
-    ("bullet", "Kafka：per-API 協商，replica fetch 交給 MV 釘版。買到單支 API 獨立演進、複製層可線上滾動升級；代價＝協定面積最大、相容性測試按 API × 版本數放大", "arrows-split"),
+    ("bullet", "Kafka：per-API 協商，partition replication 交給 finalized MV 決定。買到單支 API 獨立演進、複製層可線上滾動升級；代價＝協定面積最大、相容性測試按 API × 版本數放大", "arrows-split"),
     ("bullet", "MongoDB：全域一個 wire version＋FCV 治理叢集。實作簡單；代價＝粒度粗、無法單支 API 獨立演進（FCV 與 MV 同一套思路）", "database"),
     ("bullet", "PostgreSQL：協定 v3 逾二十年極穩定；但實體複製鎖 major → 複製層無法線上滾動升級（得停機 pg_upgrade 或另建叢集）", "leaf"),
     ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
@@ -254,8 +254,8 @@ add_content("Part 1 · 代價 · 測試", "「相容」到底要保證哪些事�
     ("bullet", "① 格式自洽：每個宣稱支援的 wire 版本，自己序列化都要來回讀寫無誤", "arrows-split"),
     ("bullet", "② 新 client → 舊 broker：client 肯協商降版、不假設對方有新功能", "point"),
     ("bullet", "③ 舊 client → 新 broker：broker 保留舊 wire 版本、繼續服務", "point"),
-    ("bullet", "④ 滾動升級混版：新舊 broker 並存，inter-broker（MV 釘版）＋對 client 都不掉資料", "point"),
-    ("solve", "這四條就是「相容承諾」的全部內容——每一條都得有測試長期盯著"),
+    ("bullet", "④ 滾動升級混版：新舊 broker 並存，inter-broker（finalized MV 決定）＋對 client 都不掉資料", "point"),
+    ("solve", "這四條是本場最相關的相容承諾——每一條都得有測試長期盯著（tagged fields、第三方 client 等外圍成本另計）"),
 ], [A("RequestResponseTest.java",340,"①格式自洽"), A("client_compat.py",109,"②新→舊"), A("compat_newbroker.py",68,"③舊→新"), A("upgrade_test.py",167,"④滾動升級")])
 
 add_content("Part 1 · 代價 · 測試", "守住相容，為什麼越來越貴", [
@@ -270,7 +270,7 @@ quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 add_content("Part 2 · 失敗訊息", "通訊當下協商不出版本，會看到什麼", [
     ("code", "交集空                       → client 端 UnsupportedVersionException（送出前 abort）\nclient 繞過協商、硬送不支援版本 → broker 丟 UnsupportedVersionException、關閉連線\n（ApiVersions 例外：回 v0 + UNSUPPORTED_VERSION 錯誤碼）"),
     ("bullet", "多數情況 client 在送出前就本地中止，根本沒上網路", "ban"),
-    ("note", "「硬送」指 client↔broker：自刻或有 bug 的 client 繞過協商；broker↔broker 版本已由 MV 事先釘住，不會送出對方不懂的版本。"),
+    ("note", "「硬送」指 client↔broker：自刻或有 bug 的 client 繞過協商；partition replication 的版本已由 finalized MV 事先決定，不會送出對方不懂的版本。"),
 ], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("NetworkClient.java",591,"NetworkClient"), A("RequestContext.java",112,"RequestContext")])
 
 add_content("Part 2 · 失敗訊息", "版本截斷：為什麼「升一點點」不夠", [
@@ -284,7 +284,7 @@ quiz_pair(1)  # 小測驗 2：自刻不支援版本會怎樣
 
 add_content("Recap", "回到開場那個問題", [
     ("code", "想像中：client v4.1 ─── broker v4.1\n實際上：同一顆 4.1 broker，同時講 Fetch v11（對老 consumer）和 v17（對 replica）"),
-    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，唯一不協商的是 partition replication（follower→leader）——上面 Fetch/ListOffsets 等由 MV 釘版（其餘 broker↔broker 仍協商）", "point"),
+    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，唯一不協商的是 partition replication（follower→leader）——上面 Fetch/ListOffsets 等由 finalized MV 決定（其餘 broker↔broker 仍協商）", "point"),
     ("bullet", "Part 2：協商不出版本 → UnsupportedVersionException（多在送出前中止）；finalize／升降的錯誤交給運行時那場", "point"),
     ("solve", "立場：per-API 細粒度協商＋replication 集中治理，是為「client 生態極度分散」量身的取捨——對 Kafka 划算，但不是通用解"),
 ])

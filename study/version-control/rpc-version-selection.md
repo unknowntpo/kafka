@@ -8,7 +8,7 @@
 
 - **「broker↔broker 不協商」是錯的**：唯一不協商（`discoverBrokerVersions=false`）的是 **partition replication**（follower→leader，元件 `ReplicaFetcherThread`/`RemoteLeaderEndPoint`）；同是 broker↔broker 的 **transaction markers**（`WriteTxnMarkers`）仍照 KIP-35 協商。
 - **「唯一不協商的 RPC」也是錯的**：不協商的是 partition replication 這**條連線/流程**，上面依序發 **三支** 不協商 RPC——OffsetsForLeaderEpoch（對齊）、ListOffsets（定位）、Fetch（抓資料）；「唯一」修飾的是流程，不是 RPC。「replica fetch」其實是 Fetch 的 replica 身分（一支 RPC）、「replica fetcher」是元件名，都不是路徑概念名——路徑用 **partition replication**。
-- **「MV 只釘 replica fetch」還是錯的**：MV 在 **wire RPC 版本**上只釘 Fetch / ListOffsets 兩支；但它另外還釘一票 **metadata log record 版本**（`registerBrokerRecordVersion`、`partitionRecordVersion`… 見 §3 末），所以「由 MV 釘版」是通用機制、不等於「只有 replica fetch」。
+- **「MV 只決定 replica fetch」還是錯的**：MV 在 **wire RPC 版本**上只決定 Fetch / ListOffsets 兩支；但它另外還決定一票 **metadata log record 版本**（`registerBrokerRecordVersion`、`partitionRecordVersion`… 見 §3 末），所以「由 finalized MV 決定版本」是通用機制、不等於「只有 replica fetch」。
 
 ## 關鍵機制：Builder 的版本範圍決定一切
 

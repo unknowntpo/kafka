@@ -22,7 +22,7 @@
 - **client↔broker，兩個方向各一支專測（對稱）**：
   - **新 client → 舊 broker**：`client_compatibility_features_test.py:109-131`（+ `client_compatibility_produce_consume_test.py:69-91`）——client 釘 DEV、broker 掃 22 歷史版；各 **23 param（22 + DEV）× 2 支**。這段是**真 ApiVersions 協商**（client 主動降版）。
   - **舊 client → 新 broker**：`compatibility_test_new_broker_test.py:68`——broker 釘 DEV（`:69`）、producer/consumer 掃 2.1→4.3（`@matrix` `:43-67`）。驗 broker 保留舊 wire 版本、繼續服務。
-- **升級/降級矩陣**：`upgrade_test.py:167-188`，4 個 `@matrix` 測試法 × 11 個 from_version（LATEST_3_4…4_3 + DEV）≈ 44 組（再乘 KRaft mode / num_nodes）；混版交易 `transactions_mixed_versions_test.py:192-198` 再 11×2 = 22 組。**注意層次**：這裡的 client↔broker 段是協商，但 **broker↔broker（partition replication）段是 MV 把 inter-broker 版本釘在舊值、非協商**——所以升級測試同時涵蓋「協商降版」與「MV 釘版」兩種相容路徑。
+- **升級/降級矩陣**：`upgrade_test.py:167-188`，4 個 `@matrix` 測試法 × 11 個 from_version（LATEST_3_4…4_3 + DEV）≈ 44 組（再乘 KRaft mode / num_nodes）；混版交易 `transactions_mixed_versions_test.py:192-198` 再 11×2 = 22 組。**注意層次**：這裡的 client↔broker 段是協商，但 **broker↔broker（partition replication）段是由 finalized MV 把 inter-broker 版本固定在舊值、非協商**——所以升級測試同時涵蓋「協商降版」與「finalized MV 決定版本」兩種相容路徑。
 - **MetadataVersion 矩陣**：`MetadataVersionTest.java:219-313` 7 個 `@EnumSource` 把 25 個現役 MV 全展開（`MetadataVersion.java` MINIMUM=IBP_3_3_IV3、25 個 enum）；工具面 `FeatureCommandTest` 用 `@ClusterTest` 在不同硬編 MV 起 KRaft 叢集。
 - **手動擴張**：每發一個 release，`version.py` 加 `V_x_y`+`LATEST_x_y`、`Dockerfile` 加一條下載、各 compat/upgrade 測試的 `@parametrize`/`@matrix` 版本清單各 +1。
 
