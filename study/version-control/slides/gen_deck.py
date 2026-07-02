@@ -178,7 +178,7 @@ def quiz_pair(i):
 
 # 只留本場範圍內、有教育意義的 2 題（其餘屬兄弟場或過於簡單，已移除）
 QUIZ = [
- ("核心", "replica fetch（broker↔broker）的 Fetch 版本怎麼決定？",
+ ("核心", "follower→leader 複製流程裡，Fetch 的版本怎麼決定？",
   ["兩 broker ApiVersions 協商取交集", "由 finalized metadata.version 決定", "永遠用最新版", "controller 每次指定"], 1,
   "fetchRequestVersion(MV)：MV 是集中共識，不做 per-connection 協商。",
   [A("RemoteLeaderEndPoint.scala",215), A("MetadataVersion.java",273)]),
@@ -217,15 +217,15 @@ add_content("Part 1 · 術語", "要談「怎麼選」，先分清楚「版本�
 
 add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 MV 事先釘版", [
     ("bullet", "機制一 · 協商（KIP-35）：連線後送 ApiVersionsRequest、取交集最高——多數路徑都是", "arrows-split"),
-    ("bullet", "機制二 · 由叢集 MV 事先釘版（KIP-584）：只有 replica fetch（partition replication）這條不協商", "ban"),
-    ("code", "協商定版   client↔broker · broker↔controller · Raft · broker↔broker txn markers\nMV 釘版    replica fetch（follower → leader partition replication）—— 唯一不協商的連線"),
-    ("note", "精確講：唯一不協商的是 replica fetch 這一「連線」——上面 Fetch/ListOffsets/OffsetsForLeaderEpoch 三支 RPC 都不協商；同是 broker↔broker 的 transaction markers 仍協商。"),
+    ("bullet", "機制二 · 由叢集 MV 事先釘版（KIP-584）：只有 follower→leader 複製流程這條不協商", "ban"),
+    ("code", "協商定版   client↔broker · broker↔controller · Raft · broker↔broker txn markers\nMV 釘版    follower→leader 複製流程（replica fetcher）—— 唯一不協商的路徑"),
+    ("note", "唯一不協商的是 follower→leader 複製流程——發三支 RPC：OffsetsForLeaderEpoch 對齊、ListOffsets 定位、Fetch 抓資料，版本都由 MV／寫死；同是 broker↔broker 的 transaction markers 仍協商。"),
 ], [X("KIP-35",KIP35), X("KIP-584",KIP584), A("BrokerBlockingSender.scala",95,"replica fetch=false"), A("TransactionMarkerChannelManager.scala",99,"txn markers=true")])
 
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
-    ("code", "協商           取交集最高（client↔broker、broker↔controller、Raft、txn markers）\nreplica fetch  不協商——Fetch/ListOffsets 由 finalized MV、OffsetsForLeaderEpoch 寫死 v4"),
-    ("bullet", "replica fetch 連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：這條路上一整組 RPC 版本都不看對端能力，改由叢集事先決定", "ban"),
-    ("solve", "為什麼 replica fetch 交給 MV？它要求 follower↔leader 全講同一版、沒法各連線各挑。代價『升級變兩階段』其實是 MV 治理的通性（凡版本由 MV 決定者皆然），非它專屬；協商連線則自動挑上去"),
+    ("code", "協商        取交集最高（client↔broker、broker↔controller、Raft、txn markers）\n複製流程    不協商——Fetch/ListOffsets 由 finalized MV、OffsetsForLeaderEpoch 寫死 v4"),
+    ("bullet", "follower→leader 複製流程連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：這條路上一整組 RPC 版本都不看對端能力，改由叢集事先決定", "ban"),
+    ("solve", "為什麼複製流程交給 MV？它要求 follower↔leader 全講同一版、沒法各連線各挑。代價『升級變兩階段』其實是 MV 治理的通性（凡版本由 MV 決定者皆然），非它專屬；協商連線則自動挑上去"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("OffsetsForLeaderEpochRequest.java",65,"forFollower 寫死 v4"), A("RemoteLeaderEndPoint.scala",215)])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
@@ -282,7 +282,7 @@ quiz_pair(1)  # 小測驗 2：自刻不支援版本會怎樣
 
 add_content("Recap", "回到開場那個問題", [
     ("code", "想像中：client v4.1 ─── broker v4.1\n實際上：同一顆 4.1 broker，同時講 Fetch v11（對老 consumer）和 v17（對 replica）"),
-    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，唯一不協商的「連線」是 replica fetch——上面 Fetch/ListOffsets 等由 MV 釘版（其餘 broker↔broker 仍協商）", "point"),
+    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，唯一不協商的是 follower→leader 複製流程——上面 Fetch/ListOffsets 等由 MV 釘版（其餘 broker↔broker 仍協商）", "point"),
     ("bullet", "Part 2：協商不出版本 → UnsupportedVersionException（多在送出前中止）；finalize／升降的錯誤交給運行時那場", "point"),
     ("solve", "立場：per-API 細粒度協商＋replication 集中治理，是為「client 生態極度分散」量身的取捨——對 Kafka 划算，但不是通用解"),
 ])

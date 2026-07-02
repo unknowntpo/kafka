@@ -6,8 +6,8 @@
 
 不是「client 協商、broker 之間用 metadata.version」這種二分。準確講：**大多數連線底層都會送 `ApiVersionsRequest` 協商；真正決定版本的是那支 request 的 `Builder` 留多少版本自由度。** 兩個常見誤解要先破：
 
-- **「broker↔broker 不協商」是錯的**：唯一不協商（`discoverBrokerVersions=false`）的是 **replica fetch 這一條連線**；同是 broker↔broker 的 **transaction markers**（`WriteTxnMarkers`）仍照 KIP-35 協商。
-- **「唯一不協商的 RPC」也是錯的**：replica fetch 是唯一不協商的**連線**，但這條連線上有 **三支** 不協商的 RPC（Fetch、ListOffsets、OffsetsForLeaderEpoch）——「唯一」只修飾連線，不修飾 RPC。
+- **「broker↔broker 不協商」是錯的**：唯一不協商（`discoverBrokerVersions=false`）的是 **follower→leader 複製流程**（`ReplicaFetcherThread`/`RemoteLeaderEndPoint`）；同是 broker↔broker 的 **transaction markers**（`WriteTxnMarkers`）仍照 KIP-35 協商。
+- **「唯一不協商的 RPC」也是錯的**：不協商的是複製流程這一**條連線**，上面依序發 **三支** 不協商 RPC——OffsetsForLeaderEpoch（對齊）、ListOffsets（定位）、Fetch（抓資料）；「唯一」修飾的是流程/連線，不是 RPC。「replica fetch」其實是 Fetch 的 replica 身分（一支 RPC），不是連線名。
 - **「MV 只釘 replica fetch」還是錯的**：MV 在 **wire RPC 版本**上只釘 Fetch / ListOffsets 兩支；但它另外還釘一票 **metadata log record 版本**（`registerBrokerRecordVersion`、`partitionRecordVersion`… 見 §3 末），所以「由 MV 釘版」是通用機制、不等於「只有 replica fetch」。
 
 ## 關鍵機制：Builder 的版本範圍決定一切
