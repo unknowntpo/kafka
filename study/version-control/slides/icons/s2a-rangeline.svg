@@ -28,7 +28,7 @@
   <text x="960" y="202" font-size="12.5" fill="#8A8A8A" text-anchor="middle">broker 上界 ↑</text>
   <text x="430" y="224" font-size="12.5" fill="#993C1D">更舊的 client（上限 &lt; v4）→ 交集空 → UnsupportedVersionException（abort）</text>
 
-  <text x="30" y="266" font-size="19" font-weight="700" fill="#1E2024">② broker ↔ broker（複製）　由 finalized MV 決定單一版本（不取 max）</text>
+  <text x="30" y="266" font-size="19" font-weight="700" fill="#1E2024">② broker ↔ broker（partition replication）　由 finalized MV 決定單一版本（不取 max）</text>
 
   <rect x="330" y="300" width="630" height="28" rx="4" fill="#B5D4F4" stroke="#185FA5"/>
   <text x="342" y="320" font-size="15" fill="#0C447C">broker 能力 v4–v18</text>
