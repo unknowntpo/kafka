@@ -32,6 +32,16 @@ P = {
  "FetchRequest.java":"clients/src/main/java/org/apache/kafka/common/requests/FetchRequest.java",
  "RequestContext.java":"clients/src/main/java/org/apache/kafka/common/requests/RequestContext.java",
  "SocketServer.scala":"core/src/main/scala/kafka/network/SocketServer.scala",
+ "KafkaApis.scala":"core/src/main/scala/kafka/server/KafkaApis.scala",
+ "TransactionMarkerChannelManager.scala":"core/src/main/scala/kafka/coordinator/transaction/TransactionMarkerChannelManager.scala",
+ "OffsetsForLeaderEpochRequest.java":"clients/src/main/java/org/apache/kafka/common/requests/OffsetsForLeaderEpochRequest.java",
+ "RequestResponseTest.java":"clients/src/test/java/org/apache/kafka/common/requests/RequestResponseTest.java",
+ "MessageTest.java":"clients/src/test/java/org/apache/kafka/common/message/MessageTest.java",
+ "Dockerfile":"tests/docker/Dockerfile",
+ "version.py":"tests/kafkatest/version.py",
+ "client_compat.py":"tests/kafkatest/tests/client/client_compatibility_features_test.py",
+ "upgrade_test.py":"tests/kafkatest/tests/core/upgrade_test.py",
+ "MetadataVersionTest.java":"server-common/src/test/java/org/apache/kafka/server/common/MetadataVersionTest.java",
  "BrokerBlockingSender.scala":"core/src/main/scala/kafka/server/BrokerBlockingSender.scala",
  "MetadataVersion.java":"server-common/src/main/java/org/apache/kafka/server/common/MetadataVersion.java",
  "RemoteLeaderEndPoint.scala":"core/src/main/scala/kafka/server/RemoteLeaderEndPoint.scala",
@@ -44,6 +54,7 @@ P = {
 }
 KIP896="https://cwiki.apache.org/confluence/display/KAFKA/KIP-896%3A+Remove+old+client+protocol+API+versions+in+Kafka+4.0"
 KIP35="https://cwiki.apache.org/confluence/display/KAFKA/KIP-35+-+Retrieving+protocol+version"
+KIP584="https://cwiki.apache.org/confluence/display/KAFKA/KIP-584%3A+Versioning+scheme+for+features"
 PGURL="https://www.postgresql.org/docs/current/protocol-flow.html"
 MONGO="https://www.mongodb.com/docs/manual/reference/command/hello/"
 
@@ -204,18 +215,18 @@ add_content("Part 1 · 術語", "要談「怎麼選」，先分清楚「版本�
     ("note", "finalize＝管理員手動宣告全叢集一致採用的 feature level（第一場《版本定義》的主題）。本場主角是 wire 版本。"),
 ], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
-add_content("Part 1 · 架構 (a)", "三種連線，分成兩類", [
-    ("bullet", "會協商的兩條：client ↔ broker、broker ↔ controller——連線後先送 ApiVersionsRequest 查對方每支 API 的版本區間（KIP-35）", "arrows-split"),
-    ("bullet", "不協商的一條：broker ↔ broker 的 partition replication——連 ApiVersionsRequest 都不送，版本由 MV 事先決定（下一張）", "ban"),
-    ("code", "client ─▶ broker        讀寫資料、查 metadata…\nbroker ─▶ controller    註冊、心跳、轉發 admin…\nbroker ◀▶ broker        partition replication"),
-], [X("KIP-35",KIP35), A("NodeApiVersions.java",149,"latestUsableVersion"), A("MetadataVersion.java",273,"fetchRequestVersion")])
+add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 MV 事先釘版", [
+    ("bullet", "機制一 · 協商（KIP-35）：連線後送 ApiVersionsRequest、取交集最高——多數路徑都是", "arrows-split"),
+    ("bullet", "機制二 · 由叢集 MV 事先釘版（KIP-584）：只有 replica fetch（partition replication）這條不協商", "ban"),
+    ("code", "協商定版   client↔broker · broker↔controller · Raft · broker↔broker txn markers\nMV 釘版    replica fetch（follower → leader partition replication）—— 唯一一條"),
+    ("note", "所以「broker↔broker 不協商」並不精確：只有 replica fetch 這條；同是 broker↔broker 的 transaction markers 仍協商。"),
+], [X("KIP-35",KIP35), X("KIP-584",KIP584), A("BrokerBlockingSender.scala",95,"replica fetch=false"), A("TransactionMarkerChannelManager.scala",99,"txn markers=true")])
 
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
-    ("code", "client ↔ broker              協商，取交集最高\nbroker ↔ controller          也協商（broker 當 client）\nbroker ↔ broker replication  不協商——由 finalized MV 決定"),
-    ("bullet", "replication 連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：版本已由 finalized MV 決定，直接照該版本送", "ban"),
-    ("solve", "為什麼 replication 例外？它要求所有 follower↔leader 講同一版，才交給 finalized MV 集中決定；成本是升級變兩階段——先全叢集滾完 binary（都具備新版能力），管理員再手動 finalize MV 才切新版（協商連線則會自動挑上去）"),
-    ("note", "機制上，決定權在組出 request 的程式碼宣告的允許版本範圍；ListOffsets 等更細差異見 blog 附錄。"),
-], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("RemoteLeaderEndPoint.scala",215)])
+    ("code", "協商           取交集最高（client↔broker、broker↔controller、Raft、txn markers）\nreplica fetch  不協商——Fetch/ListOffsets 由 finalized MV、OffsetsForLeaderEpoch 寫死 v4"),
+    ("bullet", "replica fetch 連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：這條路上一整組 RPC 版本都不看對端能力，改由叢集事先決定", "ban"),
+    ("solve", "為什麼 replica fetch 交給 MV？它要求 follower↔leader 全講同一版、沒法各連線各挑。代價『升級變兩階段』其實是 MV 治理的通性（凡版本由 MV 決定者皆然），非它專屬；協商連線則自動挑上去"),
+], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("OffsetsForLeaderEpochRequest.java",65,"forFollower 寫死 v4"), A("RemoteLeaderEndPoint.scala",215)])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
 s2a = prs.slides.add_slide(BLANK)
@@ -226,7 +237,7 @@ s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), wi
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
 
 add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什麼代價", [
-    ("bullet", "Kafka：per-API 協商＋MV 治理 replication。買到單支 API 獨立演進、複製層可線上滾動升級；代價＝協定面積最大、相容性測試按 API 數放大", "arrows-split"),
+    ("bullet", "Kafka：per-API 協商，replica fetch 交給 MV 釘版。買到單支 API 獨立演進、複製層可線上滾動升級；代價＝協定面積最大、相容性測試按 API × 版本數放大", "arrows-split"),
     ("bullet", "MongoDB：全域一個 wire version＋FCV 治理叢集。實作簡單；代價＝粒度粗、無法單支 API 獨立演進（FCV 與 MV 同一套思路）", "database"),
     ("bullet", "PostgreSQL：協定 v3 逾二十年極穩定；但實體複製鎖 major → 複製層無法線上滾動升級（得停機 pg_upgrade 或另建叢集）", "leaf"),
     ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
@@ -234,10 +245,23 @@ add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什�
 
 add_content("Part 1 · 代價", "Kafka 這個選擇有多貴（實測數字）", [
     ("code", "90 支 API × 308 個現役 wire 版本 → generator 吹成約 18× 生成碼（~18 萬行）\n每加一版：改 .json、逐版生 read/write/size、ApiKeys 補版號"),
-    ("bullet", "相容性測試矩陣兩層、都隨版本數長：build 時全 308 版 round-trip 序列化；系統測試再起真實叢集 × 23 個 broker 版本（2.1→4.3）互測新 client 對舊 broker", "arrows-split"),
-    ("note", "broker handler 也逐版分岔：按協商版本讀/填欄位、回應用『同一版』序列化、老版缺的欄位給預設，連語意差異（如 topic-id 取代 topic-name）都要 if (version≥N)。"),
+    ("bullet", "broker handler 還得逐版分岔：按協商版本讀/填欄位、回應用『同一版』序列化、老版缺的欄位給預設，連語意差異（如 topic-id 取代 topic-name）都要 if (version≥N)", "arrows-split"),
+    ("note", "這還只是「生成碼＋handler」；相容性測試是另一條隱形帳單（下兩張細看）——build 全版本 round-trip＋release 養一堆歷史版本。"),
     ("solve", "貴到 Kafka 自己在 KIP-896 承認「maintenance cost up, value down」，4.0 砍掉 2.1 以前的舊版本止血"),
-], [X("KIP-896",KIP896), A("RequestContext.java",112,"RequestContext"), A("FetchRequest.json",61,"validVersions")])
+], [X("KIP-896",KIP896), A("RequestContext.java",137,"buildResponseSend"), A("KafkaApis.scala",568,"fetch version()>=13"), A("FetchRequest.json",80,"MaxBytes v3+ default")])
+add_content("Part 1 · 代價 · 測試", "相容性測試（一）：每次 build 全版本 round-trip", [
+    ("code", "RequestResponseTest.testSerialization：ApiKeys × allVersions 全積\n94 支 RPC、308 個現役請求版本 → build → 序列化 → 反序列化 → 比對，逐一跑"),
+    ("bullet", "靠 ApiKeys.values() × allVersions() 迴圈，新增版本自動涵蓋——省了手改，代價是每次 build 執行量只增不減", "arrows-split"),
+    ("bullet", "想跳過某個歷史版本？得進 toSkip 白名單特案處理——目前只 4 支 RPC 拿得到豁免", "ban"),
+    ("solve", "KIP-896 直言維護舊版本「both in code complexity and the testing matrix」——測試面正是其一"),
+], [A("RequestResponseTest.java",340,"testSerialization"), A("MessageTest.java",716,"round-trip"), X("KIP-896",KIP896)])
+
+add_content("Part 1 · 代價 · 測試", "相容性測試（二）：把過去七年的 Kafka 一起養著", [
+    ("code", "系統測試映像 curl 下載 22 個歷史版本二進位（2.1.1 → 4.3.0）\nclient 相容測試：每個歷史 broker 各跑一遍（22 + dev = 23 param × 2 支測試）"),
+    ("bullet", "升級/降級是 from×to 矩陣：4 個 @matrix × 11 個 from_version；混版交易再 22 組；MetadataVersion 另有 25 個現役 MV × 7 個 enum 測試", "arrows-split"),
+    ("solve", "取捨：相容承諾＝「一次寫、永遠不能少測」——每發一個 release，version.py＋Dockerfile＋各測試 @parametrize 都得手動 +1"),
+], [A("Dockerfile",79,"下載 22 版"), A("client_compat.py",109,"client 相容 ×23"), A("upgrade_test.py",167,"升級矩陣"), A("MetadataVersionTest.java",219,"25 MV")])
+
 quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 
 # ---- Part 2：失敗會有什麼訊息 ----
@@ -258,7 +282,7 @@ quiz_pair(1)  # 小測驗 2：自刻不支援版本會怎樣
 
 add_content("Recap", "回到開場那個問題", [
     ("code", "想像中：client v4.1 ─── broker v4.1\n實際上：同一顆 4.1 broker，同時講 Fetch v11（對老 consumer）和 v17（對 replica）"),
-    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；三條線多數靠協商，只有 partition replication 由 finalized MV 決定", "point"),
+    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，唯一不協商、由 finalized MV 釘版的是 replica fetch（其餘 broker↔broker 仍協商）", "point"),
     ("bullet", "Part 2：協商不出版本 → UnsupportedVersionException（多在送出前中止）；finalize／升降的錯誤交給運行時那場", "point"),
     ("solve", "立場：per-API 細粒度協商＋replication 集中治理，是為「client 生態極度分散」量身的取捨——對 Kafka 划算，但不是通用解"),
 ])
