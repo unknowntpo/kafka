@@ -61,7 +61,7 @@ Title → TOC → 點題 → 動機 → 術語(+finalize note) → 架構a(握�
 ## Top 5 must-fix
 
 1. ✅ [高] 補「為什麼複製面用 MV、其餘協商」rationale（deck 一句；blog 收錄「為什麼這樣分」段）
-2. [高] Blog 重構為 2 段（Fetch 後置、Builder 後置、§6 移附錄、2 題）
+2. ✅ [高] Blog 重構為 2 段（Fetch 後置、Builder 後置、§6 移附錄、2 題）
 3. ✅ [高] 三術語首現定義（ApiVersions／finalize／Builder；NetworkClient 降級）
 4. ✅ [中] 架構拆兩張 + ListOffsets 降級（15 張）
 5. ✅ [中] 清理：刪兄弟場 QUIZ、統一自刻出處、Recap 加 v11/v17
