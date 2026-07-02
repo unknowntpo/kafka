@@ -227,7 +227,7 @@ add_content("Part 1 · 架構 (a)", "版本怎麼定：協商，還是由 finali
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
     ("code", "協商                    取交集最高（client↔broker、broker↔controller、Raft、txn markers）\npartition replication   不協商——Fetch/ListOffsets 由 finalized MV、OffsetsForLeaderEpoch 寫死 v4"),
     ("bullet", "partition replication（follower→leader）連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：這條路上一整組 RPC 版本都不看對端能力，改由叢集事先決定", "ban"),
-    ("solve", "為什麼交給 MV，不各連線協商？協商能讓 broker 互相『讀得懂』——但讀得懂不代表跨版本行為正確（如 KIP-903 replica-epoch fencing 要全叢集一致生效，才擋得住舊 epoch 的 follower 進 ISR）。MV 讓 operator 一次原子切換、與滾 binary 脫鉤，這就是升級兩階段的由來"),
+    ("solve", "為什麼交給 MV，不各連線協商？協商能讓 broker 互相『讀得懂』——但讀得懂不代表跨版本行為正確（如 KIP-903 replica-epoch fencing 要全叢集一致生效，才擋得住舊 epoch 的 follower 進 ISR）"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("OffsetsForLeaderEpochRequest.java",65,"forFollower 寫死 v4"), A("RemoteLeaderEndPoint.scala",215)])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
@@ -248,7 +248,7 @@ add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什�
 add_content("Part 1 · 代價", "代價：每支 API 的 handler 都要逐版分岔", [
     ("code", "每支 API 的 broker handler 都逐版分岔，例如 Fetch：\n  if (version >= 13)  用 topic-id   else   用 topic-name\n  老版缺的欄位給預設 · 回應一律照「request 的版本」序列化"),
     ("bullet", "讀寫欄位、語意差異、預設值全逐版 if (version ≥ N)，散在每支 API 的 handler 裡——加一版就多一堆分支要維護", "arrows-split"),
-    ("note", "另一條更大的隱形帳單是相容性測試（下兩張細看）——每個版本、每個歷史 release 都得長期盯著。"),
+    ("note", "另一條更大的隱形帳單是相容性測試（下一張細看）——每個版本、每個歷史 release 都得長期盯著。"),
     ("solve", "貴到 Kafka 自己在 KIP-896 承認「maintenance cost up, value down」，4.0 砍掉 2.1 以前的舊版本止血"),
 ], [A("KafkaApis.scala",568,"version()>=13"), A("RequestContext.java",137,"回應=request 版本"), A("FetchRequest.json",80,"預設值"), X("KIP-896",KIP896)])
 add_content("Part 1 · 代價 · 測試", "「相容」到底要保證哪些事？", [
@@ -259,11 +259,7 @@ add_content("Part 1 · 代價 · 測試", "「相容」到底要保證哪些事�
     ("solve", "這四條是本場最相關的相容承諾——每一條都得有測試長期盯著（tagged fields、第三方 client 等外圍成本另計）"),
 ], [A("RequestResponseTest.java",340,"①格式自洽"), A("client_compat.py",109,"②新→舊"), A("compat_newbroker.py",68,"③舊→新"), A("upgrade_test.py",167,"④滾動升級")])
 
-add_content("Part 1 · 代價 · 測試", "守住相容，為什麼越來越貴", [
-    ("bullet", "① 是「API × 版本」、②③④ 是「版本 × 版本」——測試面是乘積，不是加總", "arrows-split"),
-    ("bullet", "有些自動擴張（新版本免補測試、但每次 build 越跑越久），有些得手動 +1（多養一個歷史版本、多一組參數）", "point"),
-    ("solve", "所以它是只增不減的持續支出——貴到 Kafka 在 KIP-896 得砍掉 2.1 以前的舊版本止血"),
-], [X("KIP-896",KIP896), A("version.py",138,"版本清單手動+1"), A("Dockerfile",79,"養 22 個歷史版本"), A("MetadataVersionTest.java",219,"MV 矩陣")])
+# （SO-WHAT「為什麼越來越貴」測試 slide 已移除——太細節；保留 WHAT 四相容義務那張）
 
 quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 
