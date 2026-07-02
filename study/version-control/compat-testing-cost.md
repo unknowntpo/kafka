@@ -19,8 +19,10 @@
 ### 第二層 — release 時的跨版本系統測試（手動擴張）
 
 - **測試映像下載 22 個歷史版本二進位**（2.1.1 → 4.3.0），`tests/docker/Dockerfile:79-100` 逐一 `curl … | tar`；版本清單釘在 `tests/kafkatest/version.py:138-258`（22 個 `LATEST_*`）。
-- **client 相容**：`client_compatibility_features_test.py:109-131`、`client_compatibility_produce_consume_test.py:69-91`——固定 client 打不同版本 broker，各 **23 param（22 歷史 + DEV）× 2 支測試**。
-- **升級/降級矩陣**：`upgrade_test.py:167-188`，4 個 `@matrix` 測試法 × 11 個 from_version（LATEST_3_4…4_3 + DEV）≈ 44 組（再乘 KRaft mode / num_nodes）；混版交易 `transactions_mixed_versions_test.py:192-198` 再 11×2 = 22 組。
+- **client↔broker，兩個方向各一支專測（對稱）**：
+  - **新 client → 舊 broker**：`client_compatibility_features_test.py:109-131`（+ `client_compatibility_produce_consume_test.py:69-91`）——client 釘 DEV、broker 掃 22 歷史版；各 **23 param（22 + DEV）× 2 支**。這段是**真 ApiVersions 協商**（client 主動降版）。
+  - **舊 client → 新 broker**：`compatibility_test_new_broker_test.py:68`——broker 釘 DEV（`:69`）、producer/consumer 掃 2.1→4.3（`@matrix` `:43-67`）。驗 broker 保留舊 wire 版本、繼續服務。
+- **升級/降級矩陣**：`upgrade_test.py:167-188`，4 個 `@matrix` 測試法 × 11 個 from_version（LATEST_3_4…4_3 + DEV）≈ 44 組（再乘 KRaft mode / num_nodes）；混版交易 `transactions_mixed_versions_test.py:192-198` 再 11×2 = 22 組。**注意層次**：這裡的 client↔broker 段是協商，但 **broker↔broker（partition replication）段是 MV 把 inter-broker 版本釘在舊值、非協商**——所以升級測試同時涵蓋「協商降版」與「MV 釘版」兩種相容路徑。
 - **MetadataVersion 矩陣**：`MetadataVersionTest.java:219-313` 7 個 `@EnumSource` 把 25 個現役 MV 全展開（`MetadataVersion.java` MINIMUM=IBP_3_3_IV3、25 個 enum）；工具面 `FeatureCommandTest` 用 `@ClusterTest` 在不同硬編 MV 起 KRaft 叢集。
 - **手動擴張**：每發一個 release，`version.py` 加 `V_x_y`+`LATEST_x_y`、`Dockerfile` 加一條下載、各 compat/upgrade 測試的 `@parametrize`/`@matrix` 版本清單各 +1。
 
@@ -56,6 +58,7 @@
 - `tools/src/test/java/org/apache/kafka/tools/FeatureCommandTest.java:49,88,127-129`
 - `tests/kafkatest/version.py:138-258`（22 個 LATEST_*）
 - `tests/docker/Dockerfile:79-100`（22 條下載，2.1.1→4.3.0）
-- `tests/kafkatest/tests/client/client_compatibility_features_test.py:109-131`、`client_compatibility_produce_consume_test.py:69-91`
+- `tests/kafkatest/tests/client/client_compatibility_features_test.py:109-131`、`client_compatibility_produce_consume_test.py:69-91`（新 client → 舊 broker）
+- `tests/kafkatest/tests/core/compatibility_test_new_broker_test.py:68`（舊 client → 新 broker；broker=DEV `:69`、client 版本 `@matrix :43-67`）
 - `tests/kafkatest/tests/core/upgrade_test.py:167-188`、`transactions_mixed_versions_test.py:192-198`
 - KIP-896（Motivation 原句）、KIP-584（feature/MV）

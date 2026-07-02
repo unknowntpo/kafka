@@ -40,6 +40,7 @@ P = {
  "Dockerfile":"tests/docker/Dockerfile",
  "version.py":"tests/kafkatest/version.py",
  "client_compat.py":"tests/kafkatest/tests/client/client_compatibility_features_test.py",
+ "compat_newbroker.py":"tests/kafkatest/tests/core/compatibility_test_new_broker_test.py",
  "upgrade_test.py":"tests/kafkatest/tests/core/upgrade_test.py",
  "MetadataVersionTest.java":"server-common/src/test/java/org/apache/kafka/server/common/MetadataVersionTest.java",
  "BrokerBlockingSender.scala":"core/src/main/scala/kafka/server/BrokerBlockingSender.scala",
@@ -249,18 +250,19 @@ add_content("Part 1 · 代價", "Kafka 這個選擇有多貴（實測數字）",
     ("note", "這還只是「生成碼＋handler」；相容性測試是另一條隱形帳單（下兩張細看）——build 全版本 round-trip＋release 養一堆歷史版本。"),
     ("solve", "貴到 Kafka 自己在 KIP-896 承認「maintenance cost up, value down」，4.0 砍掉 2.1 以前的舊版本止血"),
 ], [X("KIP-896",KIP896), A("RequestContext.java",137,"buildResponseSend"), A("KafkaApis.scala",568,"fetch version()>=13"), A("FetchRequest.json",80,"MaxBytes v3+ default")])
-add_content("Part 1 · 代價 · 測試", "相容性測試（一）：每次 build 全版本 round-trip", [
-    ("code", "RequestResponseTest.testSerialization：ApiKeys × allVersions 全積\n94 支 RPC、308 個現役請求版本 → build → 序列化 → 反序列化 → 比對，逐一跑"),
-    ("bullet", "靠 ApiKeys.values() × allVersions() 迴圈，新增版本自動涵蓋——省了手改，代價是每次 build 執行量只增不減", "arrows-split"),
-    ("bullet", "想跳過某個歷史版本？得進 toSkip 白名單特案處理——目前只 4 支 RPC 拿得到豁免", "ban"),
-    ("solve", "KIP-896 直言維護舊版本「both in code complexity and the testing matrix」——測試面正是其一"),
-], [A("RequestResponseTest.java",340,"testSerialization"), A("MessageTest.java",716,"round-trip"), X("KIP-896",KIP896)])
+add_content("Part 1 · 代價 · 測試", "「相容」到底要保證哪些事？", [
+    ("bullet", "① 格式自洽：每個宣稱支援的 wire 版本，自己序列化都要來回讀寫無誤", "arrows-split"),
+    ("bullet", "② 新 client → 舊 broker：client 肯協商降版、不假設對方有新功能", "point"),
+    ("bullet", "③ 舊 client → 新 broker：broker 保留舊 wire 版本、繼續服務", "point"),
+    ("bullet", "④ 滾動升級混版：新舊 broker 並存，inter-broker（MV 釘版）＋對 client 都不掉資料", "point"),
+    ("solve", "這四條就是「相容承諾」的全部內容——每一條都得有測試長期盯著"),
+], [A("RequestResponseTest.java",340,"①格式自洽"), A("client_compat.py",109,"②新→舊"), A("compat_newbroker.py",68,"③舊→新"), A("upgrade_test.py",167,"④滾動升級")])
 
-add_content("Part 1 · 代價 · 測試", "相容性測試（二）：把過去七年的 Kafka 一起養著", [
-    ("code", "系統測試映像 curl 下載 22 個歷史版本二進位（2.1.1 → 4.3.0）\nclient 相容測試：每個歷史 broker 各跑一遍（22 + dev = 23 param × 2 支測試）"),
-    ("bullet", "升級/降級是 from×to 矩陣：4 個 @matrix × 11 個 from_version；混版交易再 22 組；MetadataVersion 另有 25 個現役 MV × 7 個 enum 測試", "arrows-split"),
-    ("solve", "取捨：相容承諾＝「一次寫、永遠不能少測」——每發一個 release，version.py＋Dockerfile＋各測試 @parametrize 都得手動 +1"),
-], [A("Dockerfile",79,"下載 22 版"), A("client_compat.py",109,"client 相容 ×23"), A("upgrade_test.py",167,"升級矩陣"), A("MetadataVersionTest.java",219,"25 MV")])
+add_content("Part 1 · 代價 · 測試", "守住相容，為什麼越來越貴", [
+    ("bullet", "① 是「API × 版本」、②③④ 是「版本 × 版本」——測試面是乘積，不是加總", "arrows-split"),
+    ("bullet", "有些自動擴張（新版本免補測試、但每次 build 越跑越久），有些得手動 +1（多養一個歷史版本、多一組參數）", "point"),
+    ("solve", "所以它是只增不減的持續支出——貴到 Kafka 在 KIP-896 得砍掉 2.1 以前的舊版本止血"),
+], [X("KIP-896",KIP896), A("version.py",138,"版本清單手動+1"), A("Dockerfile",79,"養 22 個歷史版本"), A("MetadataVersionTest.java",219,"MV 矩陣")])
 
 quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 
