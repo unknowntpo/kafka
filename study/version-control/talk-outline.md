@@ -1,7 +1,7 @@
 # 大綱：溝通當下的版本選擇
 
 > 幾萬個節點之上的版本控制 · 第三場。本檔是投影片／blog 的結構 spec，事實依據見 [rpc-version-selection.md](rpc-version-selection.md)。
-> 三段式：先講問題 → 用 RPC 介紹機制 → 失敗訊息。每段旁附一題小測驗（共 3 題），Demo 已移除。
+> 兩段式：① 版本為何要在連線當下協商、怎麼選（開場先亮出三種通訊角色的地圖）→ ② 失敗訊息。共 3 題小測驗，Demo 已移除。
 
 ## 小測驗互動規格
 
@@ -10,43 +10,40 @@
 
 ---
 
-## Part 1 — 為什麼單一版本號不夠
+## Part 1 — 版本為何要在連線當下協商、怎麼選
 
-- 直覺假設：client 與 broker 同版、一起升級。
-- 打破假設的兩個現實：
-  - client 內嵌在各應用程式、長期不更新（Kafka 曾保留每個 protocol 版本約九年；4.0 才把下限提到約 2.1，KIP-896）。
-  - broker 逐台滾動升級，過程必然新舊並存；要不停機就不能要求全叢集同版。
-- 一個版本號表達不了三種 scope 不同、變動時機也不同的「版本」：
-  - `release version`：我這台裝了哪版 binary（per-node）
-  - `metadata.version`：整個叢集一致認定、已 finalize 的「能力世代」——決定 inter-broker 複製用哪個協定版本、以及哪些需要 MV 的功能可啟用（cluster-wide，手動 finalize）
-  - wire protocol API version：這條連線實際講第幾版（per-connection）
-- 具體例子（一支 Fetch）：同一顆 4.1 broker，對 Kafka 2.4 老 client 協商出 Fetch v11、對 follower 由 finalized MV 決定 v17 → 同一個 release 同時存在多個 wire 版本。
+### 地圖：叢集裡有三種通訊（開場先亮出來，後面機制都掛在上面）
 
-**小測驗 1**：可以「一個版本打天下」嗎？
-- 正解：不行——client 長壽 + 要不停機，版本只能在連線當下決定。
+- `client ↔ broker`（讀寫資料）、`broker ↔ controller`（心跳／註冊）、`broker ↔ broker`（複製）。先建立這張地圖，controller 後面才不會突兀。
+- 版本天生對不齊：client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年；4.0／KIP-896 才把下限提到約 2.1）；broker 逐台滾動升級、過程必然新舊並存。要不停機，就只能在連線當下協商。
 
----
+### 一個版本號不夠：三種 scope
 
-## Part 2 — 用 RPC 介紹目前的版本與溝通機制
+- `release version`：我這台裝了哪版 binary（per-node）
+- `metadata.version`：整個叢集一致認定、已 finalize 的「能力世代」（cluster-wide，手動 finalize）
+- wire protocol API version：這條連線實際講第幾版（per-connection）
 
-核心：**每條連線底層都會做 ApiVersions 握手；真正決定版本的是那支 request 的 Builder 留多少版本自由度。** 分角色看：
+### 具體例子（一支 Fetch）
+
+- 同一顆 4.1 broker：對 Kafka 2.4 老 client（`validVersions` 0-11）協商出 Fetch v11、對 follower 由 finalized MV 決定 v17 → 同一個 release 同時存在多個 wire 版本。
+
+### 三個角色，各自怎麼選版
+
+核心：**每條連線底層都先做 ApiVersions 握手（發起端共用同一顆 `NetworkClient`）；真正決定版本的是那支 request 的 Builder 留多少版本自由度。**
 
 - **client ↔ broker**：ApiVersions 協商，取交集最高版（`NodeApiVersions.latestUsableVersion`）。
-- **broker ↔ controller**：也是協商——broker 對 controller 當 client（`BrokerHeartbeat` / `BrokerRegistration` 等，走 `NodeToControllerChannelManager` 的 NetworkClient + ApiVersions）。
-- **broker ↔ broker（複製）**：
-  - 名詞：`Fetch`＝從指定 offset 讀 partition log；`ListOffsets`＝把時間戳／哨兵（earliest / latest / by-timestamp）換算成一個 offset（consumer 的 `seekToBeginning`、`offsetsForTimes` 就靠它，follower 則用來找截斷點）。
-  - `Fetch`：由 finalized `metadata.version` **直接 pin**（`fetchRequestVersion`，建 `[v,v]`）。
-  - `ListOffsets`：以 finalized `metadata.version` 為**上限**再協商（`listOffsetRequestVersion` 當上界，`forReplica` 建 `[oldest, MV]`）。
-  - `OffsetsForLeaderEpoch`（follower）：Builder 寫死 v4。
-- **KRaft（quorum / broker 抓 metadata log）**：Fetch 走 `SimpleBuilder` 全範圍 → ApiVersions 協商；能力由獨立的 `kraft.version` feature 治理。
-- 收斂：**MV 的角色其實很窄——只釘複製用的 Fetch / ListOffsets 兩支；其餘多半仍是協商。**
+- **broker ↔ controller**：也是協商——broker 對 controller 當 client（`BrokerHeartbeat` / `BrokerRegistration`）。
+- **broker ↔ broker（複製）**：`Fetch` 由 finalized MV 直接 pin（`fetchRequestVersion`，`[v,v]`）；`ListOffsets` 以 MV 為上限再協商（`[oldest, MV]`）；`OffsetsForLeaderEpoch` 寫死 v4。
+- 收斂：**MV 只影響複製用的 `Fetch` / `ListOffsets`；client、controller 那兩條都是協商。**
+- 名詞：`Fetch`＝從指定 offset 讀 partition log；`ListOffsets`＝把時間戳／哨兵（earliest / latest）換算成 offset。
+- （更細的四路徑機制、feature vs RPC、honor、KRaft `kraft.version` 見 [rpc-version-selection.md](rpc-version-selection.md)，slide 不展開。）
 
-**小測驗 2**：replica fetch（broker↔broker）的 Fetch 版本怎麼決定？
-- 正解：由 finalized `metadata.version` 決定（`fetchRequestVersion(MV)`），不做 per-connection 協商。
+**小測驗 1**：可以「一個版本打天下」嗎？→ 不行（client 長壽 + 要不停機，只能連線當下協商）。
+**小測驗 2**：replica fetch 的 `Fetch` 版本怎麼決定？→ 由 finalized `metadata.version` 決定（`fetchRequestVersion(MV)`），不做 per-connection 協商。
 
 ---
 
-## Part 3 — 失敗會有什麼訊息
+## Part 2 — 失敗會有什麼訊息
 
 本場只講「通訊當下協商不出版本」的錯誤；finalize / 升降時的錯誤交給同系列「運行時的版本升降」那場。
 

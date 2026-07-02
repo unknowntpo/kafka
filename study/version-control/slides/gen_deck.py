@@ -210,51 +210,42 @@ add_content("點題", "為什麼不「一個版本打天下」？", [
     ("bullet", "但只要叢集達到一定規模，這個假設就不再成立", "help-circle"),
 ], [A("protocol.md",94)])
 
-add_content("Part 1 · 為什麼麻煩", "為什麼叢集裡版本總是對不齊", [
-    ("code", "真實：  client v2.3 ── broker v4.1   （對不齊）\n        client v3.6 ── broker v4.0"),
-    ("bullet", "client 內嵌在各應用程式中，通常長期不更新；Kafka 也因此保留每個 protocol 版本達九年，4.0（KIP-896）才把下限提到 2.1", "clock-hour-4"),
-    ("bullet", "broker 本身也是逐台滾動升級，升級期間叢集必然新舊版本並存，連 broker 之間也會混版", "server-2"),
-    ("bullet", "若要求所有節點版本一致，就得整批停機升級", "alert-triangle"),
-    ("solve", "因此改由每條連線各自協商版本，才能逐台滾動升級、過程中不需停機"),
+add_content("Part 1 · 地圖", "叢集裡有三種通訊，而且版本天生對不齊", [
+    ("code", "client ─▶ broker        讀寫資料\nbroker ─▶ controller    心跳 / 註冊\nbroker ◀▶ broker        複製"),
+    ("bullet", "client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年，4.0／KIP-896 才把下限提到 2.1）", "clock-hour-4"),
+    ("bullet", "broker 逐台滾動升級，過程必然新舊並存；要不停機就不能要求全叢集同版", "server-2"),
+    ("solve", "所以版本只能在連線當下協商——後面每個機制都掛在上面這三條線"),
 ], [X("KIP-896",KIP896), A("protocol.md",94), X("KIP-35",KIP35)])
+
+add_content("Part 1 · 三層 scope", "一個版本號不夠：三種 scope 互斥", [
+    ("code", "release version   = 我裝了哪版 binary   (per-node)\nmetadata.version  = 叢集一致的能力世代   (cluster-wide, finalize)\nwire API version  = 這條連線講第幾版     (per-connection)"),
+    ("bullet", "三層不會同步變動、scope 也不同，多數版本問題的根源都在於此", "arrows-split"),
+    ("solve", "單一版本號無法同時表達三種 scope，只能拆成三層各自管"),
+], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
 # §2a — 數線圖當主圖（協商取交集 vs finalized MV 決定）
 s2a = prs.slides.add_slide(BLANK)
-_, tf = tb(s2a, 0.7, 0.5, CW, 0.4); run(tf.paragraphs[0], "Part 1 · §2a", 13, ACCENT, bold=True)
+_, tf = tb(s2a, 0.7, 0.5, CW, 0.4); run(tf.paragraphs[0], "Part 1 · 具體例子", 13, ACCENT, bold=True)
 _, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "為什麼一個版本號不夠：同一支 Fetch，兩種選版", 30, DARK, bold=True)
 _, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "Fetch＝讀取 partition 資料的 RPC：consumer 拿來讀資料、follower（broker）拿來複製 log", 14, GRAY)
 s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), width=Inches(9.7))
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
 
-add_content("Part 1 · §2b", "所以要分三層：三種 scope 互斥", [
-    ("code", "release version   = 我裝了哪版 binary   (per-node)\nmetadata.version  = 叢集一致的能力世代   (cluster-wide, finalize)\nwire API version  = 這條連線講第幾版     (per-connection)"),
-    ("bullet", "三層不會同步變動、scope 也不同，多數版本問題的根源都在於此", "arrows-split"),
-    ("solve", "單一版本號無法同時表達三種 scope，只能拆成三層各自管"),
-], [T("kafka-features describe"), A("zk2kraft.md",71)])
+add_content("Part 1 · 選版機制", "三個角色，各自怎麼選版", [
+    ("bullet", "底層都先做 ApiVersions 握手（共用同一顆 NetworkClient）；決定版本的是 request Builder 留多少空間", "arrows-split"),
+    ("code", "client ↔ broker       協商，取交集最高\nbroker ↔ controller   也協商（broker 當 client：heartbeat / registration）\nbroker ↔ broker 複製   Fetch 由 MV 決定、ListOffsets 以 MV 為上限"),
+    ("solve", "MV 只影響複製用的 Fetch / ListOffsets；client、controller 那兩條都是協商"),
+], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("MetadataVersion.java",31,"javadoc")])
 quiz_pair(0)  # 小測驗 1：能一版打天下嗎
-
-# ---- Part 2：用 RPC 介紹版本與溝通機制 ----
-add_content("Part 2 · 機制", "版本怎麼選：先握手，再看 Builder 留多少自由度", [
-    ("bullet", "每條連線底層都先做 ApiVersions 握手，交換各自支援的版本範圍", "arrows-split"),
-    ("code", "Builder 全範圍   → 協商挑交集最高（多數 RPC）\nBuilder pin 成 MV → MV 決定（複製用 Fetch）\nBuilder 寫死常數  → 固定（OffsetsForLeaderEpoch）"),
-    ("note", "決定版本的不是「哪條路徑」，而是那支 request 的 Builder 給多少版本空間。"),
-], [A("NetworkClient.java",591,"NetworkClient"), A("NodeApiVersions.java",149,"latestUsableVersion")])
-
-add_content("Part 2 · 三個角色", "三個角色，版本機制不同", [
-    ("bullet", "client ↔ broker：ApiVersions 協商，取交集最高", "arrows-split"),
-    ("bullet", "broker ↔ controller：也是協商（broker 對 controller 當 client：heartbeat / registration）", "server-2"),
-    ("bullet", "broker ↔ broker 複製：Fetch 由 MV 直接 pin、ListOffsets 以 MV 為上限、OffsetsForLeaderEpoch 寫死 v4", "database"),
-    ("solve", "MV 角色其實很窄：只影響複製的 Fetch / ListOffsets（ListOffsets＝把時間戳／earliest/latest 換成 offset）；其餘多半是協商"),
-], [A("MetadataVersion.java",31,"MetadataVersion.java:31 javadoc"), A("RemoteLeaderEndPoint.scala",215), A("FetchRequest.java",133,"SimpleBuilder")])
 quiz_pair(2)  # 小測驗 2：replica fetch 版本誰決定
 
-# ---- Part 3：失敗會有什麼訊息 ----
-add_content("Part 3 · 失敗訊息", "通訊當下協商不出版本，會看到什麼", [
+# ---- Part 2：失敗會有什麼訊息 ----
+add_content("Part 2 · 失敗訊息", "通訊當下協商不出版本，會看到什麼", [
     ("code", "交集空        → client 端 UnsupportedVersionException（送出前 abort）\n繞過協商自刻  → broker 丟 UnsupportedVersionException + 關線\n（ApiVersions 例外：回 v0 + UNSUPPORTED_VERSION 錯誤碼）"),
     ("bullet", "多數情況 client 在送出前就本地中止，根本沒上網路", "ban"),
 ], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("NetworkClient.java",591,"NetworkClient"), A("RequestContext.java",112,"RequestContext")])
 
-add_content("Part 3 · 失敗訊息", "版本截斷：為什麼「升一點點」不夠", [
+add_content("Part 2 · 失敗訊息", "版本截斷：為什麼「升一點點」不夠", [
     ("code", "舊 wire API version 被整個移除，min 可 > 0\n  Fetch：4–18（v0–3 在 4.0 移除）"),
     ("solve", "解法：升級前確認兩端都跨過版本下限（升 4.0 需至少 2.1），否則協商結果沒有可用版本"),
     ("note", "銜接（非本場）：finalize / 升降當下的錯誤（INVALID_UPDATE_VERSION 等）屬「運行時的版本升降」那場，本場不展開。"),
@@ -262,10 +253,10 @@ add_content("Part 3 · 失敗訊息", "版本截斷：為什麼「升一點點�
 quiz_pair(3)  # 小測驗 3：自刻不支援版本會怎樣
 
 add_content("Takeaways", "回到開場那個問題", [
-    ("bullet", "無法「一個版本打天下」：client 長壽、又不能停機，版本只能在連線當下決定", "point"),
-    ("bullet", "版本分三層（release / metadata.version / wire），各自獨立變動", "point"),
-    ("bullet", "機制看 Builder 自由度：多數協商、複製面才由 MV 決定；三個角色各有分工", "point"),
-    ("bullet", "通訊失敗多在送出前本地中止（UnsupportedVersionException）；finalize / 升降的錯誤交給運行時那場", "point"),
+    ("bullet", "叢集三種通訊：client↔broker、broker↔controller、broker↔broker——版本機制都掛在這三條線", "point"),
+    ("bullet", "無法「一個版本打天下」：client 長壽、broker 滾動升級，只能連線當下協商", "point"),
+    ("bullet", "多數路徑靠 ApiVersions 協商；只有複製面由 finalized MV 決定", "point"),
+    ("bullet", "協商不出版本 → UnsupportedVersionException（多在送出前中止）；升降錯誤交給運行時那場", "point"),
 ])
 
 out = os.path.join(HERE, "..", "kafka-version-negotiation.pptx")
