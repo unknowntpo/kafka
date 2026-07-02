@@ -192,9 +192,10 @@ add_content("議程", "本場範圍", [
 
 add_content("點題", "為什麼不能「一個版本打天下」？", [
     ("code", "直覺（想像中）：  client v4.1 ─────── broker v4.1   同版、一起升"),
-    ("bullet", "現實一：client 是內嵌在應用裡的函式庫——IoT 裝置、車載系統、多年前的 batch job，隨應用長期運行、難更新（Kafka 曾為此保留每個 protocol 版本近九年，4.0／KIP-896 才把下限提到 2.1）", "clock-hour-4"),
+    ("bullet", "現實一：client 是內嵌在應用裡的函式庫——IoT 裝置、車載系統、多年前的 batch job，隨應用長期運行、難更新（Kafka 曾為此保留每個 protocol 版本近九年）", "clock-hour-4"),
     ("bullet", "現實二：Kafka 要求 zero downtime → broker 只能一台一台滾動升級 → 過程必然新舊混版", "server-2"),
     ("solve", "兩個現實加起來：不能鎖全叢集同一版（又要不停機）——版本無法事先統一，那要怎麼選？"),
+    ("note", "這其實就是 backward／forward compatibility：一般服務多靠『加欄位＋ URL 版號 /v1 /v2』相容；Kafka 特別在每支 API 各自宣告版本區間、連線當下協商挑一版（更像 TLS 選 cipher，而非固定版號）。"),
 ], [X("KIP-896",KIP896), A("protocol.md",94)])
 
 add_content("Part 1 · 術語", "要談「怎麼選」，先分清楚「版本」是哪一層", [
@@ -207,12 +208,12 @@ add_content("Part 1 · 架構 (a)", "三種連線，分成兩類", [
     ("bullet", "會協商的兩條：client ↔ broker、broker ↔ controller——連線後先送 ApiVersionsRequest 查對方每支 API 的版本區間（KIP-35）", "arrows-split"),
     ("bullet", "不協商的一條：broker ↔ broker 的 partition replication——連 ApiVersionsRequest 都不送，版本由 MV 事先決定（下一張）", "ban"),
     ("code", "client ─▶ broker        讀寫資料、查 metadata…\nbroker ─▶ controller    註冊、心跳、轉發 admin…\nbroker ◀▶ broker        partition replication"),
-], [X("KIP-35",KIP35), A("NodeApiVersions.java",149,"latestUsableVersion")])
+], [X("KIP-35",KIP35), A("NodeApiVersions.java",149,"latestUsableVersion"), A("MetadataVersion.java",273,"fetchRequestVersion")])
 
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
     ("code", "client ↔ broker              協商，取交集最高\nbroker ↔ controller          也協商（broker 當 client）\nbroker ↔ broker replication  不協商——由 finalized MV 決定"),
     ("bullet", "replication 連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：版本已由 finalized MV 決定，直接照該版本送", "ban"),
-    ("solve", "為什麼 replication 例外？它要求所有 follower↔leader 講同一版，才交給 finalized MV 集中決定；帳單是升級變兩階段（先滾 binary、再 finalize）——一致性拿彈性換"),
+    ("solve", "為什麼 replication 例外？它要求所有 follower↔leader 講同一版，才交給 finalized MV 集中決定；成本是升級變兩階段——先全叢集滾完 binary（都具備新版能力），管理員再手動 finalize MV 才切新版（協商連線則會自動挑上去）"),
     ("note", "機制上，決定權在組出 request 的程式碼宣告的允許版本範圍；ListOffsets 等更細差異見 blog 附錄。"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("RemoteLeaderEndPoint.scala",215)])
 
@@ -231,17 +232,19 @@ add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什�
     ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
 ], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL)])
 
-add_content("Part 1 · 帳單", "Kafka 這個選擇有多貴（實測數字）", [
-    ("code", "90 支 API × 308 個現役 wire 版本\n9,890 行 schema JSON → 約 18 萬行生成碼（≈18×）\n相容性系統測試涵蓋 23 個 broker 版本"),
-    ("bullet", "每加一版牽動 .json、generator 逐版讀寫、ApiKeys、全版本 round-trip 測試；成本隨 API 數 × 版本數乘積成長", "arrows-split"),
-    ("solve", "貴到 Kafka 自己在 KIP-896 承認「maintenance cost goes up, value goes down」，4.0 砍掉 2.1 以前的舊版本止血"),
-], [X("KIP-896",KIP896), A("FetchRequest.json",61,"FetchRequest.json 4-18")])
+add_content("Part 1 · 代價", "Kafka 這個選擇有多貴（實測數字）", [
+    ("code", "90 支 API × 308 個現役 wire 版本 → generator 吹成約 18× 生成碼（~18 萬行）\n每加一版：改 .json、逐版生 read/write/size、ApiKeys 補版號"),
+    ("bullet", "相容性測試矩陣兩層、都隨版本數長：build 時全 308 版 round-trip 序列化；系統測試再起真實叢集 × 23 個 broker 版本（2.1→4.3）互測新 client 對舊 broker", "arrows-split"),
+    ("note", "broker handler 也逐版分岔：按協商版本讀/填欄位、回應用『同一版』序列化、老版缺的欄位給預設，連語意差異（如 topic-id 取代 topic-name）都要 if (version≥N)。"),
+    ("solve", "貴到 Kafka 自己在 KIP-896 承認「maintenance cost up, value down」，4.0 砍掉 2.1 以前的舊版本止血"),
+], [X("KIP-896",KIP896), A("RequestContext.java",112,"RequestContext"), A("FetchRequest.json",61,"validVersions")])
 quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 
 # ---- Part 2：失敗會有什麼訊息 ----
 add_content("Part 2 · 失敗訊息", "通訊當下協商不出版本，會看到什麼", [
-    ("code", "交集空              → client 端 UnsupportedVersionException（送出前 abort）\n直送不支援的版本    → broker 丟 UnsupportedVersionException、關閉連線\n（ApiVersions 例外：回 v0 + UNSUPPORTED_VERSION 錯誤碼）"),
+    ("code", "交集空                       → client 端 UnsupportedVersionException（送出前 abort）\nclient 繞過協商、硬送不支援版本 → broker 丟 UnsupportedVersionException、關閉連線\n（ApiVersions 例外：回 v0 + UNSUPPORTED_VERSION 錯誤碼）"),
     ("bullet", "多數情況 client 在送出前就本地中止，根本沒上網路", "ban"),
+    ("note", "「硬送」指 client↔broker：自刻或有 bug 的 client 繞過協商；broker↔broker 版本已由 MV 事先釘住，不會送出對方不懂的版本。"),
 ], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("NetworkClient.java",591,"NetworkClient"), A("RequestContext.java",112,"RequestContext")])
 
 add_content("Part 2 · 失敗訊息", "版本截斷：為什麼「升一點點」不夠", [
