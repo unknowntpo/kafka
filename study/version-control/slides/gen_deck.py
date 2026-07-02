@@ -46,8 +46,6 @@ KIP896="https://cwiki.apache.org/confluence/display/KAFKA/KIP-896%3A+Remove+old+
 KIP35="https://cwiki.apache.org/confluence/display/KAFKA/KIP-35+-+Retrieving+protocol+version"
 PGURL="https://www.postgresql.org/docs/current/protocol-flow.html"
 MONGO="https://www.mongodb.com/docs/manual/reference/command/hello/"
-KIP482="https://cwiki.apache.org/confluence/display/KAFKA/KIP-482%3A+The+Kafka+Protocol+should+Support+Optional+Tagged+Fields"
-PBUF="https://protobuf.dev/programming-guides/encoding/"
 
 def A(name, line=None, disp=None):
     u = "https://github.com/apache/kafka/blob/%s/%s" % (UP, P[name])
@@ -197,6 +195,7 @@ add_content("點題", "為什麼不「一個版本打天下」？", [
     ("bullet", "初學者常有的直覺：client 與 broker 使用同一個版本，升級時一併更新", "bulb"),
     ("code", "想像中：  client v4.1 ─────── broker v4.1"),
     ("bullet", "但生產環境的 Kafka 通常是資料主幹道——訂單事件、log、metrics pipeline 都在上面，停機升級＝整條資料鏈路停擺，這個假設不成立", "help-circle"),
+    ("note", "預告：拆開版本也不是免費的——Kafka 為此揹上每支 API 一組 [min,max] 版本矩陣；MongoDB／PostgreSQL 選擇只維護一個全域版本號。結尾會回來評這筆帳。"),
 ], [A("protocol.md",94)])
 
 add_content("Part 1 · 動機", "為什麼版本天生對不齊，只能連線當下協商", [
@@ -222,9 +221,15 @@ add_content("Part 1 · 架構 (a)", "三種連線；要協商，先送 ApiVersio
 add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？", [
     ("code", "client ↔ broker              協商，取交集最高\nbroker ↔ controller          也協商（broker 當 client）\nbroker ↔ broker replication  不協商——由 finalized MV 決定"),
     ("bullet", "replication 連 ApiVersionsRequest 都不送（discoverBrokerVersions=false）：版本已由 finalized MV 決定，直接照該版本送", "ban"),
-    ("solve", "為什麼 replication 例外？它要求所有 follower↔leader 講同一版，才交給 finalized MV 集中決定；其餘連線點對點，各自挑最好版即可"),
+    ("solve", "為什麼 replication 例外？它要求所有 follower↔leader 講同一版，才交給 finalized MV 集中決定；帳單是升級變兩階段（先滾 binary、再 finalize）——一致性拿彈性換"),
     ("note", "機制上，決定權在組出 request 的程式碼宣告的允許版本範圍；ListOffsets 等更細差異見 blog 附錄。"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("RemoteLeaderEndPoint.scala",215)])
+
+add_content("Part 1 · 對照", "同一道題，別家怎麼答", [
+    ("code", "Kafka        per-API 協商 + MV 治理 replication      粒度最細、協定面積最大\nMongoDB      全域 wire version + FCV 治理叢集         FCV ≈ MV，同一套思路\nPostgreSQL   協定 v3 逾二十年；實體複製鎖 major 版本   複製層無法滾動升級"),
+    ("solve", "PostgreSQL 就是「複製層不做版本治理」的反事實——Kafka 的 MV 買到的，正是 PostgreSQL 買不到的線上滾動升級"),
+    ("note", "細節與來源見 other-systems-comparison.md，本場不展開。"),
+], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL)])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
 s2a = prs.slides.add_slide(BLANK)
@@ -245,6 +250,7 @@ add_content("Part 2 · 失敗訊息", "版本截斷：為什麼「升一點點�
     ("bullet", "前一頁「交集空」最容易被忽略的根因——舊 wire 版本被整批移除", "alert-triangle"),
     ("code", "舊 wire API version 被整個移除，min 可 > 0\n  Fetch：4–18（v0–3 在 4.0 移除）"),
     ("solve", "解法：升任一端到 4.0 前，先確認另一端 ≥ 2.1（upgrade guide 明訂雙向要求），否則協商結果沒有可用版本"),
+    ("note", "取捨：0.8.0（2013）起九年保留每個版本——每個舊版本都是活的程式碼與測試面；4.0 用「斷 2018 年前的 client」換「刪九年的碼」，只有 major 版本邊界付得起。"),
     ("note", "銜接（非本場）：finalize / 升降當下的錯誤（INVALID_UPDATE_VERSION 等）屬「運行時的版本升降」那場，本場不展開。"),
 ], [A("upgrade.md",229), A("FetchRequest.json",61,"FetchRequest.json validVersions")])
 quiz_pair(1)  # 小測驗 2：自刻不支援版本會怎樣
@@ -253,6 +259,7 @@ add_content("Recap", "回到開場那個問題", [
     ("code", "想像中：client v4.1 ─── broker v4.1\n實際上：同一顆 4.1 broker，同時講 Fetch v11（對老 consumer）和 v17（對 replica）"),
     ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；三條線多數靠協商，只有 partition replication 由 finalized MV 決定", "point"),
     ("bullet", "Part 2：協商不出版本 → UnsupportedVersionException（多在送出前中止）；finalize／升降的錯誤交給運行時那場", "point"),
+    ("solve", "立場：per-API 細粒度協商＋replication 集中治理，是為「client 生態極度分散」量身的取捨——對 Kafka 划算，但不是通用解"),
 ])
 
 out = os.path.join(HERE, "..", "kafka-version-negotiation.pptx")

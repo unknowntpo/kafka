@@ -25,6 +25,8 @@
 
 因果鏈收攏成一條：任一時刻，不同節點的 binary 能力必然不同 → 要不停機就不能鎖全叢集同一版 → 版本無法事先對齊，只能在「連線當下」由雙方決定。這就是本場主題的由來。後面會介紹三種通訊角色（client↔broker、broker↔controller、broker↔broker），先說清楚：那是「版本選擇發生的地方」，不是版本對不齊的原因——對不齊的原因就是上面兩個現實。
 
+先預告這個選擇的帳單：把版本拆到每支 API 各自一組 `[min, max]` 區間，協定面積、相容性測試、非 Java client 的實作負擔，全都按 API 數放大——MongoDB 與 PostgreSQL 面對同一個問題，選的是只維護一個全域協定版本號，把演進粒度讓給實作簡單。Kafka 買到的是單支 API 獨立演進、不必整包升版；這個成本後來大到需要 [KIP-482](https://cwiki.apache.org/confluence/display/KAFKA/KIP-482%3A+The+Kafka+Protocol+should+Support+Optional+Tagged+Fields) 的 flexible versions 來止血——一旦某支 API 進入 flexible version，後續的 optional tagged fields 就不必再 bump 版本。評價：對一個 client 由眾多第三方各自實作、API 數十支的生態，這筆帳划算；但它只在這種生態下划算，不是通用解。
+
 ### 2. 術語：講「版本」時，指的是哪一層？
 
 進入機制前先釐清術語。日常說的「版本」其實混了三種 scope 不同、變動時機也不同的「版本」：
@@ -44,6 +46,8 @@ wire protocol API ver  這條連線實際講第幾版        per-connection（ru
 ### 3. 架構 (a)：三種連線；要協商，先送 `ApiVersionsRequest`
 
 wire 版本的資訊來源是一次查詢：**連線建立後，發起端先送一支 `ApiVersionsRequest`，查詢對方「你每支 API 支援哪個版本區間？」**，對方回覆自己每支 API 的 `[min, max]` 範圍。這個機制由 [KIP-35](https://cwiki.apache.org/confluence/display/KAFKA/KIP-35+-+Retrieving+protocol+version) 引入，是後續一切版本選擇的前提。
+
+這個查詢有代價：每條新連線多付一次 round trip——`NetworkClient` 會把新連線排進 `ApiVersionsRequest` 流程、收到回覆後才視為 ready（`NetworkClient.java:1106` / `:1122`）。換到的是之後每支 request 都不必再猜版本：一次性成本，長期攤提。
 
 Kafka 叢集裡有三種連線（各列的 RPC 僅代表性、非窮舉）。client↔broker 與 broker↔controller 連線後先做這個查詢；partition replication 那條不查詢——原因見下一節：
 
@@ -85,6 +89,12 @@ client↔broker 與 broker↔controller 的 Builder 給全範圍，落在第一�
 
 另補一個常見誤解的修正：這**不是「broker 加入叢集前協商、加入後改用 MV」的階段切換**。`BrokerHeartbeat` 每隔幾秒送一次、貫穿 broker 整個生命週期，從頭到尾都是協商。真正的區分是永久按 RPC 角色分：控制面永遠協商、複製資料面永遠由 MV 決定。
 
+#### MV 集中決定的帳單，與一個反事實
+
+這個集中決定不是免費的，帳單有三筆：**升級從一步變兩步**（先滾動換 binary、再手動 finalize）；**多一個會被忘記的人工步驟**——忘了 finalize，replication 就一直講舊版（`fetchRequestVersion` 的門檻表停在舊值，upgrade guide 也明確把 finalize 列為 binary 換完之後的獨立步驟）；以及**沒有退讓空間**——leader 不支援 MV 指定的版本就直接失敗，不像協商還能降版。
+
+要理解這筆帳為什麼值得付，看反事實最快：PostgreSQL 的實體複製（streaming replication）沒有 MV 這一層，複製能力直接等於 binary 的 major 版本，結果是實體複製叢集**無法線上滾動升級 major**——只能 `pg_upgrade` 停機，或另建邏輯複製叢集再切換。Kafka 的兩階段升級再麻煩，換到的正是 PostgreSQL 給不了的那件事：**對複製層本身做線上滾動升級**。我認為這是全套設計裡最站得住的取捨。（MongoDB 的 `featureCompatibilityVersion` 與 MV 是同一套思路；三家對照見[附錄 C](#附錄-c別家怎麼答同一題)。）
+
 最後一句防混淆：feature（如 `group.version`、`share.version`）**不決定 RPC 版本**——只有 MV 對複製面的 `Fetch` / `ListOffsets` 這麼做；feature 與 RPC 版本是兩條正交的軸（詳見[附錄 A5](#a5--feature-與-rpc-正交honor進階)）。
 
 ### 5. 以 `Fetch` 為例：同一顆 broker 同時講兩個版本
@@ -97,6 +107,8 @@ replica  fetch   follower                                 版本 = fetchRequestV
 ```
 
 於是同一顆 4.1 broker，會**同時**對 Kafka 2.4 老 client 協商出 Fetch v11（其 `validVersions` 是 0-11，取交集的最高共同版本）、對 follower 用 finalized MV 決定的 v17——**同一個 release，同時存在多個 wire 版本**。一個版本號根本表達不了這件事。
+
+順帶評價這個 dual-role 設計本身：consumer 與 replica 共用一支 `Fetch`，是「replica 也只是 log 的讀者」這個抽象的紅利——讀取路徑、fetch session 機制都只需維護一份。帳單則是 replica 專屬語意不斷滲進共用 schema：`LogStartOffset` 欄位註明「只在 follower 發出時使用」（`FetchRequest.json:103`）；[KIP-903](https://cwiki.apache.org/confluence/display/KAFKA/KIP-903%3A+Replicas+with+stale+broker+epoch+should+not+be+allowed+to+join+the+ISR) 又為了 broker epoch 驗證在 v15 加入 `ReplicaState`、順勢廢棄扁平的 `ReplicaId`。抽象紅利先收，語意租金慢慢付。
 
 > **小測驗 1**：replica fetch（broker↔broker）的 `Fetch` 版本怎麼決定？（答案見文末 [附錄 B](#附錄-b常見誤解--隨堂考)）
 
@@ -125,6 +137,8 @@ client allows Produce 11-13, broker supports 0-10  -> UnsupportedVersionExceptio
 
 若繞過協商、直接送出一個 broker 不支援的 API version，失敗路徑是固定的一條：broker 端 `RequestContext` 解析 request 失敗 → 丟出 `UnsupportedVersionException` → `SocketServer` 直接關閉連線（`RequestContext.java:112`、`SocketServer.scala:781`）。
 
+為什麼關閉連線、而不是回一個錯誤 response？broker 其實讀得到 header（知道 apiKey 與版本），但一般 response 的序列化必須依 client 指定的 request version 進行——既然那個版本本身不受支援，broker 無法保證組出來的回應能被對方正確解讀。關閉連線是唯一可靠的動作。
+
 唯一的例外是 `ApiVersions` 本身：它是 bootstrap 的逃生口——即使 client 送的 `ApiVersions` 版本超出 broker 支援範圍，broker 也不會關線，而是回一個 v0 的 response 帶 `UNSUPPORTED_VERSION` 錯誤碼與自己支援的版本範圍，讓 client 得以 recover、重新協商。
 
 > **小測驗 2**：client 繞過協商、直接送出 broker 不支援的版本會怎樣？（答案見文末 [附錄 B](#附錄-b常見誤解--隨堂考)）
@@ -133,11 +147,15 @@ client allows Produce 11-13, broker supports 0-10  -> UnsupportedVersionExceptio
 
 第 6 節「交集為空」最容易被忽略的根因是——**舊的 wire protocol API version 會被整個移除**。每個 API 都有自己的 `validVersions` 範圍，而這個範圍不保證永遠從 `0` 開始。
 
-Kafka 4.0 就移除了一批舊 wire API 版本，例如 `FetchRequest.json` 的 `validVersions` 已是 `"4-18"`（Fetch v0–v3 移除，min 升到 4）。因此若 client 太舊、只會講已被截斷的版本，就會落到交集外——協商結果直接是 no usable version。這時「再升一點點」沒用，得跨過 upgrade guide 的版本下限（升 Kafka 4.0 前，client 與 broker 都要 ≥ 2.1）。
+Kafka 4.0 就移除了一批舊 wire API 版本，例如 `FetchRequest.json` 的 `validVersions` 已是 `"4-18"`（Fetch v0–v3 移除，min 升到 4）。因此若 client 太舊、只會講已被截斷的版本，就會落到交集外——協商結果直接是 no usable version。這時「再升一點點」沒用，得跨過 upgrade guide 的版本下限（升任一端到 4.0 前，另一端要 ≥ 2.1，雙向要求）。
+
+值得停一秒看這個決策的形狀。從 0.8.0（2013）到 3.x，Kafka 保留了每一個 protocol API 版本整整九年——「相容性至上」推到極端的取捨：好處是任何老 client 永遠連得上；代價是每個舊版本都是活的程式碼路徑與測試矩陣，broker 永遠不能假設 client 具備任何新能力。4.0 用 KIP-896 把 baseline 收到 2.1（2018），本質是一次帳務結算：用「斷掉 2018 年以前的 client」換「刪碼、縮測試面、讓協定假設前進七年」。為什麼等這麼久？因為斷 client 是不可逆的破壞性變更，只有 major 版本邊界的社會契約付得起。我的評價：收得對，甚至偏晚——九年的窗說明這個專案在相容性上保守到近乎自虐，而這份保守正是理解 Kafka 一切版本設計的鑰匙。
 
 ### Recap
 
 本場的因果鏈只有一條：client 長壽、broker 滾動升級 → 版本天生對不齊 → 只能在連線當下決定每條連線講第幾版——client↔broker 與 broker↔controller 靠 `ApiVersionsRequest` 查詢後取交集協商，partition replication 的 `Fetch` 由 finalized MV 集中決定。「一個版本打天下」不成立的最好證據，就是那顆 4.1 broker：**同一支 `Fetch`，同一時刻，對 Kafka 2.4 老 client 講 v11、對 follower 講 v17**。而當版本選不出來：交集為空時 client 在送出前本地中止；繞過協商直接送出不支援的版本，broker 解析失敗、關閉連線。至於 finalize / 升降當下會出什麼錯，交給同系列《運行時的版本升降》。
+
+最後一句立場：**per-API 細粒度協商＋replication 集中治理，這套組合是為「client 生態極度分散、API 數十支」的系統量身打造的取捨**——對 Kafka 划算，但不是通用解。MongoDB 選了較粗的全域粒度、PostgreSQL 乾脆放棄複製層的版本治理，各自都對得上自家的生態；讀懂一個系統的版本設計，就是讀懂它對自己使用者的假設。
 
 ---
 
@@ -171,6 +189,7 @@ Kafka 4.0 就移除了一批舊 wire API 版本，例如 `FetchRequest.json` 的
 
 - 底層 `BrokerBlockingSender.scala:82` 仍是 `NetworkClient`，但 `:95` 的 `discoverBrokerVersions=false`——不送 `ApiVersionsRequest`，直接照 MV 決定的版本送。
 - `MetadataVersion` 裡跟 RPC 版本有關的方法只有兩個：`fetchRequestVersion()`（`:273`）與 `listOffsetRequestVersion()`（`:289`），只作用在複製面的 `Fetch` / `ListOffsets`。
+- 一句解讀：同一條複製路徑上三支 RPC 三種選版法，並非設計失誤。`OffsetsForLeaderEpoch` 的 v4 固定值是移除舊 `MetadataVersion` 之後留下的簡化（KAFKA-18465 清理的結果），程式碼並明示：未來若要加新版本，須改用 `metadata.version` gate（`OffsetsForLeaderEpochRequest.java:64` 的註解）。
 
 `MetadataVersion.fetchRequestVersion()`（`server-common/src/main/java/org/apache/kafka/server/common/MetadataVersion.java:273`）：
 
@@ -256,3 +275,15 @@ broker 組 `ApiVersionsResponse` 時放進每個 API 的 min/max（`clients/src/
 - **直覺**：broker 一律回一個 `UNSUPPORTED_VERSION` 錯誤碼。
 - **正解**：一般 API → `RequestContext` 解析失敗、broker 丟 `UnsupportedVersionException`，`SocketServer` 關閉連線。唯一例外是 `ApiVersions`：它是 bootstrap 逃生口，會回 v0 response 帶 `UNSUPPORTED_VERSION` 錯誤碼 + 支援範圍讓 client recover。
 - **出處**：`RequestContext.java:112`、`SocketServer.scala:781`、`ApiKeys.java`（`ApiVersions` 特例）
+
+## 附錄 C：別家怎麼答同一題
+
+> 完整對照（含來源 URL）見 [other-systems-comparison.md](other-systems-comparison.md)；這裡只留骨架。
+
+| | client↔server 版本 | 節點間／複製層版本治理 |
+| --- | --- | --- |
+| **Kafka** | per-API `[min,max]` 協商（粒度最細、協定面積最大） | finalized `metadata.version`（手動 finalize、跟 binary 脫鉤） |
+| **MongoDB** | 全域 wire version（`hello` 交換） | `featureCompatibilityVersion`——與 MV 同一套思路 |
+| **PostgreSQL** | 全域協定版本（v3 逾二十年未變） | **無**——實體複製鎖 major 版本，複製層無法線上滾動升級 |
+
+兩個讀法：MongoDB 的 FCV 證明「叢集能力世代跟 binary 脫鉤、手動 finalize」不是 Kafka 的怪癖，而是分散式系統滾動升級的共同答案；PostgreSQL 則是反事實——不在複製層做版本治理，代價就是放棄複製層的線上滾動升級。

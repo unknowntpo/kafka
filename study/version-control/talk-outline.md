@@ -44,6 +44,15 @@
 - 名詞：`Fetch`＝從指定 offset 讀 partition log；`ListOffsets`＝把時間戳／哨兵（earliest / latest）換算成 offset。
 - （更細的四路徑機制、feature vs RPC、honor、KRaft `kraft.version` 見 [rpc-version-selection.md](rpc-version-selection.md)，slide 不展開。）
 
+### 取捨層（取捨 review 後加入，散落各張；細節見 review-tradeoff-depth.md）
+
+- 點題 note：預告帳單（per-API `[min,max]` 矩陣 vs Mongo/PG 全域版本號），Recap 回收。
+- 架構(b) solve 補帳單：MV 集中決定 → 升級變兩階段——一致性拿彈性換。
+- 新增一張「同一道題，別家怎麼答」（Kafka / MongoDB FCV / PostgreSQL 鎖 major）——PostgreSQL 是「複製層不做版本治理」的反事實。
+- 截斷 note：九年相容窗的帳務結算（斷 2018 前的 client 換刪九年的碼，只有 major 邊界付得起）。
+- Recap solve：立場句（為 client 生態極度分散量身的取捨，划算但非通用解）。
+- blog 對應更完整：§1 帳單（KIP-482 措辭注意：進入 flexible version 之後 tagged fields 才免升版）、§3 一次 RTT 代價、§4「MV 帳單＋PostgreSQL 反事實」小節、§5 dual-role 評價（KIP-903 broker epoch）、§7 為何關線（response 序列化依 request version、無法保證對方讀懂）、§8 KIP-896 結算、Recap 立場、附錄 A3 OffsetsForLeaderEpoch 解讀（KAFKA-18465 清理殘留、非文件化決策）、附錄 C 三家對照。
+
 ### 以 Fetch 為例（架構下的舉例，不搶題）
 
 - 放在架構之後，當「client↔broker 與 broker↔broker 兩條選版」的具體視覺化，別當開場主圖。
