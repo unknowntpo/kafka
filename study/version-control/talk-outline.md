@@ -24,16 +24,23 @@
 - `release version`：我這台裝了哪版 binary（per-node）
 - `metadata.version`：整個叢集一致認定、已 finalize 的能力世代（cluster-wide，手動 finalize）
 - wire protocol API version：這條連線實際講第幾版（per-connection）
+- **finalize 首現需一句話定義**：管理員手動宣告「全叢集從此認定這個能力世代」；怎麼宣告是第一場《版本定義》主題，本場只需知道它是叢集共識的一個值。
 - 三個獨立的軸、各自變動；本場主角是 wire 版本。此節是「釐清術語」，不是再論「一個版本不夠」。
 
-### 架構：三種連線，各自怎麼選版（三角色在此一次登場）
+### 架構 (a)：三種連線，都先做 ApiVersions 握手
 
-核心：**協商發生在三條線上，底層都先做 ApiVersions 握手（發起端共用同一顆 `NetworkClient`）；真正決定版本的是那支 request 的 Builder 留多少空間。**
+- **ApiVersions 握手首現需定義**：連線建立後，發起端先送一支 `ApiVersions`，問對方「你每支 API 支援哪個版本區間？」（KIP-35；KIP-35 的 REF 放這張、不放動機）。
+- 三條線：`client ↔ broker`（讀寫資料、查 metadata…）、`broker ↔ controller`（註冊、心跳、轉發 admin…）、`broker ↔ broker`（複製）。各列僅代表性、非窮舉。
+- `NetworkClient` 共用一顆屬實作細節，slide 不提（留給 blog/REF）。
+
+### 架構 (b)：握手之後，最終版本誰說了算？
 
 - **client ↔ broker**：協商，取交集最高版（`NodeApiVersions.latestUsableVersion`）。
-- **broker ↔ controller**：也協商——broker 對 controller 當 client（註冊／心跳／轉發 admin…；非窮舉）。
-- **broker ↔ broker（複製）**：`Fetch` 由 finalized MV 直接 pin（`fetchRequestVersion`，`[v,v]`）；`ListOffsets` 以 MV 為上限再協商（`[oldest, MV]`）；`OffsetsForLeaderEpoch` 寫死 v4。
-- 收斂：**MV 只影響複製的 `Fetch` / `ListOffsets`；其餘都是協商。**
+- **broker ↔ controller**：也協商——broker 對 controller 當 client。
+- **broker ↔ broker（複製）**：不協商——`Fetch` 由 finalized MV 決定（`fetchRequestVersion`）。
+- Builder 用白話講：「決定權在組出這支 request 的程式碼宣告的允許版本範圍」；類名留 REF。
+- **為什麼複製面例外（must-have rationale）**：複製要求所有 follower↔leader 講同一版，才交給 finalized MV 集中決定；其餘連線點對點、各自挑最好版即可。（深入版：雞生蛋——MV 存在 metadata log，抓 log 的路徑不能被 MV gate，見 [rpc-version-selection.md](rpc-version-selection.md)「為什麼這樣分」。）
+- `ListOffsets` 以 MV 為上限、`OffsetsForLeaderEpoch` 寫死 v4：**slide 不展開，降為 note／blog 附錄**。
 - 名詞：`Fetch`＝從指定 offset 讀 partition log；`ListOffsets`＝把時間戳／哨兵（earliest / latest）換算成 offset。
 - （更細的四路徑機制、feature vs RPC、honor、KRaft `kraft.version` 見 [rpc-version-selection.md](rpc-version-selection.md)，slide 不展開。）
 

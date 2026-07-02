@@ -31,6 +31,7 @@ P = {
  "FetchRequest.json":"clients/src/main/resources/common/message/FetchRequest.json",
  "FetchRequest.java":"clients/src/main/java/org/apache/kafka/common/requests/FetchRequest.java",
  "RequestContext.java":"clients/src/main/java/org/apache/kafka/common/requests/RequestContext.java",
+ "SocketServer.scala":"core/src/main/scala/kafka/network/SocketServer.scala",
  "MetadataVersion.java":"server-common/src/main/java/org/apache/kafka/server/common/MetadataVersion.java",
  "RemoteLeaderEndPoint.scala":"core/src/main/scala/kafka/server/RemoteLeaderEndPoint.scala",
  "FeatureControlManager.java":"metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java",
@@ -165,35 +166,16 @@ def quiz_pair(i):
     add_quiz(*QUIZ[i], reveal=False)
     add_quiz(*QUIZ[i], reveal=True)
 
+# 只留本場範圍內、有教育意義的 2 題（其餘屬兄弟場或過於簡單，已移除）
 QUIZ = [
- ("暖身", "可以「一個版本打天下」嗎？",
-  ["可以，大家同一版一起升", "不行——client 長壽 + 要不停機，得溝通當下協商", "可以，只要都 4.x", "看 broker 數量"], 1,
-  "client 嵌在各 app、超長壽，混版是常態；要不停機升級就得每條連線各自選版本。",
-  [A("protocol.md",94), X("KIP-896",KIP896)]),
- ("暖身", "「版本截斷」是 wire 還是 metadata.version 的事？",
-  ["wire protocol", "metadata.version", "兩個都有，是兩條獨立的軸", "Kafka 不砍舊版"], 2,
-  "wire 每 API 的 min 會升（Fetch 4–18）；MV 也有 MINIMUM（≥ 3.3-IV3）。兩條獨立軸。",
-  [A("FetchRequest.json",61), A("MetadataVersion.java",147,"MetadataVersion.MINIMUM_VERSION")]),
  ("核心", "replica fetch（broker↔broker）的 Fetch 版本怎麼決定？",
   ["兩 broker ApiVersions 協商取交集", "由 finalized metadata.version 決定", "永遠用最新版", "controller 每次指定"], 1,
   "fetchRequestVersion(MV)：MV 是集中共識，不做 per-connection 協商。",
   [A("RemoteLeaderEndPoint.scala",215), A("MetadataVersion.java",273)]),
  ("核心", "自刻 client 送了不支援的 API version，會怎樣？",
   ["一律回 UNSUPPORTED_VERSION", "只有 ApiVersions 例外回錯誤+範圍；其他 API 關線", "broker 自動降版", "忽略版本照跑"], 1,
-  "ApiVersions 是 bootstrap 逃生口；其他 API → broker 丟 UnsupportedVersionException → 斷線。",
-  [A("RequestContext.java",112)]),
- ("核心", "metadata.version 是全 cluster 同一個值嗎？",
-  ["finalized 全 cluster 一個；supported 範圍 per-node 可不同", "每個 broker 各自一個", "每條連線一個", "controller/broker 各一個"], 0,
-  "finalized MV 是 metadata log 一筆 record、複製給所有節點。supported [min,max] 才 per-binary。",
-  [T("kafka-features describe")]),
- ("核心", "finalize 某 feature 到某 level，它「不能超過」MV？",
-  ["對，feature ≤ MV", "錯——是 dependency：該 level 可能要求 MV ≥ 門檻（下限）", "feature 跟 MV 無關", "只有 controller 決定，與 MV 無關"], 1,
-  "Feature.validateVersion：feature level 可依賴 MV ≥ 某值，是下限、不是數值 ≤。",
-  [A("Feature.java",163)]),
- ("核心", "fenced 但沒 unregister 的舊 broker，會擋升級嗎？",
-  ["不會，fenced 就不算數", "會——檢查所有 registration，不 filter fenced", "只有 controller fenced 才擋", "看還有幾台活著"], 1,
-  "brokerSupportedFeatures() 迭代所有 registration、不看 fenced；fence ≠ unregister。（嘉平考點）",
-  [A("FeatureControlManager.java",334), A("ClusterControlManager.java",836,"ClusterControlManager.java:836/595")]),
+  "ApiVersions 是 bootstrap 逃生口；其他 API 在 RequestContext 解析失敗、broker 丟 UnsupportedVersionException，SocketServer 關閉連線。",
+  [A("RequestContext.java",112), A("SocketServer.scala",781)]),
 ]
 # ---- Title ----
 s = prs.slides.add_slide(BLANK)
@@ -221,19 +203,26 @@ add_content("Part 1 · 動機", "為什麼版本天生對不齊，只能連線�
     ("bullet", "broker 逐台滾動升級，過程必然新舊並存", "server-2"),
     ("code", "任一時刻：不同節點能力／版本不同\n        → 不能鎖全叢集同一版（又要不停機）\n        → 只能在「連線當下」協商"),
     ("solve", "這就是本場主題「溝通當下的版本選擇」的由來"),
-], [X("KIP-896",KIP896), A("protocol.md",94), X("KIP-35",KIP35)])
+], [X("KIP-896",KIP896), A("protocol.md",94)])
 
 add_content("Part 1 · 術語", "講「版本」時，其實是指哪一個？分三層", [
-    ("code", "release version   = 我裝了哪版 binary   (per-node)\nmetadata.version  = 叢集一致的能力世代   (cluster-wide, finalize)\nwire API version  = 這條連線講第幾版     (per-connection)"),
+    ("code", "release version   = 我裝了哪版 binary   (per-node)\nmetadata.version  = 叢集一致的能力世代   (cluster-wide, finalized)\nwire API version  = 這條連線講第幾版     (per-connection)"),
     ("bullet", "三個獨立的軸、各自變動；後面提到「版本」都要先分清楚是哪一層", "arrows-split"),
-    ("note", "本場主角是 wire 版本（連線當下選哪版）；MV 是叢集治理、release 是 binary。"),
+    ("note", "finalize＝管理員手動宣告「全叢集從此認定這個能力世代」；怎麼宣告是第一場《版本定義》的主題，本場只需知道它是叢集共識的一個值。本場主角是 wire 版本。"),
 ], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
-add_content("Part 1 · 架構", "三種連線，各自怎麼選版", [
-    ("bullet", "協商發生在三條線上，底層都先做 ApiVersions 握手（共用同一顆 NetworkClient）", "arrows-split"),
-    ("code", "client ↔ broker       協商，取交集最高\nbroker ↔ controller   也協商（broker 當 client：註冊 / 心跳 / 轉發 admin）\nbroker ↔ broker 複製   Fetch 由 MV 決定、ListOffsets 以 MV 為上限"),
-    ("solve", "決定版本的是 request Builder 留多少空間；MV 只影響複製的 Fetch / ListOffsets，其餘都是協商"),
-], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("MetadataVersion.java",31,"javadoc")])
+add_content("Part 1 · 架構 (a)", "三種連線，都先做 ApiVersions 握手", [
+    ("bullet", "連線建立後，發起端先送一支 ApiVersions：問對方「你每支 API 支援哪個版本區間？」（KIP-35）", "arrows-split"),
+    ("code", "client ─▶ broker        讀寫資料、查 metadata…\nbroker ─▶ controller    註冊、心跳、轉發 admin…\nbroker ◀▶ broker        複製（follower 抓 leader）"),
+    ("note", "每列只列代表性的幾種、非窮舉；重點是三條線都先做這個握手。"),
+], [X("KIP-35",KIP35), A("NodeApiVersions.java",149,"latestUsableVersion")])
+
+add_content("Part 1 · 架構 (b)", "握手之後，最終版本誰說了算？", [
+    ("code", "client ↔ broker       協商，取交集最高\nbroker ↔ controller   也協商（broker 當 client）\nbroker ↔ broker 複製   不協商——由 finalized MV 決定"),
+    ("bullet", "決定權在「組出這支 request 的程式碼」宣告的允許版本範圍：留全範圍就走協商、被指成 MV 對應的單一版本就不協商", "point"),
+    ("solve", "為什麼複製面例外？複製要求所有 follower↔leader 講同一版，才交給 finalized MV 集中決定；其餘連線點對點，各自挑最好版即可"),
+    ("note", "更細的差異（ListOffsets 以 MV 為上限等）見 blog 附錄，此處不展開。"),
+], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("MetadataVersion.java",31,"javadoc"), A("RemoteLeaderEndPoint.scala",215)])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
 s2a = prs.slides.add_slide(BLANK)
@@ -242,7 +231,7 @@ _, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "以一支 Fetch 為�
 _, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "同一支 Fetch 兩種身分：consumer fetch 走 client↔broker、replica fetch 走 broker↔broker", 14, GRAY)
 s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), width=Inches(9.7))
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
-quiz_pair(2)  # 小測驗 1：replica fetch 版本誰決定（打天下那題太簡單，已移除）
+quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 
 # ---- Part 2：失敗會有什麼訊息 ----
 add_content("Part 2 · 失敗訊息", "通訊當下協商不出版本，會看到什麼", [
@@ -255,11 +244,11 @@ add_content("Part 2 · 失敗訊息", "版本截斷：為什麼「升一點點�
     ("solve", "解法：升級前確認兩端都跨過版本下限（升 4.0 需至少 2.1），否則協商結果沒有可用版本"),
     ("note", "銜接（非本場）：finalize / 升降當下的錯誤（INVALID_UPDATE_VERSION 等）屬「運行時的版本升降」那場，本場不展開。"),
 ], [A("upgrade.md",229), A("FetchRequest.json",61,"FetchRequest.json validVersions")])
-quiz_pair(3)  # 小測驗 3：自刻不支援版本會怎樣
+quiz_pair(1)  # 小測驗 2：自刻不支援版本會怎樣
 
 add_content("Recap", "回到開場那個問題", [
-    ("bullet", "三種通訊：client↔broker、broker↔controller、broker↔broker——版本機制都掛在這三條線", "point"),
-    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，只有複製面由 finalized MV 決定", "point"),
+    ("code", "想像中：client v4.1 ─── broker v4.1\n實際上：同一顆 4.1 broker，同時講 Fetch v11（對老 consumer）和 v17（對 replica）"),
+    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；三條線多數靠協商，只有複製面由 finalized MV 決定", "point"),
     ("bullet", "Part 2：協商不出版本 → UnsupportedVersionException（多在送出前中止）；finalize／升降的錯誤交給運行時那場", "point"),
 ])
 
