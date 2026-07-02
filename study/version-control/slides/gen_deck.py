@@ -204,6 +204,12 @@ _, tf = tb(s, 1.2, 2.6, 11.3, 1.4); run(tf.paragraphs[0], "溝通當下的版本
 _, tf = tb(s, 1.2, 4.2, 11.3, 0.9); run(tf.paragraphs[0], "長壽的 client、滾動升級的 broker，怎麼喬出共同版本", 20, GRAY)
 _, tf = tb(s, 1.2, 6.65, 11.3, 0.5); run(tf.paragraphs[0], "Eric Chang · 2026", 14, MUTED)
 
+add_content("本場大綱", "兩段，加 3 題隨堂考穿插", [
+    ("bullet", "Part 1 — 版本為何要在連線當下協商、又是怎麼選的", "point"),
+    ("bullet", "Part 2 — 協商失敗時，會看到什麼訊息", "point"),
+    ("note", "結尾會用一頁 Recap 把兩段串回開場那個問題。"),
+])
+
 add_content("點題", "為什麼不「一個版本打天下」？", [
     ("bullet", "初學者常有的直覺：client 與 broker 使用同一個版本，升級時一併更新", "bulb"),
     ("code", "想像中：  client v4.1 ─────── broker v4.1"),
@@ -211,7 +217,8 @@ add_content("點題", "為什麼不「一個版本打天下」？", [
 ], [A("protocol.md",94)])
 
 add_content("Part 1 · 地圖", "叢集裡有三種通訊，而且版本天生對不齊", [
-    ("code", "client ─▶ broker        讀寫資料\nbroker ─▶ controller    心跳 / 註冊\nbroker ◀▶ broker        複製"),
+    ("code", "client ─▶ broker        讀寫資料、查 metadata…\nbroker ─▶ controller    註冊、心跳、AlterPartition、轉發 admin…\nbroker ◀▶ broker        複製（follower 抓 leader）"),
+    ("note", "每列只列代表性的幾種、非窮舉；重點是「就這三條線」。"),
     ("bullet", "client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年，4.0／KIP-896 才把下限提到 2.1）", "clock-hour-4"),
     ("bullet", "broker 逐台滾動升級，過程必然新舊並存；要不停機就不能要求全叢集同版", "server-2"),
     ("solve", "所以版本只能在連線當下協商——後面每個機制都掛在上面這三條線"),
@@ -232,8 +239,8 @@ add_content("Part 1 · 選版機制", "回到三個角色：各自怎麼選版",
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
 s2a = prs.slides.add_slide(BLANK)
 _, tf = tb(s2a, 0.7, 0.5, CW, 0.4); run(tf.paragraphs[0], "Part 1 · 舉例", 13, ACCENT, bold=True)
-_, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "以一支 Fetch 為例：cb 協商、bb 由 MV", 30, DARK, bold=True)
-_, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "同一支 Fetch 兩條線都會走：consumer fetch 是 cb、replica fetch 是 bb", 14, GRAY)
+_, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "以一支 Fetch 為例：consumer 協商、replica 由 MV", 29, DARK, bold=True)
+_, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "同一支 Fetch 兩種身分：consumer fetch 走 client↔broker、replica fetch 走 broker↔broker", 14, GRAY)
 s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), width=Inches(9.7))
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
 quiz_pair(0)  # 小測驗 1：能一版打天下嗎
@@ -252,11 +259,10 @@ add_content("Part 2 · 失敗訊息", "版本截斷：為什麼「升一點點�
 ], [A("upgrade.md",229), A("FetchRequest.json",61,"FetchRequest.json validVersions")])
 quiz_pair(3)  # 小測驗 3：自刻不支援版本會怎樣
 
-add_content("Takeaways", "回到開場那個問題", [
-    ("bullet", "叢集三種通訊：client↔broker、broker↔controller、broker↔broker——版本機制都掛在這三條線", "point"),
-    ("bullet", "無法「一個版本打天下」：client 長壽、broker 滾動升級，只能連線當下協商", "point"),
-    ("bullet", "多數路徑靠 ApiVersions 協商；只有複製面由 finalized MV 決定", "point"),
-    ("bullet", "協商不出版本 → UnsupportedVersionException（多在送出前中止）；升降錯誤交給運行時那場", "point"),
+add_content("Recap", "回到開場那個問題", [
+    ("bullet", "三種通訊：client↔broker、broker↔controller、broker↔broker——版本機制都掛在這三條線", "point"),
+    ("bullet", "Part 1：不能「一個版本打天下」（client 長壽、broker 滾動升級）；多數路徑靠協商，只有複製面由 finalized MV 決定", "point"),
+    ("bullet", "Part 2：協商不出版本 → UnsupportedVersionException（多在送出前中止）；finalize／升降的錯誤交給運行時那場", "point"),
 ])
 
 out = os.path.join(HERE, "..", "kafka-version-negotiation.pptx")

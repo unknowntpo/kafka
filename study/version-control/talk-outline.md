@@ -1,7 +1,7 @@
 # 大綱：溝通當下的版本選擇
 
 > 幾萬個節點之上的版本控制 · 第三場。本檔是投影片／blog 的結構 spec，事實依據見 [rpc-version-selection.md](rpc-version-selection.md)。
-> 兩段式：① 版本為何要在連線當下協商、怎麼選（開場先亮出三種通訊角色的地圖）→ ② 失敗訊息。共 3 題小測驗，Demo 已移除。
+> 兩段式：① 版本為何要在連線當下協商、怎麼選（開場先亮出三種通訊角色的地圖）→ ② 失敗訊息。標題後放一頁 TOC、結尾放一頁 Recap；共 3 題小測驗穿插，Demo 已移除。角色/RPC 用全名，不用 cb/bb 縮寫。
 
 ## 小測驗互動規格
 
@@ -14,7 +14,7 @@
 
 ### 地圖：叢集裡有三種通訊（開場先亮出來，後面機制都掛在上面）
 
-- `client ↔ broker`（讀寫資料）、`broker ↔ controller`（心跳／註冊）、`broker ↔ broker`（複製）。先建立這張地圖，controller 後面才不會突兀。
+- `client ↔ broker`（讀寫資料、查 metadata…）、`broker ↔ controller`（註冊、心跳、`AlterPartition`、轉發 admin…）、`broker ↔ broker`（複製）。先建立這張地圖，controller 後面才不會突兀。**注意各列只列代表性的幾種、非窮舉**——broker↔controller 不只心跳/註冊。
 - 版本天生對不齊：client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年；4.0／KIP-896 才把下限提到約 2.1）；broker 逐台滾動升級、過程必然新舊並存。要不停機，就只能在連線當下協商。
 
 ### 一個版本號不夠：三種 scope
