@@ -31,21 +31,21 @@
 
 ```text
 release version        我這台裝了哪版 binary       per-node（ops 換 binary，逐台滾動）
-metadata.version       整個叢集一致認定的能力世代    cluster-wide（admin 手動 finalize，刻意跟換 binary 脫鉤）
+metadata.version       叢集 finalized 的 feature level    cluster-wide（admin 手動 finalize，刻意跟換 binary 脫鉤）
 wire protocol API ver  這條連線實際講第幾版        per-connection（runtime 每條連線各自決定）
 ```
 
 - **release version**：這台節點裝了哪一版 binary。per-node，由維運換 binary、逐台滾動。
-- **`metadata.version`**：整個叢集一致認定、已 finalize 的「能力世代」。所謂 finalize，指管理員手動宣告「全叢集從此認定這個能力世代」；怎麼宣告是第一場《版本定義》的主題，本場只需要知道它是叢集共識的一個值。cluster-wide，刻意跟換 binary 脫鉤——升了 binary 不代表 MV 就跟著升。
+- **`metadata.version`**：叢集 finalized 的 feature level。所謂 finalize，指管理員手動宣告全叢集一致採用的 feature level；怎麼宣告是第一場《版本定義》的主題，本場只需要知道它是叢集共識的一個值。cluster-wide，刻意跟換 binary 脫鉤——升了 binary 不代表 MV 就跟著升。
 - **wire protocol API version**：這條連線實際講第幾版。per-connection，runtime 每條連線各自決定。
 
 這三層是三個獨立的軸，不會自動一起變：可以升了 binary（release version）卻還沒 finalize `metadata.version`；也可以兩個 broker binary 同版，卻因連線當下選出不同 wire protocol version 而行為不同。本場的主角是第三層——wire protocol API version。
 
-### 3. 架構 (a)：三種連線，都先做 `ApiVersions` 握手
+### 3. 架構 (a)：三種連線；要協商，先送 `ApiVersionsRequest`
 
-wire 版本的資訊來源是一次握手：**連線建立後，發起端先送一支 `ApiVersions` request，問對方「你每支 API 支援哪個版本區間？」**，對方回覆自己每支 API 的 `[min, max]` 範圍。這個機制由 [KIP-35](https://cwiki.apache.org/confluence/display/KAFKA/KIP-35+-+Retrieving+protocol+version) 引入，是後續一切版本選擇的前提。
+wire 版本的資訊來源是一次查詢：**連線建立後，發起端先送一支 `ApiVersionsRequest`，查詢對方「你每支 API 支援哪個版本區間？」**，對方回覆自己每支 API 的 `[min, max]` 範圍。這個機制由 [KIP-35](https://cwiki.apache.org/confluence/display/KAFKA/KIP-35+-+Retrieving+protocol+version) 引入，是後續一切版本選擇的前提。
 
-Kafka 叢集裡有三種連線，全都先做這個握手（各列的 RPC 僅代表性、非窮舉）：
+Kafka 叢集裡有三種連線（各列的 RPC 僅代表性、非窮舉）。client↔broker 與 broker↔controller 連線後先做這個查詢；partition replication 那條不查詢——原因見下一節：
 
 ```text
 client ↔ broker       讀寫資料、查 metadata        Produce、Fetch、Metadata…
@@ -53,22 +53,22 @@ broker ↔ controller   註冊、心跳、轉發 admin 請求   BrokerRegistrati
 broker ↔ broker       複製（replication）          Fetch、ListOffsets…
 ```
 
-握手只解決「知道對方會講什麼」；拿到區間之後，**最終版本怎麼定，三種連線的答案並不相同**——這是下一節的主題。
+查詢只解決「知道對方會講什麼」；拿到區間之後，**最終版本怎麼定，三種連線的答案並不相同**——這是下一節的主題。
 
-### 4. 架構 (b)：握手之後，最終版本誰說了算？
+### 4. 架構 (b)：查詢之後，最終版本誰說了算？
 
 先看三種連線各自的現象：
 
 - **client ↔ broker：協商。** 一般 producer / consumer / admin API，取雙方區間交集的最高版本（`NodeApiVersions.latestUsableVersion`）。`MetadataVersion` 的 javadoc 也寫明：「when communicating with clients, the client decides on the API version.」
 - **broker ↔ controller：也是協商。** broker 對 controller 送 `BrokerHeartbeat`、`BrokerRegistration` 等 request 時，扮演的是 client 角色，同樣取交集最高版，不由 MV 決定。
-- **broker ↔ broker（複製面）：不協商。** follower 對 leader 送的 `Fetch`（從指定 offset 讀 partition log 的資料），版本由 finalized MV 直接決定（`fetchRequestVersion(MV)`），握手只做驗證——對方不支援該版即失敗，沒有退讓空間。
+- **broker ↔ broker（partition replication）：不協商。** follower 對 leader 送的 `Fetch`（從指定 offset 讀 partition log 的資料），版本由 finalized MV 直接決定（`fetchRequestVersion(MV)`）；送出端甚至不查詢對方版本（`discoverBrokerVersions=false`），直接照該版本送，leader 不支援即失敗，沒有退讓空間。
 
 三種現象收斂到同一個機制：**決定權在「組出這支 request 的程式碼」宣告的允許版本範圍**。送出端建 request 時，`AbstractRequest.Builder` 帶一個 `[oldestAllowedVersion, latestAllowedVersion]`；底層送出前會把它跟對方 `ApiVersions` 廣播的範圍取交集：
 
 | Builder 給的範圍 | 效果 |
 | --- | --- |
 | 全範圍 `[oldest, latest]` | `ApiVersions` 協商，挑交集最高版 |
-| pin 成 `[MV, MV]` | MV 決定，握手只做驗證（不支援即 `UnsupportedVersionException`） |
+| pin 成 `[MV, MV]` | MV 決定（replication 路徑不查詢、直接照該版本送；不支援即 `UnsupportedVersionException`） |
 | pin 成固定常數 | 寫死，不看 MV 也無協商空間 |
 
 client↔broker 與 broker↔controller 的 Builder 給全範圍，落在第一格；複製面的 `Fetch` 被 pin 成 `[MV, MV]`，落在第二格。複製面另外兩支 RPC 的分工更細（`ListOffsets` 以 MV 為上限、`OffsetsForLeaderEpoch` 寫死常數），屬進階細節，完整對照表收在[附錄 A3](#a3--broker--broker複製面三層分工)；主訊息只需要一句：**複製面的 `Fetch` 由 MV 決定，其餘都是協商。**
@@ -121,13 +121,13 @@ client allows Produce 0-13 , broker supports 0-10  -> chosen 10
 client allows Produce 11-13, broker supports 0-10  -> UnsupportedVersionException（送出前中止）
 ```
 
-### 7. 繞過協商、自刻不支援版本：broker 關線
+### 7. 繞過協商、直接送出不支援的版本：broker 關閉連線
 
-若繞過協商、自刻一個 broker 不支援的 API version 硬送，失敗路徑是固定的一條：broker 端 `RequestContext` 解析 request 失敗 → 丟出 `UnsupportedVersionException` → `SocketServer` 直接關閉連線（`RequestContext.java:112`、`SocketServer.scala:781`）。
+若繞過協商、直接送出一個 broker 不支援的 API version，失敗路徑是固定的一條：broker 端 `RequestContext` 解析 request 失敗 → 丟出 `UnsupportedVersionException` → `SocketServer` 直接關閉連線（`RequestContext.java:112`、`SocketServer.scala:781`）。
 
 唯一的例外是 `ApiVersions` 本身：它是 bootstrap 的逃生口——即使 client 送的 `ApiVersions` 版本超出 broker 支援範圍，broker 也不會關線，而是回一個 v0 的 response 帶 `UNSUPPORTED_VERSION` 錯誤碼與自己支援的版本範圍，讓 client 得以 recover、重新協商。
 
-> **小測驗 2**：自刻 client 送了 broker 不支援的版本會怎樣？（答案見文末 [附錄 B](#附錄-b常見誤解--隨堂考)）
+> **小測驗 2**：client 繞過協商、直接送出 broker 不支援的版本會怎樣？（答案見文末 [附錄 B](#附錄-b常見誤解--隨堂考)）
 
 ### 8. 版本截斷：為什麼「升一點點」不夠
 
@@ -137,7 +137,7 @@ Kafka 4.0 就移除了一批舊 wire API 版本，例如 `FetchRequest.json` 的
 
 ### Recap
 
-本場的因果鏈只有一條：client 長壽、broker 滾動升級 → 版本天生對不齊 → 只能在連線當下決定每條連線講第幾版——client↔broker 與 broker↔controller 靠 `ApiVersions` 握手取交集協商，複製面的 `Fetch` 由 finalized MV 集中決定。「一個版本打天下」不成立的最好證據，就是那顆 4.1 broker：**同一支 `Fetch`，同一時刻，對 Kafka 2.4 老 client 講 v11、對 follower 講 v17**。而當版本選不出來：交集為空時 client 在送出前本地中止；繞過協商自刻不支援的版本，broker 解析失敗、直接關線。至於 finalize / 升降當下會出什麼錯，交給同系列《運行時的版本升降》。
+本場的因果鏈只有一條：client 長壽、broker 滾動升級 → 版本天生對不齊 → 只能在連線當下決定每條連線講第幾版——client↔broker 與 broker↔controller 靠 `ApiVersionsRequest` 查詢後取交集協商，partition replication 的 `Fetch` 由 finalized MV 集中決定。「一個版本打天下」不成立的最好證據，就是那顆 4.1 broker：**同一支 `Fetch`，同一時刻，對 Kafka 2.4 老 client 講 v11、對 follower 講 v17**。而當版本選不出來：交集為空時 client 在送出前本地中止；繞過協商直接送出不支援的版本，broker 解析失敗、關閉連線。至於 finalize / 升降當下會出什麼錯，交給同系列《運行時的版本升降》。
 
 ---
 
@@ -148,7 +148,7 @@ Kafka 4.0 就移除了一批舊 wire API 版本，例如 `FetchRequest.json` 的
 ### A1 — Builder 版本範圍與協商
 
 - `AbstractRequest.Builder` 帶 `[oldestAllowedVersion, latestAllowedVersion]`，`NetworkClient` 送出前取交集。
-- 四條路徑的發起端共用同一顆 `org.apache.kafka.clients.NetworkClient`、各帶一份 `ApiVersions` cache——這是它們全都先做 `ApiVersions` 握手的共同底層（實作細節，正文不展開）。
+- 四條路徑的發起端共用同一顆 `org.apache.kafka.clients.NetworkClient`、各帶一份 `ApiVersions` cache——是否先送 `ApiVersionsRequest` 由建構參數 `discoverBrokerVersions` 決定：client、controller、KRaft 路徑為 true，replica fetcher 為 false（實作細節，正文不展開）。
 - client↔broker 取交集最高版：`NodeApiVersions.latestUsableVersion(...)`（`clients/src/main/java/org/apache/kafka/clients/NodeApiVersions.java:149`）。
 - Doc：`server-common/src/main/java/org/apache/kafka/server/common/MetadataVersion.java:31`「when communicating with clients, the client decides on the API version.」
 
@@ -169,7 +169,7 @@ Kafka 4.0 就移除了一批舊 wire API 版本，例如 `FetchRequest.json` 的
 | `ListOffsets` | MV 當**上限**再協商（`[oldest, MV]`） | `RemoteLeaderEndPoint.scala:122`；`ListOffsetsRequest.java:88-90` |
 | `OffsetsForLeaderEpoch` | **寫死常數 v4**，非 MV、非協商 | `OffsetsForLeaderEpochRequest.java:60-65`（`Builder.forFollower(...)` → `new Builder((short)4, (short)4, data)`） |
 
-- 底層 `BrokerBlockingSender.scala:82` / `:96` 仍是 `NetworkClient` + `ApiVersions`，握手照做，只是 Builder 已把版本鎖定。
+- 底層 `BrokerBlockingSender.scala:82` 仍是 `NetworkClient`，但 `:95` 的 `discoverBrokerVersions=false`——不送 `ApiVersionsRequest`，直接照 MV 決定的版本送。
 - `MetadataVersion` 裡跟 RPC 版本有關的方法只有兩個：`fetchRequestVersion()`（`:273`）與 `listOffsetRequestVersion()`（`:289`），只作用在複製面的 `Fetch` / `ListOffsets`。
 
 `MetadataVersion.fetchRequestVersion()`（`server-common/src/main/java/org/apache/kafka/server/common/MetadataVersion.java:273`）：
@@ -235,7 +235,7 @@ else
 
 `NetworkClient.doSend(...)` 接到 `UnsupportedVersionException` 後跳過 socket、丟進 `abortedSends`（`NetworkClient.java:591` 呼叫、`:597` catch）；`NetworkClient.poll(...)` drains aborted sends（`:651` / `:940`）。Producer / Consumer 收到 `response.versionMismatch()`（`Sender.java:595`、`ConsumerNetworkClient.java:614`）。
 
-broker 端自刻版本的路徑：`RequestContext` 解析 request 失敗、丟 `UnsupportedVersionException`（`clients/src/main/java/org/apache/kafka/common/requests/RequestContext.java:112`）→ `SocketServer` 關閉連線（`core/src/main/scala/kafka/network/SocketServer.scala:781`）。
+broker 端收到不支援版本的路徑：`RequestContext` 解析 request 失敗、丟 `UnsupportedVersionException`（`clients/src/main/java/org/apache/kafka/common/requests/RequestContext.java:112`）→ `SocketServer` 關閉連線（`core/src/main/scala/kafka/network/SocketServer.scala:781`）。
 
 broker 組 `ApiVersionsResponse` 時放進每個 API 的 min/max（`clients/src/main/java/org/apache/kafka/common/protocol/ApiKeys.java:287`）；`ApiVersions` 對外仍宣告 v0 的特例讓它成為 bootstrap 逃生口。版本截斷的 schema 證據：`FetchRequest.json:61` = `"4-18"`、`ListOffsetsRequest.json:45` = `"1-11"`、`ProduceRequest.json` = `"3-13"`。upgrade guide 對 4.0 截斷的說明：`docs/getting-started/upgrade.md:229`。
 
@@ -251,7 +251,7 @@ broker 組 `ApiVersionsResponse` 時放進每個 API 的 min/max（`clients/src/
 - **正解**：不協商。由 finalized `metadata.version` 決定（`fetchRequestVersion(MV)`，建成 `[v, v]` exact pin）；所有 broker 從同一個 MV 推出同一版。
 - **出處**：`RemoteLeaderEndPoint.scala:215`、`MetadataVersion.java:273`
 
-### Q2：自刻 client 送了 broker 不支援的 API version，會怎樣？
+### Q2：client 繞過協商、直接送出 broker 不支援的 API version，會怎樣？
 
 - **直覺**：broker 一律回一個 `UNSUPPORTED_VERSION` 錯誤碼。
 - **正解**：一般 API → `RequestContext` 解析失敗、broker 丟 `UnsupportedVersionException`，`SocketServer` 關閉連線。唯一例外是 `ApiVersions`：它是 bootstrap 逃生口，會回 v0 response 帶 `UNSUPPORTED_VERSION` 錯誤碼 + 支援範圍讓 client recover。
