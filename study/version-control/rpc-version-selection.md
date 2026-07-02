@@ -16,6 +16,17 @@
 | pin 成 `[MV, MV]` | MV 決定，握手只做驗證（不支援就 UnsupportedVersionException） |
 | pin 成固定常數 | 寫死，不看 MV 也無協商空間 |
 
+## 共同底層：發起端都用 NetworkClient + ApiVersions
+
+四條路徑的**發起端（送請求那側）都用同一顆 `org.apache.kafka.clients.NetworkClient`，各帶一份 `ApiVersions` cache**——這正是它們全都會先做 `ApiVersions` 握手的共同底層：
+
+- client → broker：producer / consumer 直接用 `NetworkClient`。
+- broker → controller：`NodeToControllerChannelManagerImpl.java:115`（`new NetworkClient`）+ `:129`（餵 `apiVersions`）。
+- broker → broker（replica fetch）：`BrokerBlockingSender.scala:82`（`new NetworkClient`）+ `:96`（`new ApiVersions`）。
+- KRaft（quorum 彼此 / broker 以 observer 抓 metadata log）：`KafkaRaftManager.scala:241`（`new NetworkClient`）+ `:254`（餵 `apiVersions`，同檔 `:102` 建立），再由 `:186` 注入 `KafkaNetworkChannel`（`KafkaNetworkChannel.java:99` 收 `KafkaClient`）。
+
+**界線（發起端 vs 接收端）**：`NetworkClient` 是「**主動發起／送請求**」那一側的工具；因此「版本協商握手」講的是發起端的行為。**接收端**（broker／controller 收請求、解析、回應）不是 `NetworkClient`，而是 `SocketServer` + `KafkaApis`。
+
 ## 逐路徑（實證）
 
 ### 1. Client → Broker：協商
