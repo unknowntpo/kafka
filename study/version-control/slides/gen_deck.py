@@ -199,8 +199,9 @@ add_content("點題", "為什麼不「一個版本打天下」？", [
 ], [A("protocol.md",94)])
 
 add_content("Part 1 · 動機", "為什麼版本天生對不齊，只能連線當下協商", [
-    ("bullet", "client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年，4.0／KIP-896 才把下限提到 2.1）", "clock-hour-4"),
+    ("bullet", "client 內嵌在各 app、長期不更新", "clock-hour-4"),
     ("bullet", "broker 逐台滾動升級，過程必然新舊並存", "server-2"),
+    ("note", "有多長壽？Kafka 曾為舊 client 保留每個 protocol 版本近九年，直到 4.0（KIP-896）才把下限提到 2.1。"),
     ("code", "任一時刻：不同節點能力／版本不同\n        → 不能鎖全叢集同一版（又要不停機）\n        → 只能在「連線當下」協商"),
     ("solve", "這就是本場主題「溝通當下的版本選擇」的由來"),
 ], [X("KIP-896",KIP896), A("protocol.md",94)])
@@ -240,6 +241,7 @@ add_content("Part 2 · 失敗訊息", "通訊當下協商不出版本，會看�
 ], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("NetworkClient.java",591,"NetworkClient"), A("RequestContext.java",112,"RequestContext")])
 
 add_content("Part 2 · 失敗訊息", "版本截斷：為什麼「升一點點」不夠", [
+    ("bullet", "前一頁「交集空」最容易被忽略的根因——舊 wire 版本被整批移除", "alert-triangle"),
     ("code", "舊 wire API version 被整個移除，min 可 > 0\n  Fetch：4–18（v0–3 在 4.0 移除）"),
     ("solve", "解法：升級前確認兩端都跨過版本下限（升 4.0 需至少 2.1），否則協商結果沒有可用版本"),
     ("note", "銜接（非本場）：finalize / 升降當下的錯誤（INVALID_UPDATE_VERSION 等）屬「運行時的版本升降」那場，本場不展開。"),
