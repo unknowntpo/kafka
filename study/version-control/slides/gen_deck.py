@@ -213,7 +213,7 @@ add_content("點題", "為什麼不能「一個版本打天下」？", [
 
 add_content("Part 1 · 術語", "要談「怎麼選」，先分清楚「版本」是哪一層", [
     ("bullet", "上一頁的結論是「版本無法事先統一」；但在講機制前得先知道，日常講的『版本』其實混了三個東西", "arrows-split"),
-    ("code", "release version   = 我裝了哪版 binary            (per-node)\nmetadata.version  = 叢集 finalized 的 feature level (cluster-wide)\nwire API version  = 這條連線講第幾版               (per-connection)"),
+    ("code", "release version   = 我裝了哪版 binary          (per-node)\nmetadata.version  = 管理員替全叢集設的功能檔位  (cluster-wide)\nwire API version  = 這條連線講第幾版            (per-connection)"),
     ("note", "finalize＝管理員手動宣告全叢集一致採用的 feature level（第一場《版本定義》的主題）。本場主角是 wire 版本。"),
 ], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
