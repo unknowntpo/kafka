@@ -1,47 +1,49 @@
 # 大綱：溝通當下的版本選擇
 
 > 幾萬個節點之上的版本控制 · 第三場。本檔是投影片／blog 的結構 spec，事實依據見 [rpc-version-selection.md](rpc-version-selection.md)。
-> 兩段式：① 版本為何要在連線當下協商、怎麼選（開場先亮出三種通訊角色的地圖）→ ② 失敗訊息。標題後放一頁 TOC、結尾放一頁 Recap；共 3 題小測驗穿插，Demo 已移除。角色/RPC 用全名，不用 cb/bb 縮寫。
+> 兩段式：① 版本為何要在連線當下協商、又怎麼選 → ② 失敗訊息。標題後放一頁 TOC、結尾放一頁 Recap；共 2 題小測驗穿插，Demo 已移除。角色／RPC 用全名，不用 cb/bb 縮寫。
+> Part 1 內部順序：動機（為何對不齊→協商）→ 術語（版本是哪一層）→ 架構（三種連線各自怎麼選，controller 在此一次登場）→ 以 Fetch 為例。刻意把「動機/術語/架構」拆成三個不同問題，避免重複講「一個版本不夠」。
 
 ## 小測驗互動規格
 
-- 全程共 **3 題**，各貼在對應知識點的下一張。
+- 全程共 **2 題**（replica fetch 版本、自刻不支援版本；「一個版本打天下」那題太簡單、已移除），各貼在對應知識點的下一張。
 - 呈現方式：**先只顯示題目與選項，蓋住答案**；按「下一步」才顯示正解與說明（pptx 用 appear-on-click 動畫，或「題目頁 + 正解頁」兩張）。
 
 ---
 
 ## Part 1 — 版本為何要在連線當下協商、怎麼選
 
-### 地圖：叢集裡有三種通訊（開場先亮出來，後面機制都掛在上面）
+### 動機：為什麼版本天生對不齊，只能連線當下協商
 
-- `client ↔ broker`（讀寫資料、查 metadata…）、`broker ↔ controller`（註冊、心跳、`AlterPartition`、轉發 admin…）、`broker ↔ broker`（複製）。先建立這張地圖，controller 後面才不會突兀。**注意各列只列代表性的幾種、非窮舉**——broker↔controller 不只心跳/註冊。
-- 版本天生對不齊：client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年；4.0／KIP-896 才把下限提到約 2.1）；broker 逐台滾動升級、過程必然新舊並存。要不停機，就只能在連線當下協商。
+- client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年；4.0／KIP-896 才把下限提到 2.1）；broker 逐台滾動升級、過程必然新舊並存。
+- 因果鏈：任一時刻不同節點能力／版本不同 → 不能鎖全叢集同一版（又要不停機）→ 只能在連線當下協商。這就是本場主題的由來。
+- 註：三種通訊角色（下一節）是「協商發生的地方」，不是對不齊的「原因」——別把兩者用因果綁一起。
 
-### 一個版本號不夠：三種 scope
+### 術語：講「版本」時是指哪一個？分三層
 
 - `release version`：我這台裝了哪版 binary（per-node）
-- `metadata.version`：整個叢集一致認定、已 finalize 的「能力世代」（cluster-wide，手動 finalize）
+- `metadata.version`：整個叢集一致認定、已 finalize 的能力世代（cluster-wide，手動 finalize）
 - wire protocol API version：這條連線實際講第幾版（per-connection）
+- 三個獨立的軸、各自變動；本場主角是 wire 版本。此節是「釐清術語」，不是再論「一個版本不夠」。
 
-### 三個角色，各自怎麼選版（先講架構）
+### 架構：三種連線，各自怎麼選版（三角色在此一次登場）
 
-核心：**每條連線底層都先做 ApiVersions 握手（發起端共用同一顆 `NetworkClient`）；真正決定版本的是那支 request 的 Builder 留多少版本自由度。**
+核心：**協商發生在三條線上，底層都先做 ApiVersions 握手（發起端共用同一顆 `NetworkClient`）；真正決定版本的是那支 request 的 Builder 留多少空間。**
 
-- **client ↔ broker**：ApiVersions 協商，取交集最高版（`NodeApiVersions.latestUsableVersion`）。
-- **broker ↔ controller**：也是協商——broker 對 controller 當 client（`BrokerHeartbeat` / `BrokerRegistration`）。
+- **client ↔ broker**：協商，取交集最高版（`NodeApiVersions.latestUsableVersion`）。
+- **broker ↔ controller**：也協商——broker 對 controller 當 client（註冊／心跳／轉發 admin…；非窮舉）。
 - **broker ↔ broker（複製）**：`Fetch` 由 finalized MV 直接 pin（`fetchRequestVersion`，`[v,v]`）；`ListOffsets` 以 MV 為上限再協商（`[oldest, MV]`）；`OffsetsForLeaderEpoch` 寫死 v4。
-- 收斂：**MV 只影響複製用的 `Fetch` / `ListOffsets`；client、controller 那兩條都是協商。**
+- 收斂：**MV 只影響複製的 `Fetch` / `ListOffsets`；其餘都是協商。**
 - 名詞：`Fetch`＝從指定 offset 讀 partition log；`ListOffsets`＝把時間戳／哨兵（earliest / latest）換算成 offset。
 - （更細的四路徑機制、feature vs RPC、honor、KRaft `kraft.version` 見 [rpc-version-selection.md](rpc-version-selection.md)，slide 不展開。）
 
 ### 以 Fetch 為例（架構下的舉例，不搶題）
 
-- 放在三角色架構之後，當「cb 與 bb 兩條的選版」的具體視覺化，別當開場主圖。
-- 同一支 Fetch 兩條線都會走：consumer fetch 是 cb、replica fetch 是 bb。
-- 同一顆 4.1 broker：對 Kafka 2.4 老 client（`validVersions` 0-11）cb 協商出 Fetch v11、對 follower bb 由 finalized MV 決定 v17 → 同一個 release 同時存在多個 wire 版本。
+- 放在架構之後，當「client↔broker 與 broker↔broker 兩條選版」的具體視覺化，別當開場主圖。
+- 同一支 Fetch 兩種身分：consumer fetch 走 client↔broker、replica fetch 走 broker↔broker。
+- 同一顆 4.1 broker：對 Kafka 2.4 老 client（`validVersions` 0-11）consumer 協商出 Fetch v11、對 follower replica 由 finalized MV 決定 v17 → 同一個 release 同時存在多個 wire 版本。
 
-**小測驗 1**：可以「一個版本打天下」嗎？→ 不行（client 長壽 + 要不停機，只能連線當下協商）。
-**小測驗 2**：replica fetch 的 `Fetch` 版本怎麼決定？→ 由 finalized `metadata.version` 決定（`fetchRequestVersion(MV)`），不做 per-connection 協商。
+**小測驗 1**：replica fetch 的 `Fetch` 版本怎麼決定？→ 由 finalized `metadata.version` 決定（`fetchRequestVersion(MV)`），不做 per-connection 協商。
 
 ---
 
@@ -54,7 +56,7 @@
 - 銜接（非本場、點一句）：finalize / 升降當下的錯誤——`kafka-features upgrade` 的 `INVALID_UPDATE_VERSION`、老 broker 註冊撐不住 finalized MV——屬「運行時的版本升降」那場，本場不展開。
 - 收斂：本場聚焦「送 request 前 / 通訊當下」的 wire 版本錯誤；一句話帶到 finalize/升降錯誤由兄弟場處理。
 
-**小測驗 3**：自刻 client 送了 broker 不支援的 API version，會怎樣？
+**小測驗 2**：自刻 client 送了 broker 不支援的 API version，會怎樣？
 - 正解：只有 `ApiVersions` 例外會回錯誤碼 + 支援範圍；其他 API → broker 丟 `UnsupportedVersionException` → 關線。
 
 ---

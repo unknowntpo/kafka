@@ -204,7 +204,7 @@ _, tf = tb(s, 1.2, 2.6, 11.3, 1.4); run(tf.paragraphs[0], "溝通當下的版本
 _, tf = tb(s, 1.2, 4.2, 11.3, 0.9); run(tf.paragraphs[0], "長壽的 client、滾動升級的 broker，怎麼喬出共同版本", 20, GRAY)
 _, tf = tb(s, 1.2, 6.65, 11.3, 0.5); run(tf.paragraphs[0], "Eric Chang · 2026", 14, MUTED)
 
-add_content("本場大綱", "兩段，加 3 題隨堂考穿插", [
+add_content("本場大綱", "兩段，加 2 題隨堂考穿插", [
     ("bullet", "Part 1 — 版本為何要在連線當下協商、又是怎麼選的", "point"),
     ("bullet", "Part 2 — 協商失敗時，會看到什麼訊息", "point"),
     ("note", "結尾會用一頁 Recap 把兩段串回開場那個問題。"),
@@ -216,24 +216,23 @@ add_content("點題", "為什麼不「一個版本打天下」？", [
     ("bullet", "但只要叢集達到一定規模，這個假設就不再成立", "help-circle"),
 ], [A("protocol.md",94)])
 
-add_content("Part 1 · 地圖", "叢集裡有三種通訊，而且版本天生對不齊", [
-    ("code", "client ─▶ broker        讀寫資料、查 metadata…\nbroker ─▶ controller    註冊、心跳、AlterPartition、轉發 admin…\nbroker ◀▶ broker        複製（follower 抓 leader）"),
-    ("note", "每列只列代表性的幾種、非窮舉；重點是「就這三條線」。"),
+add_content("Part 1 · 動機", "為什麼版本天生對不齊，只能連線當下協商", [
     ("bullet", "client 內嵌在各 app、長期不更新（Kafka 曾為舊 client 保留每個 protocol 版本近九年，4.0／KIP-896 才把下限提到 2.1）", "clock-hour-4"),
-    ("bullet", "broker 逐台滾動升級，過程必然新舊並存；要不停機就不能要求全叢集同版", "server-2"),
-    ("solve", "所以版本只能在連線當下協商——後面每個機制都掛在上面這三條線"),
+    ("bullet", "broker 逐台滾動升級，過程必然新舊並存", "server-2"),
+    ("code", "任一時刻：不同節點能力／版本不同\n        → 不能鎖全叢集同一版（又要不停機）\n        → 只能在「連線當下」協商"),
+    ("solve", "這就是本場主題「溝通當下的版本選擇」的由來"),
 ], [X("KIP-896",KIP896), A("protocol.md",94), X("KIP-35",KIP35)])
 
-add_content("Part 1 · 三層 scope", "一個版本號不夠：三種 scope 互斥", [
+add_content("Part 1 · 術語", "講「版本」時，其實是指哪一個？分三層", [
     ("code", "release version   = 我裝了哪版 binary   (per-node)\nmetadata.version  = 叢集一致的能力世代   (cluster-wide, finalize)\nwire API version  = 這條連線講第幾版     (per-connection)"),
-    ("bullet", "三層不會同步變動、scope 也不同，多數版本問題的根源都在於此", "arrows-split"),
-    ("solve", "單一版本號無法同時表達三種 scope，只能拆成三層各自管"),
+    ("bullet", "三個獨立的軸、各自變動；後面提到「版本」都要先分清楚是哪一層", "arrows-split"),
+    ("note", "本場主角是 wire 版本（連線當下選哪版）；MV 是叢集治理、release 是 binary。"),
 ], [T("kafka-features describe"), A("zk2kraft.md",71)])
 
-add_content("Part 1 · 選版機制", "回到三個角色：各自怎麼選版", [
-    ("bullet", "底層都先做 ApiVersions 握手（共用同一顆 NetworkClient）；決定版本的是 request Builder 留多少空間", "arrows-split"),
-    ("code", "client ↔ broker       協商，取交集最高\nbroker ↔ controller   也協商（broker 當 client：heartbeat / registration）\nbroker ↔ broker 複製   Fetch 由 MV 決定、ListOffsets 以 MV 為上限"),
-    ("solve", "MV 只影響複製用的 Fetch / ListOffsets；client、controller 那兩條都是協商"),
+add_content("Part 1 · 架構", "三種連線，各自怎麼選版", [
+    ("bullet", "協商發生在三條線上，底層都先做 ApiVersions 握手（共用同一顆 NetworkClient）", "arrows-split"),
+    ("code", "client ↔ broker       協商，取交集最高\nbroker ↔ controller   也協商（broker 當 client：註冊 / 心跳 / 轉發 admin）\nbroker ↔ broker 複製   Fetch 由 MV 決定、ListOffsets 以 MV 為上限"),
+    ("solve", "決定版本的是 request Builder 留多少空間；MV 只影響複製的 Fetch / ListOffsets，其餘都是協商"),
 ], [A("NodeApiVersions.java",149,"latestUsableVersion"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("MetadataVersion.java",31,"javadoc")])
 
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
@@ -243,8 +242,7 @@ _, tf = tb(s2a, 0.7, 0.9, CW, 0.7); run(tf.paragraphs[0], "以一支 Fetch 為�
 _, tf = tb(s2a, 0.7, 1.62, CW, 0.4); run(tf.paragraphs[0], "同一支 Fetch 兩種身分：consumer fetch 走 client↔broker、replica fetch 走 broker↔broker", 14, GRAY)
 s2a.shapes.add_picture(ICO + "s2a-rangeline.png", Inches(1.82), Inches(2.15), width=Inches(9.7))
 render_ref(s2a, [A("FetchRequest.java",165,"forConsumer/forReplica"), A("MetadataVersion.java",273,"fetchRequestVersion"), A("FetchRequest.json",61,"validVersions")])
-quiz_pair(0)  # 小測驗 1：能一版打天下嗎
-quiz_pair(2)  # 小測驗 2：replica fetch 版本誰決定
+quiz_pair(2)  # 小測驗 1：replica fetch 版本誰決定（打天下那題太簡單，已移除）
 
 # ---- Part 2：失敗會有什麼訊息 ----
 add_content("Part 2 · 失敗訊息", "通訊當下協商不出版本，會看到什麼", [
