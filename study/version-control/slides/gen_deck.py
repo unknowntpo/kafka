@@ -181,7 +181,7 @@ def quiz_pair(i):
 # 只留本場範圍內、有教育意義的 2 題（其餘屬兄弟場或過於簡單，已移除）
 QUIZ = [
  ("核心", "partition replication（follower→leader）裡，Fetch 的版本怎麼決定？",
-  ["兩 broker ApiVersions 協商取交集", "由 finalized metadata.version 決定", "永遠用最新版", "controller 每次指定"], 1,
+  ["兩 broker ApiVersions 協商取交集", "由 finalized metadata.version 決定", "永遠用最新版", "由 controller 統一指定"], 1,
   "fetchRequestVersion(MV)：MV 是集中共識，不做 per-connection 協商。",
   [A("RemoteLeaderEndPoint.scala",215), A("MetadataVersion.java",273)]),
  ("核心", "client 繞過協商、直接送出 broker 不支援的 API version，會怎樣？",
