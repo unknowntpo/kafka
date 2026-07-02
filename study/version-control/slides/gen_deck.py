@@ -230,6 +230,12 @@ add_content("Part 1 · 對照", "同一道題，別家怎麼答——各付什�
     ("bullet", "PostgreSQL：協定 v3 逾二十年極穩定；但實體複製鎖 major → 複製層無法線上滾動升級（得停機 pg_upgrade 或另建叢集）", "leaf"),
     ("solve", "沒有免費的選擇：Kafka 拿協定複雜度換到細粒度演進＋複製層線上升級——後者正是 PostgreSQL 買不到的"),
 ], [X("MongoDB hello / FCV",MONGO), X("PostgreSQL protocol",PGURL)])
+
+add_content("Part 1 · 帳單", "Kafka 這個選擇有多貴（實測數字）", [
+    ("code", "90 支 API × 308 個現役 wire 版本\n9,890 行 schema JSON → 約 18 萬行生成碼（≈18×）\n相容性系統測試涵蓋 23 個 broker 版本"),
+    ("bullet", "每加一版牽動 .json、generator 逐版讀寫、ApiKeys、全版本 round-trip 測試；成本隨 API 數 × 版本數乘積成長", "arrows-split"),
+    ("solve", "貴到 Kafka 自己在 KIP-896 承認「maintenance cost goes up, value goes down」，4.0 砍掉 2.1 以前的舊版本止血"),
+], [X("KIP-896",KIP896), A("FetchRequest.json",61,"FetchRequest.json 4-18")])
 quiz_pair(0)  # 小測驗 1：replica fetch 版本誰決定
 
 # ---- Part 2：失敗會有什麼訊息 ----
