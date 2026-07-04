@@ -230,6 +230,12 @@ add_content("Part 1 · 架構 (b)", "查詢之後，最終版本誰說了算？"
     ("solve", "為什麼交給 MV，不各連線協商？協商能讓 broker 互相『讀得懂』——但讀得懂不代表跨版本行為正確（如 KIP-903 replica-epoch fencing 要全叢集一致生效，才擋得住舊 epoch 的 follower 進 ISR）"),
 ], [A("MetadataVersion.java",273,"fetchRequestVersion"), A("BrokerBlockingSender.scala",95,"discoverBrokerVersions=false"), A("OffsetsForLeaderEpochRequest.java",65,"forFollower 寫死 v4"), A("RemoteLeaderEndPoint.scala",215)])
 
+add_content("Part 1 · 架構 (c)", "為什麼 client 用協商、不用 MV？", [
+    ("bullet", "為什麼不用 MV？MV 是叢集內部、operator 協調、全叢集單一值——但 client 是外部函式庫（沒 metadata log）、幾十種實作各自升級（operator 叫不動）、點對點也不需全體同版", "arrows-split"),
+    ("bullet", "為什麼要一來一往？對方哪台、哪版事先不知，滾動升級中還一直變——只能連上當下問 broker（它才是自己能力的權威）；一次握手拿全 API 能力圖，之後每支第一次就送對版", "point"),
+    ("solve", "一句話：client 平面沒有中央協調者 → 只能在連線接觸點動態發現（協商）；inter-broker 有 operator 協調 → 才用 MV。用哪個，是『有沒有中央協調者』決定的，不是隨意選"),
+], [A("MetadataVersion.java",31,"client decides"), X("KIP-35",KIP35), A("protocol.md",100,"highest both")])
+
 # §2a — 數線圖：架構下的一個舉例（cb 協商 vs bb 由 MV）
 s2a = prs.slides.add_slide(BLANK)
 _, tf = tb(s2a, 0.7, 0.5, CW, 0.4); run(tf.paragraphs[0], "Part 1 · 舉例", 13, ACCENT, bold=True)
