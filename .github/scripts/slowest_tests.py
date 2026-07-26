@@ -28,8 +28,9 @@ Three input sources are supported and may be combined:
 
 Examples:
 
-    # Local run
-    ./gradlew test -Pkafka.test.xml.output.dir=local
+    # Local run. GITHUB_ACTIONS is what makes the build collect the reports into build/junit-xml;
+    # without it, point --path at the repository root and the per-project reports are found instead.
+    GITHUB_ACTIONS=true ./gradlew test -Pkafka.test.xml.output.dir=local
     python .github/scripts/slowest_tests.py --path build/junit-xml
 
     # Last three trunk runs of ci.yml (needs a token with actions:read)
@@ -114,15 +115,25 @@ def pretty_time_duration(seconds: float) -> str:
 
 def split_report_path(base_path: str, report_path: str) -> Tuple[str, str]:
     """
-    Extract the module and test job from a report path. Report paths look like
+    Extract the module and test job from a report path. Report paths in build/junit-xml and in
+    the artifacts built from it look like
 
         <base_path>/module[/sub-module]/[test-job]/TEST-class.method.xml
+
+    A local build that did not run the copyTestXml task instead leaves reports in each
+    sub-project, which is handled as a special case
+
+        <base_path>/module[/sub-module]/build/test-results/test/TEST-class.method.xml
 
     Returns a tuple of (module, job). Paths that are too short to carry both fall back to
     whatever is available so that ad-hoc directories still parse.
     """
     rel_report_path = os.path.relpath(report_path, base_path)
     path_segments = pathlib.Path(rel_report_path).parts
+    if "build" in path_segments[:-1]:
+        build_at = path_segments.index("build")
+        module = os.path.join(*path_segments[0:build_at]) if build_at > 0 else "unknown"
+        return module, path_segments[-2]
     if len(path_segments) >= 3:
         return os.path.join(*path_segments[0:-2]), path_segments[-2]
     elif len(path_segments) == 2:
