@@ -40,11 +40,61 @@ Examples:
     # Artifact ZIPs downloaded by hand from the run page
     python .github/scripts/slowest_tests.py --zip junit-xml-25-noflaky-nonew.zip
 
-Durations come from the "time" attribute of <testcase>, so they measure the test method itself,
-not the fork startup or Gradle overhead. Repeated executions of the same test (retries,
-kafka.cluster.test.repeat, several matrix jobs) are summed, and the number of executions is
-reported alongside, since a cheap test that runs 500 times is a different problem than a single
-test that takes ten minutes.
+Methodology
+-----------
+
+What the numbers are. Every duration comes from the "time" attribute of a <testcase> element,
+which JUnit records for a single execution of a single test method. It covers the method plus
+its per-method fixtures (@BeforeEach/@AfterEach), and it excludes the JVM fork startup, the
+per-class fixtures, Gradle's own overhead, and compilation. Summed test time is therefore a
+lower bound on the wall clock of a test job, and the two should not be compared directly.
+
+Total versus wall clock. The test task runs with -PmaxParallelForks=4 in CI, so four test
+classes execute at once and the summed test time of a job is roughly four times its wall clock.
+The three hour timeout in build.yml applies to wall clock, which is why --gh-repo mode also
+prints the measured duration of each "JUnit tests" job: use those numbers to see how close a
+run came to the timeout, and the rankings below to see what to attack.
+
+Which grouping to read. Gradle schedules work at class granularity, so a class is what actually
+occupies a fork for a contiguous stretch. --group class is the right view for "what makes the
+job long", and it is the view where a single very slow class shows up as a critical path that
+extra forks cannot shorten. --group method finds individual pathological tests, and
+--group module shows how the cost is distributed across the build.
+
+Repeated executions. The same test can run more than once in the data: the Develocity test
+retry plugin re-runs failures (-PmaxTestRetries=3 in the flaky variation), ClusterTests are
+repeated on pull requests (-Pkafka.cluster.test.repeat=3), parameterized tests report one
+<testcase> per invocation, and when several artifacts or runs are loaded each contributes its
+own copy. Every execution is summed into the total and counted in the "Runs" column, so a class
+whose total is large because it runs 250 cheap tests is distinguishable from one that runs a
+single ten minute test. "Mean" is the total divided by the number of executions and "Max" is
+the slowest single execution.
+
+Skipped tests are dropped by default. They report a zero duration, and counting them only
+dilutes the mean. Pass --include-skipped to keep them.
+
+Reproducing a measurement locally. The following mirrors the "noflaky-nonew" matrix variation,
+which is the variation that runs the bulk of the suite. It excludes tests tagged @Flaky, and
+with no test catalog on disk the "new test" selection is empty, exactly as in CI:
+
+    GITHUB_ACTIONS=true ./gradlew :core:test \
+      --build-cache --continue --no-scan \
+      -PmaxParallelForks=4 -PcommitId=xxxxxxxxxxxxxxxx \
+      -Pkafka.test.run.flaky=false -Pkafka.test.xml.output.dir=local \
+      -x spotbugsMain -x spotbugsTest
+    python .github/scripts/slowest_tests.py --path build/junit-xml --top 10 --group class
+
+Running one module at a time keeps a failing or hanging module from costing the whole
+measurement, and the reports accumulate under build/junit-xml, so the rankings can be produced
+from whatever has completed so far. GITHUB_ACTIONS is what enables the copyTestXml task that
+collects the reports there.
+
+Caveats when reading a local measurement. Durations scale with the machine: an integration test
+that waits on a fixed condition changes little, while a CPU-bound test tracks the core count, so
+a local ranking is more trustworthy than the local absolute numbers. Numbers taken from CI
+artifacts do not have that problem and should be preferred when they are available. Tests that
+failed still report the time they burned before failing, which is intentional, since a test that
+times out after two minutes costs the job those two minutes whether or not it passed.
 """
 
 import argparse
