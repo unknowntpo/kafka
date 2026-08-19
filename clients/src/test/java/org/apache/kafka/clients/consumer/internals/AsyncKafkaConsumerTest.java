@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.Metadata.LeaderAndEpoch;
 import org.apache.kafka.clients.MockClient;
 import org.apache.kafka.clients.NodeApiVersions;
@@ -130,6 +131,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
@@ -2434,6 +2436,95 @@ public class AsyncKafkaConsumerTest {
         assertThrows(InvalidGroupIdException.class, () -> consumer.subscribe(new SubscriptionPattern("t*")));
         assertThrows(InvalidGroupIdException.class, () -> consumer.subscribe(new SubscriptionPattern("t*"),
             mock(ConsumerRebalanceListener.class)));
+    }
+
+    @Test
+    public void testGrouplessPollRetriesFetchWhenReconnectBackoffExpires() throws InterruptedException {
+        final long retryBackoffMs = 100L;
+        final Properties props = requiredConsumerConfig();
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        props.put(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, retryBackoffMs);
+        final ConsumerConfig config = new ConsumerConfig(props);
+
+        final LogContext realLogContext = new LogContext();
+        final TopicPartition topicPartition = new TopicPartition("topic1", 0);
+        final SubscriptionState subscriptions = new SubscriptionState(
+            realLogContext,
+            AutoOffsetResetStrategy.EARLIEST
+        );
+        final ConsumerMetadata realMetadata = new ConsumerMetadata(
+            0,
+            0,
+            Long.MAX_VALUE,
+            false,
+            false,
+            subscriptions,
+            realLogContext,
+            new ClusterResourceListeners()
+        );
+        // Seed the shared state before the metadata update so ConsumerMetadata retains this topic's leader.
+        // The public assign/seek calls below still exercise the normal application-to-reactor event path.
+        subscriptions.assignFromUser(singleton(topicPartition));
+        subscriptions.seek(topicPartition, 0L);
+        final AtomicBoolean captureReconnectPoll = new AtomicBoolean(false);
+        final AtomicBoolean reconnectBackoffObserved = new AtomicBoolean(false);
+        final AtomicLong reconnectPollTimeoutMs = new AtomicLong(-1L);
+        final MockClient client = new MockClient(time, realMetadata) {
+            @Override
+            public boolean connectionFailed(Node node) {
+                boolean failed = super.connectionFailed(node);
+                if (failed && captureReconnectPoll.get())
+                    reconnectBackoffObserved.set(true);
+                return failed;
+            }
+
+            @Override
+            public List<ClientResponse> poll(long timeoutMs, long now) {
+                if (reconnectBackoffObserved.get() && reconnectPollTimeoutMs.compareAndSet(-1L, timeoutMs))
+                    time.sleep(timeoutMs);
+                return super.poll(0L, now);
+            }
+        };
+        client.updateMetadata(RequestTestUtils.metadataUpdateWithIds(
+            1,
+            Map.of(topicPartition.topic(), 1),
+            Map.of(topicPartition.topic(), Uuid.randomUuid())
+        ));
+        final Node leader = realMetadata.fetch().leaderFor(topicPartition);
+        assertNotNull(leader);
+        client.backoff(leader, retryBackoffMs);
+
+        consumer = new AsyncKafkaConsumer<>(
+            realLogContext,
+            time,
+            config,
+            new StringDeserializer(),
+            new StringDeserializer(),
+            client,
+            subscriptions,
+            realMetadata
+        );
+        assertThrows(InvalidGroupIdException.class, consumer::groupMetadata);
+        consumer.assign(singleton(topicPartition));
+        consumer.seek(topicPartition, 0L);
+        assertTrue(subscriptions.hasValidPosition(topicPartition));
+        captureReconnectPoll.set(true);
+
+        Future<ConsumerRecords<String, String>> pollingFuture = CompletableFuture.supplyAsync(
+            () -> consumer.poll(Duration.ofSeconds(10))
+        );
+
+        try {
+            TestUtils.waitForCondition(
+                () -> client.requests().stream()
+                    .anyMatch(request -> request.requestBuilder().apiKey() == ApiKeys.FETCH),
+                "Groupless consumer did not retry its fetch after reconnect backoff expired"
+            );
+            assertEquals(retryBackoffMs, reconnectPollTimeoutMs.get());
+        } finally {
+            consumer.wakeup();
+        }
+        TestUtils.assertFutureThrows(WakeupException.class, pollingFuture);
     }
 
     @Test

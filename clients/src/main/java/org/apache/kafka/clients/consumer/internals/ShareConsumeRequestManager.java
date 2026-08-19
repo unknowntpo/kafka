@@ -1343,6 +1343,10 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
         return !shareFetchBuffer.isEmpty();
     }
 
+    void wakeupApplicationThread() {
+        shareFetchBuffer.wakeup();
+    }
+
     protected void closeInternal() {
         Utils.closeQuietly(shareFetchBuffer, "shareFetchBuffer");
         Utils.closeQuietly(metricsManager, "shareFetchMetricsManager");

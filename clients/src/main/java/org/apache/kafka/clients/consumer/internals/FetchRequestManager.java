@@ -46,6 +46,8 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     private final NetworkClientDelegate networkClientDelegate;
     private final long retryBackoffMs;
     private CompletableFuture<Void> pendingFetchRequestFuture;
+    private ConsumerReactorProgress.ProgressIntent fetchProgressIntent =
+        ConsumerReactorProgress.ProgressIntent.awaitEvent();
 
     FetchRequestManager(final LogContext logContext,
                         final Time time,
@@ -75,13 +77,17 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     /**
      * {@inheritDoc}
      *
-     * If any request is in flight, its completion will wake the application thread regardless of the outcome, so
-     * no separate bound is needed. Otherwise, the application thread's wait is bounded by {@code retryBackoffMs}
-     * so it can re-evaluate subscription state changes promptly.
+     * The latest fetch preparation result is owned by the reactor thread, so the application wait can use the
+     * decision directly without rescanning {@link SubscriptionState} and {@link FetchBuffer}.
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return nodesWithPendingFetchRequests.isEmpty() ? retryBackoffMs : Long.MAX_VALUE;
+        return progressIntent(currentTimeMs).remainingMs(currentTimeMs);
+    }
+
+    @Override
+    public ConsumerReactorProgress.ProgressIntent progressIntent(long currentTimeMs) {
+        return fetchProgressIntent;
     }
 
     /**
@@ -117,6 +123,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     @Override
     public PollResult poll(long currentTimeMs) {
         return pollInternal(
+            currentTimeMs,
             this::prepareFetchRequests,
             this::handleFetchSuccess,
             this::handleFetchFailure
@@ -133,6 +140,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
         // TODO: move the logic to poll to handle signal close
         return pollInternal(
+                currentTimeMs,
                 this::prepareCloseFetchSessionRequests,
                 this::handleCloseFetchSessionSuccess,
                 this::handleCloseFetchSessionFailure
@@ -143,13 +151,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * Creates the {@link PollResult poll result} that contains a list of zero or more
      * {@link FetchRequest.Builder fetch requests}.
      *
-     * @param fetchRequestPreparer {@link FetchRequestPreparer} to generate a {@link FetchRequestPreparationResult}
-     *                             mapping {@link Node nodes} to their {@link FetchSessionHandler.FetchRequestData}
+     * @param fetchRequestPreparer {@link FetchRequestPreparer} to describe both requests that can be created and
+     *                             conditions preventing other requests from being created
      * @param successHandler       {@link ResponseHandler Handler for successful responses}
      * @param errorHandler         {@link ResponseHandler Handler for failure responses}
      * @return {@link PollResult}
      */
-    private PollResult pollInternal(FetchRequestPreparer fetchRequestPreparer,
+    private PollResult pollInternal(long currentTimeMs,
+                                    FetchRequestPreparer fetchRequestPreparer,
                                     ResponseHandler<ClientResponse> successHandler,
                                     ResponseHandler<Throwable> errorHandler) {
         if (pendingFetchRequestFuture == null) {
@@ -159,15 +168,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
+            fetchProgressIntent = progressIntentFor(result, currentTimeMs);
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
-                if (result.canWakeBufferIfNoFetchRequestsToSend()) {
-                    // If there's nothing to fetch because every fetchable partition already has buffered data,
-                    // wake up the FetchBuffer so it doesn't needlessly wait for a wakeup that won't come until
-                    // the data in the fetch buffer is consumed.
+                if (result.shouldWakeApplicationThread())
                     fetchBuffer.wakeup();
-                }
                 pendingFetchRequestFuture.complete(null);
                 return PollResult.EMPTY;
             }
@@ -193,10 +199,28 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
             pendingFetchRequestFuture.completeExceptionally(t);
+            fetchProgressIntent = ConsumerReactorProgress.ProgressIntent.awaitEvent();
             return PollResult.EMPTY;
         } finally {
             pendingFetchRequestFuture = null;
         }
+    }
+
+    ConsumerReactorProgress.ProgressIntent progressIntentFor(
+        final FetchRequestPreparationResult result,
+        final long currentTimeMs
+    ) {
+        if (result.conditions().contains(FetchRequestPreparationCondition.MISSING_LEADER)
+            || result.conditions().contains(FetchRequestPreparationCondition.RECONNECT_BACKOFF)
+            || result.conditions().contains(FetchRequestPreparationCondition.WAITING_FOR_BUFFER_DRAIN)) {
+            return ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(currentTimeMs, retryBackoffMs);
+        }
+
+        return ConsumerReactorProgress.ProgressIntent.awaitEvent();
+    }
+
+    void wakeupApplicationThread() {
+        fetchBuffer.wakeup();
     }
 
     /**

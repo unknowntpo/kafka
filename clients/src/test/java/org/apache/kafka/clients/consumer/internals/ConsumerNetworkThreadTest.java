@@ -42,7 +42,14 @@ import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
@@ -54,6 +61,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -100,6 +109,9 @@ public class ConsumerNetworkThreadTest {
 
     @BeforeEach
     public void setup() {
+        when(offsetsRequestManager.progressIntent(anyLong())).thenCallRealMethod();
+        when(heartbeatRequestManager.progressIntent(anyLong())).thenCallRealMethod();
+        when(coordinatorRequestManager.progressIntent(anyLong())).thenCallRealMethod();
         consumerNetworkThread.initializeResources();
     }
 
@@ -166,7 +178,7 @@ public class ConsumerNetworkThreadTest {
         when(coordinatorRequestManager.poll(anyLong())).thenReturn(mock(NetworkClientDelegate.PollResult.class));
         consumerNetworkThread.runOnce();
         requestManagers.entries().forEach(rm -> verify(rm).poll(anyLong()));
-        requestManagers.entries().forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));
+        requestManagers.entries().forEach(rm -> verify(rm, times(2)).maximumTimeToWait(anyLong()));
         verify(networkClientDelegate).addAll(any(NetworkClientDelegate.PollResult.class));
         verify(networkClientDelegate).poll(anyLong(), anyLong());
     }
@@ -183,6 +195,134 @@ public class ConsumerNetworkThreadTest {
         consumerNetworkThread.runOnce();
         // After runOnce has been called, it takes the default heartbeat interval from the heartbeat request manager
         assertEquals(defaultHeartbeatIntervalMs, consumerNetworkThread.maximumTimeToWait());
+    }
+
+    @Test
+    public void testApplicationWaitDecisionUsesTimeAfterNetworkPoll() {
+        long timeBeforePollMs = time.milliseconds();
+        AtomicLong managerDecisionTimeMs = new AtomicLong(-1L);
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(timeBeforePollMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
+        doAnswer(invocation -> {
+            time.sleep(250L);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), eq(timeBeforePollMs));
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenAnswer(invocation -> {
+            managerDecisionTimeMs.set(invocation.getArgument(0, Long.class));
+            return 100L;
+        });
+
+        consumerNetworkThread.runOnce();
+
+        assertEquals(100L, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(timeBeforePollMs + 250L, managerDecisionTimeMs.get());
+        assertEquals(managerDecisionTimeMs.get(), consumerNetworkThread.applicationWait().decidedAtMs());
+    }
+
+    @Test
+    public void testShorterDecisionIsPublishedBeforeApplicationWakeup() {
+        AtomicLong timeoutObservedByWakeup = new AtomicLong(-1L);
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
+        doAnswer(invocation -> {
+            timeoutObservedByWakeup.set(consumerNetworkThread.maximumTimeToWait());
+            return null;
+        }).when(requestManagers).wakeupApplicationThread();
+
+        consumerNetworkThread.runOnce();
+
+        assertEquals(100L, timeoutObservedByWakeup.get());
+        verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testEachExpiredDeadlineWakesOnceEvenWhenLaterThanPreviousDeadline() {
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.progressIntent(anyLong())).thenAnswer(invocation ->
+            ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(
+                invocation.getArgument(0, Long.class),
+                0L
+            )
+        );
+
+        consumerNetworkThread.runOnce();
+        consumerNetworkThread.runOnce();
+        time.sleep(100L);
+        consumerNetworkThread.runOnce();
+
+        verify(requestManagers, times(2)).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testProgressDeadlineLimitsEveryNetworkPollUntilItIsPublishedAsExpired() {
+        long startMs = time.milliseconds();
+        ConsumerReactorProgress.ProgressIntent deadline =
+            ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 100L);
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        doReturn(deadline).when(heartbeatRequestManager).progressIntent(anyLong());
+        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
+
+        consumerNetworkThread.runOnce();
+        consumerNetworkThread.runOnce();
+        time.sleep(100L);
+        consumerNetworkThread.runOnce();
+        consumerNetworkThread.runOnce();
+
+        verify(networkClientDelegate, times(2)).poll(100L, startMs);
+        verify(networkClientDelegate).poll(0L, startMs + 100L);
+        verify(networkClientDelegate).poll(ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, startMs + 100L);
+    }
+
+    @Test
+    public void testDeadlineWakeupReleasesGrouplessApplicationWaitWithoutReadingMaximumTimeToWait() throws Exception {
+        long startMs = time.milliseconds();
+        FetchBuffer fetchBuffer = new FetchBuffer(new LogContext());
+        CountDownLatch firstWaitReturned = new CountDownLatch(1);
+        CountDownLatch secondWaitStarted = new CountDownLatch(1);
+        ExecutorService applicationExecutor = Executors.newSingleThreadExecutor();
+        AtomicInteger networkPolls = new AtomicInteger();
+
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        doReturn(ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 100L))
+            .when(heartbeatRequestManager).progressIntent(anyLong());
+        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
+        doAnswer(invocation -> {
+            if (networkPolls.incrementAndGet() == 2)
+                time.sleep(100L);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+        doAnswer(invocation -> {
+            fetchBuffer.wakeup();
+            return null;
+        }).when(requestManagers).wakeupApplicationThread();
+
+        Future<?> applicationWait = applicationExecutor.submit(() -> {
+            // A groupless consumer does not read ConsumerNetworkThread.maximumTimeToWait(). It waits on the
+            // caller's poll timer, so both publication of a shorter deadline and expiry of that deadline must
+            // produce retained fetch-buffer wakeups.
+            fetchBuffer.awaitWakeup(Time.SYSTEM.timer(DEFAULT_MAX_WAIT_MS));
+            firstWaitReturned.countDown();
+            secondWaitStarted.countDown();
+            fetchBuffer.awaitWakeup(Time.SYSTEM.timer(DEFAULT_MAX_WAIT_MS));
+        });
+
+        try {
+            consumerNetworkThread.runOnce();
+            assertTrue(firstWaitReturned.await(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
+            assertTrue(secondWaitStarted.await(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
+
+            consumerNetworkThread.runOnce();
+
+            applicationWait.get(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+            verify(requestManagers, times(2)).wakeupApplicationThread();
+            assertEquals(2, networkPolls.get());
+        } finally {
+            fetchBuffer.wakeup();
+            applicationExecutor.shutdownNow();
+        }
     }
 
     @Test
