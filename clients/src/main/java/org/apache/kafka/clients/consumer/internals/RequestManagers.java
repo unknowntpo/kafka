@@ -137,6 +137,17 @@ public class RequestManagers implements Closeable {
         return entries;
     }
 
+    /**
+     * Wake the application-side fetch wait after a shorter progress decision has been published. The fetch buffers
+     * latch wakeups, so publishing first prevents both stale reads and lost notifications.
+     */
+    void wakeupApplicationThread() {
+        if (fetchRequestManager != null)
+            fetchRequestManager.wakeupApplicationThread();
+        else
+            shareConsumeRequestManager.ifPresent(ShareConsumeRequestManager::wakeupApplicationThread);
+    }
+
     @Override
     public void close() {
         closer.close(

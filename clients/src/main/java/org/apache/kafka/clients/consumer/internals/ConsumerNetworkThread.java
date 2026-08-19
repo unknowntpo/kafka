@@ -82,7 +82,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
-    private volatile long cachedMaximumTimeToWait = MAX_POLL_TIMEOUT_MS;
+    private volatile ConsumerReactorProgress.ApplicationWait applicationWait;
+    private volatile long lastExpiredDeadlineWakeupAtMs = Long.MIN_VALUE;
     private long lastPollTimeMs = 0L;
 
     public ConsumerNetworkThread(LogContext logContext,
@@ -103,6 +104,10 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         this.requestManagersSupplier = requestManagersSupplier;
         this.running = true;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
+        this.applicationWait = ConsumerReactorProgress.initialApplicationWait(
+            MAX_POLL_TIMEOUT_MS,
+            time.milliseconds()
+        );
     }
 
     /**
@@ -225,16 +230,20 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
             pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
         }
 
+        ConsumerReactorProgress.ApplicationWait progressCheck = ConsumerReactorProgress.decideApplicationWait(
+            requestManagers.entries(),
+            currentTimeMs
+        );
+        pollWaitTimeMs = Math.min(
+            pollWaitTimeMs,
+            timeUntilNextProgressCheck(progressCheck, currentTimeMs)
+        );
+
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
-        long maxTimeToWaitMs = Long.MAX_VALUE;
-
-        for (RequestManager rm : requestManagers.entries()) {
-            long waitMs = rm.maximumTimeToWait(currentTimeMs);
-            maxTimeToWaitMs = Math.min(maxTimeToWaitMs, waitMs);
-        }
-
-        cachedMaximumTimeToWait = maxTimeToWaitMs;
+        // Network I/O may block and change manager state, so publish a decision computed from a fresh time snapshot
+        // rather than reusing currentTimeMs from before the poll.
+        publishApplicationWait(time.milliseconds());
 
         reapExpiredApplicationEvents(currentTimeMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
@@ -341,7 +350,45 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      * @return The maximum delay in milliseconds
      */
     public long maximumTimeToWait() {
-        return cachedMaximumTimeToWait;
+        return applicationWait.remainingMs(time.milliseconds());
+    }
+
+    private void publishApplicationWait(final long currentTimeMs) {
+        ConsumerReactorProgress.ApplicationWait previous = applicationWait;
+        ConsumerReactorProgress.ApplicationWait next = ConsumerReactorProgress.decideApplicationWait(
+            requestManagers.entries(),
+            currentTimeMs
+        );
+
+        // Publish before signaling. Fetch buffers latch wakeups, so the application either observes the new
+        // snapshot before waiting or is released after it has started waiting on the old snapshot.
+        applicationWait = next;
+        boolean expiredDeadlineNeedsWakeup =
+            next.waitMode() == ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE
+                && next.remainingMs(currentTimeMs) == 0L
+                && next.deadlineAtMs() != lastExpiredDeadlineWakeupAtMs;
+        if (expiredDeadlineNeedsWakeup)
+            lastExpiredDeadlineWakeupAtMs = next.deadlineAtMs();
+
+        if (next.shortens(previous) || expiredDeadlineNeedsWakeup)
+            requestManagers.wakeupApplicationThread();
+    }
+
+    private long timeUntilNextProgressCheck(final ConsumerReactorProgress.ApplicationWait decision,
+                                            final long currentTimeMs) {
+        if (decision.waitMode() == ConsumerReactorProgress.WaitMode.AWAIT_EVENT)
+            return Long.MAX_VALUE;
+
+        long remainingMs = decision.remainingMs(currentTimeMs);
+        if (remainingMs == 0L && decision.deadlineAtMs() == lastExpiredDeadlineWakeupAtMs)
+            return Long.MAX_VALUE;
+
+        return remainingMs;
+    }
+
+    // Visible for testing. The immutable snapshot is safe to inspect without exposing request-manager state.
+    ConsumerReactorProgress.ApplicationWait applicationWait() {
+        return applicationWait;
     }
 
     @Override

@@ -48,6 +48,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -291,9 +292,9 @@ public abstract class AbstractFetch implements Closeable {
         log.debug("Removing pending request for fetch session: {} for node: {}", sessionId, fetchTarget);
         nodesWithPendingFetchRequests.remove(fetchTarget.id());
 
-        // Wake the buffer whenever a node stops having a request in flight, whatever the outcome was: data, an
-        // empty response, a fetch session error, or a failure. This ensures the caller is not left waiting on a
-        // wakeup that only a completed request could have delivered.
+        // Completing an in-flight request is a concrete state transition. Wake the application thread for every
+        // terminal outcome so it can observe data, an empty response, or a failure without depending on an
+        // ambiguous empty fetch-preparation result.
         fetchBuffer.wakeup();
     }
 
@@ -408,9 +409,10 @@ public abstract class AbstractFetch implements Closeable {
             fetchable.put(fetchTarget, sessionHandler.newBuilder());
         });
 
-        // Closing is a one-shot operation, not part of the steady-state polling loop, so always waking the
-        // buffer here is safe even if this ends up empty.
-        return new FetchRequestPreparationResult(convert(fetchable), true);
+        return new FetchRequestPreparationResult(
+            convert(fetchable),
+            EnumSet.of(FetchRequestPreparationCondition.CLOSING)
+        );
     }
 
     /**
@@ -432,24 +434,24 @@ public abstract class AbstractFetch implements Closeable {
         List<TopicPartition> unbuffered = fetchablePartitions(buffered);
 
         if (unbuffered.isEmpty()) {
-            // If every currently fetchable partition already has buffered data, there is no need to issue
-            // additional fetch requests. This is a safe point to wake the buffer immediately because progress
-            // can be made by consuming the buffered data. If no partitions are fetchable at all (for example,
-            // no assignment yet, invalid positions, or paused), the state will not change until some external
-            // event occurs, so an immediate wakeup would only busy-loop the caller rather than allowing it
-            // to remain parked until bounded by other mechanisms (such as heartbeat interval or poll timeout).
-            boolean canWakeBufferIfNoFetchRequestsToSend = subscriptions.hasFetchablePartitions(tp -> true);
-            return new FetchRequestPreparationResult(Map.of(), canWakeBufferIfNoFetchRequestsToSend);
+            FetchRequestPreparationCondition condition = subscriptions.hasFetchablePartitions(tp -> true)
+                ? FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED
+                : FetchRequestPreparationCondition.NO_FETCHABLE_PARTITIONS;
+            return new FetchRequestPreparationResult(Map.of(), EnumSet.of(condition));
         }
 
         Set<Integer> bufferedNodes = bufferedNodes(buffered, currentTimeMs);
+        EnumSet<FetchRequestPreparationCondition> conditions =
+            EnumSet.noneOf(FetchRequestPreparationCondition.class);
 
         for (TopicPartition partition : unbuffered) {
             SubscriptionState.FetchPosition position = positionForPartition(partition);
             Optional<Node> nodeOpt = maybeNodeForPosition(partition, position, currentTimeMs);
 
-            if (nodeOpt.isEmpty())
+            if (nodeOpt.isEmpty()) {
+                conditions.add(FetchRequestPreparationCondition.MISSING_LEADER);
                 continue;
+            }
 
             Node node = nodeOpt.get();
 
@@ -459,15 +461,18 @@ public abstract class AbstractFetch implements Closeable {
                 // If we try to send during the reconnect backoff window, then the request is just
                 // going to be failed anyway before being sent, so skip sending the request for now
                 log.trace("Skipping fetch for partition {} because node {} is awaiting reconnect backoff", partition, node);
+                conditions.add(FetchRequestPreparationCondition.RECONNECT_BACKOFF);
             } else if (nodesWithPendingFetchRequests.contains(node.id())) {
                 // If there's already an inflight request for this node, don't issue another request.
                 log.trace("Skipping fetch for partition {} because previous request to {} has not been processed", partition, node);
+                conditions.add(FetchRequestPreparationCondition.REQUEST_IN_FLIGHT);
             } else if (bufferedNodes.contains(node.id())) {
                 // While a node has buffered data, don't fetch other partition data from it. Because the buffered
                 // partitions are not included in the fetch request, those partitions will be inadvertently dropped
                 // from the broker fetch session cache. In some cases, that could lead to the entire fetch session
                 // being evicted.
                 log.trace("Skipping fetch for partition {} because its leader node {} hosts buffered partitions", partition, node);
+                conditions.add(FetchRequestPreparationCondition.WAITING_FOR_BUFFER_DRAIN);
             } else {
                 // if there is a leader and no in-flight requests, issue a new fetch
                 FetchSessionHandler.Builder builder = fetchable.computeIfAbsent(node, k -> {
@@ -488,47 +493,55 @@ public abstract class AbstractFetch implements Closeable {
             }
         }
 
-        // If every fetchable-but-unbuffered partition was skipped (for example, due to reconnect backoff,
-        // an in-flight request, or its node already hosting buffered partitions), the state will only
-        // change over time. An immediate wakeup would therefore just busy-loop the caller instead of
-        // respecting its normal backoff. This case is only relevant when fetchable partitions exist but
-        // the resulting request map is empty; otherwise the caller ignores this flag.
-        return new FetchRequestPreparationResult(convert(fetchable), false);
+        return new FetchRequestPreparationResult(convert(fetchable), conditions);
     }
 
     /**
-     * The result of preparing fetch requests via {@link #prepareFetchRequests()} or
-     * {@link #prepareCloseFetchSessionRequests()}.
+     * Conditions observed while preparing fetch requests. More than one condition may apply when partitions are
+     * blocked for different reasons.
+     */
+    protected enum FetchRequestPreparationCondition {
+        DATA_ALREADY_BUFFERED,
+        NO_FETCHABLE_PARTITIONS,
+        MISSING_LEADER,
+        RECONNECT_BACKOFF,
+        REQUEST_IN_FLIGHT,
+        WAITING_FOR_BUFFER_DRAIN,
+        CLOSING
+    }
+
+    /**
+     * An explicit description of both the requests that can be sent now and the conditions that prevented other
+     * fetch requests from being created.
      */
     protected static final class FetchRequestPreparationResult {
-
         private final Map<Node, FetchSessionHandler.FetchRequestData> requests;
-        private final boolean canWakeBufferIfNoFetchRequestsToSend;
+        private final Set<FetchRequestPreparationCondition> conditions;
 
-        FetchRequestPreparationResult(
-                Map<Node, FetchSessionHandler.FetchRequestData> requests,
-                boolean canWakeBufferIfNoFetchRequestsToSend
-        ) {
-            this.requests = requests;
-            this.canWakeBufferIfNoFetchRequestsToSend = canWakeBufferIfNoFetchRequestsToSend;
+        FetchRequestPreparationResult(final Map<Node, FetchSessionHandler.FetchRequestData> requests,
+                                      final Set<FetchRequestPreparationCondition> conditions) {
+            // Each preparation creates and transfers ownership of this map to the result. Wrapping instead of
+            // copying keeps the hot fetch path immutable to callers without adding another full map allocation.
+            this.requests = Collections.unmodifiableMap(requests);
+            this.conditions = conditions.isEmpty()
+                ? Collections.emptySet()
+                : Collections.unmodifiableSet(EnumSet.copyOf(conditions));
         }
 
-        /**
-         * {@link Map} of {@link Node nodes} to the {@link FetchSessionHandler.FetchRequestData} to send them,
-         * empty if there is nothing to fetch right now.
-         */
         Map<Node, FetchSessionHandler.FetchRequestData> requests() {
             return requests;
         }
 
-        /**
-         * Whether, if {@link #requests()} is empty, this is a safe point to wake up the {@link FetchBuffer}
-         * immediately, as opposed to a state that will only change once some other event happens (for example, a
-         * metadata update, reconnect backoff expiration, or an in-flight response arriving). Ignored when
-         * {@link #requests()} is non-empty.
-         */
-        boolean canWakeBufferIfNoFetchRequestsToSend() {
-            return canWakeBufferIfNoFetchRequestsToSend;
+        Set<FetchRequestPreparationCondition> conditions() {
+            return conditions;
+        }
+
+        boolean shouldWakeApplicationThread() {
+            if (!requests.isEmpty())
+                return false;
+
+            return conditions.contains(FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED)
+                || conditions.contains(FetchRequestPreparationCondition.CLOSING);
         }
     }
 

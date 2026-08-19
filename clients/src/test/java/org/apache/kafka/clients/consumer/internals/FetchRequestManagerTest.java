@@ -358,6 +358,9 @@ public class FetchRequestManagerTest {
     public void testNoFetchablePartitionsDoesNotWakeUpBuffer() throws InterruptedException {
         buildFetcher();
 
+        AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationCondition.NO_FETCHABLE_PARTITIONS), result.conditions());
+
         // A consumer thread blocked waiting for data on the empty buffer.
         Thread blockedOnBuffer = new Thread(() -> fetcher.fetchBuffer.awaitWakeup(time.timer(3_600_000L)));
         blockedOnBuffer.setDaemon(true);
@@ -402,6 +405,11 @@ public class FetchRequestManagerTest {
         networkClientDelegate.poll(time.timer(0));
         assertTrue(fetcher.hasCompletedFetches());
 
+        AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
+        assertTrue(result.requests().isEmpty());
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED), result.conditions());
+        assertTrue(result.shouldWakeApplicationThread());
+
         assertEquals(0, sendFetches());
         assertEquals(retryBackoffMs, fetcher.maximumTimeToWait(time.milliseconds()));
     }
@@ -441,13 +449,39 @@ public class FetchRequestManagerTest {
         Node node = metadata.fetch().leaderFor(tp0);
 
         client.backoff(node, 500);
+        AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
+        assertTrue(result.requests().isEmpty());
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationCondition.RECONNECT_BACKOFF), result.conditions());
+        assertFalse(result.shouldWakeApplicationThread());
+
         assertEquals(0, sendFetches());
-        assertEquals(retryBackoffMs, fetcher.maximumTimeToWait(time.milliseconds()));
+        long remainingMs = fetcher.maximumTimeToWait(time.milliseconds());
+        assertTrue(remainingMs > 0L && remainingMs <= retryBackoffMs);
+        assertEquals(ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE,
+            fetcher.progressIntent(time.milliseconds()).waitMode());
 
         // Once the backoff clears, a fetch request can be sent and maximumTimeToWait reverts to unbounded.
         time.sleep(500);
         assertEquals(1, sendFetches());
         assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+    }
+
+    @Test
+    public void testRetryDeadlineWinsWhenInFlightAndReconnectConditionsAreMixed() {
+        buildFetcher();
+        AbstractFetch.FetchRequestPreparationResult result = new AbstractFetch.FetchRequestPreparationResult(
+            Map.of(),
+            Set.of(
+                AbstractFetch.FetchRequestPreparationCondition.REQUEST_IN_FLIGHT,
+                AbstractFetch.FetchRequestPreparationCondition.RECONNECT_BACKOFF
+            )
+        );
+
+        long currentTimeMs = time.milliseconds();
+        ConsumerReactorProgress.ProgressIntent intent = fetcher.progressIntentFor(result, currentTimeMs);
+
+        assertEquals(ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE, intent.waitMode());
+        assertEquals(retryBackoffMs, intent.remainingMs(currentTimeMs));
     }
 
     @Test
@@ -4405,6 +4439,10 @@ public class FetchRequestManagerTest {
 
         public void setAuthenticationException(AuthenticationException authenticationException) {
             this.authenticationException = authenticationException;
+        }
+
+        private FetchRequestPreparationResult prepareFetchRequestResult() {
+            return prepareFetchRequests();
         }
 
         @Override

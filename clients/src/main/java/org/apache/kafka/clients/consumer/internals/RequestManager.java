@@ -28,6 +28,18 @@ import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.
 public interface RequestManager {
 
     /**
+     * Describes the condition that must change before the application thread needs to observe this manager again.
+     * Implementations that have not migrated to typed progress intents retain their existing
+     * {@link #maximumTimeToWait(long)} behavior through this adapter.
+     */
+    default ConsumerReactorProgress.ProgressIntent progressIntent(long currentTimeMs) {
+        return ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(
+            currentTimeMs,
+            maximumTimeToWait(currentTimeMs)
+        );
+    }
+
+    /**
      * During normal operation of the {@link Consumer}, a request manager may need to send out network requests.
      * Implementations can return {@link PollResult their need for network I/O} by returning the requests here.
      * This method is called within a single-threaded context from
