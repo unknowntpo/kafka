@@ -295,14 +295,15 @@ public class ApplicationEventProcessorTest {
 
         setupProcessor(true);
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
-        when(offsetsRequestManager.updateFetchPositions(event.deadlineMs())).thenReturn(CompletableFuture.completedFuture(null));
+        when(offsetsRequestManager.updateFetchPositionsForAsyncPoll(event.deadlineMs()))
+            .thenReturn(CompletableFuture.completedFuture(null));
         when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
         processor.process(event);
         assertTrue(event.isComplete());
         verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());
         verify(membershipManager).onConsumerPoll();
         verify(heartbeatRequestManager).resetPollTimer(event.pollTimeMs());
-        verify(offsetsRequestManager).updateFetchPositions(event.deadlineMs());
+        verify(offsetsRequestManager).updateFetchPositionsForAsyncPoll(event.deadlineMs());
         verify(fetchRequestManager).createFetchRequests();
     }
 
@@ -725,7 +726,8 @@ public class ApplicationEventProcessorTest {
         when(cluster.topics()).thenReturn(Set.of(topic));
 
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
-        when(offsetsRequestManager.updateFetchPositions(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+        when(offsetsRequestManager.updateFetchPositionsForAsyncPoll(anyLong()))
+            .thenReturn(CompletableFuture.completedFuture(null));
 
         setupProcessor(true);
         processor.process(new AsyncPollEvent(110, 100));
@@ -747,7 +749,7 @@ public class ApplicationEventProcessorTest {
     }
 
     private void testUpdateFetchPositionsWithFetchCommittedOffsetsTimeout() {
-        when(offsetsRequestManager.updateFetchPositions(anyLong())).thenReturn(
+        when(offsetsRequestManager.updateFetchPositionsForAsyncPoll(anyLong())).thenReturn(
             CompletableFuture.failedFuture(new Throwable("Intentional failure"))
         );
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
@@ -755,7 +757,7 @@ public class ApplicationEventProcessorTest {
         // Verify that the poll completes even when the update fetch positions throws an error.
         AsyncPollEvent event = new AsyncPollEvent(110, 100);
         processor.process(event);
-        verify(offsetsRequestManager).updateFetchPositions(anyLong());
+        verify(offsetsRequestManager).updateFetchPositionsForAsyncPoll(anyLong());
         assertTrue(event.isComplete());
         assertFalse(event.error().isEmpty());
     }

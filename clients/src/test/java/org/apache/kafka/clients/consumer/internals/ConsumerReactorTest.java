@@ -118,7 +118,14 @@ public class ConsumerReactorTest {
         when(offsetsRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        when(offsetsRequestManager.reconcile(anyLong())).thenCallRealMethod();
+        when(offsetsRequestManager.reconcile(anyLong())).thenAnswer(invocation -> {
+            long currentTimeMs = invocation.getArgument(0);
+            return ManagerReconcileResult.of(
+                offsetsRequestManager,
+                offsetsRequestManager.poll(currentTimeMs),
+                offsetsRequestManager.nextReconcile(currentTimeMs)
+            );
+        });
         when(heartbeatRequestManager.reconcile(anyLong())).thenCallRealMethod();
         when(coordinatorRequestManager.reconcile(anyLong())).thenCallRealMethod();
         when(offsetsRequestManager.nextReconcile(anyLong())).thenCallRealMethod();

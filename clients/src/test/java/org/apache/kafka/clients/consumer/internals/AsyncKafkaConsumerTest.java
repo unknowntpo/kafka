@@ -28,6 +28,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.GroupProtocol;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.NoOffsetForPartitionException;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetAndTimestamp;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
@@ -127,6 +128,7 @@ import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -2556,6 +2558,78 @@ public class AsyncKafkaConsumerTest {
             consumer.wakeup();
         }
         TestUtils.assertFutureThrows(WakeupException.class, pollingFuture);
+    }
+
+    @Test
+    public void testGrouplessPollWakesWhenPositionUpdateFails() throws Exception {
+        final Properties props = requiredConsumerConfig();
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "none");
+        final ConsumerConfig config = new ConsumerConfig(props);
+
+        final LogContext realLogContext = new LogContext();
+        final TopicPartition topicPartition = new TopicPartition("topic1", 0);
+        final SubscriptionState subscriptions = new SubscriptionState(
+            realLogContext,
+            AutoOffsetResetStrategy.NONE
+        );
+        final ConsumerMetadata realMetadata = new ConsumerMetadata(
+            0,
+            0,
+            Long.MAX_VALUE,
+            false,
+            false,
+            subscriptions,
+            realLogContext,
+            new ClusterResourceListeners()
+        );
+        final AtomicBoolean capturePoll = new AtomicBoolean(false);
+        final CountDownLatch reactorPolledAfterAsyncPoll = new CountDownLatch(1);
+        final MockClient client = new MockClient(time, realMetadata) {
+            @Override
+            public List<ClientResponse> poll(long timeoutMs, long now) {
+                if (capturePoll.get())
+                    reactorPolledAfterAsyncPoll.countDown();
+                return super.poll(0L, now);
+            }
+        };
+
+        consumer = new AsyncKafkaConsumer<>(
+            realLogContext,
+            time,
+            config,
+            new StringDeserializer(),
+            new StringDeserializer(),
+            client,
+            subscriptions,
+            realMetadata
+        );
+        consumer.assign(singleton(topicPartition));
+        capturePoll.set(true);
+
+        Future<ConsumerRecords<String, String>> pollingFuture = CompletableFuture.supplyAsync(
+            () -> consumer.poll(Duration.ofSeconds(30))
+        );
+
+        try {
+            assertTrue(
+                reactorPolledAfterAsyncPoll.await(TestUtils.DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS),
+                "Reactor did not process the async poll event"
+            );
+            ExecutionException exception = assertThrows(
+                ExecutionException.class,
+                () -> pollingFuture.get(2, TimeUnit.SECONDS)
+            );
+            assertInstanceOf(NoOffsetForPartitionException.class, exception.getCause());
+        } finally {
+            if (!pollingFuture.isDone())
+                consumer.wakeup();
+            try {
+                pollingFuture.get(TestUtils.DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+            } catch (Exception ignored) {
+                // The expected position error or cleanup wakeup completes the polling thread.
+            }
+        }
     }
 
     @Test

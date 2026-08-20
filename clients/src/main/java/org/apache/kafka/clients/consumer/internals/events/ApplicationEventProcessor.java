@@ -753,7 +753,8 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
             });
         }
 
-        CompletableFuture<Void> updatePositionsFuture = requestManagers.offsetsRequestManager.updateFetchPositions(event.deadlineMs());
+        CompletableFuture<Void> updatePositionsFuture =
+            requestManagers.offsetsRequestManager.updateFetchPositionsForAsyncPoll(event.deadlineMs());
         event.markValidatePositionsComplete();
 
         updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
