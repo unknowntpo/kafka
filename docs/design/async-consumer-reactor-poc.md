@@ -104,7 +104,9 @@ substitute for describing why progress became possible.
 ### Phase 1: Make the progress decision explicit
 
 Replace the anonymous cached timeout with an immutable decision snapshot. Record when it was computed and which
-manager supplied the limiting deadline. Compute it from a post-I/O time snapshot.
+manager supplied the limiting deadline. Publish the pre-I/O decision which bounds the network poll, deliver its
+expiry, and then recompute from a post-I/O time snapshot. This ordering matters for compatibility adapters which
+still express a relative delay: recomputing first would move an expired deadline into the future.
 
 This phase is implemented by this POC. It intentionally preserves behavior while creating an observable seam for
 later phases.
@@ -113,7 +115,7 @@ Exit criteria:
 
 * one tested aggregation function chooses the application wait deadline;
 * the published decision is immutable and safe to read from the application thread;
-* the decision uses time sampled after network I/O;
+* the decision which bounded I/O is delivered before a fresh post-I/O decision replaces it;
 * no public API changes.
 
 ### Phase 2: Replace manager-local delays with progress intents
@@ -133,19 +135,25 @@ AWAIT_DEADLINE(absoluteDeadlineMs)
 ```
 
 Managers that have not migrated use a compatibility adapter around `maximumTimeToWait()`. `FetchRequestManager`
-produces its intent directly from the latest typed fetch-preparation result, so its previous application-thread
-rescan of `SubscriptionState` and `FetchBuffer` has been removed. Absolute deadlines prevent time spent between
-publication and reading from being added to the wait again.
+produces its intent directly from the latest typed fetch-preparation result instead of reducing every non-in-flight
+state to the same anonymous backoff. Absolute deadlines prevent time spent between publication and reading from
+being added to the wait again. The application-side `SubscriptionState` / `FetchBuffer` safety rescan added by PR
+23014 remains in place until the typed publication protocol has equivalent end-to-end coverage. Re-observing the
+same blocking condition preserves its existing deadline; otherwise unrelated events could continuously move the
+retry forward and create starvation. The compatibility adapter is explicitly tagged so the reactor conservatively
+preserves its earlier deadline across early network returns without applying that heuristic to native typed intents.
 
 The publication protocol is part of the type boundary, not an implementation detail:
 
 1. publish the immutable wait snapshot;
 2. wake the application-side fetch wait if the new deadline is earlier;
-3. wake once when each absolute deadline expires, even if it is later than the previous deadline.
+3. wake once when each semantic decision's absolute deadline expires, even if it is later than the previous
+   deadline;
+4. atomically mark that expiry as delivered, so the application cannot repeatedly observe a stale `0 ms` wait.
 
-The third rule is required for consumers without a group id, because that application path does not consult
-`maximumTimeToWait()`. The typed deadline also limits the background network poll, so the reactor reaches the
-deadline without depending on application-thread polling.
+The third rule is required because an application thread may already be blocked using the previous snapshot and
+cannot read a newly shortened `maximumTimeToWait()` until it is released. The typed deadline also limits the
+background network poll, so the reactor reaches the deadline without depending on application-thread polling.
 
 ### Phase 3: Remove generic fetch wakeups
 
@@ -175,8 +183,9 @@ CLOSING
 ```
 
 An empty result wakes the application thread only for `DATA_ALREADY_BUFFERED` or `CLOSING`. Completing an in-flight
-request wakes it on every terminal response or failure. Reconnect and other transient blockers contribute a bounded
-retry deadline instead of an immediate wakeup.
+request wakes it on every terminal response or failure. Reconnect contributes the network client's actual remaining
+connection delay, including exponential backoff, instead of substituting the configured base retry interval or an
+immediate wakeup. Missing metadata contributes the configured retry deadline.
 
 When conditions are mixed across partitions, a retry deadline wins over an event-only blocker. For example,
 `REQUEST_IN_FLIGHT` on one node does not hide `RECONNECT_BACKOFF` on another node.
@@ -205,10 +214,19 @@ and the first direct typed-intent producer.
 
 The POC includes a deterministic `FetchBuffer` concurrency test plus a cross-component test of the complete async
 consumer chain with only its socket replaced by `MockClient`. In the latter, a consumer without a group id and with
-a valid position cannot rely on the application-side retry fallback: the reactor must cap network polling to the
-100 ms reconnect deadline, notify the blocked caller, and cause a new fetch to be generated. The real KRaft
-`PlaintextConsumerPollTest` suite also remains green. Before production integration, a broker-restart smoke test
-should repeat the invariant against real sockets, and direct fetch-buffer notifications should migrate into named
-reactor effects. The application-thread invalid-position check in `AsyncKafkaConsumer.pollForFetches()` remains
-intentionally in place until position validation has an explicit completion event; removing that independent
-safety bound now would introduce a liveness regression.
+a valid position proves that the reactor caps network polling to the 100 ms reconnect deadline and eventually
+generates a new fetch. The separate concurrency test proves publication and expiry wakeups, because current trunk's
+application-side safety rescan also bounds the caller's next wait. The real KRaft `PlaintextConsumerPollTest` suite
+remains green. Before production integration, a broker-restart smoke test should repeat the invariant against real
+sockets, and direct fetch-buffer notifications should migrate into named reactor effects. The application-side
+safety checks in `AsyncKafkaConsumer.pollForFetches()` remain intentionally in place until typed progress decisions
+have equivalent end-to-end coverage; removing those independent bounds now would introduce a liveness regression.
+
+## Validation Checkpoint (2026-08-20)
+
+* Focused reactor, fetch-manager, and groupless cross-component regressions passed with Checkstyle and SpotBugs.
+* The complete `clients` unit suite passed: 13,576 tests, zero failures.
+* The KRaft `PlaintextConsumerPollTest` integration suite passed: 24 tests, zero failures.
+
+These results validate this POC checkpoint, not the later removal of the application-side safety rescan. That step
+still requires the real-socket broker-restart smoke test and terminal-path coverage listed in the evidence document.

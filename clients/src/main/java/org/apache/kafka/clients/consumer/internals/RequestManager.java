@@ -33,7 +33,7 @@ public interface RequestManager {
      * {@link #maximumTimeToWait(long)} behavior through this adapter.
      */
     default ConsumerReactorProgress.ProgressIntent progressIntent(long currentTimeMs) {
-        return ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(
+        return ConsumerReactorProgress.ProgressIntent.awaitCompatibilityDeadlineAfter(
             currentTimeMs,
             maximumTimeToWait(currentTimeMs)
         );

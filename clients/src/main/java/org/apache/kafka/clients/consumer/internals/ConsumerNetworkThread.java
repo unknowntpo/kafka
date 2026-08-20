@@ -83,7 +83,6 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
     private volatile ConsumerReactorProgress.ApplicationWait applicationWait;
-    private volatile long lastExpiredDeadlineWakeupAtMs = Long.MIN_VALUE;
     private long lastPollTimeMs = 0L;
 
     public ConsumerNetworkThread(LogContext logContext,
@@ -234,6 +233,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
             requestManagers.entries(),
             currentTimeMs
         );
+        progressCheck = publishApplicationWait(progressCheck, currentTimeMs);
         pollWaitTimeMs = Math.min(
             pollWaitTimeMs,
             timeUntilNextProgressCheck(progressCheck, currentTimeMs)
@@ -241,9 +241,17 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
 
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
-        // Network I/O may block and change manager state, so publish a decision computed from a fresh time snapshot
-        // rather than reusing currentTimeMs from before the poll.
-        publishApplicationWait(time.milliseconds());
+        // Deliver the exact decision which bounded this network poll before asking managers for a fresh one. Legacy
+        // managers describe relative waits, so recomputing first could move an expired deadline into the future.
+        long afterNetworkPollMs = time.milliseconds();
+        deliverExpiredApplicationWait(afterNetworkPollMs);
+
+        // Network I/O may change manager state. Publish the resulting decision from the fresh time snapshot.
+        publishApplicationWait(
+            ConsumerReactorProgress.decideApplicationWait(requestManagers.entries(), afterNetworkPollMs),
+            afterNetworkPollMs
+        );
+        deliverExpiredApplicationWait(afterNetworkPollMs);
 
         reapExpiredApplicationEvents(currentTimeMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
@@ -350,40 +358,61 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      * @return The maximum delay in milliseconds
      */
     public long maximumTimeToWait() {
-        return applicationWait.remainingMs(time.milliseconds());
+        return applicationWait.remainingMsForApplication(time.milliseconds());
     }
 
-    private void publishApplicationWait(final long currentTimeMs) {
+    private ConsumerReactorProgress.ApplicationWait publishApplicationWait(
+        final ConsumerReactorProgress.ApplicationWait decision,
+        final long currentTimeMs
+    ) {
         ConsumerReactorProgress.ApplicationWait previous = applicationWait;
-        ConsumerReactorProgress.ApplicationWait next = ConsumerReactorProgress.decideApplicationWait(
-            requestManagers.entries(),
-            currentTimeMs
-        );
+        ConsumerReactorProgress.ApplicationWait next = decision;
+
+        // A legacy manager may repeatedly express a fixed relative delay. Preserve its earlier absolute deadline
+        // across unrelated early network returns; otherwise every recomputation can postpone progress forever.
+        // Once that deadline is delivered, a fresh later decision is allowed to start the next interval.
+        if (previous.isPendingCompatibilityDeadline(currentTimeMs)
+            && next.compatibilityDeadline()
+            && previous.sameSource(next)
+            && previous.deadlineAtMs() < next.deadlineAtMs()) {
+            next = previous;
+        }
+
+        if (next.sameDecision(previous) && previous.deadlineNotificationDelivered())
+            next = next.withDeadlineNotificationDelivered();
 
         // Publish before signaling. Fetch buffers latch wakeups, so the application either observes the new
         // snapshot before waiting or is released after it has started waiting on the old snapshot.
         applicationWait = next;
-        boolean expiredDeadlineNeedsWakeup =
-            next.waitMode() == ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE
-                && next.remainingMs(currentTimeMs) == 0L
-                && next.deadlineAtMs() != lastExpiredDeadlineWakeupAtMs;
-        if (expiredDeadlineNeedsWakeup)
-            lastExpiredDeadlineWakeupAtMs = next.deadlineAtMs();
 
-        if (next.shortens(previous) || expiredDeadlineNeedsWakeup)
+        // An already-expired decision is delivered by deliverExpiredApplicationWait so it produces exactly one
+        // notification. Future deadlines wake a caller which may already be blocked using an older snapshot.
+        if (next.shortens(previous) && next.remainingMs(currentTimeMs) > 0L)
             requestManagers.wakeupApplicationThread();
+
+        return next;
+    }
+
+    private void deliverExpiredApplicationWait(final long currentTimeMs) {
+        ConsumerReactorProgress.ApplicationWait current = applicationWait;
+        if (current.waitMode() != ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE
+            || current.remainingMs(currentTimeMs) > 0L
+            || current.deadlineNotificationDelivered()) {
+            return;
+        }
+
+        // Mark delivery in the published snapshot before signaling. This prevents the released application thread
+        // from observing a stale 0ms timeout and spinning while the manager processes the resulting event.
+        applicationWait = current.withDeadlineNotificationDelivered();
+        requestManagers.wakeupApplicationThread();
     }
 
     private long timeUntilNextProgressCheck(final ConsumerReactorProgress.ApplicationWait decision,
                                             final long currentTimeMs) {
-        if (decision.waitMode() == ConsumerReactorProgress.WaitMode.AWAIT_EVENT)
+        if (decision.waitMode() == ConsumerReactorProgress.WaitMode.AWAIT_EVENT
+            || decision.deadlineNotificationDelivered())
             return Long.MAX_VALUE;
-
-        long remainingMs = decision.remainingMs(currentTimeMs);
-        if (remainingMs == 0L && decision.deadlineAtMs() == lastExpiredDeadlineWakeupAtMs)
-            return Long.MAX_VALUE;
-
-        return remainingMs;
+        return decision.remainingMs(currentTimeMs);
     }
 
     // Visible for testing. The immutable snapshot is safe to inspect without exposing request-manager state.

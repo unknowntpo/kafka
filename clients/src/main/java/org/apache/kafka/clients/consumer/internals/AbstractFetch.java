@@ -116,6 +116,11 @@ public abstract class AbstractFetch implements Closeable {
     protected abstract boolean isUnavailable(Node node);
 
     /**
+     * Return the remaining connection backoff for a node which is currently unavailable.
+     */
+    protected abstract long unavailableTimeRemainingMs(Node node, long currentTimeMs);
+
+    /**
      * Checks for an authentication error on a given node and throws the exception if it exists.
      *
      * @param node {@link Node} to check for a previous {@link AuthenticationException}; if found it is thrown
@@ -443,6 +448,7 @@ public abstract class AbstractFetch implements Closeable {
         Set<Integer> bufferedNodes = bufferedNodes(buffered, currentTimeMs);
         EnumSet<FetchRequestPreparationCondition> conditions =
             EnumSet.noneOf(FetchRequestPreparationCondition.class);
+        long reconnectBackoffRemainingMs = Long.MAX_VALUE;
 
         for (TopicPartition partition : unbuffered) {
             SubscriptionState.FetchPosition position = positionForPartition(partition);
@@ -462,6 +468,10 @@ public abstract class AbstractFetch implements Closeable {
                 // going to be failed anyway before being sent, so skip sending the request for now
                 log.trace("Skipping fetch for partition {} because node {} is awaiting reconnect backoff", partition, node);
                 conditions.add(FetchRequestPreparationCondition.RECONNECT_BACKOFF);
+                reconnectBackoffRemainingMs = Math.min(
+                    reconnectBackoffRemainingMs,
+                    unavailableTimeRemainingMs(node, currentTimeMs)
+                );
             } else if (nodesWithPendingFetchRequests.contains(node.id())) {
                 // If there's already an inflight request for this node, don't issue another request.
                 log.trace("Skipping fetch for partition {} because previous request to {} has not been processed", partition, node);
@@ -493,7 +503,7 @@ public abstract class AbstractFetch implements Closeable {
             }
         }
 
-        return new FetchRequestPreparationResult(convert(fetchable), conditions);
+        return new FetchRequestPreparationResult(convert(fetchable), conditions, reconnectBackoffRemainingMs);
     }
 
     /**
@@ -517,15 +527,23 @@ public abstract class AbstractFetch implements Closeable {
     protected static final class FetchRequestPreparationResult {
         private final Map<Node, FetchSessionHandler.FetchRequestData> requests;
         private final Set<FetchRequestPreparationCondition> conditions;
+        private final long reconnectBackoffRemainingMs;
 
         FetchRequestPreparationResult(final Map<Node, FetchSessionHandler.FetchRequestData> requests,
                                       final Set<FetchRequestPreparationCondition> conditions) {
+            this(requests, conditions, Long.MAX_VALUE);
+        }
+
+        FetchRequestPreparationResult(final Map<Node, FetchSessionHandler.FetchRequestData> requests,
+                                      final Set<FetchRequestPreparationCondition> conditions,
+                                      final long reconnectBackoffRemainingMs) {
             // Each preparation creates and transfers ownership of this map to the result. Wrapping instead of
             // copying keeps the hot fetch path immutable to callers without adding another full map allocation.
             this.requests = Collections.unmodifiableMap(requests);
             this.conditions = conditions.isEmpty()
                 ? Collections.emptySet()
                 : Collections.unmodifiableSet(EnumSet.copyOf(conditions));
+            this.reconnectBackoffRemainingMs = reconnectBackoffRemainingMs;
         }
 
         Map<Node, FetchSessionHandler.FetchRequestData> requests() {
@@ -534,6 +552,10 @@ public abstract class AbstractFetch implements Closeable {
 
         Set<FetchRequestPreparationCondition> conditions() {
             return conditions;
+        }
+
+        long reconnectBackoffRemainingMs() {
+            return reconnectBackoffRemainingMs;
         }
 
         boolean shouldWakeApplicationThread() {
