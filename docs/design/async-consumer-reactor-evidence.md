@@ -61,6 +61,9 @@ released. A later Claude Fable review of the implemented reconciliation boundary
 risks: a persistent compatibility `0 ms` result could recreate an expired deadline on every loop, and preserving
 only the global limiting deadline could erase an unaffected manager's earlier deadline. The POC now uses a
 per-manager schedule cache and one-shot compatibility-deadline delivery to cover both findings.
+The same review also found that `PollResult.timeUntilNextPollMs` still bypassed the published schedule. The migration
+adapter now converts that value to a Reactor-only `NextReconcile`: it participates in the single schedule and bounds
+network polling, but cannot synthesize an application wakeup.
 Before PR 23014, the groupless path did not read `maximumTimeToWait()` at all; current trunk now reads it for every
 consumer, but that fixes the next wait rather than an already-blocked wait.
 
@@ -74,6 +77,8 @@ The rescan-removal slice uses the following properties as its deterministic gate
 | stale `0 ms` wait | mark expiry delivery in the immutable snapshot before waking and preserve it for the same semantic decision | `testExpiredDeadlineDoesNotLeaveZeroReactorSchedule`, `testSameDeadlineFromDifferentSourceIsANewTransition` |
 | persistent compatibility `0 ms` wait | suppress a delivered zero wait until the manager reports new progress or a positive delay | `ManagerReconcileCacheTest.testDeliveredPersistentZeroCompatibilityDeadlineIsSuppressed`, `testPersistentZeroCompatibilityWaitDoesNotBusyLoop` |
 | incremental multi-manager scheduling | retain each unaffected manager's contribution when one affected manager is reconciled | `ManagerReconcileCacheTest.testIncrementalUpdateRetainsUnaffectedManagerDeadline`, `testNextFullReconciliationRecomputesCrossManagerSchedule` |
+| split network/application scheduling | normalize legacy poll delays into the same immutable schedule while keeping Reactor-only deadlines from waking the application | `testLegacyPollTimeoutIsPublishedInReactorSchedule`, `ManagerReconcileCacheTest.testLegacyPollDeadlineDoesNotDriftAcrossEarlyReconciliation` |
+| delivered deadline reactivation | delivering a later manager deadline must not reactivate an earlier delivered deadline | `ManagerReconcileCacheTest.testDeliveringAnotherManagerDeadlineDoesNotReactivateEarlierDeadline` |
 | same-source, same-timestamp retry | include the manager-owned semantic generation in native deadline identity | `testSameSourceAndDeadlineWithNewGenerationIsANewTransition` |
 | deadline starvation | do not postpone an absolute deadline when the same block is re-observed | `ReactorScheduleTest.testReactorScheduleSubtractsElapsedTime`, `testRepeatedPreparationDoesNotPostponeRetryDeadline` |
 | reconnect retry before capacity | use the network client's actual connection delay, including exponential backoff | `testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff` |

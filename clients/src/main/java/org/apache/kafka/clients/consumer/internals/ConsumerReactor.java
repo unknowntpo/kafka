@@ -248,8 +248,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             ManagerReconcileResult result = rm.reconcile(currentTimeMs);
             reconcileResults.add(result);
             stageReconcileResult(result, currentTimeMs);
-            long timeoutMs = networkClientDelegate.addAll(result.pollResult());
-            pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
+            networkClientDelegate.addAll(result.pollResult().unsentRequests);
         }
         managerReconcileCache.retainManagers(reconcileResults);
 
@@ -414,7 +413,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             ManagerReconcileResult result = manager.reconcile(currentTimeMs);
             results.add(result);
             stageReconcileResult(result, currentTimeMs);
-            networkClientDelegate.addAll(result.pollResult());
+            networkClientDelegate.addAll(result.pollResult().unsentRequests);
         }
         return results;
     }
@@ -447,8 +446,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
 
     private void deliverExpiredReactorSchedule(final long currentTimeMs) {
         ReactorSchedule current = reactorSchedule;
-        if (current.nextReconcileType() != NextReconcile.Type.AT_DEADLINE
-            || current.remainingMs(currentTimeMs) > 0L
+        if (current.applicationNextReconcileType() != NextReconcile.Type.AT_DEADLINE
+            || current.applicationRemainingMs(currentTimeMs) > 0L
             || current.deadlineNotificationDelivered()) {
             return;
         }
@@ -493,8 +492,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
 
     private long timeUntilNextReconcile(final ReactorSchedule decision,
                                         final long currentTimeMs) {
-        if (decision.nextReconcileType() == NextReconcile.Type.ON_EVENT
-            || decision.deadlineNotificationDelivered())
+        if (decision.nextReconcileType() == NextReconcile.Type.ON_EVENT)
             return Long.MAX_VALUE;
         return decision.remainingMs(currentTimeMs);
     }

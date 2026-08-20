@@ -83,12 +83,60 @@ public class ManagerReconcileCacheTest {
         assertEquals(NextReconcile.Type.ON_EVENT, schedule(cache, 52L).nextReconcileType());
     }
 
+    @Test
+    public void testLegacyPollDeadlineDoesNotDriftAcrossEarlyReconciliation() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerReconcileCache cache = new ManagerReconcileCache();
+
+        cache.update(pollResult(manager, 100L), 0L);
+        cache.update(pollResult(manager, 100L), 10L);
+
+        ReactorSchedule beforeDeadline = schedule(cache, 10L);
+        assertEquals(100L, beforeDeadline.reactorDeadlineAtMs());
+        assertEquals(Long.MAX_VALUE, beforeDeadline.deadlineAtMs());
+
+        cache.update(pollResult(manager, 100L), 100L);
+        assertEquals(200L, schedule(cache, 100L).reactorDeadlineAtMs());
+    }
+
+    @Test
+    public void testDeliveringAnotherManagerDeadlineDoesNotReactivateEarlierDeadline() {
+        RequestManager first = mock(RequestManager.class);
+        RequestManager second = mock(RequestManager.class);
+        ManagerReconcileCache cache = new ManagerReconcileCache();
+
+        cache.update(nativeResult(first, 10L), 0L);
+        cache.update(nativeResult(second, 20L), 0L);
+        cache.markDeadlineDelivered(schedule(cache, 10L));
+        assertEquals(20L, schedule(cache, 10L).deadlineAtMs());
+
+        cache.markDeadlineDelivered(schedule(cache, 20L));
+        assertEquals(NextReconcile.Type.ON_EVENT, schedule(cache, 20L).nextReconcileType());
+    }
+
     private static ManagerReconcileResult compatibilityResult(final RequestManager manager,
                                                                final long currentTimeMs,
                                                                final long delayMs) {
         return ManagerReconcileResult.scheduleOnly(
             manager,
             NextReconcile.atCompatibilityDeadlineAfter(currentTimeMs, delayMs)
+        );
+    }
+
+    private static ManagerReconcileResult pollResult(final RequestManager manager,
+                                                      final long delayMs) {
+        return ManagerReconcileResult.of(
+            manager,
+            new NetworkClientDelegate.PollResult(delayMs),
+            NextReconcile.onEvent()
+        );
+    }
+
+    private static ManagerReconcileResult nativeResult(final RequestManager manager,
+                                                       final long deadlineAtMs) {
+        return ManagerReconcileResult.scheduleOnly(
+            manager,
+            NextReconcile.atDeadlineAfter(0L, deadlineAtMs)
         );
     }
 

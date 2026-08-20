@@ -26,7 +26,8 @@ import java.util.Set;
 
 /**
  * Retains each manager's latest scheduling contribution so an incremental reconciliation cannot erase another
- * manager's deadline. Compatibility deadlines are preserved as absolute values across relative-time recomputation.
+ * manager's deadline. Legacy application waits and network poll delays are converted to absolute deadlines here,
+ * before the reactor forms its single schedule, so early network returns cannot move them into the future.
  */
 final class ManagerReconcileCache {
     private final Map<RequestManager, Entry> entries = new IdentityHashMap<>();
@@ -39,7 +40,11 @@ final class ManagerReconcileCache {
             entries.put(result.manager(), entry);
             managerOrder.add(result.manager());
         }
-        entry.update(result.nextReconciles(), currentTimeMs);
+        entry.update(
+            result.nextReconciles(),
+            result.pollResult().timeUntilNextPollMs,
+            currentTimeMs
+        );
     }
 
     Collection<ManagerReconcileResult> scheduleResults() {
@@ -70,52 +75,133 @@ final class ManagerReconcileCache {
         private final RequestManager manager;
         private List<NextReconcile> nextReconciles = List.of();
         private NextReconcile compatibilityDeadline;
+        private NextReconcile reactorPollDeadline = NextReconcile.onEvent();
+        private List<NextReconcile> deliveredApplicationDeadlines = List.of();
         private boolean compatibilityDeadlineDelivered;
 
         private Entry(final RequestManager manager) {
             this.manager = manager;
         }
 
-        private void update(final List<NextReconcile> candidates, final long currentTimeMs) {
+        private void update(final List<NextReconcile> candidates,
+                            final long pollDelayMs,
+                            final long currentTimeMs) {
             NextReconcile candidateCompatibilityDeadline = earliestCompatibilityDeadline(candidates);
-            NextReconcile preservedCompatibilityDeadline = candidateCompatibilityDeadline;
-            boolean preserveDelivered = false;
+            NextReconcile preservedCompatibilityDeadline = preserveCompatibilityDeadline(
+                candidateCompatibilityDeadline,
+                currentTimeMs
+            );
+            boolean preserveDelivered = compatibilityDeadlineDelivered
+                && preservedCompatibilityDeadline == compatibilityDeadline;
 
-            if (compatibilityDeadline != null && candidateCompatibilityDeadline != null) {
-                if (compatibilityDeadlineDelivered
-                    && candidateCompatibilityDeadline.remainingMs(currentTimeMs) == 0L) {
-                    preservedCompatibilityDeadline = compatibilityDeadline;
-                    preserveDelivered = true;
-                } else if (!compatibilityDeadlineDelivered
-                    && compatibilityDeadline.deadlineAtMs() <= candidateCompatibilityDeadline.deadlineAtMs()) {
-                    preservedCompatibilityDeadline = compatibilityDeadline;
-                }
+            List<NextReconcile> updated = replaceCompatibilityDeadline(
+                candidates,
+                candidateCompatibilityDeadline,
+                preservedCompatibilityDeadline
+            );
+            nextReconciles = List.copyOf(updated);
+            compatibilityDeadline = preservedCompatibilityDeadline;
+            deliveredApplicationDeadlines = retainDeliveredDeadlines(
+                updated,
+                preservedCompatibilityDeadline,
+                preserveDelivered
+            );
+            compatibilityDeadlineDelivered =
+                compatibilityDeadline != null && deliveredApplicationDeadlines.contains(compatibilityDeadline);
+            updateReactorPollDeadline(pollDelayMs, currentTimeMs);
+        }
+
+        private void updateReactorPollDeadline(final long pollDelayMs,
+                                               final long currentTimeMs) {
+            NextReconcile proposedPollDeadline =
+                NextReconcile.atReactorDeadlineAfter(currentTimeMs, pollDelayMs);
+            if (reactorPollDeadline.remainingMs(currentTimeMs) > 0L
+                && reactorPollDeadline.deadlineAtMs() <= proposedPollDeadline.deadlineAtMs()) {
+                proposedPollDeadline = reactorPollDeadline;
             }
+            reactorPollDeadline = proposedPollDeadline;
+        }
 
+        private NextReconcile preserveCompatibilityDeadline(final NextReconcile candidate,
+                                                            final long currentTimeMs) {
+            if (compatibilityDeadline == null || candidate == null)
+                return candidate;
+            if (compatibilityDeadlineDelivered && candidate.remainingMs(currentTimeMs) == 0L)
+                return compatibilityDeadline;
+            if (!compatibilityDeadlineDelivered
+                && compatibilityDeadline.deadlineAtMs() <= candidate.deadlineAtMs()) {
+                return compatibilityDeadline;
+            }
+            return candidate;
+        }
+
+        private static List<NextReconcile> replaceCompatibilityDeadline(
+            final List<NextReconcile> candidates,
+            final NextReconcile candidateCompatibilityDeadline,
+            final NextReconcile preservedCompatibilityDeadline
+        ) {
             List<NextReconcile> updated = new ArrayList<>(candidates.size());
             for (NextReconcile candidate : candidates) {
                 updated.add(candidate == candidateCompatibilityDeadline ? preservedCompatibilityDeadline : candidate);
             }
-            nextReconciles = List.copyOf(updated);
-            compatibilityDeadline = preservedCompatibilityDeadline;
-            compatibilityDeadlineDelivered = preserveDelivered;
+            return updated;
+        }
+
+        private List<NextReconcile> retainDeliveredDeadlines(
+            final List<NextReconcile> candidates,
+            final NextReconcile preservedCompatibilityDeadline,
+            final boolean preserveCompatibilityDelivery
+        ) {
+            List<NextReconcile> retained = new ArrayList<>();
+            if (preserveCompatibilityDelivery)
+                retained.add(preservedCompatibilityDeadline);
+            for (NextReconcile delivered : deliveredApplicationDeadlines) {
+                NextReconcile matching = matchingDecision(candidates, delivered);
+                if (matching != null && !retained.contains(matching))
+                    retained.add(matching);
+            }
+            return List.copyOf(retained);
         }
 
         private NextReconcile[] activeNextReconciles() {
-            if (!compatibilityDeadlineDelivered)
-                return nextReconciles.toArray(new NextReconcile[0]);
-
-            return nextReconciles.stream()
-                .filter(next -> next != compatibilityDeadline)
-                .toArray(NextReconcile[]::new);
+            List<NextReconcile> active = new ArrayList<>(nextReconciles.size() + 1);
+            for (NextReconcile next : nextReconciles) {
+                if (!deliveredApplicationDeadlines.contains(next))
+                    active.add(next);
+            }
+            if (reactorPollDeadline.type() != NextReconcile.Type.ON_EVENT)
+                active.add(reactorPollDeadline);
+            return active.toArray(new NextReconcile[0]);
         }
 
         private void markDeadlineDelivered(final ReactorSchedule schedule) {
-            if (compatibilityDeadline != null
-                && schedule.compatibilityDeadline()
-                && compatibilityDeadline.deadlineAtMs() == schedule.deadlineAtMs()) {
-                compatibilityDeadlineDelivered = true;
+            List<NextReconcile> delivered = new ArrayList<>(deliveredApplicationDeadlines);
+            for (NextReconcile candidate : nextReconciles) {
+                if (candidate.applicationVisible()
+                    && candidate.deadlineAtMs() == schedule.deadlineAtMs()
+                    && !delivered.contains(candidate)) {
+                    delivered.add(candidate);
+                }
             }
+            deliveredApplicationDeadlines = List.copyOf(delivered);
+            compatibilityDeadlineDelivered = compatibilityDeadline != null
+                && deliveredApplicationDeadlines.contains(compatibilityDeadline);
+        }
+
+        private static NextReconcile matchingDecision(final List<NextReconcile> candidates,
+                                                      final NextReconcile expected) {
+            if (expected == null)
+                return null;
+            for (NextReconcile candidate : candidates) {
+                if (candidate.applicationVisible() == expected.applicationVisible()
+                    && candidate.type() == expected.type()
+                    && candidate.deadlineAtMs() == expected.deadlineAtMs()
+                    && candidate.compatibilityDeadline() == expected.compatibilityDeadline()
+                    && candidate.semanticGeneration() == expected.semanticGeneration()) {
+                    return candidate;
+                }
+            }
+            return null;
         }
 
         private static NextReconcile earliestCompatibilityDeadline(final List<NextReconcile> candidates) {

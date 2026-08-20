@@ -18,7 +18,10 @@ package org.apache.kafka.clients.consumer.internals;
 
 import java.util.Objects;
 
-/** Describes when a request manager needs the reactor to reconcile it again. */
+/**
+ * Describes when a request manager needs the reactor to reconcile it again. A deadline may also require an
+ * application wakeup, or it may be reactor-only work such as a legacy network poll timeout.
+ */
 final class NextReconcile {
 
     enum Type {
@@ -27,20 +30,23 @@ final class NextReconcile {
     }
 
     private static final NextReconcile EVENT =
-        new NextReconcile(Type.ON_EVENT, Long.MAX_VALUE, false, 0L);
+        new NextReconcile(Type.ON_EVENT, Long.MAX_VALUE, false, true, 0L);
 
     private final Type type;
     private final long deadlineAtMs;
     private final boolean compatibilityDeadline;
+    private final boolean applicationVisible;
     private final long semanticGeneration;
 
     private NextReconcile(final Type type,
                           final long deadlineAtMs,
                           final boolean compatibilityDeadline,
+                          final boolean applicationVisible,
                           final long semanticGeneration) {
         this.type = Objects.requireNonNull(type, "Next reconcile type must be non-null");
         this.deadlineAtMs = deadlineAtMs;
         this.compatibilityDeadline = compatibilityDeadline;
+        this.applicationVisible = applicationVisible;
         this.semanticGeneration = semanticGeneration;
     }
 
@@ -50,30 +56,48 @@ final class NextReconcile {
 
     static NextReconcile atDeadlineAfter(final long currentTimeMs,
                                          final long delayMs) {
-        return atDeadlineAfter(currentTimeMs, delayMs, false);
+        return atDeadlineAfter(currentTimeMs, delayMs, false, true);
     }
 
     static NextReconcile atCompatibilityDeadlineAfter(final long currentTimeMs,
                                                       final long delayMs) {
-        return atDeadlineAfter(currentTimeMs, Math.max(0L, delayMs), true);
+        return atDeadlineAfter(currentTimeMs, Math.max(0L, delayMs), true, true);
+    }
+
+    static NextReconcile atReactorDeadlineAfter(final long currentTimeMs,
+                                                final long delayMs) {
+        return atDeadlineAfter(currentTimeMs, Math.max(0L, delayMs), false, false);
     }
 
     private static NextReconcile atDeadlineAfter(final long currentTimeMs,
                                                  final long delayMs,
-                                                 final boolean compatibilityDeadline) {
+                                                 final boolean compatibilityDeadline,
+                                                 final boolean applicationVisible) {
         if (delayMs < 0L)
             throw new IllegalArgumentException("Reconcile delay must not be negative: " + delayMs);
 
         if (delayMs == Long.MAX_VALUE || currentTimeMs > Long.MAX_VALUE - delayMs)
             return onEvent();
 
-        return new NextReconcile(Type.AT_DEADLINE, currentTimeMs + delayMs, compatibilityDeadline, 0L);
+        return new NextReconcile(
+            Type.AT_DEADLINE,
+            currentTimeMs + delayMs,
+            compatibilityDeadline,
+            applicationVisible,
+            0L
+        );
     }
 
     NextReconcile withSemanticGeneration(final long semanticGeneration) {
         if (type == Type.ON_EVENT)
             return this;
-        return new NextReconcile(type, deadlineAtMs, compatibilityDeadline, semanticGeneration);
+        return new NextReconcile(
+            type,
+            deadlineAtMs,
+            compatibilityDeadline,
+            applicationVisible,
+            semanticGeneration
+        );
     }
 
     Type type() {
@@ -90,6 +114,10 @@ final class NextReconcile {
 
     boolean compatibilityDeadline() {
         return compatibilityDeadline;
+    }
+
+    boolean applicationVisible() {
+        return applicationVisible;
     }
 
     long semanticGeneration() {
