@@ -16,7 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals.events;
 
-import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
+import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
@@ -39,14 +39,14 @@ import java.util.function.Supplier;
 
 /**
  * An event handler that receives {@link ApplicationEvent application events} from the application thread which
- * are then readable from the {@link ApplicationEventProcessor} in the {@link ConsumerNetworkThread network thread}.
+ * are then readable from the {@link ApplicationEventProcessor} in the {@link ConsumerReactor reactor}.
  */
 public class ApplicationEventHandler implements Closeable {
 
     private final Logger log;
     private final Time time;
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
-    private final ConsumerNetworkThread networkThread;
+    private final ConsumerReactor reactor;
     private final IdempotentCloser closer = new IdempotentCloser();
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
@@ -63,7 +63,7 @@ public class ApplicationEventHandler implements Closeable {
         this.time = time;
         this.applicationEventQueue = applicationEventQueue;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
-        ConsumerNetworkThread networkThread = new ConsumerNetworkThread(logContext,
+        ConsumerReactor reactor = new ConsumerReactor(logContext,
                 time,
                 applicationEventQueue,
                 applicationEventReaper,
@@ -73,42 +73,42 @@ public class ApplicationEventHandler implements Closeable {
                 asyncConsumerMetrics);
 
         try {
-            networkThread.start(initializationTimeoutMs);
+            reactor.start(initializationTimeoutMs);
         } catch (Exception e) {
             try {
-                networkThread.close();
+                reactor.close();
             } finally {
-                networkThread = null;
+                reactor = null;
             }
             throw e;
         } finally {
-            this.networkThread = networkThread;
+            this.reactor = reactor;
         }
     }
 
     /**
-     * Add an {@link ApplicationEvent} to the handler and then internally invoke {@link #wakeupNetworkThread()}
-     * to alert the network I/O thread that it has something to process.
+     * Add an {@link ApplicationEvent} to the handler and then internally invoke {@link #wakeupReactor()}
+     * to alert the reactor thread that it has something to process.
      *
      * @param event An {@link ApplicationEvent} created by the application thread
-     * @throws KafkaException if the consumer background thread is no longer alive
+     * @throws KafkaException if the consumer reactor is no longer alive
      */
     public void add(final ApplicationEvent event) {
         Objects.requireNonNull(event, "ApplicationEvent provided to add must be non-null");
-        ensureNetworkThreadAlive();
+        ensureReactorAlive();
         event.setEnqueuedMs(time.milliseconds());
         // Record the updated queue size before actually adding the event to the queue
-        // to avoid race conditions (the background thread is continuously removing from this queue)
+        // to avoid race conditions (the reactor is continuously removing from this queue)
         asyncConsumerMetrics.recordApplicationEventQueueSize(applicationEventQueue.size() + 1);
         applicationEventQueue.add(event);
-        wakeupNetworkThread();
+        wakeupReactor();
     }
 
     /**
-     * Wakeup the {@link ConsumerNetworkThread network I/O thread} to pull the next event(s) from the queue.
+     * Wakeup the {@link ConsumerReactor reactor thread} to pull the next event(s) from the queue.
      */
-    public void wakeupNetworkThread() {
-        networkThread.wakeup();
+    public void wakeupReactor() {
+        reactor.wakeup();
     }
 
     /**
@@ -120,7 +120,7 @@ public class ApplicationEventHandler implements Closeable {
      * @return The maximum delay in milliseconds
      */
     public long maximumTimeToWait() {
-        return networkThread.maximumTimeToWait();
+        return reactor.maximumTimeToWait();
     }
 
     /**
@@ -154,13 +154,13 @@ public class ApplicationEventHandler implements Closeable {
 
     public void close(final Duration timeout) {
         closer.close(
-                () -> Utils.closeQuietly(() -> networkThread.close(timeout), "consumer network thread"),
+                () -> Utils.closeQuietly(() -> reactor.close(timeout), "consumer reactor"),
                 () -> log.warn("The application event handler was already closed")
         );
     }
 
     /**
-     * Best-effort check that the consumer network thread is still alive. If the thread has
+     * Best-effort check that the consumer reactor is still alive. If the thread has
      * already terminated (due to a failure or shutdown), it will never process any events from
      * the queue. Rather than blocking indefinitely or timing out with a misleading error, this
      * fails fast with a clear error message.
@@ -169,12 +169,12 @@ public class ApplicationEventHandler implements Closeable {
      * subsequent {@code applicationEventQueue.add()}. That narrow window is acceptable because
      * any subsequent call to {@code add()} will detect the dead thread immediately.
      *
-     * @throws KafkaException if the background thread is not alive
+     * @throws KafkaException if the reactor is not alive
      */
-    private void ensureNetworkThreadAlive() {
-        if (networkThread == null || !networkThread.isAlive()) {
+    private void ensureReactorAlive() {
+        if (reactor == null || !reactor.isAlive()) {
             throw new KafkaException(
-                "The consumer background thread is not running and cannot process requests.");
+                "The consumer reactor is not running and cannot process requests.");
         }
     }
 }

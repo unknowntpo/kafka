@@ -58,14 +58,18 @@ import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.DEFAULT_
 import static org.apache.kafka.common.utils.Utils.closeQuietly;
 
 /**
- * Background thread runnable that consumes {@link ApplicationEvent} and produces {@link BackgroundEvent}. It
- * uses an event loop to consume and produce events, and poll the network client to handle network IO.
+ * Single-owner event loop that consumes {@link ApplicationEvent}, advances request-manager protocol state,
+ * decides progress scheduling, produces {@link BackgroundEvent}, and polls the network client.
+ *
+ * <p>The reactor is the only component that combines manager intents into network-poll and application-wait
+ * decisions. Request managers remain the owners of their protocol-specific mutable state.</p>
  */
-public class ConsumerNetworkThread extends KafkaThread implements Closeable {
+public class ConsumerReactor extends KafkaThread implements Closeable {
 
     // visible for testing
     static final long MAX_POLL_TIMEOUT_MS = 5000;
-    private static final String BACKGROUND_THREAD_NAME = "consumer_background_thread";
+    // Keep the runtime thread name stable for diagnostics and compatibility with existing tooling.
+    private static final String REACTOR_THREAD_NAME = "consumer_background_thread";
     private final Time time;
     private final Logger log;
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
@@ -85,15 +89,15 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private volatile ConsumerReactorProgress.ApplicationWait applicationWait;
     private long lastPollTimeMs = 0L;
 
-    public ConsumerNetworkThread(LogContext logContext,
-                                 Time time,
-                                 BlockingQueue<ApplicationEvent> applicationEventQueue,
-                                 CompletableEventReaper applicationEventReaper,
-                                 Supplier<ApplicationEventProcessor> applicationEventProcessorSupplier,
-                                 Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
-                                 Supplier<RequestManagers> requestManagersSupplier,
-                                 AsyncConsumerMetrics asyncConsumerMetrics) {
-        super(BACKGROUND_THREAD_NAME, true);
+    public ConsumerReactor(LogContext logContext,
+                           Time time,
+                           BlockingQueue<ApplicationEvent> applicationEventQueue,
+                           CompletableEventReaper applicationEventReaper,
+                           Supplier<ApplicationEventProcessor> applicationEventProcessorSupplier,
+                           Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
+                           Supplier<RequestManagers> requestManagersSupplier,
+                           AsyncConsumerMetrics asyncConsumerMetrics) {
+        super(REACTOR_THREAD_NAME, true);
         this.time = time;
         this.log = logContext.logger(getClass());
         this.applicationEventQueue = applicationEventQueue;
@@ -110,7 +114,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     }
 
     /**
-     * Start the network thread and let it complete its initialization before proceeding. The
+     * Start the reactor thread and let it complete its initialization before proceeding. The
      * {@link ClassicKafkaConsumer} constructor blocks during creation of its {@link NetworkClient}, providing
      * precedent for waiting here.
      *
@@ -128,12 +132,12 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         try {
             if (!initializationLatch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
                 maybeSetInitializationError(
-                    new TimeoutException("Consumer network thread resource initialization timed out after " + timeoutMs + " ms")
+                    new TimeoutException("Consumer reactor resource initialization timed out after " + timeoutMs + " ms")
                 );
             }
         } catch (InterruptedException e) {
             maybeSetInitializationError(
-                new InterruptException("Consumer network thread resource initialization was interrupted", e)
+                new InterruptException("Consumer reactor resource initialization was interrupted", e)
             );
         }
 
@@ -146,9 +150,9 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     @Override
     public void run() {
         try {
-            log.debug("Consumer network thread started");
+            log.debug("Consumer reactor started");
 
-            // Wait until we're securely in the background network thread to initialize these objects...
+            // Wait until we're securely in the reactor thread to initialize these objects...
             try {
                 initializeResources();
             } catch (Throwable t) {
@@ -166,11 +170,11 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
                     runOnce();
                 } catch (final Throwable e) {
                     // Swallow the exception and continue
-                    log.error("Unexpected error caught in consumer network thread", e);
+                    log.error("Unexpected error caught in consumer reactor", e);
                 }
             }
         } catch (Throwable t) {
-            log.error("Unexpected failure in consumer network thread", t);
+            log.error("Unexpected failure in consumer reactor", t);
         } finally {
             cleanup();
         }
@@ -180,7 +184,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         if (initializationError.compareAndSet(null, error))
             return;
 
-        log.error("Consumer network thread resource initialization error ({}) will be suppressed as an error was already set", error.getMessage(), error);
+        log.error("Consumer reactor resource initialization error ({}) will be suppressed as an error was already set", error.getMessage(), error);
     }
 
     void initializeResources() {
@@ -352,7 +356,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      * responsive to changes.
      *
      * Because this method is called by the application thread, it's not allowed to access the request managers
-     * that actually provide the information. As a result, the consumer network thread periodically caches the
+     * that actually provide the information. As a result, the consumer reactor periodically caches the
      * information from the request managers and this can then be read safely using this method.
      *
      * @return The maximum delay in milliseconds
@@ -426,11 +430,11 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     }
 
     public void close(final Duration timeout) {
-        Objects.requireNonNull(timeout, "Close timeout for consumer network thread must be non-null");
+        Objects.requireNonNull(timeout, "Close timeout for consumer reactor must be non-null");
 
         closer.close(
                 () -> closeInternal(timeout),
-                () -> log.warn("The consumer network thread was already closed")
+                () -> log.warn("The consumer reactor was already closed")
         );
     }
 
@@ -439,22 +443,22 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      *
      * <p/>
      *
-     * This method is called from the application thread, but our resources are owned by the network thread. As such,
+     * This method is called from the application thread, but our resources are owned by the reactor. As such,
      * we don't actually close any of those resources here, immediately, on the application thread. Instead, we just
-     * update our internal state on the application thread. When the network thread next
+     * update our internal state on the application thread. When the reactor next
      * {@link #run() executes its loop}, it will notice that state, cease processing any further events, and begin
      * {@link #cleanup() closing its resources}.
      *
      * <p/>
      *
      * This method will wait (i.e. block the application thread) for up to the duration of the given timeout to give
-     * the network thread the time to close down cleanly.
+     * the reactor the time to close down cleanly.
      *
-     * @param timeout Upper bound of time to wait for the network thread to close its resources
+     * @param timeout Upper bound of time to wait for the reactor to close its resources
      */
     private void closeInternal(final Duration timeout) {
         long timeoutMs = timeout.toMillis();
-        log.trace("Signaling the consumer network thread to close in {}ms", timeoutMs);
+        log.trace("Signaling the consumer reactor to close in {}ms", timeoutMs);
         running = false;
         closeTimeout = timeout;
         wakeup();
@@ -462,7 +466,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         try {
             join();
         } catch (InterruptedException e) {
-            log.error("Interrupted while waiting for consumer network thread to complete", e);
+            log.error("Interrupted while waiting for consumer reactor to complete", e);
         }
     }
 
@@ -479,14 +483,14 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         } while (timer.notExpired() && networkClientDelegate.hasAnyPendingRequests());
 
         if (networkClientDelegate.hasAnyPendingRequests()) {
-            log.warn("Close timeout of {} ms expired before the consumer network thread was able " +
+            log.warn("Close timeout of {} ms expired before the consumer reactor was able " +
                 "to complete pending requests. Inflight request count: {}, Unsent request count: {}",
                 timer.timeoutMs(), networkClientDelegate.inflightRequestCount(), networkClientDelegate.unsentRequests().size());
         }
     }
 
     void cleanup() {
-        log.trace("Closing the consumer network thread");
+        log.trace("Closing the consumer reactor");
         Timer timer = time.timer(closeTimeout);
         try {
             // If an error was thrown from initializeResources(), it's possible that the list of request managers
@@ -507,7 +511,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
 
             closeQuietly(requestManagers, "request managers");
             closeQuietly(networkClientDelegate, "network client delegate");
-            log.debug("Closed the consumer network thread");
+            log.debug("Closed the consumer reactor");
         }
     }
 

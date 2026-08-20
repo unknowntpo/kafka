@@ -162,7 +162,7 @@ public class StreamsMembershipManager implements RequestManager {
     private final Logger log;
 
     /**
-     * The processor that handles events from the background thread (a.k.a. ConsumerNetworkThread).
+     * The processor that handles events from the background thread (a.k.a. ConsumerReactor).
      * For example, requests for invocation of assignment/revocation callbacks.
      */
     private final BackgroundEventHandler backgroundEventHandler;

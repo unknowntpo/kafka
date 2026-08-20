@@ -21,7 +21,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Computes immutable progress decisions that can be safely published by the consumer network thread.
+ * Computes immutable progress decisions that can be safely published by the consumer reactor.
  *
  * <p>This is the migration seam toward making the consumer reactor the single place that combines progress
  * constraints. Request managers describe what they are waiting for; the reactor turns those intents into one

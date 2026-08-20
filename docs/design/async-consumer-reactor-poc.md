@@ -13,7 +13,7 @@ The current implementation has a background event loop, but it does not yet have
 Several components independently decide when work should run or when another thread should wake:
 
 * `AsyncKafkaConsumer` reads `SubscriptionState`, collects records, and waits on `FetchBuffer`.
-* `ConsumerNetworkThread` processes application events, polls request managers, and polls the network client.
+* `ConsumerReactor` processes application events, polls request managers, and polls the network client.
 * Each `RequestManager` independently returns a network poll delay and an application-thread wait delay.
 * A request manager may wake `FetchBuffer` directly.
 * Futures, background events, callback-completed events, and user wakeups use separate notification paths.
@@ -27,7 +27,7 @@ possible.
 | Execution context | State read or mutated | Progress mechanism |
 | --- | --- | --- |
 | Application thread | assignment, positions, buffered fetches, in-flight poll state | event enqueue, future wait, `FetchBuffer.awaitWakeup` |
-| Consumer network thread | application events, request-manager state, network responses | network poll and cached `maximumTimeToWait` |
+| Consumer reactor | application events, request-manager state, network responses | network poll and cached `maximumTimeToWait` |
 | Request managers | membership, coordinator, commit, offset and fetch sub-state | `PollResult`, `maximumTimeToWait`, direct buffer wakeup |
 
 The effective flow is:
@@ -39,7 +39,7 @@ poll()
   -> read a cached background-thread timeout
   -> wait on FetchBuffer
 
-ConsumerNetworkThread.runOnce()
+ConsumerReactor.runOnce()
   -> drain events
   -> ask every manager for requests and a network timeout
   -> perform network I/O
@@ -55,14 +55,14 @@ and which event or deadline can change that answer.
 
 ## After
 
-The target is a `ConsumerReactor`: the single owner of mutable consumer protocol state and the only scheduler for
-background progress.
+The target is a `ConsumerReactor`: the single execution-context owner of mutable consumer protocol state and the
+only component that combines cross-manager constraints into final progress decisions.
 
-`ConsumerReactor` is also the intended replacement name for `ConsumerNetworkThread`. The current name describes an
-execution resource, while the target abstraction owns events, protocol state, transitions, and progress decisions.
-The reactor may still use a dedicated thread internally, but that thread is its executor rather than its identity.
-The rename should happen only after these decision and ownership contracts exist; a mechanical rename would
-overstate the current implementation.
+The implementation class is now named `ConsumerReactor`. The name describes its responsibility rather than its
+executor: it orders events, invokes protocol state machines, aggregates their constraints, decides network polling
+and application waiting, and publishes the resulting effects. It still uses a dedicated thread internally, but the
+thread is an implementation detail. The rename marks the intended boundary; it does not imply that every legacy
+decision source has already migrated.
 
 | Component | Responsibility after migration |
 | --- | --- |
@@ -98,6 +98,27 @@ substitute for describing why progress became possible.
 4. Every cross-thread operation has one terminal success, failure, cancellation, or timeout acknowledgement.
 5. Every queue, in-flight collection, and data mailbox has an explicit capacity bound.
 6. User callbacks remain isolated on the application thread.
+
+## Current Decision Coverage
+
+The architectural boundary is: request managers own protocol-specific transitions and report constraints; the
+reactor alone combines those constraints into cross-component scheduling and notification decisions. Centralizing
+the final decision must not turn the reactor into a switch statement containing every protocol rule.
+
+| Decision | Current authority | Coverage | Remaining gap |
+| --- | --- | --- | --- |
+| Earliest application deadline across managers | Reactor | absolute deadlines, elapsed-time subtraction, same-source preservation | most managers still use the compatibility timeout adapter |
+| Network poll duration | Reactor | request delays and progress deadlines cap every poll | inputs are not yet typed by reason |
+| Publish-before-wakeup ordering | Reactor | shorter decision and deadline-expiry wakeups are ordered and retained | wake effect still uses `FetchBuffer` as a generic signal |
+| Deadline delivery | Reactor | one-shot delivery, no stale `0 ms`, distinct source at same timestamp | semantic generation is inferred from source/deadline rather than an explicit operation id |
+| Fetch blocked by missing leader | Fetch manager reports typed condition; reactor schedules | bounded retry deadline | metadata completion is not yet a named reactor effect |
+| Fetch blocked by reconnect backoff | Fetch manager reports actual connection delay; reactor schedules | exponential connection backoff and mixed partitions | real-socket broker-restart smoke test remains |
+| Fetch blocked by in-flight request or buffer drain | Fetch manager reports event-driven condition; reactor schedules | no anonymous retry wakeup | completion/capacity events are not yet first-class effect types |
+| Empty or failed fetch response | Response path signals application; reactor owns subsequent schedule | terminal response and failure tests | unsent-request expiration audit remains |
+| Groupless manual assignment | Reactor deadline limits the full async chain | deterministic cross-component test | caller safety rescan can also bound its next wait |
+| No assignment, invalid positions, fetchable/unbuffered scan | Application thread | safety fallback only | must move behind reactor-owned snapshots/events before the rescan is removed |
+| Rebalance callbacks and lifecycle handshakes | Split between reactor and application thread | existing Required/Completed event protocol | operation/epoch ownership and terminal-path unification remain |
+| Queue and buffer admission | Individual queues and producers | existing local behavior | no unified capacity decision or overload policy |
 
 ## Incremental Migration
 
@@ -208,9 +229,10 @@ callbacks, in-flight requests, and retained response buffers.
 
 ## POC Scope and Non-goals
 
-The POC does not yet rename `ConsumerNetworkThread`, move `SubscriptionState`, change callback threading, or claim
-to fix every busy loop. It has established a progress-decision publication seam, a typed fetch-preparation result,
-and the first direct typed-intent producer.
+The POC now names the execution component `ConsumerReactor`, but does not yet move `SubscriptionState`, change
+callback threading, rename existing runtime thread/metric identifiers, or claim to fix every busy loop. It has
+established a progress-decision publication seam, a typed fetch-preparation result, and the first direct typed-intent
+producer.
 
 The POC includes a deterministic `FetchBuffer` concurrency test plus a cross-component test of the complete async
 consumer chain with only its socket replaced by `MockClient`. In the latter, a consumer without a group id and with

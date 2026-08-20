@@ -69,20 +69,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-public class ConsumerNetworkThreadTest {
+public class ConsumerReactorTest {
     private final Time time;
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
     private final ApplicationEventProcessor applicationEventProcessor;
     private final OffsetsRequestManager offsetsRequestManager;
     private final ConsumerHeartbeatRequestManager heartbeatRequestManager;
     private final CoordinatorRequestManager coordinatorRequestManager;
-    private final ConsumerNetworkThread consumerNetworkThread;
+    private final ConsumerReactor consumerReactor;
     private final NetworkClientDelegate networkClientDelegate;
     private final RequestManagers requestManagers;
     private final CompletableEventReaper applicationEventReaper;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
-    ConsumerNetworkThreadTest() {
+    ConsumerReactorTest() {
         this.networkClientDelegate = mock(NetworkClientDelegate.class);
         this.requestManagers = mock(RequestManagers.class);
         this.offsetsRequestManager = mock(OffsetsRequestManager.class);
@@ -95,7 +95,7 @@ public class ConsumerNetworkThreadTest {
         this.asyncConsumerMetrics = mock(AsyncConsumerMetrics.class);
         LogContext logContext = new LogContext();
 
-        this.consumerNetworkThread = new ConsumerNetworkThread(
+        this.consumerReactor = new ConsumerReactor(
                 logContext,
                 time,
                 applicationEventQueue,
@@ -112,28 +112,28 @@ public class ConsumerNetworkThreadTest {
         when(offsetsRequestManager.progressIntent(anyLong())).thenCallRealMethod();
         when(heartbeatRequestManager.progressIntent(anyLong())).thenCallRealMethod();
         when(coordinatorRequestManager.progressIntent(anyLong())).thenCallRealMethod();
-        consumerNetworkThread.initializeResources();
+        consumerReactor.initializeResources();
     }
 
     @AfterEach
     public void tearDown() {
-        if (consumerNetworkThread != null)
-            consumerNetworkThread.close();
+        if (consumerReactor != null)
+            consumerReactor.close();
     }
 
     @Test
-    public void testEnsureCloseStopsRunningThread() {
-        assertTrue(consumerNetworkThread.isRunning(),
-            "ConsumerNetworkThread should start running when created");
+    public void testEnsureCloseStopsReactor() {
+        assertTrue(consumerReactor.isRunning(),
+            "ConsumerReactor should start running when created");
 
-        consumerNetworkThread.close();
-        assertFalse(consumerNetworkThread.isRunning(),
-            "close() should make consumerNetworkThread.running false by calling closeInternal(Duration timeout)");
+        consumerReactor.close();
+        assertFalse(consumerReactor.isRunning(),
+            "close() should make consumerReactor.running false by calling closeInternal(Duration timeout)");
     }
 
     @ParameterizedTest
-    @ValueSource(longs = {ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS - 1, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS + 1})
-    public void testConsumerNetworkThreadPollTimeComputations(long exampleTime) {
+    @ValueSource(longs = {ConsumerReactor.MAX_POLL_TIMEOUT_MS - 1, ConsumerReactor.MAX_POLL_TIMEOUT_MS, ConsumerReactor.MAX_POLL_TIMEOUT_MS + 1})
+    public void testConsumerReactorPollTimeComputations(long exampleTime) {
         List<RequestManager> list = List.of(coordinatorRequestManager, heartbeatRequestManager);
         when(requestManagers.entries()).thenReturn(list);
 
@@ -147,36 +147,36 @@ public class ConsumerNetworkThreadTest {
         when(heartbeatRequestManager.maximumTimeToWait(t)).thenReturn(exampleTime + 100);
         when(networkClientDelegate.addAll(pollResult)).thenReturn(pollResult.timeUntilNextPollMs);
         when(networkClientDelegate.addAll(pollResult1)).thenReturn(pollResult1.timeUntilNextPollMs);
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
-        verify(networkClientDelegate).poll(Math.min(exampleTime, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS), time.milliseconds());
-        assertEquals(consumerNetworkThread.maximumTimeToWait(), exampleTime);
+        verify(networkClientDelegate).poll(Math.min(exampleTime, ConsumerReactor.MAX_POLL_TIMEOUT_MS), time.milliseconds());
+        assertEquals(consumerReactor.maximumTimeToWait(), exampleTime);
     }
 
     @Test
     public void testStartupAndTearDown() throws InterruptedException {
-        consumerNetworkThread.start();
-        TestCondition isStarted = consumerNetworkThread::isRunning;
-        TestCondition isClosed = () -> !(consumerNetworkThread.isRunning() || consumerNetworkThread.isAlive());
+        consumerReactor.start();
+        TestCondition isStarted = consumerReactor::isRunning;
+        TestCondition isClosed = () -> !(consumerReactor.isRunning() || consumerReactor.isAlive());
 
         // There's a nonzero amount of time between starting the thread and having it
         // begin to execute our code. Wait for a bit before checking...
         TestUtils.waitForCondition(isStarted,
-                "The consumer network thread did not start within " + DEFAULT_MAX_WAIT_MS + " ms");
+                "The consumer reactor did not start within " + DEFAULT_MAX_WAIT_MS + " ms");
 
-        consumerNetworkThread.close(Duration.ofMillis(DEFAULT_MAX_WAIT_MS));
+        consumerReactor.close(Duration.ofMillis(DEFAULT_MAX_WAIT_MS));
 
         TestUtils.waitForCondition(isClosed,
-                "The consumer network thread did not stop within " + DEFAULT_MAX_WAIT_MS + " ms");
+                "The consumer reactor did not stop within " + DEFAULT_MAX_WAIT_MS + " ms");
     }
 
     @Test
-    public void testRequestsTransferFromManagersToClientOnThreadRun() {
+    public void testRequestsTransferFromManagersToClientOnReactorRun() {
         List<RequestManager> list = List.of(coordinatorRequestManager, heartbeatRequestManager, offsetsRequestManager);
 
         when(requestManagers.entries()).thenReturn(list);
         when(coordinatorRequestManager.poll(anyLong())).thenReturn(mock(NetworkClientDelegate.PollResult.class));
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
         requestManagers.entries().forEach(rm -> verify(rm).poll(anyLong()));
         requestManagers.entries().forEach(rm -> verify(rm, times(2)).maximumTimeToWait(anyLong()));
         verify(networkClientDelegate).addAll(any(NetworkClientDelegate.PollResult.class));
@@ -187,14 +187,14 @@ public class ConsumerNetworkThreadTest {
     public void testMaximumTimeToWait() {
         final int defaultHeartbeatIntervalMs = 1000;
         // Initial value before runOnce has been called
-        assertEquals(ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(ConsumerReactor.MAX_POLL_TIMEOUT_MS, consumerReactor.maximumTimeToWait());
 
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.maximumTimeToWait(time.milliseconds())).thenReturn((long) defaultHeartbeatIntervalMs);
 
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
         // After runOnce has been called, it takes the default heartbeat interval from the heartbeat request manager
-        assertEquals(defaultHeartbeatIntervalMs, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(defaultHeartbeatIntervalMs, consumerReactor.maximumTimeToWait());
     }
 
     @Test
@@ -213,11 +213,11 @@ public class ConsumerNetworkThreadTest {
             return 100L;
         });
 
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
-        assertEquals(100L, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(100L, consumerReactor.maximumTimeToWait());
         assertEquals(timeBeforePollMs + 250L, managerDecisionTimeMs.get());
-        assertEquals(managerDecisionTimeMs.get(), consumerNetworkThread.applicationWait().decidedAtMs());
+        assertEquals(managerDecisionTimeMs.get(), consumerReactor.applicationWait().decidedAtMs());
     }
 
     @Test
@@ -226,11 +226,11 @@ public class ConsumerNetworkThreadTest {
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
         doAnswer(invocation -> {
-            timeoutObservedByWakeup.set(consumerNetworkThread.maximumTimeToWait());
+            timeoutObservedByWakeup.set(consumerReactor.maximumTimeToWait());
             return null;
         }).when(requestManagers).wakeupApplicationThread();
 
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
         assertEquals(100L, timeoutObservedByWakeup.get());
         verify(requestManagers).wakeupApplicationThread();
@@ -246,10 +246,10 @@ public class ConsumerNetworkThreadTest {
             )
         );
 
-        consumerNetworkThread.runOnce();
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
         time.sleep(100L);
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
         verify(requestManagers, times(2)).wakeupApplicationThread();
     }
@@ -261,14 +261,14 @@ public class ConsumerNetworkThreadTest {
         doReturn(ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 0L))
             .when(heartbeatRequestManager).progressIntent(anyLong());
 
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
-        assertEquals(Long.MAX_VALUE, consumerNetworkThread.maximumTimeToWait());
-        assertTrue(consumerNetworkThread.applicationWait().deadlineNotificationDelivered());
+        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
+        assertTrue(consumerReactor.applicationWait().deadlineNotificationDelivered());
 
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
-        assertEquals(Long.MAX_VALUE, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
         verify(requestManagers).wakeupApplicationThread();
     }
 
@@ -284,14 +284,14 @@ public class ConsumerNetworkThreadTest {
             return null;
         }).when(networkClientDelegate).poll(anyLong(), eq(startMs));
 
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(100L, startMs);
         // One wake publishes the shorter deadline; the second delivers its expiry before the legacy adapter
         // computes a fresh relative wait from the later time.
         verify(requestManagers, times(2)).wakeupApplicationThread();
-        assertEquals(100L, consumerNetworkThread.maximumTimeToWait());
-        assertEquals(startMs + 200L, consumerNetworkThread.applicationWait().deadlineAtMs());
+        assertEquals(100L, consumerReactor.maximumTimeToWait());
+        assertEquals(startMs + 200L, consumerReactor.applicationWait().deadlineAtMs());
     }
 
     @Test
@@ -306,11 +306,11 @@ public class ConsumerNetworkThreadTest {
             return null;
         }).when(networkClientDelegate).poll(anyLong(), anyLong());
 
-        consumerNetworkThread.runOnce();
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
 
-        assertEquals(startMs + 100L, consumerNetworkThread.applicationWait().deadlineAtMs());
-        assertEquals(80L, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(startMs + 100L, consumerReactor.applicationWait().deadlineAtMs());
+        assertEquals(80L, consumerReactor.maximumTimeToWait());
     }
 
     @Test
@@ -325,13 +325,13 @@ public class ConsumerNetworkThreadTest {
         doReturn(expired).when(heartbeatRequestManager).progressIntent(anyLong());
         doReturn(expired).when(coordinatorRequestManager).progressIntent(anyLong());
 
-        consumerNetworkThread.runOnce();
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
 
         verify(requestManagers, times(2)).wakeupApplicationThread();
         assertEquals(
             CoordinatorRequestManager.class.getSimpleName(),
-            consumerNetworkThread.applicationWait().source().orElseThrow()
+            consumerReactor.applicationWait().source().orElseThrow()
         );
     }
 
@@ -345,15 +345,15 @@ public class ConsumerNetworkThreadTest {
         doReturn(deadline).when(heartbeatRequestManager).progressIntent(anyLong());
         when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
 
-        consumerNetworkThread.runOnce();
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
         time.sleep(100L);
-        consumerNetworkThread.runOnce();
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
 
         verify(networkClientDelegate, times(2)).poll(100L, startMs);
         verify(networkClientDelegate).poll(0L, startMs + 100L);
-        verify(networkClientDelegate).poll(ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, startMs + 100L);
+        verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, startMs + 100L);
     }
 
     @Test
@@ -391,11 +391,11 @@ public class ConsumerNetworkThreadTest {
         });
 
         try {
-            consumerNetworkThread.runOnce();
+            consumerReactor.runOnce();
             assertTrue(firstWaitReturned.await(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
             assertTrue(secondWaitStarted.await(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
 
-            consumerNetworkThread.runOnce();
+            consumerReactor.runOnce();
 
             applicationWait.get(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS);
             verify(requestManagers, times(2)).wakeupApplicationThread();
@@ -411,7 +411,7 @@ public class ConsumerNetworkThreadTest {
         LinkedList<NetworkClientDelegate.UnsentRequest> queue = new LinkedList<>();
         when(networkClientDelegate.unsentRequests()).thenReturn(queue);
         when(applicationEventReaper.reap(applicationEventQueue)).thenReturn(1L);
-        consumerNetworkThread.cleanup();
+        consumerReactor.cleanup();
         verify(applicationEventReaper).reap(applicationEventQueue);
         verify(asyncConsumerMetrics).recordApplicationEventExpiredSize(1L);
     }
@@ -419,7 +419,7 @@ public class ConsumerNetworkThreadTest {
     @Test
     public void testRunOnceInvokesReaper() {
         when(applicationEventReaper.reap(any(Long.class))).thenReturn(1L);
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
         verify(applicationEventReaper).reap(any(Long.class));
         verify(asyncConsumerMetrics).recordApplicationEventExpiredSize(1L);
     }
@@ -427,7 +427,7 @@ public class ConsumerNetworkThreadTest {
     @Test
     public void testSendUnsentRequests() {
         when(networkClientDelegate.hasAnyPendingRequests()).thenReturn(true).thenReturn(true).thenReturn(false);
-        consumerNetworkThread.cleanup();
+        consumerReactor.cleanup();
         verify(networkClientDelegate, times(2)).poll(anyLong(), anyLong(), eq(true));
     }
 
@@ -436,7 +436,7 @@ public class ConsumerNetworkThreadTest {
     public void testRunOnceRecordTimeBetweenNetworkThreadPoll(String groupName) {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, groupName);
-             ConsumerNetworkThread consumerNetworkThread = new ConsumerNetworkThread(
+             ConsumerReactor consumerReactor = new ConsumerReactor(
                      new LogContext(),
                      time,
                      applicationEventQueue,
@@ -446,11 +446,11 @@ public class ConsumerNetworkThreadTest {
                      () -> requestManagers,
                      asyncConsumerMetrics
              )) {
-            consumerNetworkThread.initializeResources();
+            consumerReactor.initializeResources();
 
-            consumerNetworkThread.runOnce();
+            consumerReactor.runOnce();
             time.sleep(10);
-            consumerNetworkThread.runOnce();
+            consumerReactor.runOnce();
             assertEquals(
                 10,
                 (double) metrics.metric(
@@ -471,7 +471,7 @@ public class ConsumerNetworkThreadTest {
     public void testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime(String groupName) {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, groupName);
-             ConsumerNetworkThread consumerNetworkThread = new ConsumerNetworkThread(
+             ConsumerReactor consumerReactor = new ConsumerReactor(
                      new LogContext(),
                      time,
                      applicationEventQueue,
@@ -481,7 +481,7 @@ public class ConsumerNetworkThreadTest {
                      () -> requestManagers,
                      asyncConsumerMetrics
              )) {
-            consumerNetworkThread.initializeResources();
+            consumerReactor.initializeResources();
 
             AsyncPollEvent event = new AsyncPollEvent(10, 0);
             event.setEnqueuedMs(time.milliseconds());
@@ -489,7 +489,7 @@ public class ConsumerNetworkThreadTest {
             asyncConsumerMetrics.recordApplicationEventQueueSize(1);
 
             time.sleep(10);
-            consumerNetworkThread.runOnce();
+            consumerReactor.runOnce();
             assertEquals(
                 0,
                 (double) metrics.metric(
@@ -549,7 +549,7 @@ public class ConsumerNetworkThreadTest {
         event.setEnqueuedMs(time.milliseconds());
         applicationEventQueue.add(event);
 
-        consumerNetworkThread.runOnce();
+        consumerReactor.runOnce();
 
         assertTrue(event.future().isDone(), "Event future should be completed after processing failure");
         assertTrue(event.future().isCompletedExceptionally(), "Event future should be completed exceptionally");
@@ -559,15 +559,15 @@ public class ConsumerNetworkThreadTest {
     }
 
     /**
-     * Tests that when an error occurs during {@link ConsumerNetworkThread#initializeResources()} that the
-     * logic in {@link ConsumerNetworkThread#cleanup()} will not throw errors when closing.
+     * Tests that when an error occurs during {@link ConsumerReactor#initializeResources()} that the
+     * logic in {@link ConsumerReactor#cleanup()} will not throw errors when closing.
      */
     private void testInitializeResourcesError(Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
                                               Supplier<RequestManagers> requestManagersSupplier) {
-        // A new ConsumerNetworkThread is created because the shared one doesn't have any issues initializing its
+        // A new ConsumerReactor is created because the shared one doesn't have any issues initializing its
         // resources. However, most of the mocks can be reused, so this is mostly boilerplate except for the error
         // when a supplier is invoked.
-        try (ConsumerNetworkThread thread = new ConsumerNetworkThread(
+        try (ConsumerReactor thread = new ConsumerReactor(
             new LogContext(),
             time,
             applicationEventQueue,
