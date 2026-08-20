@@ -41,6 +41,7 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -48,8 +49,10 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
@@ -112,6 +115,7 @@ public class ConsumerReactorTest {
         when(offsetsRequestManager.progressIntent(anyLong())).thenCallRealMethod();
         when(heartbeatRequestManager.progressIntent(anyLong())).thenCallRealMethod();
         when(coordinatorRequestManager.progressIntent(anyLong())).thenCallRealMethod();
+        when(requestManagers.drainApplicationProgressEffects()).thenReturn(Set.of());
         consumerReactor.initializeResources();
     }
 
@@ -237,6 +241,67 @@ public class ConsumerReactorTest {
     }
 
     @Test
+    public void testReactorCoalescesProgressEffectWithShorterDecisionWakeup() {
+        AtomicLong timeoutObservedByWakeup = new AtomicLong(-1L);
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
+        doReturn(Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED))
+            .doReturn(Set.of())
+            .when(requestManagers).drainApplicationProgressEffects();
+        doAnswer(invocation -> {
+            timeoutObservedByWakeup.set(consumerReactor.maximumTimeToWait());
+            return null;
+        }).when(requestManagers).wakeupApplicationThread();
+
+        consumerReactor.runOnce();
+
+        assertEquals(100L, timeoutObservedByWakeup.get());
+        verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testReactorAppliesProgressEffectWithoutChangingPublishedWait() {
+        when(requestManagers.entries()).thenReturn(List.of());
+        doReturn(Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED))
+            .doReturn(Set.of())
+            .when(requestManagers).drainApplicationProgressEffects();
+
+        consumerReactor.runOnce();
+
+        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
+        verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testReactorPublishesPostPollDecisionBeforeApplyingNetworkProgressEffect() {
+        long startMs = time.milliseconds();
+        AtomicBoolean networkPollCompleted = new AtomicBoolean(false);
+        AtomicBoolean effectDelivered = new AtomicBoolean(false);
+        AtomicLong decisionTimeObservedByWakeup = new AtomicLong(-1L);
+        when(requestManagers.entries()).thenReturn(List.of());
+        when(requestManagers.drainApplicationProgressEffects()).thenAnswer(invocation -> {
+            if (networkPollCompleted.get() && effectDelivered.compareAndSet(false, true)) {
+                return Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED);
+            }
+            return Set.of();
+        });
+        doAnswer(invocation -> {
+            time.sleep(10L);
+            networkPollCompleted.set(true);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+        doAnswer(invocation -> {
+            decisionTimeObservedByWakeup.set(consumerReactor.applicationWait().decidedAtMs());
+            return null;
+        }).when(requestManagers).wakeupApplicationThread();
+
+        consumerReactor.runOnce();
+
+        assertEquals(startMs + 10L, decisionTimeObservedByWakeup.get());
+        verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
     public void testEachExpiredDeadlineWakesOnceEvenWhenLaterThanPreviousDeadline() {
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.progressIntent(anyLong())).thenAnswer(invocation ->
@@ -318,14 +383,14 @@ public class ConsumerReactorTest {
         long startMs = time.milliseconds();
         ConsumerReactorProgress.ProgressIntent expired =
             ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 0L);
-        when(requestManagers.entries())
-            .thenReturn(List.of(heartbeatRequestManager))
-            .thenReturn(List.of(heartbeatRequestManager))
-            .thenReturn(List.of(coordinatorRequestManager));
+        AtomicReference<List<RequestManager>> activeManagers =
+            new AtomicReference<>(List.of(heartbeatRequestManager));
+        when(requestManagers.entries()).thenAnswer(invocation -> activeManagers.get());
         doReturn(expired).when(heartbeatRequestManager).progressIntent(anyLong());
         doReturn(expired).when(coordinatorRequestManager).progressIntent(anyLong());
 
         consumerReactor.runOnce();
+        activeManagers.set(List.of(coordinatorRequestManager));
         consumerReactor.runOnce();
 
         verify(requestManagers, times(2)).wakeupApplicationThread();
@@ -333,6 +398,26 @@ public class ConsumerReactorTest {
             CoordinatorRequestManager.class.getSimpleName(),
             consumerReactor.applicationWait().source().orElseThrow()
         );
+    }
+
+    @Test
+    public void testSameSourceAndDeadlineWithNewGenerationIsANewTransition() {
+        long startMs = time.milliseconds();
+        ConsumerReactorProgress.ProgressIntent first =
+            ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 0L)
+                .withSemanticGeneration(1L);
+        ConsumerReactorProgress.ProgressIntent second =
+            ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 0L)
+                .withSemanticGeneration(2L);
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        doReturn(first).doReturn(first).doReturn(second).doReturn(second)
+            .when(heartbeatRequestManager).progressIntent(anyLong());
+
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
+
+        verify(requestManagers, times(2)).wakeupApplicationThread();
+        assertEquals(2L, consumerReactor.applicationWait().semanticGeneration());
     }
 
     @Test

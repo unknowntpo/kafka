@@ -36,6 +36,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
@@ -135,6 +136,13 @@ public class RequestManagers implements Closeable {
 
     public List<RequestManager> entries() {
         return entries;
+    }
+
+    /** Transfers manager-reported protocol effects to the reactor. */
+    Set<ConsumerReactorProgress.ApplicationProgressEffect> drainApplicationProgressEffects() {
+        if (fetchRequestManager == null)
+            return Set.of();
+        return fetchRequestManager.drainApplicationProgressEffects();
     }
 
     /**

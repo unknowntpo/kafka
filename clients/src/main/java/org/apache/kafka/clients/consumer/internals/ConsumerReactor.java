@@ -42,6 +42,7 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
@@ -87,6 +88,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
     private volatile ConsumerReactorProgress.ApplicationWait applicationWait;
+    private final EnumSet<ConsumerReactorProgress.ApplicationProgressEffect> pendingApplicationProgressEffects =
+        EnumSet.noneOf(ConsumerReactorProgress.ApplicationProgressEffect.class);
+    private final EnumSet<ConsumerReactorProgress.ApplicationWakeupReason> pendingApplicationWakeups =
+        EnumSet.noneOf(ConsumerReactorProgress.ApplicationWakeupReason.class);
     private long lastPollTimeMs = 0L;
 
     public ConsumerReactor(LogContext logContext,
@@ -242,6 +247,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             pollWaitTimeMs,
             timeUntilNextProgressCheck(progressCheck, currentTimeMs)
         );
+        collectApplicationProgressEffects();
+        flushApplicationWakeups();
 
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
@@ -256,6 +263,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             afterNetworkPollMs
         );
         deliverExpiredApplicationWait(afterNetworkPollMs);
+        collectApplicationProgressEffects();
+        flushApplicationWakeups();
 
         reapExpiredApplicationEvents(currentTimeMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
@@ -391,8 +400,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
 
         // An already-expired decision is delivered by deliverExpiredApplicationWait so it produces exactly one
         // notification. Future deadlines wake a caller which may already be blocked using an older snapshot.
-        if (next.shortens(previous) && next.remainingMs(currentTimeMs) > 0L)
-            requestManagers.wakeupApplicationThread();
+        if (next.shortens(previous) && next.remainingMs(currentTimeMs) > 0L) {
+            pendingApplicationWakeups.add(
+                ConsumerReactorProgress.ApplicationWakeupReason.WAIT_DECISION_SHORTENED
+            );
+        }
 
         return next;
     }
@@ -408,7 +420,32 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         // Mark delivery in the published snapshot before signaling. This prevents the released application thread
         // from observing a stale 0ms timeout and spinning while the manager processes the resulting event.
         applicationWait = current.withDeadlineNotificationDelivered();
+        pendingApplicationWakeups.add(
+            ConsumerReactorProgress.ApplicationWakeupReason.WAIT_DEADLINE_EXPIRED
+        );
+    }
+
+    private void collectApplicationProgressEffects() {
+        pendingApplicationProgressEffects.addAll(requestManagers.drainApplicationProgressEffects());
+        if (!pendingApplicationProgressEffects.isEmpty()) {
+            pendingApplicationWakeups.add(
+                ConsumerReactorProgress.ApplicationWakeupReason.PROGRESS_EFFECT
+            );
+        }
+    }
+
+    private void flushApplicationWakeups() {
+        if (pendingApplicationWakeups.isEmpty())
+            return;
+
+        log.trace(
+            "Waking application thread for reasons {} and progress effects {}",
+            pendingApplicationWakeups,
+            pendingApplicationProgressEffects
+        );
         requestManagers.wakeupApplicationThread();
+        pendingApplicationWakeups.clear();
+        pendingApplicationProgressEffects.clear();
     }
 
     private long timeUntilNextProgressCheck(final ConsumerReactorProgress.ApplicationWait decision,

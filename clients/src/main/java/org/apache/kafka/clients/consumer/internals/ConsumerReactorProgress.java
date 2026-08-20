@@ -65,20 +65,40 @@ final class ConsumerReactorProgress {
         AWAIT_DEADLINE
     }
 
+    /**
+     * Protocol facts which require the application thread to observe fresh state. Managers report these effects;
+     * only the reactor decides when to turn them into a cross-thread wakeup.
+     */
+    enum ApplicationProgressEffect {
+        FETCH_BUFFER_HAS_DATA,
+        FETCH_PREPARATION_FAILED,
+        FETCH_REQUEST_TERMINATED
+    }
+
+    /** Reasons coalesced by the reactor before it signals the application-side wait primitive. */
+    enum ApplicationWakeupReason {
+        WAIT_DECISION_SHORTENED,
+        WAIT_DEADLINE_EXPIRED,
+        PROGRESS_EFFECT
+    }
+
     static final class ProgressIntent {
         private static final ProgressIntent EVENT =
-            new ProgressIntent(WaitMode.AWAIT_EVENT, Long.MAX_VALUE, false);
+            new ProgressIntent(WaitMode.AWAIT_EVENT, Long.MAX_VALUE, false, 0L);
 
         private final WaitMode waitMode;
         private final long deadlineAtMs;
         private final boolean compatibilityDeadline;
+        private final long semanticGeneration;
 
         private ProgressIntent(final WaitMode waitMode,
                                final long deadlineAtMs,
-                               final boolean compatibilityDeadline) {
+                               final boolean compatibilityDeadline,
+                               final long semanticGeneration) {
             this.waitMode = Objects.requireNonNull(waitMode, "Wait mode must be non-null");
             this.deadlineAtMs = deadlineAtMs;
             this.compatibilityDeadline = compatibilityDeadline;
+            this.semanticGeneration = semanticGeneration;
         }
 
         static ProgressIntent awaitEvent() {
@@ -104,7 +124,13 @@ final class ConsumerReactorProgress {
             if (delayMs == Long.MAX_VALUE || currentTimeMs > Long.MAX_VALUE - delayMs)
                 return awaitEvent();
 
-            return new ProgressIntent(WaitMode.AWAIT_DEADLINE, currentTimeMs + delayMs, compatibilityDeadline);
+            return new ProgressIntent(WaitMode.AWAIT_DEADLINE, currentTimeMs + delayMs, compatibilityDeadline, 0L);
+        }
+
+        ProgressIntent withSemanticGeneration(final long semanticGeneration) {
+            if (waitMode == WaitMode.AWAIT_EVENT)
+                return this;
+            return new ProgressIntent(waitMode, deadlineAtMs, compatibilityDeadline, semanticGeneration);
         }
 
         WaitMode waitMode() {
@@ -123,6 +149,10 @@ final class ConsumerReactorProgress {
 
         boolean compatibilityDeadline() {
             return compatibilityDeadline;
+        }
+
+        long semanticGeneration() {
+            return semanticGeneration;
         }
     }
 
@@ -174,6 +204,7 @@ final class ConsumerReactorProgress {
             return waitMode() == other.waitMode()
                 && deadlineAtMs() == other.deadlineAtMs()
                 && compatibilityDeadline() == other.compatibilityDeadline()
+                && semanticGeneration() == other.semanticGeneration()
                 && Objects.equals(source, other.source);
         }
 
@@ -183,6 +214,10 @@ final class ConsumerReactorProgress {
 
         boolean compatibilityDeadline() {
             return intent.compatibilityDeadline();
+        }
+
+        long semanticGeneration() {
+            return intent.semanticGeneration();
         }
 
         boolean isPendingCompatibilityDeadline(final long currentTimeMs) {

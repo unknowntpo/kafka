@@ -15,7 +15,7 @@ Several components independently decide when work should run or when another thr
 * `AsyncKafkaConsumer` reads `SubscriptionState`, collects records, and waits on `FetchBuffer`.
 * `ConsumerReactor` processes application events, polls request managers, and polls the network client.
 * Each `RequestManager` independently returns a network poll delay and an application-thread wait delay.
-* A request manager may wake `FetchBuffer` directly.
+* Legacy request-manager and response paths may wake `FetchBuffer` directly.
 * Futures, background events, callback-completed events, and user wakeups use separate notification paths.
 
 These mechanisms are individually reasonable, but their decisions are not based on one state snapshot. A local
@@ -73,6 +73,44 @@ decision source has already migrated.
 | Fetch mailbox | Bounded transfer of immutable/owned fetch results; not a generic wakeup condition |
 | Callback mailbox | Publish callback work and require an epoch-tagged completion acknowledgement |
 
+### Ownership and communication topology
+
+`AsyncKafkaConsumer` indirectly owns the reactor through `ApplicationEventHandler`. Despite its current name,
+`ApplicationEventHandler` is not the Reactor-pattern handler: it is the application-side cross-thread gateway and
+lifecycle handle (`add`, `addAndGet`, `wakeup`, wait-snapshot access, and close). A later mechanical rename to
+`ConsumerReactorHandle` would make this role clearer. `ApplicationEventProcessor` executes application-command
+logic; `ConsumerReactor` drains and dispatches the commands.
+
+```text
+AsyncKafkaConsumer
+  -> ConsumerReactorHandle (currently ApplicationEventHandler)
+     -> ApplicationEventQueue -- enqueue, then wake --> ConsumerReactor
+
+ConsumerReactor
+  -> RequestManagers -> NetworkClientDelegate       (same-thread direct calls)
+  -> BackgroundEventQueue / FetchBuffer / futures   (cross-thread publication)
+```
+
+There should be no queue between the reactor, request managers, and network delegate: they share one owner thread,
+so an extra hop would weaken ordering and add capacity management without isolating mutable state. Cross-thread
+paths require explicit admission bounds. The current application and background queues are unbounded
+`LinkedBlockingQueue` instances, so resource ownership is not complete yet.
+
+Regular and share consumers should reuse a thin reactor kernel, not one combined protocol policy. The kernel owns
+queue drain, ordering, deadline aggregation, network polling, publish-before-wakeup, shutdown, and resource limits.
+A `RegularConsumerDriver` can own membership/fetch/offset policy; a `ShareConsumerDriver` can own acquisition,
+lock-renewal, and acknowledgement policy. Branches such as `RequestManagers.wakeupApplicationThread()` and boolean
+transport policy flags are evidence that this boundary has not yet been extracted. New `isShareConsumer` branches,
+union-shaped optionals, or policy booleans in the kernel should be treated as boundary leaks.
+
+`NetworkClientDelegate` currently owns a `BackgroundEventHandler` and
+`notifyMetadataErrorsViaErrorQueue`: regular consumers ask the reactor to pull a metadata error, while share
+consumers let the delegate enqueue an `ErrorEvent`. Thread ownership is intact because polling and callbacks run on
+the reactor thread, but decision ownership leaks into transport. The target is for transport to return a typed
+`NetworkOutcome`; the reactor/driver then decides whether to retry, complete, publish, or wake. Internal
+`UnsentRequest` future completion may remain transport-local because it performs correlation rather than
+application-visible policy.
+
 Every reactor iteration should produce one explicit decision:
 
 ```text
@@ -109,12 +147,12 @@ the final decision must not turn the reactor into a switch statement containing 
 | --- | --- | --- | --- |
 | Earliest application deadline across managers | Reactor | absolute deadlines, elapsed-time subtraction, same-source preservation | most managers still use the compatibility timeout adapter |
 | Network poll duration | Reactor | request delays and progress deadlines cap every poll | inputs are not yet typed by reason |
-| Publish-before-wakeup ordering | Reactor | shorter decision and deadline-expiry wakeups are ordered and retained | wake effect still uses `FetchBuffer` as a generic signal |
-| Deadline delivery | Reactor | one-shot delivery, no stale `0 ms`, distinct source at same timestamp | semantic generation is inferred from source/deadline rather than an explicit operation id |
+| Publish-before-wakeup ordering | Reactor | shorter decisions, deadline expiry, and named fetch progress effects are coalesced after publication | dedicated application-wait primitive remains a possible follow-up |
+| Deadline delivery | Reactor | one-shot delivery, no stale `0 ms`, distinct source and native fetch generation at the same timestamp | compatibility managers still lack explicit operation generations |
 | Fetch blocked by missing leader | Fetch manager reports typed condition; reactor schedules | bounded retry deadline | metadata completion is not yet a named reactor effect |
 | Fetch blocked by reconnect backoff | Fetch manager reports actual connection delay; reactor schedules | exponential connection backoff and mixed partitions | real-socket broker-restart smoke test remains |
-| Fetch blocked by in-flight request or buffer drain | Fetch manager reports event-driven condition; reactor schedules | no anonymous retry wakeup | completion/capacity events are not yet first-class effect types |
-| Empty or failed fetch response | Response path signals application; reactor owns subsequent schedule | terminal response and failure tests | unsent-request expiration audit remains |
+| Fetch blocked by in-flight request or buffer drain | Fetch manager reports event-driven condition; reactor schedules | terminal request completion is a bounded, named effect | buffer-capacity transitions still use the data mailbox signal |
+| Empty or failed fetch response | Fetch manager reports a named terminal/preparation effect; reactor coalesces and applies it | empty, error, preparation-failure, duplicate-coalescing, and unsent-expiration tests | real-socket failure smoke remains |
 | Groupless manual assignment | Reactor deadline limits the full async chain | deterministic cross-component test without caller rescan | real-socket broker-restart smoke test remains |
 | No assignment or invalid positions | Fetch manager reports `NO_FETCHABLE_PARTITIONS`; reactor schedules | behavior-equivalent retry deadline | replace the periodic compatibility deadline with explicit assignment/position events |
 | Fetchable/unbuffered partitions | Fetch manager reports the concrete preparation condition; reactor schedules | missing leader, reconnect, in-flight, and buffer-drain paths no longer need caller inference | completion/capacity effects are not yet first-class types |
@@ -209,10 +247,25 @@ WAITING_FOR_BUFFER_DRAIN
 CLOSING
 ```
 
-An empty result wakes the application thread only for `DATA_ALREADY_BUFFERED` or `CLOSING`. Completing an in-flight
-request wakes it on every terminal response or failure. Reconnect contributes the network client's actual remaining
-connection delay, including exponential backoff, instead of substituting the configured base retry interval or an
-immediate wakeup. Missing metadata contributes the configured retry deadline.
+The fifth POC slice makes synthetic application notification a reactor-owned effect. `FetchRequestManager` reports a
+bounded, duplicate-coalescing enum set containing `FETCH_BUFFER_HAS_DATA`, `FETCH_PREPARATION_FAILED`, or
+`FETCH_REQUEST_TERMINATED`. The reactor drains these facts before and after network I/O, coalesces them with deadline
+and publication reasons, and applies at most one application wake per phase. The manager does not directly signal
+the buffer for these outcomes. A response that already added a `CompletedFetch` does not also report a terminal
+effect, preventing a second retained wake after the data signal. Fetch-session close is intentionally not an
+application progress effect: close runs inside reactor cleanup while the application waits for reactor termination,
+not fetch data.
+
+Two direct signals remain intentionally separate. Adding records to `FetchBuffer` signals the mailbox condition
+that actually changed; `Consumer.wakeup()` is an explicit user interruption. Neither is a synthetic scheduling
+policy. Reconnect contributes the network client's actual remaining connection delay, including exponential
+backoff, instead of substituting the configured base retry interval or an immediate wakeup. Missing metadata
+contributes the configured retry deadline.
+
+Native fetch deadlines carry a manager-owned semantic generation. Deadline delivery identity is therefore
+`source + mode + absolute deadline + generation`, rather than only a timestamp. Two distinct zero-delay retries from
+the same manager in the same clock tick each receive one notification, while re-observing the same blocked state
+preserves both its absolute deadline and generation.
 
 When conditions are mixed across partitions, a retry deadline wins over an event-only blocker. For example,
 `REQUEST_IN_FLIGHT` on one node does not hide `RECONNECT_BACKOFF` on another node.
@@ -236,9 +289,10 @@ callbacks, in-flight requests, and retained response buffers.
 ## POC Scope and Non-goals
 
 The POC now names the execution component `ConsumerReactor`, but does not yet move `SubscriptionState`, change
-callback threading, rename existing runtime thread/metric identifiers, or claim to fix every busy loop. It has
-established a progress-decision publication seam, a typed fetch-preparation result, and the first direct typed-intent
-producer.
+callback threading, rename `ApplicationEventHandler` or existing runtime thread/metric identifiers, extract
+regular/share protocol drivers, or claim to fix every busy loop. It has established a progress-decision publication
+seam, a typed fetch-preparation result, the first direct typed-intent producer, and a bounded/coalesced application
+progress-effect boundary.
 
 The POC includes a deterministic `FetchBuffer` concurrency test plus a cross-component test of the complete async
 consumer chain with only its socket replaced by `MockClient`. In the latter, a consumer without a group id and with
@@ -247,15 +301,18 @@ generates a new fetch. Because the application-side rescan is now absent, that t
 publication and expiry wakeups. `testPollWaitUsesOnlyPublishedReactorDecision` separately asserts that fetchable
 application state cannot shorten a published unbounded decision. The real KRaft `PlaintextConsumerPollTest` suite
 remains green. Before production integration, a broker-restart smoke test should repeat the invariant against real
-sockets, and direct fetch-buffer notifications should migrate into named reactor effects.
+sockets. Unsent-request expiration is covered deterministically through the real fetch manager, network delegate,
+reactor post-I/O drain, and blocking fetch waiter.
 
 ## Validation Checkpoint (2026-08-20)
 
 * Focused reactor, fetch-manager, and groupless cross-component regressions passed with Checkstyle and SpotBugs.
 * After removing the application-side rescan, the focused no-fetchable, published-wait, and groupless reconnect
   regressions passed with Checkstyle and SpotBugs.
-* The complete `clients` unit suite passed: 13,578 tests, zero failures.
+* The complete `clients` unit suite passed: 13,584 tests, zero failures.
 * The KRaft `PlaintextConsumerPollTest` integration suite passed: 24 tests, zero failures.
+* A final read-only adversarial review passed after semantic-generation, double-wakeup, post-poll ordering, and
+  unsent-expiration findings were addressed.
 
 These results validate the deterministic POC checkpoint. Production integration still requires the real-socket
 broker-restart smoke test and terminal-path coverage listed in the evidence document.
