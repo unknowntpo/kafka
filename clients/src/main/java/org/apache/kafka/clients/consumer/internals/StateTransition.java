@@ -20,5 +20,6 @@ package org.apache.kafka.clients.consumer.internals;
 enum StateTransition {
     FETCH_BUFFER_HAS_DATA,
     FETCH_PREPARATION_FAILED,
-    FETCH_REQUEST_TERMINATED
+    FETCH_REQUEST_TERMINATED,
+    FETCH_POSITIONS_UPDATE_FAILED
 }
