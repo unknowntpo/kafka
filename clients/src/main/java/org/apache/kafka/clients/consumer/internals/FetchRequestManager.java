@@ -215,10 +215,16 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         final FetchRequestPreparationResult result,
         final long currentTimeMs
     ) {
+        boolean noFetchablePartitions =
+            result.conditions().contains(FetchRequestPreparationCondition.NO_FETCHABLE_PARTITIONS);
         boolean missingLeader = result.conditions().contains(FetchRequestPreparationCondition.MISSING_LEADER);
         boolean reconnectBackoff = result.conditions().contains(FetchRequestPreparationCondition.RECONNECT_BACKOFF);
-        if (missingLeader || reconnectBackoff) {
-            long delayMs = missingLeader ? retryBackoffMs : Long.MAX_VALUE;
+        if (noFetchablePartitions || missingLeader || reconnectBackoff) {
+            // NO_FETCHABLE_PARTITIONS includes assignment and position states which are not yet represented by
+            // explicit reactor events. Preserve the legacy retry bound here while keeping the final scheduling
+            // decision in the reactor. Missing-leader retries use the same configured backoff; reconnects use the
+            // actual connection delay so exponential backoff does not degrade into fixed-period polling.
+            long delayMs = noFetchablePartitions || missingLeader ? retryBackoffMs : Long.MAX_VALUE;
             if (reconnectBackoff)
                 delayMs = Math.min(delayMs, result.reconnectBackoffRemainingMs());
 
