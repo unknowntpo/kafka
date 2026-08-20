@@ -158,7 +158,7 @@ public class ShareHeartbeatRequestManagerTest
     }
 
     /**
-     * ShareConsumerImpl runs on the same ConsumerNetworkThread as the AsyncKafkaConsumer, thus we also test to ensure
+     * ShareConsumerImpl runs on the same ConsumerReactor as the AsyncKafkaConsumer, thus we also test to ensure
      * we don't enter a CPU spin state. Refer to KAFKA-20253
      */
     @Test

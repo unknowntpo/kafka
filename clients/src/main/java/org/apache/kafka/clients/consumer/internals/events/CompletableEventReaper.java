@@ -162,7 +162,7 @@ public class CompletableEventReaper {
 
     public List<CompletableEvent<?>> uncompletedEvents() {
         // The following code does not use the Java Collections Streams API to reduce overhead in the critical
-        // path of the ConsumerNetworkThread loop.
+        // path of the ConsumerReactor loop.
         List<CompletableEvent<?>> events = new ArrayList<>();
 
         for (CompletableEvent<?> event : tracked) {

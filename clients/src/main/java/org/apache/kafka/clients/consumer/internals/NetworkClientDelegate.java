@@ -479,7 +479,7 @@ public class NetworkClientDelegate implements AutoCloseable {
 
     /**
      * Creates a {@link Supplier} for deferred creation during invocation by
-     * {@link ConsumerNetworkThread}.
+     * {@link ConsumerReactor}.
      */
     public static Supplier<NetworkClientDelegate> supplier(final Time time,
                                                            final LogContext logContext,
@@ -513,7 +513,7 @@ public class NetworkClientDelegate implements AutoCloseable {
 
     /**
      * Creates a {@link Supplier} for deferred creation during invocation by
-     * {@link ConsumerNetworkThread}.
+     * {@link ConsumerReactor}.
      */
     public static Supplier<NetworkClientDelegate> supplier(final Time time,
                                                            final ConsumerConfig config,

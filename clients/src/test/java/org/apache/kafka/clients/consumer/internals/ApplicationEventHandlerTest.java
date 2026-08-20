@@ -108,7 +108,7 @@ public class ApplicationEventHandlerTest {
     }
 
     @Test
-    public void testAddThrowsWhenBackgroundThreadDead() {
+    public void testAddThrowsWhenReactorDead() {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = spy(new AsyncConsumerMetrics(metrics, "test-group"));
              ApplicationEventHandler handler = new ApplicationEventHandler(
@@ -126,7 +126,7 @@ public class ApplicationEventHandlerTest {
 
             KafkaException error = assertThrows(KafkaException.class,
                 () -> handler.add(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds())));
-            assertTrue(error.getMessage().contains("background thread is not running"));
+            assertTrue(error.getMessage().contains("consumer reactor is not running"));
         }
     }
 

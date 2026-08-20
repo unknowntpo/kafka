@@ -311,7 +311,7 @@ public class ConsumerHeartbeatRequestManagerTest
      * KAFKA-20253: when the coordinator is unavailable (e.g. after a re-authentication failure),
      * poll() returns EMPTY, so no heartbeat can be sent. maximumTimeToWait() must return a positive
      * value in that case; returning 0 busy-spins the application thread (and, via wakeups, the
-     * consumer network thread), which is the AsyncKafkaConsumer high-CPU loop in this ticket.
+     * consumer reactor), which is the AsyncKafkaConsumer high-CPU loop in this ticket.
      */
     @Test
     public void testMaximumTimeToWaitWhenCoordinatorUnavailableDoesNotSpin() {

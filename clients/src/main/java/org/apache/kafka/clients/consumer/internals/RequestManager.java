@@ -43,13 +43,13 @@ public interface RequestManager {
      * During normal operation of the {@link Consumer}, a request manager may need to send out network requests.
      * Implementations can return {@link PollResult their need for network I/O} by returning the requests here.
      * This method is called within a single-threaded context from
-     * {@link ConsumerNetworkThread the consumer's network I/O thread}. As such, there should be no need for
+     * {@link ConsumerReactor the consumer reactor}. As such, there should be no need for
      * synchronization protection in this method's implementation.
      *
      * <p/>
      *
      * <em>Note</em>: no network I/O occurs in this method. The method itself should not block for any reason. This
-     * method is called from the consumer's network I/O thread, so quick execution of this method in <em>all</em>
+     * method is called from the consumer reactor, so quick execution of this method in <em>all</em>
      * request managers is critical to ensure that we can heartbeat in a timely fashion.
      *
      * @param currentTimeMs The current system time in milliseconds at which the method was called;
@@ -60,14 +60,14 @@ public interface RequestManager {
     /**
      * On shutdown of the {@link Consumer}, a request manager may need to send out network requests. Implementations
      * can signal that by returning the {@link PollResult close} requests here. Like {@link #poll(long)}, this method
-     * is called within a single-threaded context from {@link ConsumerNetworkThread the consumer's network I/O thread}.
+     * is called within a single-threaded context from {@link ConsumerReactor the consumer reactor}.
      * As such, there should be no need for synchronization protection in this method's implementation.
      *
      * <p/>
      *
      * <em>Note</em>: no network I/O occurs in this method. The method itself should not block for any reason. This
      * method is called as an (indirect) result of {@link Consumer#close() the consumer's close method} being invoked.
-     * (Note that it is still invoked on the consumer's network I/O thread). Quick execution of this method in
+     * (Note that it is still invoked on the consumer reactor). Quick execution of this method in
      * <em>all</em> request managers is critical to ensure that we can complete as many of the consumer's shutdown
      * tasks as possible within the user-provided timeout.
      *

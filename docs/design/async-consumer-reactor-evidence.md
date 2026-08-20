@@ -76,7 +76,7 @@ The POC therefore requires these properties before the rescan is removed:
 
 The POC now covers the stale-wait publication protocol at two deterministic levels: a real application-side
 `FetchBuffer` wait running concurrently with the reactor scheduler, and the complete
-`AsyncKafkaConsumer -> ApplicationEventHandler -> ConsumerNetworkThread -> FetchRequestManager -> FetchBuffer`
+`AsyncKafkaConsumer -> ApplicationEventHandler -> ConsumerReactor -> FetchRequestManager -> FetchBuffer`
 chain with only the socket replaced by a controllable `MockClient`. The real KRaft `PlaintextConsumerPollTest`
 suite also remains green. A broker-restart test still belongs to production integration rather than this POC, so
 the review leaves two gates open:

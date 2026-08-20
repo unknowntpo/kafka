@@ -11,7 +11,7 @@ Improvement
 ## Summary
 
 `AsyncKafkaConsumer` has a background event loop, but progress decisions are still distributed across the
-application thread, `ConsumerNetworkThread`, individual request managers, network callbacks, futures, and fetch
+application thread, `ConsumerReactor`, individual request managers, network callbacks, futures, and fetch
 buffer wakeups.
 
 This makes it difficult to answer a basic scheduling question from one state snapshot:
@@ -98,7 +98,7 @@ Request managers can migrate incrementally. Existing managers may initially adap
 
 ## Non-goals
 
-- Rename `ConsumerNetworkThread` as part of the first change.
+- Rename existing runtime thread names or public metrics as part of the class rename.
 - Move all `SubscriptionState` mutations behind reactor commands in one patch.
 - Redesign rebalance callback execution in this issue.
 - Remove application-thread safety checks before their corresponding background completion events exist.
@@ -128,7 +128,6 @@ the scope into a KIP, the mailing list should confirm whether this belongs under
 
 ## Open questions
 
-- Should the long-term owner be named `ConsumerReactor`, with its thread treated only as the executor?
 - Should progress intents remain a request-manager interface, or become the output of reactor-owned state reducers?
 - Which current application-thread state checks can be removed only after equivalent completion events exist?
 - Should deadline delivery use the fetch-buffer latch temporarily, or introduce a dedicated application-wait signal?
