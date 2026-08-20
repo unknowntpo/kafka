@@ -4,12 +4,12 @@
 
 This is an exploratory design and migration plan. It does not change the Kafka consumer public API or protocol.
 
-The immediate goal is to test whether the current `AsyncKafkaConsumer` implementation can evolve toward one
-owner for protocol state and one place that decides whether the consumer can make progress.
+The immediate goal is to test whether the current `AsyncKafkaConsumer` implementation can evolve toward explicit
+owners for mutable consumer state and one place that decides whether the consumer can make progress.
 
 ## Problem Statement
 
-The current implementation has a background event loop, but it does not yet have a single progress model.
+The current implementation has a background event loop, but it does not yet have a single scheduling model.
 Several components independently decide when work should run or when another thread should wake:
 
 * `AsyncKafkaConsumer` reads `SubscriptionState`, collects records, and waits on `FetchBuffer`.
@@ -24,7 +24,7 @@ possible.
 
 ## Before
 
-| Execution context | State read or mutated | Progress mechanism |
+| Execution context | State read or mutated | Scheduling mechanism |
 | --- | --- | --- |
 | Application thread | assignment, positions, buffered fetches, in-flight poll state | event enqueue, future wait, `FetchBuffer.awaitWakeup` |
 | Consumer reactor | application events, request-manager state, network responses | network poll and cached `maximumTimeToWait` |
@@ -55,11 +55,11 @@ and which event or deadline can change that answer.
 
 ## After
 
-The target is a `ConsumerReactor`: the single execution-context owner of mutable consumer protocol state and the
-only component that combines cross-manager constraints into final progress decisions.
+The target is a `ConsumerReactor`: the single execution-context coordinator for consumer resources and the only
+component that combines cross-manager constraints into final reactor schedules and actions.
 
 The implementation class is now named `ConsumerReactor`. The name describes its responsibility rather than its
-executor: it orders events, invokes protocol state machines, aggregates their constraints, decides network polling
+executor: it orders events, invokes manager reconciliation logic, aggregates their constraints, decides network polling
 and application waiting, and publishes the resulting effects. It still uses a dedicated thread internally, but the
 thread is an implementation detail. The rename marks the intended boundary; it does not imply that every legacy
 decision source has already migrated.
@@ -67,8 +67,8 @@ decision source has already migrated.
 | Component | Responsibility after migration |
 | --- | --- |
 | Application facade | Validate API calls, submit bounded commands, return records, execute user callbacks |
-| Consumer reactor | Own protocol state, apply events in order, choose the next progress action |
-| Request-manager state machines | Reduce reactor-owned state and propose effects; do not independently schedule threads |
+| Consumer reactor | Order input events, initiate reconciliation, publish `ReactorSchedule`, execute `ReactorAction` |
+| Request managers | Own local state, implement `reconcile()`, and return `ManagerReconcileResult` |
 | Network delegate | Transport only: send requests and publish completions |
 | Fetch mailbox | Bounded transfer of immutable/owned fetch results; not a generic wakeup condition |
 | Callback mailbox | Publish callback work and require an epoch-tagged completion acknowledgement |
@@ -111,25 +111,32 @@ the reactor thread, but decision ownership leaks into transport. The target is f
 `UnsentRequest` future completion may remain transport-local because it performs correlation rather than
 application-visible policy.
 
-Every reactor iteration should produce one explicit decision:
+The target control flow is:
 
 ```text
-SEND(requests)
-DELIVER(fetchBatch)
-AWAIT_NETWORK(deadline)
-AWAIT_APPLICATION(commandType)
-AWAIT_CALLBACK(epoch)
-AWAIT_CAPACITY(resource)
-AWAIT_DEADLINE(deadline)
-TERMINAL(result)
+Input Event → ConsumerReactor → RequestManager.reconcile()
+            → manager-owned state transition + ManagerReconcileResult
+            → NextReconcile → ReactorSchedule → ReactorAction
 ```
 
-The decision is computed from state owned by the reactor. A wakeup is an effect of a concrete transition, not a
-substitute for describing why progress became possible.
+The reactor initiates reconciliation. Each manager changes only its own state and reports proposed network work plus
+the conditions for its next reconciliation. `ReactorSchedule.merge(...)` is a pure calculation; it is not a second
+scheduler or owner. A wakeup is an action derived from a concrete transition, not a substitute for describing why
+progress became possible.
+
+There are three distinct ownership roles:
+
+* each request manager owns its local state and rules;
+* `ConsumerReactor` owns input ordering and when reconciliation runs;
+* `ConsumerReactor` owns the final cross-manager schedule and actions.
+
+`Input Event` is semantic, not a new universal queue. Application commands use the existing application-event
+queue. Network completions occur directly during reactor-thread network polling. Deadlines are materialized from the
+published schedule and time source. No queue is added between the reactor and network delegate.
 
 ## Target Invariants
 
-1. Each mutable protocol state has one execution-context owner.
+1. Each mutable state has one execution-context owner.
 2. A transition is applied before its result, data, or callback is published.
 3. Every wakeup, retry, and reschedule names the state transition, capacity change, completion, command, or deadline
    that can enable progress.
@@ -146,27 +153,27 @@ the final decision must not turn the reactor into a switch statement containing 
 | Decision | Current authority | Coverage | Remaining gap |
 | --- | --- | --- | --- |
 | Earliest application deadline across managers | Reactor | absolute deadlines, elapsed-time subtraction, same-source preservation | most managers still use the compatibility timeout adapter |
-| Network poll duration | Reactor | request delays and progress deadlines cap every poll | inputs are not yet typed by reason |
-| Publish-before-wakeup ordering | Reactor | shorter decisions, deadline expiry, and named fetch progress effects are coalesced after publication | dedicated application-wait primitive remains a possible follow-up |
+| Network poll duration | Reactor | request delays and `NextReconcile` deadlines cap every poll | inputs are not yet typed by reason |
+| Publish-before-wakeup ordering | Reactor | shorter schedules, deadline expiry, and named fetch state transitions are coalesced into `ReactorAction` after publication | dedicated application-wait primitive remains a possible follow-up |
 | Deadline delivery | Reactor | one-shot delivery, no stale `0 ms`, distinct source and native fetch generation at the same timestamp | compatibility managers still lack explicit operation generations |
-| Fetch blocked by missing leader | Fetch manager reports typed condition; reactor schedules | bounded retry deadline | metadata completion is not yet a named reactor effect |
+| Fetch blocked by missing leader | Fetch manager reports a typed blocker; reactor schedules | bounded retry deadline | metadata completion is not yet a named reactor action |
 | Fetch blocked by reconnect backoff | Fetch manager reports actual connection delay; reactor schedules | exponential connection backoff and mixed partitions | real-socket broker-restart smoke test remains |
 | Fetch blocked by in-flight request or buffer drain | Fetch manager reports event-driven condition; reactor schedules | terminal request completion is a bounded, named effect | buffer-capacity transitions still use the data mailbox signal |
 | Empty or failed fetch response | Fetch manager reports a named terminal/preparation effect; reactor coalesces and applies it | empty, error, preparation-failure, duplicate-coalescing, and unsent-expiration tests | real-socket failure smoke remains |
 | Groupless manual assignment | Reactor deadline limits the full async chain | deterministic cross-component test without caller rescan | real-socket broker-restart smoke test remains |
 | No assignment or invalid positions | Fetch manager reports `NO_FETCHABLE_PARTITIONS`; reactor schedules | behavior-equivalent retry deadline | replace the periodic compatibility deadline with explicit assignment/position events |
-| Fetchable/unbuffered partitions | Fetch manager reports the concrete preparation condition; reactor schedules | missing leader, reconnect, in-flight, and buffer-drain paths no longer need caller inference | completion/capacity effects are not yet first-class types |
+| Fetchable/unbuffered partitions | Fetch manager reports concrete preparation blockers; reactor schedules | missing leader, reconnect, in-flight, and buffer-drain paths no longer need caller inference | completion/capacity actions are not yet first-class types |
 | Rebalance callbacks and lifecycle handshakes | Split between reactor and application thread | existing Required/Completed event protocol | operation/epoch ownership and terminal-path unification remain |
 | Queue and buffer admission | Individual queues and producers | existing local behavior | no unified capacity decision or overload policy |
 
 ## Incremental Migration
 
-### Phase 1: Make the progress decision explicit
+### Phase 1: Make the reactor schedule explicit
 
 Replace the anonymous cached timeout with an immutable decision snapshot. Record when it was computed and which
-manager supplied the limiting deadline. Publish the pre-I/O decision which bounds the network poll, deliver its
-expiry, and then recompute from a post-I/O time snapshot. This ordering matters for compatibility adapters which
-still express a relative delay: recomputing first would move an expired deadline into the future.
+manager supplied the limiting deadline. Publish the pre-I/O decision which bounds the network poll, then deliver
+that exact decision's expiry. This ordering matters for compatibility adapters which still express a relative delay:
+recomputing first would move an expired deadline into the future.
 
 This phase is implemented by this POC. It intentionally preserves behavior while creating an observable seam for
 later phases.
@@ -175,35 +182,49 @@ Exit criteria:
 
 * one tested aggregation function chooses the application wait deadline;
 * the published decision is immutable and safe to read from the application thread;
-* the decision which bounded I/O is delivered before a fresh post-I/O decision replaces it;
+* the decision which bounded I/O is delivered before an affected manager replaces its contribution;
 * no public API changes.
 
-### Phase 2: Replace manager-local delays with progress intents
+### Phase 2: Introduce manager reconciliation results
 
-Replace `RequestManager.maximumTimeToWait()` with typed intents such as `READY_TO_SEND`, `WAITING_FOR_COORDINATOR`,
-`WAITING_FOR_RESPONSE`, and `WAITING_FOR_DEADLINE`. The reactor combines feasibility and urgency instead of taking
-the minimum of unrelated numbers.
+Make `RequestManager.reconcile()` the reactor-facing operation. It returns `ManagerReconcileResult`, which carries
+proposed network work, one or more typed `NextReconcile` values, and manager-owned state transitions. The reactor
+combines feasibility and urgency instead of taking the minimum of unrelated numbers.
+
+The current default implementation is a compatibility adapter: `poll(now) + nextReconcile(now)`. It standardizes
+the output shape but does not yet centralize callbacks or timeout handling. `FetchRequestManager` is the first native
+override and returns work, scheduling inputs, and transitions from one reconciliation. The reactor consumes these
+transitions directly; the former `RequestManagers.drainStateTransitions()` side path is removed.
+
+Pre-I/O reconciles every manager as a correctness fallback. Request completion marks its owning manager; post-I/O
+reconciles only a stable snapshot of those affected managers. A completion mark is not itself an application wake.
+The reactor first applies the returned transition and publishes the merged schedule, then dispatches any action.
+Metadata, disconnect, capacity, and cross-manager dependency inputs still rely on the next full pre-I/O pass until
+they are migrated to typed inputs.
 
 The focused regression scenario is a manager that reports urgent work while its prerequisite is unavailable. The
 reactor must park on the prerequisite or its deadline rather than return a zero-duration wait.
 
-The third POC slice implements the first typed intent boundary:
+The third POC slice implements the first typed reconciliation boundary:
 
 ```text
-AWAIT_EVENT
-AWAIT_DEADLINE(absoluteDeadlineMs)
+ON_EVENT
+AT_DEADLINE(absoluteDeadlineMs)
 ```
 
 Managers that have not migrated use a compatibility adapter around `maximumTimeToWait()`. `FetchRequestManager`
-produces its intent directly from the latest typed fetch-preparation result instead of reducing every non-in-flight
+produces `NextReconcile` directly from the latest typed fetch-preparation result instead of reducing every non-in-flight
 state to the same anonymous backoff. Absolute deadlines prevent time spent between publication and reading from
 being added to the wait again. Re-observing the same blocking condition preserves its existing deadline; otherwise
 unrelated events could continuously move the retry forward and create starvation. The compatibility adapter is
-explicitly tagged so the reactor conservatively preserves its earlier deadline across early network returns without
-applying that heuristic to native typed intents.
+explicitly tagged. The reactor retains each manager's absolute contribution separately, so an incremental update
+cannot erase another manager's deadline. A delivered compatibility `0 ms` result remains suppressed until that
+manager reports a new positive wait. Because the compatibility API has no semantic generation, it cannot distinguish
+a new zero-delay operation from the previously delivered zero; native managers use generations when that distinction
+matters. Native `NextReconcile` values do not inherit this relative-time heuristic.
 
 The fourth POC slice removes the application-side `SubscriptionState` / `FetchBuffer` safety rescan. Fetchable
-partitions now rely on their concrete preparation condition: missing leader and reconnect use reactor deadlines,
+partitions now rely on their concrete preparation blockers: missing leader and reconnect use reactor deadlines,
 while in-flight requests and buffer drain wait for real completion or capacity transitions. Until assignment and
 position changes become explicit reactor events, `NO_FETCHABLE_PARTITIONS` retains the old retry bound as a named
 manager constraint. The application thread only applies the immutable timeout published by the reactor.
@@ -234,10 +255,11 @@ Make fetch preparation return a discriminated result:
 Only `data already buffered` publishes `DATA_AVAILABLE`. Backoff publishes a deadline; request completion publishes
 a completion event. `FetchBuffer.wakeup()` is no longer used for an ambiguous empty result.
 
-The second POC slice implements this boundary as a request map plus a set of typed conditions, because different
+The second POC slice implements this boundary as a request map plus a set of typed blockers, because different
 partitions can be blocked for different reasons in the same preparation pass:
 
 ```text
+FetchRequestPreparationBlocker:
 DATA_ALREADY_BUFFERED
 NO_FETCHABLE_PARTITIONS
 MISSING_LEADER
@@ -252,8 +274,8 @@ bounded, duplicate-coalescing enum set containing `FETCH_BUFFER_HAS_DATA`, `FETC
 `FETCH_REQUEST_TERMINATED`. The reactor drains these facts before and after network I/O, coalesces them with deadline
 and publication reasons, and applies at most one application wake per phase. The manager does not directly signal
 the buffer for these outcomes. A response that already added a `CompletedFetch` does not also report a terminal
-effect, preventing a second retained wake after the data signal. Fetch-session close is intentionally not an
-application progress effect: close runs inside reactor cleanup while the application waits for reactor termination,
+transition, preventing a second retained wake after the data signal. Fetch-session close is intentionally not an
+application action: close runs inside reactor cleanup while the application waits for reactor termination,
 not fetch data.
 
 Two direct signals remain intentionally separate. Adding records to `FetchBuffer` signals the mailbox condition
@@ -267,7 +289,7 @@ Native fetch deadlines carry a manager-owned semantic generation. Deadline deliv
 the same manager in the same clock tick each receive one notification, while re-observing the same blocked state
 preserves both its absolute deadline and generation.
 
-When conditions are mixed across partitions, a retry deadline wins over an event-only blocker. For example,
+When blockers are mixed across partitions, a retry deadline wins over an event-only blocker. For example,
 `REQUEST_IN_FLIGHT` on one node does not hide `RECONNECT_BACKOFF` on another node.
 
 ### Phase 4: Move subscription transitions behind reactor commands
@@ -291,8 +313,8 @@ callbacks, in-flight requests, and retained response buffers.
 The POC now names the execution component `ConsumerReactor`, but does not yet move `SubscriptionState`, change
 callback threading, rename `ApplicationEventHandler` or existing runtime thread/metric identifiers, extract
 regular/share protocol drivers, or claim to fix every busy loop. It has established a progress-decision publication
-seam, a typed fetch-preparation result, the first direct typed-intent producer, and a bounded/coalesced application
-progress-effect boundary.
+seam, a typed fetch-preparation result, the first direct `NextReconcile` producer, and a bounded/coalesced
+state-transition-to-action boundary.
 
 The POC includes a deterministic `FetchBuffer` concurrency test plus a cross-component test of the complete async
 consumer chain with only its socket replaced by `MockClient`. In the latter, a consumer without a group id and with
@@ -302,7 +324,7 @@ publication and expiry wakeups. `testPollWaitUsesOnlyPublishedReactorDecision` s
 application state cannot shorten a published unbounded decision. The real KRaft `PlaintextConsumerPollTest` suite
 remains green. Before production integration, a broker-restart smoke test should repeat the invariant against real
 sockets. Unsent-request expiration is covered deterministically through the real fetch manager, network delegate,
-reactor post-I/O drain, and blocking fetch waiter.
+the next ordered fetch reconciliation, and a blocking fetch waiter.
 
 ## Validation Checkpoint (2026-08-20)
 
