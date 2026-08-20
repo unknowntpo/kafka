@@ -180,12 +180,37 @@ portable acceptance checks.
 
 ## Jenkins Ducktape phase
 
-The local harness is the first slice, not the final Kafka system-test integration. Before publishing formal e2e
-evidence, add a dedicated test on the fork branch, for example:
+The dedicated wrapper is:
 
 ```text
 tests/kafkatest/tests/client/consumer_reactor_ab_test.py
 ```
+
+It compiles and runs `IdleWakeHarness.java` against the client artifact from the current checkout. It does not invoke
+`run-idle.sh`, because that local runner deliberately requires two sibling worktrees, and it never performs a Git
+checkout. Selecting the method without parameters is a short smoke run:
+
+```text
+tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision
+```
+
+Formal runs must inject the profile, logical variant, and workload explicitly. The current `ducker-ak` parser accepts
+Ducktape arguments after `--`; when this is carried through the Jenkins `TC_PATHS` value, the proposal value is:
+
+```text
+tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision -- --parameters \{\"metadata_quorum\":\"COMBINED_KRAFT\",\"reactor_ab_profile\":\"formal\",\"reactor_ab_variant\":\"proposal\",\"reactor_ab_repetitions\":5,\"reactor_ab_idle_duration_ms\":60000,\"reactor_ab_first_record_warmup_samples\":10,\"reactor_ab_first_record_samples\":100,\"reactor_ab_first_record_idle_ms\":1000,\"reactor_ab_poll_timeout_ms\":30000\}
+```
+
+The backslashes preserve the JSON braces and quotes through `run_tests.sh` and `ducker-ak` shell argument forwarding.
+Use the identical value with `reactor_ab_variant` set to `pre-refactor-async-baseline` on the baseline+harness revision.
+The wrapper rejects a formal profile without one of those two explicit variant names. Passing the bare file or class
+is discouraged; the method selector above makes the Jenkins scope auditable. Revalidate this forwarding against the
+live job before submission if its wrapper script changes.
+
+The smoke workload itself is about 7 seconds, with roughly 2-5 minutes expected for broker startup and test overhead
+after the repository build. The formal workload has 850 seconds of deliberate measurement scheduling and should take
+about 15-25 minutes after the build. Its service wait budget is 2,320 seconds so a slow or failed sample remains
+bounded instead of inheriting Ducktape's 600-second service default.
 
 The Jenkins job at `https://jenkins.opensource4you.tw/job/kafka-e2e/` checks out one `ACCOUNT`/`REVISION` per build.
 Do not make a Ducktape test perform its own Git checkout. Put the same harness-only test change on a branch based on
@@ -193,15 +218,16 @@ Do not make a Ducktape test perform its own Git checkout. Put the same harness-o
 
 | Build | `ACCOUNT` | `REVISION` | `TC_PATHS` | Variants emitted |
 | --- | --- | --- | --- | --- |
-| baseline | `unknowntpo` | exact baseline+harness commit | dedicated test path | legacy Classic reference; pre-refactor async baseline |
-| proposal | `unknowntpo` | exact POC+harness commit | same dedicated test path | proposal; optionally Classic again as an A/A control |
+| baseline | `unknowntpo` | exact baseline+harness commit | parameterized method path | pre-refactor async baseline |
+| proposal | `unknowntpo` | exact POC+harness commit | parameterized method path | proposal |
 
 Use a branch name only while iterating. Use the exact tested commit in retained evidence. Do not point `TC_PATHS` at
 all of `tests/kafkatest/tests`: build 873 did that and took about 7 hours 8 minutes. Retain Jenkins `report.txt` and
 `results.zip` with the raw client logs and the manifest described below.
 
-The test must write a machine-readable manifest into the result directory. It must contain one entry for each of these
-three logical variants, even though they are collected across two Jenkins builds:
+Each test writes raw logs, `results.csv`, the broker configuration, and a machine-readable `manifest.json` into its
+collected service result directory. The manifest records the one variant collected by that checkout and declares the
+three-variant comparison contract. The post-Jenkins merge must produce one entry for each logical variant:
 
 | Manifest variant | Commit | Artifact | Required distinguishing configuration |
 | --- | --- | --- | --- |
@@ -209,10 +235,18 @@ three logical variants, even though they are collected across two Jenkins builds
 | `pre-refactor-async-baseline` | exact baseline+harness revision | client jar name and SHA-256 | `group.protocol=consumer`, remaining consumer properties |
 | `proposal` | exact POC+harness revision | client jar name and SHA-256 | `group.protocol=consumer`, remaining consumer properties |
 
-Also record the broker artifact/commit, broker configuration, JVM/OS, workload parameters, execution order, Jenkins
-build URL/number, and raw-log paths. The merge step must reject manifests whose broker artifact/configuration or
-workload differs between the baseline and proposal builds. The dedicated Ducktape path and Jenkins submission are a
-later phase: this repository-local slice neither adds that out-of-scope test nor triggers Jenkins.
+The wrapper also records the broker commit, core artifact, complete broker runtime jar set and SHA-256 values, broker
+configuration and SHA-256, JVM/OS, workload parameters, execution order, Jenkins build URL/number when present, and
+raw-log paths.
+The runtime set intentionally includes the checkout's `kafka-clients` jar because `kafka-server-start.sh` puts it on
+the broker classpath. The merge step must reject manifests whose broker runtime artifacts/configuration or workload
+differs between the baseline and proposal builds. The current two-checkout Jenkins contract therefore reveals, but
+does not by itself eliminate, broker-binary differences; pinning one broker build requires a later execution split.
+`BUILD_URL` and `BUILD_NUMBER` remain null unless Jenkins forwards them into the existing Ducker container, so retain
+the exact revision and manifest alongside the Jenkins build URL externally as the authoritative association.
+The current public harness fixes `group.protocol=consumer`, so the wrapper cannot honestly emit the legacy Classic
+reference yet; add an explicit group-protocol harness option before collecting that third variant. No Jenkins
+submission is performed by these files.
 
 ## Throughput command
 
