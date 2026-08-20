@@ -255,6 +255,87 @@ public class ConsumerNetworkThreadTest {
     }
 
     @Test
+    public void testExpiredDeadlineDoesNotLeaveZeroApplicationWait() {
+        long startMs = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        doReturn(ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 0L))
+            .when(heartbeatRequestManager).progressIntent(anyLong());
+
+        consumerNetworkThread.runOnce();
+
+        assertEquals(Long.MAX_VALUE, consumerNetworkThread.maximumTimeToWait());
+        assertTrue(consumerNetworkThread.applicationWait().deadlineNotificationDelivered());
+
+        consumerNetworkThread.runOnce();
+
+        assertEquals(Long.MAX_VALUE, consumerNetworkThread.maximumTimeToWait());
+        verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testLegacyRelativeWaitExpiresBeforeFreshDecisionMovesDeadlineForward() {
+        long startMs = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
+        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
+        doAnswer(invocation -> {
+            time.sleep(invocation.getArgument(0, Long.class));
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), eq(startMs));
+
+        consumerNetworkThread.runOnce();
+
+        verify(networkClientDelegate).poll(100L, startMs);
+        // One wake publishes the shorter deadline; the second delivers its expiry before the legacy adapter
+        // computes a fresh relative wait from the later time.
+        verify(requestManagers, times(2)).wakeupApplicationThread();
+        assertEquals(100L, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(startMs + 200L, consumerNetworkThread.applicationWait().deadlineAtMs());
+    }
+
+    @Test
+    public void testLegacyRelativeWaitDoesNotDriftAcrossEarlyNetworkReturns() {
+        long startMs = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
+        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
+        doAnswer(invocation -> {
+            time.sleep(10L);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+
+        consumerNetworkThread.runOnce();
+        consumerNetworkThread.runOnce();
+
+        assertEquals(startMs + 100L, consumerNetworkThread.applicationWait().deadlineAtMs());
+        assertEquals(80L, consumerNetworkThread.maximumTimeToWait());
+    }
+
+    @Test
+    public void testSameDeadlineFromDifferentSourceIsANewTransition() {
+        long startMs = time.milliseconds();
+        ConsumerReactorProgress.ProgressIntent expired =
+            ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(startMs, 0L);
+        when(requestManagers.entries())
+            .thenReturn(List.of(heartbeatRequestManager))
+            .thenReturn(List.of(heartbeatRequestManager))
+            .thenReturn(List.of(coordinatorRequestManager));
+        doReturn(expired).when(heartbeatRequestManager).progressIntent(anyLong());
+        doReturn(expired).when(coordinatorRequestManager).progressIntent(anyLong());
+
+        consumerNetworkThread.runOnce();
+        consumerNetworkThread.runOnce();
+
+        verify(requestManagers, times(2)).wakeupApplicationThread();
+        assertEquals(
+            CoordinatorRequestManager.class.getSimpleName(),
+            consumerNetworkThread.applicationWait().source().orElseThrow()
+        );
+    }
+
+    @Test
     public void testProgressDeadlineLimitsEveryNetworkPollUntilItIsPublishedAsExpired() {
         long startMs = time.milliseconds();
         ConsumerReactorProgress.ProgressIntent deadline =
@@ -276,7 +357,7 @@ public class ConsumerNetworkThreadTest {
     }
 
     @Test
-    public void testDeadlineWakeupReleasesGrouplessApplicationWaitWithoutReadingMaximumTimeToWait() throws Exception {
+    public void testDeadlineWakeupReleasesApplicationWaitUsingOlderSnapshot() throws Exception {
         long startMs = time.milliseconds();
         FetchBuffer fetchBuffer = new FetchBuffer(new LogContext());
         CountDownLatch firstWaitReturned = new CountDownLatch(1);
@@ -300,9 +381,9 @@ public class ConsumerNetworkThreadTest {
         }).when(requestManagers).wakeupApplicationThread();
 
         Future<?> applicationWait = applicationExecutor.submit(() -> {
-            // A groupless consumer does not read ConsumerNetworkThread.maximumTimeToWait(). It waits on the
-            // caller's poll timer, so both publication of a shorter deadline and expiry of that deadline must
-            // produce retained fetch-buffer wakeups.
+            // The caller may already be blocked with an older snapshot and cannot read the newly published
+            // maximumTimeToWait() until it is released. Both publication of a shorter deadline and expiry of that
+            // deadline must therefore produce retained fetch-buffer wakeups.
             fetchBuffer.awaitWakeup(Time.SYSTEM.timer(DEFAULT_MAX_WAIT_MS));
             firstWaitReturned.countDown();
             secondWaitStarted.countDown();

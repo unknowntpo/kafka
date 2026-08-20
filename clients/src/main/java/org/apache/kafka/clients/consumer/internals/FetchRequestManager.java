@@ -70,6 +70,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     }
 
     @Override
+    protected long unavailableTimeRemainingMs(Node node, long currentTimeMs) {
+        return networkClientDelegate.connectionDelay(node, currentTimeMs);
+    }
+
+    @Override
     protected void maybeThrowAuthFailure(Node node) {
         networkClientDelegate.maybeThrowAuthFailure(node);
     }
@@ -210,10 +215,24 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         final FetchRequestPreparationResult result,
         final long currentTimeMs
     ) {
-        if (result.conditions().contains(FetchRequestPreparationCondition.MISSING_LEADER)
-            || result.conditions().contains(FetchRequestPreparationCondition.RECONNECT_BACKOFF)
-            || result.conditions().contains(FetchRequestPreparationCondition.WAITING_FOR_BUFFER_DRAIN)) {
-            return ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(currentTimeMs, retryBackoffMs);
+        boolean missingLeader = result.conditions().contains(FetchRequestPreparationCondition.MISSING_LEADER);
+        boolean reconnectBackoff = result.conditions().contains(FetchRequestPreparationCondition.RECONNECT_BACKOFF);
+        if (missingLeader || reconnectBackoff) {
+            long delayMs = missingLeader ? retryBackoffMs : Long.MAX_VALUE;
+            if (reconnectBackoff)
+                delayMs = Math.min(delayMs, result.reconnectBackoffRemainingMs());
+
+            ConsumerReactorProgress.ProgressIntent candidate =
+                ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(currentTimeMs, delayMs);
+            // Re-observing the same class of blocked state must not move an existing deadline forward. Otherwise,
+            // unrelated application events can perpetually postpone the retry and turn a bounded wait into
+            // starvation. A newly observed capacity deadline is still allowed to shorten the existing decision.
+            if (fetchProgressIntent.waitMode() == ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE
+                && fetchProgressIntent.remainingMs(currentTimeMs) > 0L
+                && fetchProgressIntent.deadlineAtMs() <= candidate.deadlineAtMs()) {
+                return fetchProgressIntent;
+            }
+            return candidate;
         }
 
         return ConsumerReactorProgress.ProgressIntent.awaitEvent();

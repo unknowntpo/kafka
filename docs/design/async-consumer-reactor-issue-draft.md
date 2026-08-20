@@ -92,8 +92,8 @@ Request managers can migrate incrementally. Existing managers may initially adap
 - Aggregate progress intents in the background event loop.
 - Represent deadlines as absolute times so publication latency is not added to the wait.
 - Derive fetch progress from explicit fetch-preparation conditions.
-- Remove the duplicate `SubscriptionState` / `FetchBuffer` rescan from
-  `FetchRequestManager.maximumTimeToWait()` after the publication and wakeup protocol is covered by tests.
+- Remove the application-side `SubscriptionState` / `FetchBuffer` safety rescan only after the publication and
+  wakeup protocol has equivalent end-to-end coverage.
 - Preserve the existing public consumer API and callback threading model.
 
 ## Non-goals

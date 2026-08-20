@@ -37,7 +37,8 @@ final class ConsumerReactorProgress {
         return new ApplicationWait(
             ProgressIntent.awaitDeadlineAfter(currentTimeMs, timeoutMs),
             currentTimeMs,
-            null
+            null,
+            false
         );
     }
 
@@ -56,7 +57,7 @@ final class ConsumerReactorProgress {
             }
         }
 
-        return new ApplicationWait(limitingIntent, currentTimeMs, source);
+        return new ApplicationWait(limitingIntent, currentTimeMs, source, false);
     }
 
     enum WaitMode {
@@ -65,15 +66,19 @@ final class ConsumerReactorProgress {
     }
 
     static final class ProgressIntent {
-        private static final ProgressIntent EVENT = new ProgressIntent(WaitMode.AWAIT_EVENT, Long.MAX_VALUE);
+        private static final ProgressIntent EVENT =
+            new ProgressIntent(WaitMode.AWAIT_EVENT, Long.MAX_VALUE, false);
 
         private final WaitMode waitMode;
         private final long deadlineAtMs;
+        private final boolean compatibilityDeadline;
 
         private ProgressIntent(final WaitMode waitMode,
-                               final long deadlineAtMs) {
+                               final long deadlineAtMs,
+                               final boolean compatibilityDeadline) {
             this.waitMode = Objects.requireNonNull(waitMode, "Wait mode must be non-null");
             this.deadlineAtMs = deadlineAtMs;
+            this.compatibilityDeadline = compatibilityDeadline;
         }
 
         static ProgressIntent awaitEvent() {
@@ -82,13 +87,24 @@ final class ConsumerReactorProgress {
 
         static ProgressIntent awaitDeadlineAfter(final long currentTimeMs,
                                                  final long delayMs) {
+            return awaitDeadlineAfter(currentTimeMs, delayMs, false);
+        }
+
+        static ProgressIntent awaitCompatibilityDeadlineAfter(final long currentTimeMs,
+                                                              final long delayMs) {
+            return awaitDeadlineAfter(currentTimeMs, delayMs, true);
+        }
+
+        private static ProgressIntent awaitDeadlineAfter(final long currentTimeMs,
+                                                         final long delayMs,
+                                                         final boolean compatibilityDeadline) {
             if (delayMs < 0L)
                 throw new IllegalArgumentException("Progress delay must not be negative: " + delayMs);
 
             if (delayMs == Long.MAX_VALUE || currentTimeMs > Long.MAX_VALUE - delayMs)
                 return awaitEvent();
 
-            return new ProgressIntent(WaitMode.AWAIT_DEADLINE, currentTimeMs + delayMs);
+            return new ProgressIntent(WaitMode.AWAIT_DEADLINE, currentTimeMs + delayMs, compatibilityDeadline);
         }
 
         WaitMode waitMode() {
@@ -104,19 +120,26 @@ final class ConsumerReactorProgress {
                 ? Long.MAX_VALUE
                 : Math.max(0L, deadlineAtMs - currentTimeMs);
         }
+
+        boolean compatibilityDeadline() {
+            return compatibilityDeadline;
+        }
     }
 
     static final class ApplicationWait {
         private final ProgressIntent intent;
         private final long decidedAtMs;
         private final String source;
+        private final boolean deadlineNotificationDelivered;
 
         private ApplicationWait(final ProgressIntent intent,
                                 final long decidedAtMs,
-                                final String source) {
+                                final String source,
+                                final boolean deadlineNotificationDelivered) {
             this.intent = Objects.requireNonNull(intent, "Progress intent must be non-null");
             this.decidedAtMs = decidedAtMs;
             this.source = source;
+            this.deadlineNotificationDelivered = deadlineNotificationDelivered;
         }
 
         long timeoutMs() {
@@ -125,6 +148,14 @@ final class ConsumerReactorProgress {
 
         long remainingMs(final long currentTimeMs) {
             return intent.remainingMs(currentTimeMs);
+        }
+
+        long remainingMsForApplication(final long currentTimeMs) {
+            return deadlineNotificationDelivered ? Long.MAX_VALUE : remainingMs(currentTimeMs);
+        }
+
+        boolean deadlineNotificationDelivered() {
+            return deadlineNotificationDelivered;
         }
 
         WaitMode waitMode() {
@@ -139,12 +170,40 @@ final class ConsumerReactorProgress {
             return deadlineAtMs() < previous.deadlineAtMs();
         }
 
+        boolean sameDecision(final ApplicationWait other) {
+            return waitMode() == other.waitMode()
+                && deadlineAtMs() == other.deadlineAtMs()
+                && compatibilityDeadline() == other.compatibilityDeadline()
+                && Objects.equals(source, other.source);
+        }
+
+        boolean sameSource(final ApplicationWait other) {
+            return Objects.equals(source, other.source);
+        }
+
+        boolean compatibilityDeadline() {
+            return intent.compatibilityDeadline();
+        }
+
+        boolean isPendingCompatibilityDeadline(final long currentTimeMs) {
+            return waitMode() == WaitMode.AWAIT_DEADLINE
+                && compatibilityDeadline()
+                && remainingMs(currentTimeMs) > 0L
+                && !deadlineNotificationDelivered();
+        }
+
         long decidedAtMs() {
             return decidedAtMs;
         }
 
         Optional<String> source() {
             return Optional.ofNullable(source);
+        }
+
+        ApplicationWait withDeadlineNotificationDelivered() {
+            if (waitMode() != WaitMode.AWAIT_DEADLINE)
+                throw new IllegalStateException("Only deadline waits can deliver a deadline notification");
+            return new ApplicationWait(intent, decidedAtMs, source, true);
         }
     }
 }

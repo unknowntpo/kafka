@@ -392,14 +392,14 @@ public class FetchRequestManagerTest {
     }
 
     @Test
-    public void testMaximumTimeToWaitBoundedWhenNoInflightRequest() {
+    public void testMaximumTimeToWaitUnboundedWhenBufferedDataWakesApplication() {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
         subscriptions.seek(tp0, 0);
 
         // Fetch data for tp0, but leave it buffered (unconsumed) so the next prepare() finds every fetchable
-        // partition already buffered. With no in-flight request, maximumTimeToWait is bounded.
+        // partition already buffered. This transition wakes the application directly, so it needs no deadline.
         client.prepareResponse(fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
         assertEquals(1, sendFetches());
         networkClientDelegate.poll(time.timer(0));
@@ -411,7 +411,7 @@ public class FetchRequestManagerTest {
         assertTrue(result.shouldWakeApplicationThread());
 
         assertEquals(0, sendFetches());
-        assertEquals(retryBackoffMs, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
     }
 
     @Test
@@ -449,14 +449,18 @@ public class FetchRequestManagerTest {
         Node node = metadata.fetch().leaderFor(tp0);
 
         client.backoff(node, 500);
+        offsetFetcher.validatePositionsOnMetadataChange();
         AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
         assertTrue(result.requests().isEmpty());
         assertEquals(Set.of(AbstractFetch.FetchRequestPreparationCondition.RECONNECT_BACKOFF), result.conditions());
+        assertTrue(result.reconnectBackoffRemainingMs() > 0L);
+        assertTrue(result.reconnectBackoffRemainingMs() <= 500L);
         assertFalse(result.shouldWakeApplicationThread());
 
         assertEquals(0, sendFetches());
         long remainingMs = fetcher.maximumTimeToWait(time.milliseconds());
-        assertTrue(remainingMs > 0L && remainingMs <= retryBackoffMs);
+        assertTrue(remainingMs > 0L);
+        assertTrue(remainingMs <= result.reconnectBackoffRemainingMs());
         assertEquals(ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE,
             fetcher.progressIntent(time.milliseconds()).waitMode());
 
@@ -474,14 +478,50 @@ public class FetchRequestManagerTest {
             Set.of(
                 AbstractFetch.FetchRequestPreparationCondition.REQUEST_IN_FLIGHT,
                 AbstractFetch.FetchRequestPreparationCondition.RECONNECT_BACKOFF
-            )
+            ),
+            500L
         );
 
         long currentTimeMs = time.milliseconds();
         ConsumerReactorProgress.ProgressIntent intent = fetcher.progressIntentFor(result, currentTimeMs);
 
         assertEquals(ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE, intent.waitMode());
-        assertEquals(retryBackoffMs, intent.remainingMs(currentTimeMs));
+        assertEquals(500L, intent.remainingMs(currentTimeMs));
+    }
+
+    @Test
+    public void testRepeatedPreparationDoesNotPostponeRetryDeadline() {
+        buildFetcher();
+
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        Node node = metadata.fetch().leaderFor(tp0);
+        client.backoff(node, 500L);
+
+        assertEquals(0, sendFetches());
+        long firstDeadlineMs = fetcher.progressIntent(time.milliseconds()).deadlineAtMs();
+
+        time.sleep(250L);
+        assertEquals(0, sendFetches());
+        long repeatedDeadlineMs = fetcher.progressIntent(time.milliseconds()).deadlineAtMs();
+
+        assertEquals(firstDeadlineMs, repeatedDeadlineMs);
+        long currentTimeMs = time.milliseconds();
+        long remainingMs = fetcher.maximumTimeToWait(currentTimeMs);
+        assertEquals(firstDeadlineMs - currentTimeMs, remainingMs);
+    }
+
+    @Test
+    public void testWaitingForBufferDrainUsesEventDrivenIntent() {
+        buildFetcher();
+        AbstractFetch.FetchRequestPreparationResult result = new AbstractFetch.FetchRequestPreparationResult(
+            Map.of(),
+            Set.of(AbstractFetch.FetchRequestPreparationCondition.WAITING_FOR_BUFFER_DRAIN)
+        );
+
+        ConsumerReactorProgress.ProgressIntent intent = fetcher.progressIntentFor(result, time.milliseconds());
+
+        assertEquals(ConsumerReactorProgress.WaitMode.AWAIT_EVENT, intent.waitMode());
     }
 
     @Test

@@ -53,27 +53,33 @@ KAFKA-20426), and one handshake example (KAFKA-18160 or KAFKA-20397). The remain
 
 ## POC Adversarial Review Gate
 
-A Claude Fable read-only review challenged the direct removal of the fetch wait rescan. Its high-severity finding
-was that a typed deadline is insufficient unless publication and notification form one protocol: the application
-may already be waiting with an older snapshot, and consumers without a group id do not read
-`maximumTimeToWait()` at all.
+A read-only adversarial Claude review challenged the direct removal of the fetch wait rescan. Its high-severity
+finding was that a typed deadline is insufficient unless publication and notification form one protocol: the
+application may already be waiting with an older snapshot and cannot observe a newly shortened deadline until it is
+released. Two direct Claude Fable runs were also attempted, but timed out without a review result; this document
+does not attribute findings to those incomplete runs.
+Before PR 23014, the groupless path did not read `maximumTimeToWait()` at all; current trunk now reads it for every
+consumer, but that fixes the next wait rather than an already-blocked wait.
 
 The POC therefore requires these properties before the rescan is removed:
 
 | Risk | Required property | POC evidence |
 | --- | --- | --- |
 | stale long wait | publish the new immutable snapshot before waking the waiter | `testShorterDecisionIsPublishedBeforeApplicationWakeup` |
-| groupless consumer ignores application wait | publish and deadline expiry produce retained wakeups; the real consumer chain retries after exactly one reconnect backoff | `testDeadlineWakeupReleasesGrouplessApplicationWaitWithoutReadingMaximumTimeToWait`, `AsyncKafkaConsumerTest.testGrouplessPollRetriesFetchWhenReconnectBackoffExpires` |
-| deadline drift | store an absolute deadline and subtract elapsed time at the reader | `ConsumerReactorProgressTest.testApplicationWaitSubtractsElapsedTime` |
+| caller is already waiting on an older decision | publish and deadline expiry produce retained wakeups; the real groupless consumer chain limits the network poll to one reconnect backoff | `testDeadlineWakeupReleasesApplicationWaitUsingOlderSnapshot`, `AsyncKafkaConsumerTest.testGrouplessPollRetriesFetchWhenReconnectBackoffExpires` |
+| relative-deadline drift | publish the decision which bounds network I/O, preserve it across early returns, and deliver it before recomputing a legacy relative wait | `testLegacyRelativeWaitDoesNotDriftAcrossEarlyNetworkReturns`, `testLegacyRelativeWaitExpiresBeforeFreshDecisionMovesDeadlineForward` |
+| stale `0 ms` wait | mark expiry delivery in the immutable snapshot before waking and preserve it for the same semantic decision | `testExpiredDeadlineDoesNotLeaveZeroApplicationWait`, `testSameDeadlineFromDifferentSourceIsANewTransition` |
+| deadline starvation | do not postpone an absolute deadline when the same block is re-observed | `ConsumerReactorProgressTest.testApplicationWaitSubtractsElapsedTime`, `testRepeatedPreparationDoesNotPostponeRetryDeadline` |
+| reconnect retry before capacity | use the network client's actual connection delay, including exponential backoff | `testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff` |
 | mixed partitions | retry conditions win over event-only in-flight conditions | `testRetryDeadlineWinsWhenInFlightAndReconnectConditionsAreMixed` |
 | wakeup ping-pong | no wake for `NO_FETCHABLE_PARTITIONS`; terminal request completion remains a real transition | fetch-manager wakeup tests |
 
-The POC now covers the groupless publication protocol at two deterministic levels: a real application-side
+The POC now covers the stale-wait publication protocol at two deterministic levels: a real application-side
 `FetchBuffer` wait running concurrently with the reactor scheduler, and the complete
 `AsyncKafkaConsumer -> ApplicationEventHandler -> ConsumerNetworkThread -> FetchRequestManager -> FetchBuffer`
 chain with only the socket replaced by a controllable `MockClient`. The real KRaft `PlaintextConsumerPollTest`
 suite also remains green. A broker-restart test still belongs to production integration rather than this POC, so
 the review leaves two gates open:
 
-1. add an end-to-end manual-assignment/groupless reconnect-backoff test;
+1. add a real-socket broker-restart smoke test for manual-assignment/groupless reconnect backoff;
 2. prove that unsent-request expiration and every terminal failure path reach the fetch completion wakeup.

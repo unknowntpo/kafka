@@ -120,6 +120,13 @@ public class NetworkClientDelegate implements AutoCloseable {
     }
 
     /**
+     * Return the remaining connection delay, including the client's exponential reconnect backoff.
+     */
+    public long connectionDelay(Node node, long currentTimeMs) {
+        return client.connectionDelay(node, currentTimeMs);
+    }
+
+    /**
      * Checks for an authentication error on a given node and throws the exception if it exists.
      *
      * @param node {@link Node} to check for a previous {@link AuthenticationException}; if found it is thrown
