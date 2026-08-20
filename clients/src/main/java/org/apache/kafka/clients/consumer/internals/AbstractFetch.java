@@ -157,6 +157,7 @@ public abstract class AbstractFetch implements Closeable {
     protected void handleFetchSuccess(final Node fetchTarget,
                                       final FetchSessionHandler.FetchRequestData data,
                                       final ClientResponse resp) {
+        boolean fetchBufferSignaled = false;
         try {
             final FetchResponse response = (FetchResponse) resp.responseBody();
             final FetchSessionHandler handler = sessionHandler(fetchTarget.id());
@@ -229,6 +230,7 @@ public abstract class AbstractFetch implements Closeable {
                         metricAggregator,
                         fetchOffset);
                 fetchBuffer.add(completedFetch);
+                fetchBufferSignaled = true;
             }
 
             if (!partitionsWithUpdatedLeaderInfo.isEmpty()) {
@@ -251,6 +253,8 @@ public abstract class AbstractFetch implements Closeable {
             }
         } finally {
             removePendingFetchRequest(fetchTarget, data.metadata().sessionId());
+            if (!fetchBufferSignaled)
+                onFetchRequestTerminated();
         }
     }
 
@@ -273,6 +277,7 @@ public abstract class AbstractFetch implements Closeable {
             }
         } finally {
             removePendingFetchRequest(fetchTarget, data.metadata().sessionId());
+            onFetchRequestTerminated();
         }
     }
 
@@ -296,10 +301,14 @@ public abstract class AbstractFetch implements Closeable {
     private void removePendingFetchRequest(Node fetchTarget, int sessionId) {
         log.debug("Removing pending request for fetch session: {} for node: {}", sessionId, fetchTarget);
         nodesWithPendingFetchRequests.remove(fetchTarget.id());
+    }
 
-        // Completing an in-flight request is a concrete state transition. Wake the application thread for every
-        // terminal outcome so it can observe data, an empty response, or a failure without depending on an
-        // ambiguous empty fetch-preparation result.
+    /**
+     * Notify the execution model that a fetch request reached a terminal outcome without publishing buffer data.
+     * The classic consumer directly signals its fetch buffer. The async consumer overrides this hook to report a
+     * progress effect which its reactor publishes and applies.
+     */
+    protected void onFetchRequestTerminated() {
         fetchBuffer.wakeup();
     }
 
@@ -558,13 +567,6 @@ public abstract class AbstractFetch implements Closeable {
             return reconnectBackoffRemainingMs;
         }
 
-        boolean shouldWakeApplicationThread() {
-            if (!requests.isEmpty())
-                return false;
-
-            return conditions.contains(FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED)
-                || conditions.contains(FetchRequestPreparationCondition.CLOSING);
-        }
     }
 
     /**

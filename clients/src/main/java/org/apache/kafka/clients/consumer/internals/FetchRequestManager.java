@@ -28,9 +28,11 @@ import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.LogContext;
 
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
@@ -48,6 +50,9 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     private CompletableFuture<Void> pendingFetchRequestFuture;
     private ConsumerReactorProgress.ProgressIntent fetchProgressIntent =
         ConsumerReactorProgress.ProgressIntent.awaitEvent();
+    private long fetchProgressGeneration;
+    private EnumSet<ConsumerReactorProgress.ApplicationProgressEffect> pendingApplicationProgressEffects =
+        EnumSet.noneOf(ConsumerReactorProgress.ApplicationProgressEffect.class);
 
     FetchRequestManager(final LogContext logContext,
                         final Time time,
@@ -177,8 +182,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
-                if (result.shouldWakeApplicationThread())
-                    fetchBuffer.wakeup();
+                reportPreparationProgress(result);
                 pendingFetchRequestFuture.complete(null);
                 return PollResult.EMPTY;
             }
@@ -205,6 +209,9 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             // request managers.
             pendingFetchRequestFuture.completeExceptionally(t);
             fetchProgressIntent = ConsumerReactorProgress.ProgressIntent.awaitEvent();
+            pendingApplicationProgressEffects.add(
+                ConsumerReactorProgress.ApplicationProgressEffect.FETCH_PREPARATION_FAILED
+            );
             return PollResult.EMPTY;
         } finally {
             pendingFetchRequestFuture = null;
@@ -238,10 +245,39 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 && fetchProgressIntent.deadlineAtMs() <= candidate.deadlineAtMs()) {
                 return fetchProgressIntent;
             }
-            return candidate;
+            return candidate.withSemanticGeneration(++fetchProgressGeneration);
         }
 
         return ConsumerReactorProgress.ProgressIntent.awaitEvent();
+    }
+
+    private void reportPreparationProgress(final FetchRequestPreparationResult result) {
+        if (result.conditions().contains(FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED)) {
+            pendingApplicationProgressEffects.add(
+                ConsumerReactorProgress.ApplicationProgressEffect.FETCH_BUFFER_HAS_DATA
+            );
+        }
+    }
+
+    @Override
+    protected void onFetchRequestTerminated() {
+        pendingApplicationProgressEffects.add(
+            ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED
+        );
+    }
+
+    /**
+     * Transfers the bounded, coalesced set of protocol effects to the reactor. This method and all producers of the
+     * set run on the reactor thread, so no cross-thread synchronization is required.
+     */
+    Set<ConsumerReactorProgress.ApplicationProgressEffect> drainApplicationProgressEffects() {
+        if (pendingApplicationProgressEffects.isEmpty())
+            return Set.of();
+
+        EnumSet<ConsumerReactorProgress.ApplicationProgressEffect> drained = pendingApplicationProgressEffects;
+        pendingApplicationProgressEffects =
+            EnumSet.noneOf(ConsumerReactorProgress.ApplicationProgressEffect.class);
+        return drained;
     }
 
     void wakeupApplicationThread() {

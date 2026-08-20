@@ -28,7 +28,9 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.IsolationLevel;
@@ -121,8 +123,13 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -150,10 +157,12 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class FetchRequestManagerTest {
 
@@ -282,11 +291,9 @@ public class FetchRequestManagerTest {
         }
     }
 
-    /**
-     * A fetch response that carries no records must still wake up a thread blocked on the fetch buffer.
-     */
+    /** A fetch response that carries no records must report progress for the reactor to publish. */
     @Test
-    public void testEmptyFetchResponseWakesUpBuffer() throws InterruptedException {
+    public void testEmptyFetchResponseReportsProgressEffect() throws InterruptedException {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
@@ -304,37 +311,121 @@ public class FetchRequestManagerTest {
         networkClientDelegate.poll(time.timer(0));
         fetchRecords();
         fetcher.fetchBuffer.awaitWakeup(time.timer(0));
+        assertTrue(fetcher.drainApplicationProgressEffects().isEmpty());
 
         // A consumer thread blocked waiting for data on the empty buffer.
         Thread blockedOnBuffer = new Thread(() -> fetcher.fetchBuffer.awaitWakeup(time.timer(3_600_000L)));
         blockedOnBuffer.setDaemon(true);
         blockedOnBuffer.start();
 
-        // An empty incremental fetch response (same session, no partition data) must wake the thread blocked on the buffer.
+        // An empty incremental fetch response has no data mutation to wake the buffer directly.
         client.prepareResponse(FetchResponse.of(Errors.NONE, 0, 123, new LinkedHashMap<>(), List.of()));
         assertEquals(1, sendFetches());
         networkClientDelegate.poll(time.timer(0));
 
-        // On a successful run the blocked thread gets unblocked with the response above so this join completes promptly.
-        // This timeout only caps how long we wait before declaring the wakeup missing (failure).
+        blockedOnBuffer.join(200);
+        assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
+        assertEquals(
+            Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED),
+            fetcher.drainApplicationProgressEffects()
+        );
+
+        // Simulate the reactor applying the drained effect.
+        fetcher.wakeupApplicationThread();
         blockedOnBuffer.join(2_000);
-        assertFalse(blockedOnBuffer.isAlive(), "Empty fetch response did not wake the thread blocked on the fetch buffer");
+        assertFalse(blockedOnBuffer.isAlive(), "Reactor progress effect did not release the fetch wait");
     }
 
     @Test
-    public void testFailedFetchResponseWakesUpBuffer() throws InterruptedException {
+    public void testFailedFetchResponseReportsProgressEffect() throws InterruptedException {
         // The response body is irrelevant: it is discarded once the response is marked as disconnected.
-        assertRequestCompletionWakesUpBuffer(() -> client.prepareResponse(
+        assertRequestCompletionReportsProgressEffect(() -> client.prepareResponse(
                 fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0), true));
     }
 
     @Test
-    public void testFetchSessionErrorResponseWakesUpBuffer() throws InterruptedException {
-        assertRequestCompletionWakesUpBuffer(() -> client.prepareResponse(FetchResponse.of(
+    public void testFetchSessionErrorResponseReportsProgressEffect() throws InterruptedException {
+        assertRequestCompletionReportsProgressEffect(() -> client.prepareResponse(FetchResponse.of(
                 Errors.FETCH_SESSION_ID_NOT_FOUND, 0, INVALID_SESSION_ID, new LinkedHashMap<>(), List.of())));
     }
 
-    private void assertRequestCompletionWakesUpBuffer(Runnable prepareResponse) throws InterruptedException {
+    @Test
+    public void testUnsentFetchExpirationIsDrainedByReactorAfterPoll() throws Exception {
+        buildFetcher();
+
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        Node node = metadata.fetch().leaderFor(tp0);
+        client.delayReady(node, requestTimeoutMs + 1L);
+        fetcher.createFetchRequests();
+
+        AtomicReference<Set<ConsumerReactorProgress.ApplicationProgressEffect>> drainedEffects =
+            new AtomicReference<>(Set.of());
+        AtomicInteger applicationWakeups = new AtomicInteger();
+        RequestManagers managers = mock(RequestManagers.class);
+        when(managers.entries()).thenReturn(List.of(fetcher));
+        doAnswer(invocation -> {
+            Set<ConsumerReactorProgress.ApplicationProgressEffect> effects =
+                fetcher.drainApplicationProgressEffects();
+            if (!effects.isEmpty()) {
+                assertTrue(networkClientDelegate.unsentRequests().isEmpty());
+                drainedEffects.set(effects);
+            }
+            return effects;
+        }).when(managers).drainApplicationProgressEffects();
+        doAnswer(invocation -> {
+            assertEquals(
+                Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED),
+                drainedEffects.get()
+            );
+            applicationWakeups.incrementAndGet();
+            fetcher.wakeupApplicationThread();
+            return null;
+        }).when(managers).wakeupApplicationThread();
+
+        CountDownLatch waiterStarted = new CountDownLatch(1);
+        CompletableFuture<Void> applicationWaiter = CompletableFuture.runAsync(() -> {
+            waiterStarted.countDown();
+            fetcher.fetchBuffer.awaitWakeup(time.timer(Long.MAX_VALUE));
+        });
+        assertTrue(waiterStarted.await(TestUtils.DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
+
+        try (ConsumerReactor reactor = new ConsumerReactor(
+            new LogContext(),
+            time,
+            new LinkedBlockingQueue<>(),
+            mock(CompletableEventReaper.class),
+            () -> mock(ApplicationEventProcessor.class),
+            () -> networkClientDelegate,
+            () -> managers,
+            mock(AsyncConsumerMetrics.class)
+        )) {
+            reactor.initializeResources();
+            reactor.runOnce();
+
+            assertEquals(1, networkClientDelegate.unsentRequests().size());
+            assertTrue(client.requests().isEmpty());
+            assertFalse(applicationWaiter.isDone());
+            assertTrue(drainedEffects.get().isEmpty());
+            assertEquals(0, applicationWakeups.get());
+            NetworkClientDelegate.UnsentRequest unsent = networkClientDelegate.unsentRequests().peek();
+
+            time.sleep(requestTimeoutMs);
+            reactor.runOnce();
+
+            assertFutureThrows(org.apache.kafka.common.errors.TimeoutException.class, unsent.future());
+            assertEquals(
+                Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED),
+                drainedEffects.get()
+            );
+            assertTrue(fetcher.drainApplicationProgressEffects().isEmpty());
+            assertEquals(1, applicationWakeups.get());
+            applicationWaiter.get(TestUtils.DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void assertRequestCompletionReportsProgressEffect(Runnable prepareResponse) throws InterruptedException {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
@@ -350,8 +441,16 @@ public class FetchRequestManagerTest {
         prepareResponse.run();
         networkClientDelegate.poll(time.timer(0));
 
+        blockedOnBuffer.join(200);
+        assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
+        assertEquals(
+            Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED),
+            fetcher.drainApplicationProgressEffects()
+        );
+
+        fetcher.wakeupApplicationThread();
         blockedOnBuffer.join(2_000);
-        assertFalse(blockedOnBuffer.isAlive(), "Completed fetch request did not wake the thread blocked on the fetch buffer");
+        assertFalse(blockedOnBuffer.isAlive(), "Reactor progress effect did not release the fetch wait");
     }
 
     @Test
@@ -373,11 +472,26 @@ public class FetchRequestManagerTest {
         blockedOnBuffer.join(500);
         assertTrue(blockedOnBuffer.isAlive(),
                 "Empty fetch result with no fetchable partitions must not wake the thread blocked on the fetch buffer");
+        assertTrue(fetcher.drainApplicationProgressEffects().isEmpty());
 
         // Clean up: explicitly wake so the daemon thread can exit instead of leaking as a live thread.
         fetcher.fetchBuffer.wakeup();
         blockedOnBuffer.join(2_000);
         assertFalse(blockedOnBuffer.isAlive());
+    }
+
+    @Test
+    public void testDuplicateProgressEffectsAreCoalescedAndDrained() {
+        buildFetcher();
+
+        fetcher.onFetchRequestTerminated();
+        fetcher.onFetchRequestTerminated();
+
+        assertEquals(
+            Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED),
+            fetcher.drainApplicationProgressEffects()
+        );
+        assertTrue(fetcher.drainApplicationProgressEffects().isEmpty());
     }
 
     @Test
@@ -421,9 +535,13 @@ public class FetchRequestManagerTest {
         AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
         assertTrue(result.requests().isEmpty());
         assertEquals(Set.of(AbstractFetch.FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED), result.conditions());
-        assertTrue(result.shouldWakeApplicationThread());
+        assertTrue(fetcher.drainApplicationProgressEffects().isEmpty());
 
         assertEquals(0, sendFetches());
+        assertEquals(
+            Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_BUFFER_HAS_DATA),
+            fetcher.drainApplicationProgressEffects()
+        );
         assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
     }
 
@@ -468,9 +586,9 @@ public class FetchRequestManagerTest {
         assertEquals(Set.of(AbstractFetch.FetchRequestPreparationCondition.RECONNECT_BACKOFF), result.conditions());
         assertTrue(result.reconnectBackoffRemainingMs() > 0L);
         assertTrue(result.reconnectBackoffRemainingMs() <= 500L);
-        assertFalse(result.shouldWakeApplicationThread());
 
         assertEquals(0, sendFetches());
+        assertTrue(fetcher.drainApplicationProgressEffects().isEmpty());
         long remainingMs = fetcher.maximumTimeToWait(time.milliseconds());
         assertTrue(remainingMs > 0L);
         assertTrue(remainingMs <= result.reconnectBackoffRemainingMs());
@@ -3754,6 +3872,10 @@ public class FetchRequestManagerTest {
 
         assertDoesNotThrow(() -> sendFetches(false));
         assertFutureThrows(AuthenticationException.class, future);
+        assertEquals(
+            Set.of(ConsumerReactorProgress.ApplicationProgressEffect.FETCH_PREPARATION_FAILED),
+            fetcher.drainApplicationProgressEffects()
+        );
     }
 
     @Test

@@ -115,7 +115,7 @@ Request managers can migrate incrementally. Existing managers may initially adap
 - A consumer without a group id can still be notified when a fetch retry deadline expires.
 - Mixed `REQUEST_IN_FLIGHT` and `RECONNECT_BACKOFF` conditions retain the reconnect deadline.
 - Focused tests cover publish-before-wakeup ordering, elapsed-time subtraction, one-shot deadline notification, early
-  network-poll return, empty fetch responses, failures, and request completion.
+  network-poll return, empty fetch responses, failures, request completion, and duplicate effect coalescing.
 - Existing async consumer and share consumer tests remain green.
 
 ## Related work

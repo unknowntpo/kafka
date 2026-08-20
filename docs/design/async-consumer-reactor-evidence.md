@@ -69,10 +69,16 @@ The rescan-removal slice uses the following properties as its deterministic gate
 | caller is already waiting on an older decision | publish and deadline expiry produce retained wakeups; the real groupless consumer chain limits the network poll to one reconnect backoff | `testDeadlineWakeupReleasesApplicationWaitUsingOlderSnapshot`, `AsyncKafkaConsumerTest.testGrouplessPollRetriesFetchWhenReconnectBackoffExpires` |
 | relative-deadline drift | publish the decision which bounds network I/O, preserve it across early returns, and deliver it before recomputing a legacy relative wait | `testLegacyRelativeWaitDoesNotDriftAcrossEarlyNetworkReturns`, `testLegacyRelativeWaitExpiresBeforeFreshDecisionMovesDeadlineForward` |
 | stale `0 ms` wait | mark expiry delivery in the immutable snapshot before waking and preserve it for the same semantic decision | `testExpiredDeadlineDoesNotLeaveZeroApplicationWait`, `testSameDeadlineFromDifferentSourceIsANewTransition` |
+| same-source, same-timestamp retry | include the manager-owned semantic generation in native deadline identity | `testSameSourceAndDeadlineWithNewGenerationIsANewTransition` |
 | deadline starvation | do not postpone an absolute deadline when the same block is re-observed | `ConsumerReactorProgressTest.testApplicationWaitSubtractsElapsedTime`, `testRepeatedPreparationDoesNotPostponeRetryDeadline` |
 | reconnect retry before capacity | use the network client's actual connection delay, including exponential backoff | `testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff` |
 | mixed partitions | retry conditions win over event-only in-flight conditions | `testRetryDeadlineWinsWhenInFlightAndReconnectConditionsAreMixed` |
-| wakeup ping-pong | `NO_FETCHABLE_PARTITIONS` schedules a reactor deadline without an eager wake; terminal request completion remains a real transition | `testNoFetchablePartitionsDoesNotWakeUpBuffer`, `testNoFetchablePartitionsUsesReactorRetryDeadline` |
+| wakeup ping-pong | `NO_FETCHABLE_PARTITIONS` schedules a reactor deadline without an eager wake; terminal request completion becomes a named reactor effect | `testNoFetchablePartitionsDoesNotWakeUpBuffer`, `testNoFetchablePartitionsUsesReactorRetryDeadline` |
+| manager bypasses reactor | request completion and preparation failure report bounded effects; only the reactor applies the synthetic wake | `testEmptyFetchResponseReportsProgressEffect`, `testFailedFetchResponseReportsProgressEffect`, `testFetchSessionErrorResponseReportsProgressEffect`, `testPollWithCreateFetchRequestsError` |
+| duplicate notification pressure | equal protocol effects coalesce in an enum-bounded set and multiple wake reasons collapse into one primitive wake per phase | `testDuplicateProgressEffectsAreCoalescedAndDrained`, `testReactorCoalescesProgressEffectWithShorterDecisionWakeup` |
+| network callback ordering | publish the post-I/O wait snapshot before applying an effect produced during network poll | `testReactorPublishesPostPollDecisionBeforeApplyingNetworkProgressEffect` |
+| data plus terminal double wake | a response that adds a completed fetch uses the mailbox signal and does not also report a terminal effect | `testMaximumTimeToWaitUnboundedWhenBufferedDataWakesApplication`, `testEmptyFetchResponseReportsProgressEffect` |
+| unsent request expiration | timeout failure reports a terminal effect which the real reactor drains post-poll before waking one blocked application waiter | `testUnsentFetchExpirationIsDrainedByReactorAfterPoll` |
 
 The POC now covers the stale-wait publication protocol at two deterministic levels: a real application-side
 `FetchBuffer` wait running concurrently with the reactor scheduler, and the complete
@@ -80,7 +86,6 @@ The POC now covers the stale-wait publication protocol at two deterministic leve
 chain with only the socket replaced by a controllable `MockClient`. `testPollWaitUsesOnlyPublishedReactorDecision`
 also proves that the application thread no longer derives a competing timeout from `SubscriptionState` or
 `FetchBuffer`. The real KRaft `PlaintextConsumerPollTest` suite also remains green. The POC removes the rescan, but
-production integration still has two open gates:
+production integration still has one open gate:
 
 1. add a real-socket broker-restart smoke test for manual-assignment/groupless reconnect backoff;
-2. prove that unsent-request expiration and every terminal failure path reach the fetch completion wakeup.
