@@ -126,8 +126,9 @@ Request managers can migrate incrementally. Existing managers may initially adap
 - KAFKA-20426 and KAFKA-20253 addressed busy waits caused by locally computed wait times.
 - KAFKA-20854 / PR 23014 distinguishes fetch-preparation outcomes to prevent paused-partition wakeup ping-pong.
 
-This issue should complement that work by defining the common progress and publication contract. Before expanding
-the scope into a KIP, the mailing list should confirm whether this belongs under KIP-945 or a follow-up proposal.
+This issue should complement that work by defining the common progress and publication contract. KIP-945 is related
+history, not a dependency or approval gate: the focused ownership and progress proposal can proceed independently
+while explicitly building on the existing async consumer threading refactor.
 
 ## Open questions
 
