@@ -425,7 +425,7 @@ public abstract class AbstractFetch implements Closeable {
 
         return new FetchRequestPreparationResult(
             convert(fetchable),
-            EnumSet.of(FetchRequestPreparationCondition.CLOSING)
+            EnumSet.of(FetchRequestPreparationBlocker.CLOSING)
         );
     }
 
@@ -448,15 +448,15 @@ public abstract class AbstractFetch implements Closeable {
         List<TopicPartition> unbuffered = fetchablePartitions(buffered);
 
         if (unbuffered.isEmpty()) {
-            FetchRequestPreparationCondition condition = subscriptions.hasFetchablePartitions(tp -> true)
-                ? FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED
-                : FetchRequestPreparationCondition.NO_FETCHABLE_PARTITIONS;
+            FetchRequestPreparationBlocker condition = subscriptions.hasFetchablePartitions(tp -> true)
+                ? FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED
+                : FetchRequestPreparationBlocker.NO_FETCHABLE_PARTITIONS;
             return new FetchRequestPreparationResult(Map.of(), EnumSet.of(condition));
         }
 
         Set<Integer> bufferedNodes = bufferedNodes(buffered, currentTimeMs);
-        EnumSet<FetchRequestPreparationCondition> conditions =
-            EnumSet.noneOf(FetchRequestPreparationCondition.class);
+        EnumSet<FetchRequestPreparationBlocker> blockers =
+            EnumSet.noneOf(FetchRequestPreparationBlocker.class);
         long reconnectBackoffRemainingMs = Long.MAX_VALUE;
 
         for (TopicPartition partition : unbuffered) {
@@ -464,7 +464,7 @@ public abstract class AbstractFetch implements Closeable {
             Optional<Node> nodeOpt = maybeNodeForPosition(partition, position, currentTimeMs);
 
             if (nodeOpt.isEmpty()) {
-                conditions.add(FetchRequestPreparationCondition.MISSING_LEADER);
+                blockers.add(FetchRequestPreparationBlocker.MISSING_LEADER);
                 continue;
             }
 
@@ -476,7 +476,7 @@ public abstract class AbstractFetch implements Closeable {
                 // If we try to send during the reconnect backoff window, then the request is just
                 // going to be failed anyway before being sent, so skip sending the request for now
                 log.trace("Skipping fetch for partition {} because node {} is awaiting reconnect backoff", partition, node);
-                conditions.add(FetchRequestPreparationCondition.RECONNECT_BACKOFF);
+                blockers.add(FetchRequestPreparationBlocker.RECONNECT_BACKOFF);
                 reconnectBackoffRemainingMs = Math.min(
                     reconnectBackoffRemainingMs,
                     unavailableTimeRemainingMs(node, currentTimeMs)
@@ -484,14 +484,14 @@ public abstract class AbstractFetch implements Closeable {
             } else if (nodesWithPendingFetchRequests.contains(node.id())) {
                 // If there's already an inflight request for this node, don't issue another request.
                 log.trace("Skipping fetch for partition {} because previous request to {} has not been processed", partition, node);
-                conditions.add(FetchRequestPreparationCondition.REQUEST_IN_FLIGHT);
+                blockers.add(FetchRequestPreparationBlocker.REQUEST_IN_FLIGHT);
             } else if (bufferedNodes.contains(node.id())) {
                 // While a node has buffered data, don't fetch other partition data from it. Because the buffered
                 // partitions are not included in the fetch request, those partitions will be inadvertently dropped
                 // from the broker fetch session cache. In some cases, that could lead to the entire fetch session
                 // being evicted.
                 log.trace("Skipping fetch for partition {} because its leader node {} hosts buffered partitions", partition, node);
-                conditions.add(FetchRequestPreparationCondition.WAITING_FOR_BUFFER_DRAIN);
+                blockers.add(FetchRequestPreparationBlocker.WAITING_FOR_BUFFER_DRAIN);
             } else {
                 // if there is a leader and no in-flight requests, issue a new fetch
                 FetchSessionHandler.Builder builder = fetchable.computeIfAbsent(node, k -> {
@@ -512,14 +512,14 @@ public abstract class AbstractFetch implements Closeable {
             }
         }
 
-        return new FetchRequestPreparationResult(convert(fetchable), conditions, reconnectBackoffRemainingMs);
+        return new FetchRequestPreparationResult(convert(fetchable), blockers, reconnectBackoffRemainingMs);
     }
 
     /**
-     * Conditions observed while preparing fetch requests. More than one condition may apply when partitions are
+     * Blockers observed while preparing fetch requests. More than one condition may apply when partitions are
      * blocked for different reasons.
      */
-    protected enum FetchRequestPreparationCondition {
+    protected enum FetchRequestPreparationBlocker {
         DATA_ALREADY_BUFFERED,
         NO_FETCHABLE_PARTITIONS,
         MISSING_LEADER,
@@ -530,28 +530,28 @@ public abstract class AbstractFetch implements Closeable {
     }
 
     /**
-     * An explicit description of both the requests that can be sent now and the conditions that prevented other
+     * An explicit description of both the requests that can be sent now and the blockers that prevented other
      * fetch requests from being created.
      */
     protected static final class FetchRequestPreparationResult {
         private final Map<Node, FetchSessionHandler.FetchRequestData> requests;
-        private final Set<FetchRequestPreparationCondition> conditions;
+        private final Set<FetchRequestPreparationBlocker> blockers;
         private final long reconnectBackoffRemainingMs;
 
         FetchRequestPreparationResult(final Map<Node, FetchSessionHandler.FetchRequestData> requests,
-                                      final Set<FetchRequestPreparationCondition> conditions) {
-            this(requests, conditions, Long.MAX_VALUE);
+                                      final Set<FetchRequestPreparationBlocker> blockers) {
+            this(requests, blockers, Long.MAX_VALUE);
         }
 
         FetchRequestPreparationResult(final Map<Node, FetchSessionHandler.FetchRequestData> requests,
-                                      final Set<FetchRequestPreparationCondition> conditions,
+                                      final Set<FetchRequestPreparationBlocker> blockers,
                                       final long reconnectBackoffRemainingMs) {
             // Each preparation creates and transfers ownership of this map to the result. Wrapping instead of
             // copying keeps the hot fetch path immutable to callers without adding another full map allocation.
             this.requests = Collections.unmodifiableMap(requests);
-            this.conditions = conditions.isEmpty()
+            this.blockers = blockers.isEmpty()
                 ? Collections.emptySet()
-                : Collections.unmodifiableSet(EnumSet.copyOf(conditions));
+                : Collections.unmodifiableSet(EnumSet.copyOf(blockers));
             this.reconnectBackoffRemainingMs = reconnectBackoffRemainingMs;
         }
 
@@ -559,8 +559,8 @@ public abstract class AbstractFetch implements Closeable {
             return requests;
         }
 
-        Set<FetchRequestPreparationCondition> conditions() {
-            return conditions;
+        Set<FetchRequestPreparationBlocker> blockers() {
+            return blockers;
         }
 
         long reconnectBackoffRemainingMs() {

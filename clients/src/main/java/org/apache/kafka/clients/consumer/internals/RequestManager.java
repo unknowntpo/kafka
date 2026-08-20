@@ -28,12 +28,24 @@ import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.
 public interface RequestManager {
 
     /**
-     * Describes the condition that must change before the application thread needs to observe this manager again.
-     * Implementations that have not migrated to typed progress intents retain their existing
+     * Reconciles this manager's owned state with the latest application events, network results, and time. The
+     * reactor invokes this method and combines every manager's result into one schedule.
+     *
+     * <p>During migration, {@link #poll(long)} remains the implementation hook for producing network work and
+     * {@link #nextReconcile(long)} adapts the existing wait calculation.</p>
+     */
+    default ManagerReconcileResult reconcile(long currentTimeMs) {
+        PollResult pollResult = poll(currentTimeMs);
+        return ManagerReconcileResult.of(this, pollResult, nextReconcile(currentTimeMs));
+    }
+
+    /**
+     * Describes when this manager needs the reactor to reconcile it again. Implementations that have not migrated
+     * to typed reconciliation retain their existing
      * {@link #maximumTimeToWait(long)} behavior through this adapter.
      */
-    default ConsumerReactorProgress.ProgressIntent progressIntent(long currentTimeMs) {
-        return ConsumerReactorProgress.ProgressIntent.awaitCompatibilityDeadlineAfter(
+    default NextReconcile nextReconcile(long currentTimeMs) {
+        return NextReconcile.atCompatibilityDeadlineAfter(
             currentTimeMs,
             maximumTimeToWait(currentTimeMs)
         );

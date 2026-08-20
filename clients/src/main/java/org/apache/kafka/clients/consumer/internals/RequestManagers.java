@@ -36,7 +36,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
@@ -138,15 +137,8 @@ public class RequestManagers implements Closeable {
         return entries;
     }
 
-    /** Transfers manager-reported protocol effects to the reactor. */
-    Set<ConsumerReactorProgress.ApplicationProgressEffect> drainApplicationProgressEffects() {
-        if (fetchRequestManager == null)
-            return Set.of();
-        return fetchRequestManager.drainApplicationProgressEffects();
-    }
-
     /**
-     * Wake the application-side fetch wait after a shorter progress decision has been published. The fetch buffers
+     * Wake the application-side fetch wait after a shorter reactor schedule has been published. The fetch buffers
      * latch wakeups, so publishing first prevents both stale reads and lost notifications.
      */
     void wakeupApplicationThread() {
