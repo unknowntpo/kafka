@@ -381,6 +381,19 @@ public class FetchRequestManagerTest {
     }
 
     @Test
+    public void testNoFetchablePartitionsUsesReactorRetryDeadline() {
+        buildFetcher();
+
+        assertEquals(0, sendFetches());
+
+        long currentTimeMs = time.milliseconds();
+        ConsumerReactorProgress.ProgressIntent intent = fetcher.progressIntent(currentTimeMs);
+        assertEquals(ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE, intent.waitMode());
+        assertTrue(intent.remainingMs(currentTimeMs) > 0L);
+        assertTrue(intent.remainingMs(currentTimeMs) <= retryBackoffMs);
+    }
+
+    @Test
     public void testMaximumTimeToWaitUnboundedWhenFetchSent() {
         buildFetcher();
 

@@ -115,8 +115,9 @@ the final decision must not turn the reactor into a switch statement containing 
 | Fetch blocked by reconnect backoff | Fetch manager reports actual connection delay; reactor schedules | exponential connection backoff and mixed partitions | real-socket broker-restart smoke test remains |
 | Fetch blocked by in-flight request or buffer drain | Fetch manager reports event-driven condition; reactor schedules | no anonymous retry wakeup | completion/capacity events are not yet first-class effect types |
 | Empty or failed fetch response | Response path signals application; reactor owns subsequent schedule | terminal response and failure tests | unsent-request expiration audit remains |
-| Groupless manual assignment | Reactor deadline limits the full async chain | deterministic cross-component test | caller safety rescan can also bound its next wait |
-| No assignment, invalid positions, fetchable/unbuffered scan | Application thread | safety fallback only | must move behind reactor-owned snapshots/events before the rescan is removed |
+| Groupless manual assignment | Reactor deadline limits the full async chain | deterministic cross-component test without caller rescan | real-socket broker-restart smoke test remains |
+| No assignment or invalid positions | Fetch manager reports `NO_FETCHABLE_PARTITIONS`; reactor schedules | behavior-equivalent retry deadline | replace the periodic compatibility deadline with explicit assignment/position events |
+| Fetchable/unbuffered partitions | Fetch manager reports the concrete preparation condition; reactor schedules | missing leader, reconnect, in-flight, and buffer-drain paths no longer need caller inference | completion/capacity effects are not yet first-class types |
 | Rebalance callbacks and lifecycle handshakes | Split between reactor and application thread | existing Required/Completed event protocol | operation/epoch ownership and terminal-path unification remain |
 | Queue and buffer admission | Individual queues and producers | existing local behavior | no unified capacity decision or overload policy |
 
@@ -158,11 +159,16 @@ AWAIT_DEADLINE(absoluteDeadlineMs)
 Managers that have not migrated use a compatibility adapter around `maximumTimeToWait()`. `FetchRequestManager`
 produces its intent directly from the latest typed fetch-preparation result instead of reducing every non-in-flight
 state to the same anonymous backoff. Absolute deadlines prevent time spent between publication and reading from
-being added to the wait again. The application-side `SubscriptionState` / `FetchBuffer` safety rescan added by PR
-23014 remains in place until the typed publication protocol has equivalent end-to-end coverage. Re-observing the
-same blocking condition preserves its existing deadline; otherwise unrelated events could continuously move the
-retry forward and create starvation. The compatibility adapter is explicitly tagged so the reactor conservatively
-preserves its earlier deadline across early network returns without applying that heuristic to native typed intents.
+being added to the wait again. Re-observing the same blocking condition preserves its existing deadline; otherwise
+unrelated events could continuously move the retry forward and create starvation. The compatibility adapter is
+explicitly tagged so the reactor conservatively preserves its earlier deadline across early network returns without
+applying that heuristic to native typed intents.
+
+The fourth POC slice removes the application-side `SubscriptionState` / `FetchBuffer` safety rescan. Fetchable
+partitions now rely on their concrete preparation condition: missing leader and reconnect use reactor deadlines,
+while in-flight requests and buffer drain wait for real completion or capacity transitions. Until assignment and
+position changes become explicit reactor events, `NO_FETCHABLE_PARTITIONS` retains the old retry bound as a named
+manager constraint. The application thread only applies the immutable timeout published by the reactor.
 
 The publication protocol is part of the type boundary, not an implementation detail:
 
@@ -237,18 +243,19 @@ producer.
 The POC includes a deterministic `FetchBuffer` concurrency test plus a cross-component test of the complete async
 consumer chain with only its socket replaced by `MockClient`. In the latter, a consumer without a group id and with
 a valid position proves that the reactor caps network polling to the 100 ms reconnect deadline and eventually
-generates a new fetch. The separate concurrency test proves publication and expiry wakeups, because current trunk's
-application-side safety rescan also bounds the caller's next wait. The real KRaft `PlaintextConsumerPollTest` suite
+generates a new fetch. Because the application-side rescan is now absent, that test directly exercises reactor
+publication and expiry wakeups. `testPollWaitUsesOnlyPublishedReactorDecision` separately asserts that fetchable
+application state cannot shorten a published unbounded decision. The real KRaft `PlaintextConsumerPollTest` suite
 remains green. Before production integration, a broker-restart smoke test should repeat the invariant against real
-sockets, and direct fetch-buffer notifications should migrate into named reactor effects. The application-side
-safety checks in `AsyncKafkaConsumer.pollForFetches()` remain intentionally in place until typed progress decisions
-have equivalent end-to-end coverage; removing those independent bounds now would introduce a liveness regression.
+sockets, and direct fetch-buffer notifications should migrate into named reactor effects.
 
 ## Validation Checkpoint (2026-08-20)
 
 * Focused reactor, fetch-manager, and groupless cross-component regressions passed with Checkstyle and SpotBugs.
-* The complete `clients` unit suite passed: 13,576 tests, zero failures.
+* After removing the application-side rescan, the focused no-fetchable, published-wait, and groupless reconnect
+  regressions passed with Checkstyle and SpotBugs.
+* The complete `clients` unit suite passed: 13,578 tests, zero failures.
 * The KRaft `PlaintextConsumerPollTest` integration suite passed: 24 tests, zero failures.
 
-These results validate this POC checkpoint, not the later removal of the application-side safety rescan. That step
-still requires the real-socket broker-restart smoke test and terminal-path coverage listed in the evidence document.
+These results validate the deterministic POC checkpoint. Production integration still requires the real-socket
+broker-restart smoke test and terminal-path coverage listed in the evidence document.

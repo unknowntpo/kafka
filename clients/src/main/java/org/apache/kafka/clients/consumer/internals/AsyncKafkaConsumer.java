@@ -397,7 +397,6 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     private final AtomicReference<Set<TopicPartition>> groupAssignmentSnapshot = new AtomicReference<>(Collections.emptySet());
     private final ConsumerMetadata metadata;
     private final Metrics metrics;
-    private final long retryBackoffMs;
     private final int requestTimeoutMs;
     private final Duration defaultApiTimeoutMs;
     private final boolean autoCommitEnabled;
@@ -489,7 +488,6 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             this.metrics = createMetrics(config, time, reporters);
             this.asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
             this.kafkaConsumerMetrics = new KafkaConsumerMetrics(metrics);
-            this.retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
             this.requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
 
             List<ConsumerInterceptor<K, V>> interceptorList = configuredConsumerInterceptors(config);
@@ -622,7 +620,6 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                        Metrics metrics,
                        SubscriptionState subscriptions,
                        ConsumerMetadata metadata,
-                       long retryBackoffMs,
                        int requestTimeoutMs,
                        int defaultApiTimeoutMs,
                        String groupId,
@@ -646,7 +643,6 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.metrics = metrics;
         this.groupMetadata.set(initializeGroupMetadata(groupId, Optional.empty()));
         this.metadata = metadata;
-        this.retryBackoffMs = retryBackoffMs;
         this.requestTimeoutMs = requestTimeoutMs;
         this.defaultApiTimeoutMs = Duration.ofMillis(defaultApiTimeoutMs);
         this.deserializers = deserializers;
@@ -682,7 +678,6 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.metrics = new Metrics(time);
         this.interceptors = new ConsumerInterceptors<>(Collections.emptyList(), metrics);
         this.metadata = metadata;
-        this.retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
         this.requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
         this.defaultApiTimeoutMs = Duration.ofMillis(config.getInt(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG));
         this.deserializers = new Deserializers<>(keyDeserializer, valueDeserializer, metrics);
@@ -971,7 +966,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
                     return interceptors.onConsume(new ConsumerRecords<>(fetch.records(), fetch.nextOffsets()));
                 }
-                // We will wait for retryBackoffMs
+                // The reactor decision bounds the next wait when progress requires a retry deadline.
             } while (timer.notExpired());
 
             return ConsumerRecords.empty();
@@ -1985,32 +1980,10 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             return fetch;
         }
 
+        // The reactor is the single authority for cross-component waiting decisions. Request managers inspect their
+        // owned state and publish progress constraints there; the application thread only applies the immutable
+        // timeout snapshot and never rescans SubscriptionState or FetchBuffer to derive a competing decision.
         long pollTimeout = Math.min(applicationEventHandler.maximumTimeToWait(), timer.remainingMs());
-
-        // Bound the wait when background progress may make fetching possible soon.
-        // Use the current application-thread state to avoid relying on stale state from the reactor.
-        if (pollTimeout > retryBackoffMs) {
-            if (subscriptions.numAssignedPartitions() == 0) {
-                // If there are no assigned partitions, reduce the fetch buffer wait time. This may happen when
-                // group membership has not been established yet, assignments have been revoked but not reassigned,
-                // bootstrap DNS resolution is still in progress, or manual assignment has not happened yet.
-                pollTimeout = retryBackoffMs;
-            } else if (!subscriptions.hasAllFetchPositions()) {
-                // If some partitions do not have valid positions, the reactor may still be resolving them,
-                // for example by fetching committed offsets, looking up offsets by timestamp, or backing off after a
-                // failure. Reduce the wait time so the application thread can consume data promptly once positions are
-                // resolved.
-                pollTimeout = retryBackoffMs;
-            } else {
-                Set<TopicPartition> buffered = fetchBuffer.bufferedPartitions();
-                if (subscriptions.hasFetchablePartitions(tp -> !buffered.contains(tp))) {
-                    // If any fetchable partition has no buffered data, it may have been skipped due to reconnect
-                    // backoff, an in-flight request, or a missing leader. Bound the wait so the application thread
-                    // can retry once the condition clears.
-                    pollTimeout = retryBackoffMs;
-                }
-            }
-        }
 
         log.trace("Polling for fetches with timeout {}", pollTimeout);
 

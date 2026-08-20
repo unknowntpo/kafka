@@ -92,8 +92,8 @@ Request managers can migrate incrementally. Existing managers may initially adap
 - Aggregate progress intents in the background event loop.
 - Represent deadlines as absolute times so publication latency is not added to the wait.
 - Derive fetch progress from explicit fetch-preparation conditions.
-- Remove the application-side `SubscriptionState` / `FetchBuffer` safety rescan only after the publication and
-  wakeup protocol has equivalent end-to-end coverage.
+- Remove the application-side `SubscriptionState` / `FetchBuffer` safety rescan after the publication and wakeup
+  protocol has deterministic equivalent coverage.
 - Preserve the existing public consumer API and callback threading model.
 
 ## Non-goals
@@ -101,7 +101,8 @@ Request managers can migrate incrementally. Existing managers may initially adap
 - Rename existing runtime thread names or public metrics as part of the class rename.
 - Move all `SubscriptionState` mutations behind reactor commands in one patch.
 - Redesign rebalance callback execution in this issue.
-- Remove application-thread safety checks before their corresponding background completion events exist.
+- Remove the `NO_FETCHABLE_PARTITIONS` compatibility deadline before assignment and position changes have explicit
+  reactor events.
 - Replace KIP-945 or claim that the background-thread architecture itself is new.
 
 ## Acceptance criteria
@@ -109,6 +110,8 @@ Request managers can migrate incrementally. Existing managers may initially adap
 - A request manager can express event-driven and deadline-driven waits without encoding both as an anonymous delay.
 - The background event loop uses the aggregated decision to bound every network poll until the deadline is handled.
 - The application thread cannot remain blocked on an older, longer decision after a shorter decision is published.
+- The application thread applies the published reactor decision without rescanning `SubscriptionState` or
+  `FetchBuffer` to derive another timeout.
 - A consumer without a group id can still be notified when a fetch retry deadline expires.
 - Mixed `REQUEST_IN_FLIGHT` and `RECONNECT_BACKOFF` conditions retain the reconnect deadline.
 - Focused tests cover publish-before-wakeup ordering, elapsed-time subtraction, one-shot deadline notification, early

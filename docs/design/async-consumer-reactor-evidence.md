@@ -61,7 +61,7 @@ does not attribute findings to those incomplete runs.
 Before PR 23014, the groupless path did not read `maximumTimeToWait()` at all; current trunk now reads it for every
 consumer, but that fixes the next wait rather than an already-blocked wait.
 
-The POC therefore requires these properties before the rescan is removed:
+The rescan-removal slice uses the following properties as its deterministic gate:
 
 | Risk | Required property | POC evidence |
 | --- | --- | --- |
@@ -72,14 +72,15 @@ The POC therefore requires these properties before the rescan is removed:
 | deadline starvation | do not postpone an absolute deadline when the same block is re-observed | `ConsumerReactorProgressTest.testApplicationWaitSubtractsElapsedTime`, `testRepeatedPreparationDoesNotPostponeRetryDeadline` |
 | reconnect retry before capacity | use the network client's actual connection delay, including exponential backoff | `testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff` |
 | mixed partitions | retry conditions win over event-only in-flight conditions | `testRetryDeadlineWinsWhenInFlightAndReconnectConditionsAreMixed` |
-| wakeup ping-pong | no wake for `NO_FETCHABLE_PARTITIONS`; terminal request completion remains a real transition | fetch-manager wakeup tests |
+| wakeup ping-pong | `NO_FETCHABLE_PARTITIONS` schedules a reactor deadline without an eager wake; terminal request completion remains a real transition | `testNoFetchablePartitionsDoesNotWakeUpBuffer`, `testNoFetchablePartitionsUsesReactorRetryDeadline` |
 
 The POC now covers the stale-wait publication protocol at two deterministic levels: a real application-side
 `FetchBuffer` wait running concurrently with the reactor scheduler, and the complete
 `AsyncKafkaConsumer -> ApplicationEventHandler -> ConsumerReactor -> FetchRequestManager -> FetchBuffer`
-chain with only the socket replaced by a controllable `MockClient`. The real KRaft `PlaintextConsumerPollTest`
-suite also remains green. A broker-restart test still belongs to production integration rather than this POC, so
-the review leaves two gates open:
+chain with only the socket replaced by a controllable `MockClient`. `testPollWaitUsesOnlyPublishedReactorDecision`
+also proves that the application thread no longer derives a competing timeout from `SubscriptionState` or
+`FetchBuffer`. The real KRaft `PlaintextConsumerPollTest` suite also remains green. The POC removes the rescan, but
+production integration still has two open gates:
 
 1. add a real-socket broker-restart smoke test for manual-assignment/groupless reconnect backoff;
 2. prove that unsent-request expiration and every terminal failure path reach the fetch completion wakeup.

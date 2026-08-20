@@ -280,7 +280,6 @@ public class AsyncKafkaConsumerTest {
             metrics,
             subscriptions,
             metadata,
-            100L,
             requestTimeoutMs,
             defaultApiTimeoutMs,
             "group-id",
@@ -2167,6 +2166,38 @@ public class AsyncKafkaConsumerTest {
 
         // Only a single wait cycle should have happened
         verify(fetchBuffer, times(1)).awaitWakeup(any(Timer.class));
+    }
+
+    @Test
+    public void testPollWaitUsesOnlyPublishedReactorDecision() {
+        FetchBuffer fetchBuffer = mock(FetchBuffer.class);
+        ConsumerInterceptors<String, String> interceptors = mock(ConsumerInterceptors.class);
+        ConsumerRebalanceListenerInvoker rebalanceListenerInvoker = mock(ConsumerRebalanceListenerInvoker.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        consumer = newConsumer(fetchBuffer, interceptors, rebalanceListenerInvoker, subscriptions);
+
+        TopicPartition tp = new TopicPartition("topic1", 0);
+        subscriptions.assignFromUser(singleton(tp));
+        subscriptions.seek(tp, 0L);
+
+        doReturn(Long.MAX_VALUE).when(applicationEventHandler).maximumTimeToWait();
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+
+        AtomicReference<Long> applicationWaitMs = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Timer pollTimer = invocation.getArgument(0, Timer.class);
+            applicationWaitMs.compareAndSet(null, pollTimer.remainingMs());
+            time.sleep(pollTimer.remainingMs());
+            pollTimer.update();
+            return null;
+        }).when(fetchBuffer).awaitWakeup(any(Timer.class));
+
+        long pollTimeoutMs = 500L;
+        consumer.poll(Duration.ofMillis(pollTimeoutMs));
+
+        assertEquals(pollTimeoutMs, applicationWaitMs.get());
+        verify(fetchBuffer).awaitWakeup(any(Timer.class));
+        verify(fetchBuffer, never()).bufferedPartitions();
     }
 
     /**
