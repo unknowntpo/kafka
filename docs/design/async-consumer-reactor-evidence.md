@@ -39,8 +39,9 @@ These are supporting rather than primary examples because a narrower lifecycle c
 
 [KIP-945](https://cwiki.apache.org/confluence/spaces/KAFKA/pages/255073708/KIP-945+Update+threading+model+for+Consumer)
 already records the motivation for changing the consumer threading model, but its detailed threading, data-flow,
-and network-I/O sections remain incomplete. A proposal should first determine whether to complete KIP-945 or create
-a successor.
+and network-I/O sections remain incomplete. It is related history rather than a dependency or approval gate for the
+focused ownership, progress, wakeup, and resource-bound proposal. That proposal can proceed independently while
+explicitly building on the event-loop architecture already established by the threading refactor.
 
 The design claim is not that a reactor automatically prevents every bug. The narrower claim is:
 
