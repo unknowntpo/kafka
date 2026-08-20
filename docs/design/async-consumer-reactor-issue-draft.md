@@ -35,7 +35,7 @@ The background thread currently combines several independent mechanisms:
 
 Each mechanism is locally reasonable, but they may describe different state snapshots. A timeout can express
 urgency without expressing whether progress is feasible, while a wakeup may indicate only that a method returned an
-empty result rather than that protocol state actually changed.
+empty result rather than that manager-owned state actually changed.
 
 ## Example failure mode
 
@@ -60,8 +60,8 @@ Introduce a typed progress contract between request-manager state machines and t
 minimal form only needs to distinguish:
 
 ```text
-AWAIT_EVENT
-AWAIT_DEADLINE(absoluteDeadlineMs)
+NextReconcile.ON_EVENT
+NextReconcile.AT_DEADLINE(absoluteDeadlineMs)
 ```
 
 The event loop aggregates these intents and owns the resulting scheduling decision. That decision should be used
@@ -79,7 +79,7 @@ Request managers can migrate incrementally. Existing managers may initially adap
 
 ## Desired invariants
 
-1. Every mutable protocol state has one execution-context owner.
+1. Every mutable manager-owned state has one execution-context owner.
 2. Every retry or reschedule names the event or deadline that can enable progress.
 3. A newly published decision is visible before its corresponding wakeup is delivered.
 4. Mixed manager or partition conditions preserve the earliest real deadline.
