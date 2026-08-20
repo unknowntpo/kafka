@@ -65,12 +65,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -164,12 +166,29 @@ public class ConsumerReactorTest {
         when(coordinatorRequestManager.maximumTimeToWait(t)).thenReturn(exampleTime);
         when(heartbeatRequestManager.poll(t)).thenReturn(pollResult1);
         when(heartbeatRequestManager.maximumTimeToWait(t)).thenReturn(exampleTime + 100);
-        when(networkClientDelegate.addAll(pollResult)).thenReturn(pollResult.timeUntilNextPollMs);
-        when(networkClientDelegate.addAll(pollResult1)).thenReturn(pollResult1.timeUntilNextPollMs);
         consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(Math.min(exampleTime, ConsumerReactor.MAX_POLL_TIMEOUT_MS), time.milliseconds());
         assertEquals(consumerReactor.maximumTimeToWait(), exampleTime);
+    }
+
+    @Test
+    public void testLegacyPollTimeoutIsPublishedInReactorSchedule() {
+        long currentTimeMs = time.milliseconds();
+        NetworkClientDelegate.PollResult pollResult = new NetworkClientDelegate.PollResult(25L);
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        doReturn(ManagerReconcileResult.of(
+            coordinatorRequestManager,
+            pollResult,
+            NextReconcile.onEvent()
+        )).when(coordinatorRequestManager).reconcile(currentTimeMs);
+        consumerReactor.runOnce();
+
+        verify(networkClientDelegate).poll(25L, currentTimeMs);
+        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
+        assertEquals(25L, consumerReactor.reactorSchedule().reactorDeadlineAtMs() - currentTimeMs);
+        assertEquals(Long.MAX_VALUE, consumerReactor.reactorSchedule().deadlineAtMs());
+        verify(requestManagers, never()).wakeupApplicationThread();
     }
 
     @Test
@@ -199,7 +218,7 @@ public class ConsumerReactorTest {
         requestManagers.entries().forEach(rm -> verify(rm).reconcile(anyLong()));
         requestManagers.entries().forEach(rm -> verify(rm).poll(anyLong()));
         requestManagers.entries().forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));
-        verify(networkClientDelegate, times(list.size())).addAll(any(NetworkClientDelegate.PollResult.class));
+        verify(networkClientDelegate, times(list.size())).addAll(anyList());
         verify(networkClientDelegate).poll(anyLong(), anyLong());
     }
 
@@ -223,7 +242,6 @@ public class ConsumerReactorTest {
         AtomicLong managerDecisionTimeMs = new AtomicLong(-1L);
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.poll(timeBeforePollMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
         doAnswer(invocation -> {
             time.sleep(250L);
             return null;
@@ -261,7 +279,6 @@ public class ConsumerReactorTest {
         when(coordinatorRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(offsetsRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
         doAnswer(invocation ->
             coordinatorReady.get()
                 ? NextReconcile.onEvent()
@@ -374,8 +391,6 @@ public class ConsumerReactorTest {
         doReturn(beforeCompletion, afterCompletion)
             .when(heartbeatRequestManager).reconcile(currentTimeMs);
         doReturn(unaffected).when(coordinatorRequestManager).reconcile(currentTimeMs);
-        when(networkClientDelegate.addAll(any(NetworkClientDelegate.PollResult.class)))
-            .thenReturn(Long.MAX_VALUE);
         doAnswer(invocation -> {
             request.future().complete(null);
             return null;
@@ -491,7 +506,6 @@ public class ConsumerReactorTest {
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
-        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
         doAnswer(invocation -> {
             time.sleep(invocation.getArgument(0, Long.class));
             return null;
@@ -517,7 +531,6 @@ public class ConsumerReactorTest {
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
-        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
         doAnswer(invocation -> {
             time.sleep(10L);
             return null;
@@ -578,7 +591,6 @@ public class ConsumerReactorTest {
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(0L);
-        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
 
         consumerReactor.runOnce();
         time.sleep(1L);
@@ -598,7 +610,6 @@ public class ConsumerReactorTest {
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         doReturn(deadline).when(heartbeatRequestManager).nextReconcile(anyLong());
-        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
 
         consumerReactor.runOnce();
         consumerReactor.runOnce();
@@ -624,7 +635,6 @@ public class ConsumerReactorTest {
         when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         doReturn(NextReconcile.atDeadlineAfter(startMs, 100L))
             .when(heartbeatRequestManager).nextReconcile(anyLong());
-        when(networkClientDelegate.addAll(NetworkClientDelegate.PollResult.EMPTY)).thenReturn(Long.MAX_VALUE);
         doAnswer(invocation -> {
             if (networkPolls.incrementAndGet() == 2)
                 time.sleep(100L);

@@ -338,7 +338,8 @@ schedule. `merge` is a pure calculation, not another component or decision owner
 2. If `IMMEDIATE` remains after budget exhaustion, the reactor performs a non-blocking network poll and continues
    the work in the next iteration. `IMMEDIATE` alone never synthesizes an application wake; only an externally
    observable transition does.
-3. If no work is ready, the earliest finite deadline bounds the network poll and application wait.
+3. If no work is ready, the earliest finite deadline bounds the network poll. The earliest application-visible
+   deadline bounds the application wait. Both are projections of the same immutable `ReactorSchedule`.
 4. Event, capacity, and callback blockers remain observable but cannot hide a finite deadline contributed by other
    work.
 5. Urgency cannot make work ready when its prerequisite is unavailable.
@@ -357,8 +358,9 @@ positive wait. This is deliberately conservative: the legacy API cannot distingu
 the previously delivered one. Managers which require that distinction migrate to a native semantic generation.
 
 The resulting schedule is the only scheduling decision consumed by the application wait and network poll. It records
-whether another iteration is immediate, the earliest absolute deadline, the observed event/capacity/callback
-conditions, and their semantic generations.
+whether another iteration is immediate, the earliest Reactor deadline, the earliest application-visible deadline,
+the observed event/capacity/callback conditions, and their semantic generations. A Reactor-only deadline may shorten
+network polling without synthesizing an application wakeup.
 
 #### Multi-manager scheduling rules
 

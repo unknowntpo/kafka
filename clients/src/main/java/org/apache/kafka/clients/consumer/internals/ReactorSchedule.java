@@ -20,20 +20,33 @@ import java.util.Collection;
 import java.util.Objects;
 import java.util.Optional;
 
-/** Immutable schedule produced by the reactor from all manager reconciliation results. */
+/**
+ * Immutable schedule produced by the reactor from all manager reconciliation results. It owns both projections of
+ * one decision: the earliest deadline at which the reactor must run again, and the earliest deadline which must also
+ * release an application waiter. Reactor-only work therefore cannot synthesize an application wakeup.
+ */
 final class ReactorSchedule {
     private final NextReconcile nextReconcile;
+    private final NextReconcile applicationNextReconcile;
     private final long decidedAtMs;
-    private final RequestManager source;
+    private final RequestManager reactorSource;
+    private final RequestManager applicationSource;
     private final boolean deadlineNotificationDelivered;
 
     private ReactorSchedule(final NextReconcile nextReconcile,
+                            final NextReconcile applicationNextReconcile,
                             final long decidedAtMs,
-                            final RequestManager source,
+                            final RequestManager reactorSource,
+                            final RequestManager applicationSource,
                             final boolean deadlineNotificationDelivered) {
         this.nextReconcile = Objects.requireNonNull(nextReconcile, "Next reconcile must be non-null");
+        this.applicationNextReconcile = Objects.requireNonNull(
+            applicationNextReconcile,
+            "Application next reconcile must be non-null"
+        );
         this.decidedAtMs = decidedAtMs;
-        this.source = source;
+        this.reactorSource = reactorSource;
+        this.applicationSource = applicationSource;
         this.deadlineNotificationDelivered = deadlineNotificationDelivered;
     }
 
@@ -41,7 +54,9 @@ final class ReactorSchedule {
                                    final long currentTimeMs) {
         return new ReactorSchedule(
             NextReconcile.atDeadlineAfter(currentTimeMs, timeoutMs),
+            NextReconcile.atDeadlineAfter(currentTimeMs, timeoutMs),
             currentTimeMs,
+            null,
             null,
             false
         );
@@ -53,16 +68,30 @@ final class ReactorSchedule {
         Objects.requireNonNull(results, "Manager reconcile results must be non-null");
 
         NextReconcile limiting = NextReconcile.onEvent();
-        RequestManager source = null;
+        NextReconcile applicationLimiting = NextReconcile.onEvent();
+        RequestManager reactorSource = null;
+        RequestManager applicationSource = null;
         for (ManagerReconcileResult result : results) {
             for (NextReconcile candidate : result.nextReconciles()) {
                 if (candidate.deadlineAtMs() < limiting.deadlineAtMs()) {
                     limiting = candidate;
-                    source = result.manager();
+                    reactorSource = result.manager();
+                }
+                if (candidate.applicationVisible()
+                    && candidate.deadlineAtMs() < applicationLimiting.deadlineAtMs()) {
+                    applicationLimiting = candidate;
+                    applicationSource = result.manager();
                 }
             }
         }
-        return new ReactorSchedule(limiting, currentTimeMs, source, false);
+        return new ReactorSchedule(
+            limiting,
+            applicationLimiting,
+            currentTimeMs,
+            reactorSource,
+            applicationSource,
+            false
+        );
     }
 
     long timeoutMs() {
@@ -74,7 +103,13 @@ final class ReactorSchedule {
     }
 
     long remainingMsForApplication(final long currentTimeMs) {
-        return deadlineNotificationDelivered ? Long.MAX_VALUE : remainingMs(currentTimeMs);
+        return deadlineNotificationDelivered
+            ? Long.MAX_VALUE
+            : applicationNextReconcile.remainingMs(currentTimeMs);
+    }
+
+    long applicationRemainingMs(final long currentTimeMs) {
+        return applicationNextReconcile.remainingMs(currentTimeMs);
     }
 
     boolean deadlineNotificationDelivered() {
@@ -85,28 +120,37 @@ final class ReactorSchedule {
         return nextReconcile.type();
     }
 
+    NextReconcile.Type applicationNextReconcileType() {
+        return applicationNextReconcile.type();
+    }
+
     long deadlineAtMs() {
+        return applicationNextReconcile.deadlineAtMs();
+    }
+
+    long reactorDeadlineAtMs() {
         return nextReconcile.deadlineAtMs();
     }
 
     boolean shortens(final ReactorSchedule previous) {
-        return deadlineAtMs() < previous.deadlineAtMs();
+        return applicationNextReconcile.deadlineAtMs()
+            < previous.applicationNextReconcile.deadlineAtMs();
     }
 
     boolean sameSchedule(final ReactorSchedule other) {
-        return nextReconcileType() == other.nextReconcileType()
+        return applicationNextReconcileType() == other.applicationNextReconcileType()
             && deadlineAtMs() == other.deadlineAtMs()
             && compatibilityDeadline() == other.compatibilityDeadline()
             && semanticGeneration() == other.semanticGeneration()
-            && Objects.equals(source, other.source);
+            && Objects.equals(applicationSource, other.applicationSource);
     }
 
     boolean compatibilityDeadline() {
-        return nextReconcile.compatibilityDeadline();
+        return applicationNextReconcile.compatibilityDeadline();
     }
 
     long semanticGeneration() {
-        return nextReconcile.semanticGeneration();
+        return applicationNextReconcile.semanticGeneration();
     }
 
     long decidedAtMs() {
@@ -114,19 +158,28 @@ final class ReactorSchedule {
     }
 
     Optional<String> source() {
-        if (source == null)
+        if (applicationSource == null)
             return Optional.empty();
-        String simpleName = source.getClass().getSimpleName();
-        return Optional.of(simpleName.isEmpty() ? source.getClass().getName() : simpleName);
+        String simpleName = applicationSource.getClass().getSimpleName();
+        return Optional.of(
+            simpleName.isEmpty() ? applicationSource.getClass().getName() : simpleName
+        );
     }
 
     Optional<RequestManager> sourceManager() {
-        return Optional.ofNullable(source);
+        return Optional.ofNullable(applicationSource);
     }
 
     ReactorSchedule withDeadlineNotificationDelivered() {
-        if (nextReconcileType() != NextReconcile.Type.AT_DEADLINE)
+        if (applicationNextReconcileType() != NextReconcile.Type.AT_DEADLINE)
             throw new IllegalStateException("Only deadline waits can deliver a deadline notification");
-        return new ReactorSchedule(nextReconcile, decidedAtMs, source, true);
+        return new ReactorSchedule(
+            nextReconcile,
+            applicationNextReconcile,
+            decidedAtMs,
+            reactorSource,
+            applicationSource,
+            true
+        );
     }
 }
