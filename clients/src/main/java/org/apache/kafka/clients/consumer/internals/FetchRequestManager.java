@@ -48,11 +48,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     private final NetworkClientDelegate networkClientDelegate;
     private final long retryBackoffMs;
     private CompletableFuture<Void> pendingFetchRequestFuture;
-    private ConsumerReactorProgress.ProgressIntent fetchProgressIntent =
-        ConsumerReactorProgress.ProgressIntent.awaitEvent();
-    private long fetchProgressGeneration;
-    private EnumSet<ConsumerReactorProgress.ApplicationProgressEffect> pendingApplicationProgressEffects =
-        EnumSet.noneOf(ConsumerReactorProgress.ApplicationProgressEffect.class);
+    private NextReconcile fetchNextReconcile =
+        NextReconcile.onEvent();
+    private long fetchNextReconcileGeneration;
+    private EnumSet<StateTransition> pendingStateTransitions =
+        EnumSet.noneOf(StateTransition.class);
 
     FetchRequestManager(final LogContext logContext,
                         final Time time,
@@ -92,12 +92,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return progressIntent(currentTimeMs).remainingMs(currentTimeMs);
+        return nextReconcile(currentTimeMs).remainingMs(currentTimeMs);
     }
 
     @Override
-    public ConsumerReactorProgress.ProgressIntent progressIntent(long currentTimeMs) {
-        return fetchProgressIntent;
+    public NextReconcile nextReconcile(long currentTimeMs) {
+        return fetchNextReconcile;
     }
 
     /**
@@ -141,6 +141,22 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     }
 
     /**
+     * Atomically reports the fetch manager's proposed network work, next reconciliation, and state transitions from
+     * one reactor-thread snapshot. Other managers continue to use the compatibility adapter in
+     * {@link RequestManager#reconcile(long)} while they migrate.
+     */
+    @Override
+    public ManagerReconcileResult reconcile(long currentTimeMs) {
+        PollResult pollResult = poll(currentTimeMs);
+        return ManagerReconcileResult.of(
+            this,
+            pollResult,
+            drainPendingStateTransitions(),
+            nextReconcile(currentTimeMs)
+        );
+    }
+
+    /**
      * {@inheritDoc}
      */
     @Override
@@ -162,7 +178,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * {@link FetchRequest.Builder fetch requests}.
      *
      * @param fetchRequestPreparer {@link FetchRequestPreparer} to describe both requests that can be created and
-     *                             conditions preventing other requests from being created
+     *                             blockers preventing other requests from being created
      * @param successHandler       {@link ResponseHandler Handler for successful responses}
      * @param errorHandler         {@link ResponseHandler Handler for failure responses}
      * @return {@link PollResult}
@@ -178,11 +194,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
-            fetchProgressIntent = progressIntentFor(result, currentTimeMs);
+            fetchNextReconcile = nextReconcileFor(result, currentTimeMs);
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
-                reportPreparationProgress(result);
+                reportPreparationStateTransition(result);
                 pendingFetchRequestFuture.complete(null);
                 return PollResult.EMPTY;
             }
@@ -208,9 +224,9 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
             pendingFetchRequestFuture.completeExceptionally(t);
-            fetchProgressIntent = ConsumerReactorProgress.ProgressIntent.awaitEvent();
-            pendingApplicationProgressEffects.add(
-                ConsumerReactorProgress.ApplicationProgressEffect.FETCH_PREPARATION_FAILED
+            fetchNextReconcile = NextReconcile.onEvent();
+            pendingStateTransitions.add(
+                StateTransition.FETCH_PREPARATION_FAILED
             );
             return PollResult.EMPTY;
         } finally {
@@ -218,14 +234,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         }
     }
 
-    ConsumerReactorProgress.ProgressIntent progressIntentFor(
+    NextReconcile nextReconcileFor(
         final FetchRequestPreparationResult result,
         final long currentTimeMs
     ) {
         boolean noFetchablePartitions =
-            result.conditions().contains(FetchRequestPreparationCondition.NO_FETCHABLE_PARTITIONS);
-        boolean missingLeader = result.conditions().contains(FetchRequestPreparationCondition.MISSING_LEADER);
-        boolean reconnectBackoff = result.conditions().contains(FetchRequestPreparationCondition.RECONNECT_BACKOFF);
+            result.blockers().contains(FetchRequestPreparationBlocker.NO_FETCHABLE_PARTITIONS);
+        boolean missingLeader = result.blockers().contains(FetchRequestPreparationBlocker.MISSING_LEADER);
+        boolean reconnectBackoff = result.blockers().contains(FetchRequestPreparationBlocker.RECONNECT_BACKOFF);
         if (noFetchablePartitions || missingLeader || reconnectBackoff) {
             // NO_FETCHABLE_PARTITIONS includes assignment and position states which are not yet represented by
             // explicit reactor events. Preserve the legacy retry bound here while keeping the final scheduling
@@ -235,48 +251,48 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             if (reconnectBackoff)
                 delayMs = Math.min(delayMs, result.reconnectBackoffRemainingMs());
 
-            ConsumerReactorProgress.ProgressIntent candidate =
-                ConsumerReactorProgress.ProgressIntent.awaitDeadlineAfter(currentTimeMs, delayMs);
+            NextReconcile candidate =
+                NextReconcile.atDeadlineAfter(currentTimeMs, delayMs);
             // Re-observing the same class of blocked state must not move an existing deadline forward. Otherwise,
             // unrelated application events can perpetually postpone the retry and turn a bounded wait into
             // starvation. A newly observed capacity deadline is still allowed to shorten the existing decision.
-            if (fetchProgressIntent.waitMode() == ConsumerReactorProgress.WaitMode.AWAIT_DEADLINE
-                && fetchProgressIntent.remainingMs(currentTimeMs) > 0L
-                && fetchProgressIntent.deadlineAtMs() <= candidate.deadlineAtMs()) {
-                return fetchProgressIntent;
+            if (fetchNextReconcile.type() == NextReconcile.Type.AT_DEADLINE
+                && fetchNextReconcile.remainingMs(currentTimeMs) > 0L
+                && fetchNextReconcile.deadlineAtMs() <= candidate.deadlineAtMs()) {
+                return fetchNextReconcile;
             }
-            return candidate.withSemanticGeneration(++fetchProgressGeneration);
+            return candidate.withSemanticGeneration(++fetchNextReconcileGeneration);
         }
 
-        return ConsumerReactorProgress.ProgressIntent.awaitEvent();
+        return NextReconcile.onEvent();
     }
 
-    private void reportPreparationProgress(final FetchRequestPreparationResult result) {
-        if (result.conditions().contains(FetchRequestPreparationCondition.DATA_ALREADY_BUFFERED)) {
-            pendingApplicationProgressEffects.add(
-                ConsumerReactorProgress.ApplicationProgressEffect.FETCH_BUFFER_HAS_DATA
+    private void reportPreparationStateTransition(final FetchRequestPreparationResult result) {
+        if (result.blockers().contains(FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED)) {
+            pendingStateTransitions.add(
+                StateTransition.FETCH_BUFFER_HAS_DATA
             );
         }
     }
 
     @Override
     protected void onFetchRequestTerminated() {
-        pendingApplicationProgressEffects.add(
-            ConsumerReactorProgress.ApplicationProgressEffect.FETCH_REQUEST_TERMINATED
+        pendingStateTransitions.add(
+            StateTransition.FETCH_REQUEST_TERMINATED
         );
     }
 
     /**
-     * Transfers the bounded, coalesced set of protocol effects to the reactor. This method and all producers of the
-     * set run on the reactor thread, so no cross-thread synchronization is required.
+     * Transfers the bounded, coalesced set of manager-owned state transitions to the reactor. This method and all
+     * producers of the set run on the reactor thread, so no cross-thread synchronization is required.
      */
-    Set<ConsumerReactorProgress.ApplicationProgressEffect> drainApplicationProgressEffects() {
-        if (pendingApplicationProgressEffects.isEmpty())
+    private Set<StateTransition> drainPendingStateTransitions() {
+        if (pendingStateTransitions.isEmpty())
             return Set.of();
 
-        EnumSet<ConsumerReactorProgress.ApplicationProgressEffect> drained = pendingApplicationProgressEffects;
-        pendingApplicationProgressEffects =
-            EnumSet.noneOf(ConsumerReactorProgress.ApplicationProgressEffect.class);
+        EnumSet<StateTransition> drained = pendingStateTransitions;
+        pendingStateTransitions =
+            EnumSet.noneOf(StateTransition.class);
         return drained;
     }
 
