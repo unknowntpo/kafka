@@ -39,23 +39,14 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
@@ -120,19 +111,9 @@ public class ConsumerReactorTest {
         when(offsetsRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        when(offsetsRequestManager.reconcile(anyLong())).thenAnswer(invocation -> {
-            long currentTimeMs = invocation.getArgument(0);
-            return ManagerReconcileResult.of(
-                offsetsRequestManager,
-                offsetsRequestManager.poll(currentTimeMs),
-                offsetsRequestManager.nextReconcile(currentTimeMs)
-            );
-        });
-        when(heartbeatRequestManager.reconcile(anyLong())).thenCallRealMethod();
-        when(coordinatorRequestManager.reconcile(anyLong())).thenCallRealMethod();
-        when(offsetsRequestManager.nextReconcile(anyLong())).thenCallRealMethod();
-        when(heartbeatRequestManager.nextReconcile(anyLong())).thenCallRealMethod();
-        when(coordinatorRequestManager.nextReconcile(anyLong())).thenCallRealMethod();
+        when(offsetsRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
+        when(coordinatorRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         consumerReactor.initializeResources();
     }
 
@@ -143,7 +124,7 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testEnsureCloseStopsReactor() {
+    public void testEnsureCloseStopsRunningThread() {
         assertTrue(consumerReactor.isRunning(),
             "ConsumerReactor should start running when created");
 
@@ -173,25 +154,6 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testLegacyPollTimeoutIsPublishedInReactorSchedule() {
-        long currentTimeMs = time.milliseconds();
-        NetworkClientDelegate.PollResult pollResult = new NetworkClientDelegate.PollResult(25L);
-        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
-        doReturn(ManagerReconcileResult.of(
-            coordinatorRequestManager,
-            pollResult,
-            NextReconcile.onEvent()
-        )).when(coordinatorRequestManager).reconcile(currentTimeMs);
-        consumerReactor.runOnce();
-
-        verify(networkClientDelegate).poll(25L, currentTimeMs);
-        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
-        assertEquals(25L, consumerReactor.reactorSchedule().reactorDeadlineAtMs() - currentTimeMs);
-        assertEquals(Long.MAX_VALUE, consumerReactor.reactorSchedule().deadlineAtMs());
-        verify(requestManagers, never()).wakeupApplicationThread();
-    }
-
-    @Test
     public void testStartupAndTearDown() throws InterruptedException {
         consumerReactor.start();
         TestCondition isStarted = consumerReactor::isRunning;
@@ -200,22 +162,21 @@ public class ConsumerReactorTest {
         // There's a nonzero amount of time between starting the thread and having it
         // begin to execute our code. Wait for a bit before checking...
         TestUtils.waitForCondition(isStarted,
-                "The consumer reactor did not start within " + DEFAULT_MAX_WAIT_MS + " ms");
+                "The consumer network thread did not start within " + DEFAULT_MAX_WAIT_MS + " ms");
 
         consumerReactor.close(Duration.ofMillis(DEFAULT_MAX_WAIT_MS));
 
         TestUtils.waitForCondition(isClosed,
-                "The consumer reactor did not stop within " + DEFAULT_MAX_WAIT_MS + " ms");
+                "The consumer network thread did not stop within " + DEFAULT_MAX_WAIT_MS + " ms");
     }
 
     @Test
-    public void testRequestsTransferFromManagersToClientOnReactorRun() {
+    public void testRequestsTransferFromManagersToClientOnThreadRun() {
         List<RequestManager> list = List.of(coordinatorRequestManager, heartbeatRequestManager, offsetsRequestManager);
 
         when(requestManagers.entries()).thenReturn(list);
         when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         consumerReactor.runOnce();
-        requestManagers.entries().forEach(rm -> verify(rm).reconcile(anyLong()));
         requestManagers.entries().forEach(rm -> verify(rm).poll(anyLong()));
         requestManagers.entries().forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));
         verify(networkClientDelegate, times(list.size())).addAll(anyList());
@@ -237,438 +198,168 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testExpiredScheduleIsNotMovedForwardByNetworkPoll() {
-        long timeBeforePollMs = time.milliseconds();
-        AtomicLong managerDecisionTimeMs = new AtomicLong(-1L);
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.poll(timeBeforePollMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        doAnswer(invocation -> {
-            time.sleep(250L);
-            return null;
-        }).when(networkClientDelegate).poll(anyLong(), eq(timeBeforePollMs));
-        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenAnswer(invocation -> {
-            managerDecisionTimeMs.set(invocation.getArgument(0, Long.class));
-            return 100L;
-        });
-
-        consumerReactor.runOnce();
-
-        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
-        assertEquals(timeBeforePollMs, managerDecisionTimeMs.get());
-
-        consumerReactor.runOnce();
-
-        assertEquals(100L, consumerReactor.maximumTimeToWait());
-        assertEquals(timeBeforePollMs + 250L, managerDecisionTimeMs.get());
-        assertEquals(managerDecisionTimeMs.get(), consumerReactor.reactorSchedule().decidedAtMs());
-    }
-
-    @Test
-    public void testNextFullReconciliationRecomputesCrossManagerSchedule() {
+    public void testReactorOnlyDeadlineDoesNotWakeApplication() {
         long startMs = time.milliseconds();
-        AtomicBoolean coordinatorReady = new AtomicBoolean(false);
-        List<String> wakeupSources = new ArrayList<>();
-        NextReconcile coordinatorDeadline =
-            NextReconcile.atDeadlineAfter(startMs, 100L);
-        NextReconcile heartbeatDeadline =
-            NextReconcile.atDeadlineAfter(startMs, 30L);
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(startMs))
+            .thenReturn(new NetworkClientDelegate.PollResult(100L));
 
-        when(requestManagers.entries()).thenReturn(
-            List.of(coordinatorRequestManager, heartbeatRequestManager, offsetsRequestManager)
-        );
-        when(coordinatorRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        when(heartbeatRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        when(offsetsRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        doAnswer(invocation ->
-            coordinatorReady.get()
-                ? NextReconcile.onEvent()
-                : coordinatorDeadline
-        ).when(coordinatorRequestManager).nextReconcile(anyLong());
-        doAnswer(invocation ->
-            coordinatorReady.get()
-                ? heartbeatDeadline
-                : NextReconcile.onEvent()
-        ).when(heartbeatRequestManager).nextReconcile(anyLong());
-        doReturn(NextReconcile.onEvent())
-            .when(offsetsRequestManager).nextReconcile(anyLong());
-        doAnswer(invocation -> {
-            time.sleep(10L);
-            coordinatorReady.set(true);
-            return null;
-        }).when(networkClientDelegate).poll(100L, startMs);
-        doAnswer(invocation -> {
-            wakeupSources.add(consumerReactor.reactorSchedule().source().orElseThrow());
-            return null;
-        }).when(requestManagers).wakeupApplicationThread();
-
-        // The first poll changes a cross-manager dependency which is not typed yet. The next full pre-I/O pass is
-        // the correctness fallback and publishes the heartbeat deadline without managers calling each other.
-        consumerReactor.runOnce();
         consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(100L, startMs);
-        verify(coordinatorRequestManager, times(2)).nextReconcile(anyLong());
-        verify(heartbeatRequestManager, times(2)).nextReconcile(anyLong());
-        verify(offsetsRequestManager, times(2)).nextReconcile(anyLong());
-        assertEquals(
-            List.of(
-                CoordinatorRequestManager.class.getSimpleName(),
-                ConsumerHeartbeatRequestManager.class.getSimpleName()
-            ),
-            wakeupSources
-        );
-        assertEquals(startMs + 30L, consumerReactor.reactorSchedule().deadlineAtMs());
-        assertEquals(20L, consumerReactor.maximumTimeToWait());
+        verify(requestManagers, never()).wakeupApplicationThread();
+        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().networkDeadlineMs());
+        assertEquals(Long.MAX_VALUE, consumerReactor.reactorSchedule().applicationDeadlineMs());
     }
 
     @Test
-    public void testShorterScheduleIsPublishedBeforeWakeAction() {
-        AtomicLong timeoutObservedByWakeup = new AtomicLong(-1L);
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
-        doAnswer(invocation -> {
-            timeoutObservedByWakeup.set(consumerReactor.maximumTimeToWait());
-            return null;
-        }).when(requestManagers).wakeupApplicationThread();
-
-        consumerReactor.runOnce();
-
-        assertEquals(100L, timeoutObservedByWakeup.get());
-        verify(requestManagers).wakeupApplicationThread();
-    }
-
-    @Test
-    public void testReactorCoalescesStateTransitionAndShorterScheduleIntoOneAction() {
+    public void testStateTransitionIsExecutedAfterSchedulePublication() {
         long currentTimeMs = time.milliseconds();
-        AtomicLong timeoutObservedByWakeup = new AtomicLong(-1L);
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
-        doReturn(ManagerReconcileResult.of(
-            heartbeatRequestManager,
-            NetworkClientDelegate.PollResult.EMPTY,
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            NextReconcile.atDeadlineAfter(currentTimeMs, 100L)
-        )).when(heartbeatRequestManager).reconcile(currentTimeMs);
+        AtomicLong deadlineObservedByWakeup = new AtomicLong(-1L);
+        NetworkClientDelegate.PollResult result = new NetworkClientDelegate.PollResult(
+            100L,
+            List.of(),
+            Set.of(StateTransition.FETCH_BUFFER_HAS_DATA)
+        );
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(result);
         doAnswer(invocation -> {
-            timeoutObservedByWakeup.set(consumerReactor.maximumTimeToWait());
+            deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().networkDeadlineMs());
             return null;
         }).when(requestManagers).wakeupApplicationThread();
 
         consumerReactor.runOnce();
 
-        assertEquals(100L, timeoutObservedByWakeup.get());
+        assertEquals(currentTimeMs + 100L, deadlineObservedByWakeup.get());
         verify(requestManagers).wakeupApplicationThread();
     }
 
     @Test
-    public void testRequestCompletionReconcilesOnlyAffectedManagerAndRetainsOtherDeadline() {
+    public void testRequestCompletionPollsOnlyAffectedManagerAndPublishesBeforeWakeup() {
         long currentTimeMs = time.milliseconds();
         NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
             mock(AbstractRequest.Builder.class),
             Optional.empty()
         );
-        ManagerReconcileResult beforeCompletion = ManagerReconcileResult.of(
-            heartbeatRequestManager,
-            new NetworkClientDelegate.PollResult(request),
-            NextReconcile.onEvent()
+        NetworkClientDelegate.PollResult beforeCompletion =
+            new NetworkClientDelegate.PollResult(request);
+        NetworkClientDelegate.PollResult afterCompletion = new NetworkClientDelegate.PollResult(
+            7_000L,
+            List.of(),
+            Set.of(StateTransition.FETCH_REQUEST_TERMINATED)
         );
-        ManagerReconcileResult afterCompletion = ManagerReconcileResult.of(
-            heartbeatRequestManager,
-            NetworkClientDelegate.PollResult.EMPTY,
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            NextReconcile.atDeadlineAfter(currentTimeMs, 7_000L)
-        );
-        ManagerReconcileResult unaffected = ManagerReconcileResult.of(
-            coordinatorRequestManager,
-            NetworkClientDelegate.PollResult.EMPTY,
-            NextReconcile.atDeadlineAfter(currentTimeMs, 6_000L)
-        );
+        NetworkClientDelegate.PollResult unaffected =
+            new NetworkClientDelegate.PollResult(6_000L);
         AtomicLong deadlineObservedByWakeup = new AtomicLong(-1L);
 
         when(requestManagers.entries()).thenReturn(
             List.of(heartbeatRequestManager, coordinatorRequestManager)
         );
         doReturn(beforeCompletion, afterCompletion)
-            .when(heartbeatRequestManager).reconcile(currentTimeMs);
-        doReturn(unaffected).when(coordinatorRequestManager).reconcile(currentTimeMs);
+            .when(heartbeatRequestManager).poll(currentTimeMs);
+        doReturn(unaffected).when(coordinatorRequestManager).poll(currentTimeMs);
         doAnswer(invocation -> {
             request.future().complete(null);
             return null;
         }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
         doAnswer(invocation -> {
-            deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().deadlineAtMs());
+            deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().networkDeadlineMs());
             return null;
         }).when(requestManagers).wakeupApplicationThread();
 
         consumerReactor.runOnce();
 
-        verify(heartbeatRequestManager, times(2)).reconcile(currentTimeMs);
-        verify(coordinatorRequestManager).reconcile(currentTimeMs);
+        verify(heartbeatRequestManager, times(2)).poll(currentTimeMs);
+        verify(coordinatorRequestManager).poll(currentTimeMs);
         verify(requestManagers).wakeupApplicationThread();
         assertEquals(currentTimeMs + 6_000L, deadlineObservedByWakeup.get());
-        assertEquals(
-            CoordinatorRequestManager.class.getSimpleName(),
-            consumerReactor.reactorSchedule().source().orElseThrow()
+    }
+
+    @Test
+    public void testEarlierManagerDeadlineDoesNotEraseLaterManagerDeadline() {
+        long startMs = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(
+            List.of(coordinatorRequestManager, heartbeatRequestManager)
         );
-    }
-
-    @Test
-    public void testReactorAppliesStateTransitionWithoutChangingPublishedSchedule() {
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        doReturn(ManagerReconcileResult.of(
-            heartbeatRequestManager,
-            NetworkClientDelegate.PollResult.EMPTY,
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            NextReconcile.onEvent()
-        )).when(heartbeatRequestManager).reconcile(anyLong());
-        doReturn(NextReconcile.onEvent()).when(heartbeatRequestManager).nextReconcile(anyLong());
-
-        consumerReactor.runOnce();
-
-        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
-        verify(requestManagers).wakeupApplicationThread();
-    }
-
-    @Test
-    public void testReactorPublishesScheduleBeforeExecutingTransitionFromNextReconciliation() {
-        long startMs = time.milliseconds();
-        AtomicBoolean networkPollCompleted = new AtomicBoolean(false);
-        AtomicBoolean transitionReturned = new AtomicBoolean(false);
-        AtomicLong decisionTimeObservedByWakeup = new AtomicLong(-1L);
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        doAnswer(invocation ->
-            ManagerReconcileResult.of(
-                heartbeatRequestManager,
-                NetworkClientDelegate.PollResult.EMPTY,
-                networkPollCompleted.get() && transitionReturned.compareAndSet(false, true)
-                    ? Set.of(StateTransition.FETCH_REQUEST_TERMINATED)
-                    : Set.of(),
-                NextReconcile.onEvent()
-            )
-        ).when(heartbeatRequestManager).reconcile(anyLong());
-        doReturn(NextReconcile.onEvent()).when(heartbeatRequestManager).nextReconcile(anyLong());
-        doAnswer(invocation -> {
-            time.sleep(10L);
-            networkPollCompleted.set(true);
-            return null;
-        }).when(networkClientDelegate).poll(anyLong(), anyLong());
-        doAnswer(invocation -> {
-            decisionTimeObservedByWakeup.set(consumerReactor.reactorSchedule().decidedAtMs());
-            return null;
-        }).when(requestManagers).wakeupApplicationThread();
-
-        consumerReactor.runOnce();
-        assertEquals(-1L, decisionTimeObservedByWakeup.get());
-
-        consumerReactor.runOnce();
-
-        assertEquals(startMs + 10L, decisionTimeObservedByWakeup.get());
-        verify(requestManagers).wakeupApplicationThread();
-    }
-
-    @Test
-    public void testSameExpiredDeadlineDoesNotCauseRepeatedWakeups() {
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.nextReconcile(anyLong())).thenAnswer(invocation ->
-            NextReconcile.atDeadlineAfter(
-                invocation.getArgument(0, Long.class),
-                0L
-            )
-        );
-
-        consumerReactor.runOnce();
-        consumerReactor.runOnce();
-
-        verify(requestManagers).wakeupApplicationThread();
-    }
-
-    @Test
-    public void testExpiredDeadlineDoesNotLeaveZeroReactorSchedule() {
-        long startMs = time.milliseconds();
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        doReturn(NextReconcile.atDeadlineAfter(startMs, 0L))
-            .when(heartbeatRequestManager).nextReconcile(anyLong());
-
-        consumerReactor.runOnce();
-
-        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
-        assertTrue(consumerReactor.reactorSchedule().deadlineNotificationDelivered());
-
-        consumerReactor.runOnce();
-
-        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
-        verify(requestManagers).wakeupApplicationThread();
-    }
-
-    @Test
-    public void testLegacyRelativeWaitExpiresBeforeFreshScheduleMovesDeadlineForward() {
-        long startMs = time.milliseconds();
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.poll(startMs)).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
+        when(coordinatorRequestManager.poll(anyLong()))
+            .thenReturn(new NetworkClientDelegate.PollResult(100L));
+        when(heartbeatRequestManager.poll(anyLong()))
+            .thenReturn(new NetworkClientDelegate.PollResult(30L))
+            .thenReturn(new NetworkClientDelegate.PollResult(30L))
+            .thenReturn(new NetworkClientDelegate.PollResult(100L));
         doAnswer(invocation -> {
             time.sleep(invocation.getArgument(0, Long.class));
             return null;
-        }).when(networkClientDelegate).poll(anyLong(), eq(startMs));
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
 
         consumerReactor.runOnce();
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
 
-        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
+        verify(networkClientDelegate).poll(30L, startMs);
+        verify(networkClientDelegate).poll(30L, startMs + 30L);
+        verify(networkClientDelegate).poll(40L, startMs + 60L);
+        verify(requestManagers, never()).wakeupApplicationThread();
+        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().networkDeadlineMs());
+    }
+
+    @Test
+    public void testCompatibilityApplicationDeadlineBoundsNetworkPoll() {
+        long startMs = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.maximumTimeToWait(startMs)).thenReturn(100L);
 
         consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(100L, startMs);
-        // One wake publishes the shorter deadline; the second delivers its expiry before the legacy adapter
-        // computes a fresh relative wait during the next reactor iteration.
-        verify(requestManagers, times(2)).wakeupApplicationThread();
-        assertEquals(100L, consumerReactor.maximumTimeToWait());
-        assertEquals(startMs + 200L, consumerReactor.reactorSchedule().deadlineAtMs());
     }
 
     @Test
-    public void testLegacyRelativeWaitDoesNotDriftAcrossEarlyNetworkReturns() {
-        long startMs = time.milliseconds();
+    public void testShorterCompatibilityScheduleIsPublishedBeforeWakeup() {
+        AtomicLong waitObservedByWakeup = new AtomicLong(-1L);
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
         doAnswer(invocation -> {
-            time.sleep(10L);
+            waitObservedByWakeup.set(consumerReactor.maximumTimeToWait());
+            return null;
+        }).when(requestManagers).wakeupApplicationThread();
+
+        consumerReactor.runOnce();
+
+        assertEquals(100L, waitObservedByWakeup.get());
+    }
+
+    @Test
+    public void testDeliveredCompatibilityDeadlineRearmsAndBoundsNextPoll() {
+        long startMs = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(100L);
+        doAnswer(invocation -> {
+            time.sleep(invocation.getArgument(0, Long.class));
             return null;
         }).when(networkClientDelegate).poll(anyLong(), anyLong());
 
         consumerReactor.runOnce();
+        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
         consumerReactor.runOnce();
 
-        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().deadlineAtMs());
-        assertEquals(80L, consumerReactor.maximumTimeToWait());
-    }
-
-    @Test
-    public void testSameDeadlineFromDifferentSourceIsANewTransition() {
-        long startMs = time.milliseconds();
-        NextReconcile expired =
-            NextReconcile.atDeadlineAfter(startMs, 0L);
-        AtomicReference<List<RequestManager>> activeManagers =
-            new AtomicReference<>(List.of(heartbeatRequestManager));
-        when(requestManagers.entries()).thenAnswer(invocation -> activeManagers.get());
-        doReturn(expired).when(heartbeatRequestManager).nextReconcile(anyLong());
-        doReturn(expired).when(coordinatorRequestManager).nextReconcile(anyLong());
-
-        consumerReactor.runOnce();
-        activeManagers.set(List.of(coordinatorRequestManager));
-        consumerReactor.runOnce();
-
-        verify(requestManagers, times(2)).wakeupApplicationThread();
-        assertEquals(
-            CoordinatorRequestManager.class.getSimpleName(),
-            consumerReactor.reactorSchedule().source().orElseThrow()
-        );
-    }
-
-    @Test
-    public void testSameSourceAndDeadlineWithNewGenerationIsANewTransition() {
-        long startMs = time.milliseconds();
-        NextReconcile first =
-            NextReconcile.atDeadlineAfter(startMs, 0L)
-                .withSemanticGeneration(1L);
-        NextReconcile second =
-            NextReconcile.atDeadlineAfter(startMs, 0L)
-                .withSemanticGeneration(2L);
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        doReturn(first).doReturn(second)
-            .when(heartbeatRequestManager).nextReconcile(anyLong());
-
-        consumerReactor.runOnce();
-        consumerReactor.runOnce();
-
-        verify(requestManagers, times(2)).wakeupApplicationThread();
-        assertEquals(2L, consumerReactor.reactorSchedule().semanticGeneration());
+        verify(networkClientDelegate).poll(100L, startMs);
+        verify(networkClientDelegate).poll(100L, startMs + 100L);
+        verify(requestManagers, times(3)).wakeupApplicationThread();
     }
 
     @Test
     public void testPersistentZeroCompatibilityWaitDoesNotBusyLoop() {
         long startMs = time.milliseconds();
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(0L);
 
         consumerReactor.runOnce();
-        time.sleep(1L);
         consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(0L, startMs);
-        verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, startMs + 1L);
+        verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, startMs);
         verify(requestManagers).wakeupApplicationThread();
-        assertEquals(Long.MAX_VALUE, consumerReactor.maximumTimeToWait());
-    }
-
-    @Test
-    public void testScheduleDeadlineLimitsEveryNetworkPollUntilItIsPublishedAsExpired() {
-        long startMs = time.milliseconds();
-        NextReconcile deadline =
-            NextReconcile.atDeadlineAfter(startMs, 100L);
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        doReturn(deadline).when(heartbeatRequestManager).nextReconcile(anyLong());
-
-        consumerReactor.runOnce();
-        consumerReactor.runOnce();
-        time.sleep(100L);
-        consumerReactor.runOnce();
-        consumerReactor.runOnce();
-
-        verify(networkClientDelegate, times(2)).poll(100L, startMs);
-        verify(networkClientDelegate).poll(0L, startMs + 100L);
-        verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, startMs + 100L);
-    }
-
-    @Test
-    public void testDeadlineWakeupReleasesReactorScheduleUsingOlderSnapshot() throws Exception {
-        long startMs = time.milliseconds();
-        FetchBuffer fetchBuffer = new FetchBuffer(new LogContext());
-        CountDownLatch firstWaitReturned = new CountDownLatch(1);
-        CountDownLatch secondWaitStarted = new CountDownLatch(1);
-        ExecutorService applicationExecutor = Executors.newSingleThreadExecutor();
-        AtomicInteger networkPolls = new AtomicInteger();
-
-        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
-        doReturn(NextReconcile.atDeadlineAfter(startMs, 100L))
-            .when(heartbeatRequestManager).nextReconcile(anyLong());
-        doAnswer(invocation -> {
-            if (networkPolls.incrementAndGet() == 2)
-                time.sleep(100L);
-            return null;
-        }).when(networkClientDelegate).poll(anyLong(), anyLong());
-        doAnswer(invocation -> {
-            fetchBuffer.wakeup();
-            return null;
-        }).when(requestManagers).wakeupApplicationThread();
-
-        Future<?> reactorSchedule = applicationExecutor.submit(() -> {
-            // The caller may already be blocked with an older snapshot and cannot read the newly published
-            // maximumTimeToWait() until it is released. Both publication of a shorter deadline and expiry of that
-            // deadline must therefore produce retained fetch-buffer wakeups.
-            fetchBuffer.awaitWakeup(Time.SYSTEM.timer(DEFAULT_MAX_WAIT_MS));
-            firstWaitReturned.countDown();
-            secondWaitStarted.countDown();
-            fetchBuffer.awaitWakeup(Time.SYSTEM.timer(DEFAULT_MAX_WAIT_MS));
-        });
-
-        try {
-            consumerReactor.runOnce();
-            assertTrue(firstWaitReturned.await(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
-            assertTrue(secondWaitStarted.await(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
-
-            consumerReactor.runOnce();
-
-            reactorSchedule.get(DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS);
-            verify(requestManagers, times(2)).wakeupApplicationThread();
-            assertEquals(2, networkPolls.get());
-        } finally {
-            fetchBuffer.wakeup();
-            applicationExecutor.shutdownNow();
-        }
     }
 
     @Test

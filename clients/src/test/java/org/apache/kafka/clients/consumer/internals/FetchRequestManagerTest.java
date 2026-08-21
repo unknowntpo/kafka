@@ -326,7 +326,7 @@ public class FetchRequestManagerTest {
         assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
         assertEquals(
             Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            fetcher.reconcileStateTransitions()
+            fetcher.pollStateTransitions()
         );
 
         // Simulate the reactor applying the returned transition.
@@ -349,7 +349,7 @@ public class FetchRequestManagerTest {
     }
 
     @Test
-    public void testUnsentFetchExpirationIsPublishedByAffectedPostPollReconciliation() throws Exception {
+    public void testUnsentFetchExpirationIsPublishedByAffectedPostPoll() throws Exception {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
@@ -424,7 +424,7 @@ public class FetchRequestManagerTest {
         assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
         assertEquals(
             Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            fetcher.reconcileStateTransitions()
+            fetcher.pollStateTransitions()
         );
 
         fetcher.wakeupApplicationThread();
@@ -460,7 +460,7 @@ public class FetchRequestManagerTest {
     }
 
     @Test
-    public void testDuplicateStateTransitionsAreReturnedOnceByReconcile() {
+    public void testDuplicateStateTransitionsAreReturnedOnceByPoll() {
         buildFetcher();
 
         fetcher.onFetchRequestTerminated();
@@ -468,9 +468,9 @@ public class FetchRequestManagerTest {
 
         assertEquals(
             Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            fetcher.reconcileStateTransitions()
+            fetcher.pollStateTransitions()
         );
-        assertTrue(fetcher.reconcileStateTransitions().isEmpty());
+        assertTrue(fetcher.pollStateTransitions().isEmpty());
     }
 
     @Test
@@ -479,11 +479,39 @@ public class FetchRequestManagerTest {
 
         assertEquals(0, sendFetches());
 
-        long currentTimeMs = time.milliseconds();
-        NextReconcile nextReconcile = fetcher.nextReconcile(currentTimeMs);
-        assertEquals(NextReconcile.Type.AT_DEADLINE, nextReconcile.type());
-        assertTrue(nextReconcile.remainingMs(currentTimeMs) > 0L);
-        assertTrue(nextReconcile.remainingMs(currentTimeMs) <= retryBackoffMs);
+        assertTrue(fetcher.lastPollResult.timeUntilNextPollMs > 0L);
+        assertTrue(fetcher.lastPollResult.timeUntilNextPollMs <= retryBackoffMs);
+    }
+
+    @Test
+    public void testRetryableBlockerCompletesEachFutureAndRetainsFetchIntent() {
+        buildFetcher();
+
+        CompletableFuture<Void> first = fetcher.createFetchRequests();
+        CompletableFuture<Void> duplicate = fetcher.createFetchRequests();
+        assertFalse(first.isDone());
+        assertTrue(duplicate.isDone());
+        NetworkClientDelegate.PollResult firstResult = fetcher.poll(time.milliseconds());
+        assertTrue(first.isDone());
+        assertTrue(firstResult.timeUntilNextPollMs <= retryBackoffMs);
+
+        CompletableFuture<Void> second = fetcher.createFetchRequests();
+        assertTrue(second.isDone());
+        NetworkClientDelegate.PollResult secondResult = fetcher.poll(time.milliseconds());
+        assertTrue(secondResult.timeUntilNextPollMs <= retryBackoffMs);
+
+        NetworkClientDelegate.PollResult retainedIntentResult = fetcher.poll(time.milliseconds());
+        assertTrue(retainedIntentResult.timeUntilNextPollMs <= retryBackoffMs);
+    }
+
+    @Test
+    public void testPollOnCloseCompletesPendingFetchFuture() {
+        buildFetcher();
+        CompletableFuture<Void> future = fetcher.createFetchRequests();
+
+        fetcher.pollOnClose(time.milliseconds());
+
+        assertTrue(future.isDone());
     }
 
     @Test
@@ -514,7 +542,7 @@ public class FetchRequestManagerTest {
         AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
         assertTrue(result.requests().isEmpty());
         assertEquals(Set.of(AbstractFetch.FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED), result.blockers());
-        assertTrue(fetcher.reconcileStateTransitions().isEmpty());
+        assertTrue(fetcher.pollStateTransitions().isEmpty());
 
         assertEquals(0, sendFetches());
         assertEquals(
@@ -568,11 +596,10 @@ public class FetchRequestManagerTest {
 
         assertEquals(0, sendFetches());
         assertTrue(fetcher.lastStateTransitions().isEmpty());
-        long remainingMs = fetcher.maximumTimeToWait(time.milliseconds());
+        long remainingMs = fetcher.lastPollResult.timeUntilNextPollMs;
         assertTrue(remainingMs > 0L);
         assertTrue(remainingMs <= result.reconnectBackoffRemainingMs());
-        assertEquals(NextReconcile.Type.AT_DEADLINE,
-            fetcher.nextReconcile(time.milliseconds()).type());
+        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
 
         // Once the backoff clears, a fetch request can be sent and maximumTimeToWait reverts to unbounded.
         time.sleep(500);
@@ -592,11 +619,7 @@ public class FetchRequestManagerTest {
             500L
         );
 
-        long currentTimeMs = time.milliseconds();
-        NextReconcile nextReconcile = fetcher.nextReconcileFor(result, currentTimeMs);
-
-        assertEquals(NextReconcile.Type.AT_DEADLINE, nextReconcile.type());
-        assertEquals(500L, nextReconcile.remainingMs(currentTimeMs));
+        assertEquals(500L, fetcher.timeUntilNextPollMs(result, time.milliseconds()));
     }
 
     @Test
@@ -609,29 +632,28 @@ public class FetchRequestManagerTest {
         client.backoff(node, 500L);
 
         assertEquals(0, sendFetches());
-        long firstDeadlineMs = fetcher.nextReconcile(time.milliseconds()).deadlineAtMs();
+        long firstDeadlineMs = time.milliseconds() + fetcher.lastPollResult.timeUntilNextPollMs;
 
         time.sleep(250L);
         assertEquals(0, sendFetches());
-        long repeatedDeadlineMs = fetcher.nextReconcile(time.milliseconds()).deadlineAtMs();
+        long repeatedDeadlineMs = time.milliseconds() + fetcher.lastPollResult.timeUntilNextPollMs;
 
-        assertEquals(firstDeadlineMs, repeatedDeadlineMs);
+        // This fixture's MockTime advances by 1ms on each read; compare the absolute deadlines within that tick.
+        assertTrue(Math.abs(firstDeadlineMs - repeatedDeadlineMs) <= 1L);
         long currentTimeMs = time.milliseconds();
-        long remainingMs = fetcher.maximumTimeToWait(currentTimeMs);
-        assertEquals(firstDeadlineMs - currentTimeMs, remainingMs);
+        long remainingMs = fetcher.lastPollResult.timeUntilNextPollMs;
+        assertTrue(Math.abs((firstDeadlineMs - currentTimeMs) - remainingMs) <= 1L);
     }
 
     @Test
-    public void testWaitingForBufferDrainUsesEventDrivenReconciliation() {
+    public void testWaitingForBufferDrainUsesEventDrivenPoll() {
         buildFetcher();
         AbstractFetch.FetchRequestPreparationResult result = new AbstractFetch.FetchRequestPreparationResult(
             Map.of(),
             Set.of(AbstractFetch.FetchRequestPreparationBlocker.WAITING_FOR_BUFFER_DRAIN)
         );
 
-        NextReconcile nextReconcile = fetcher.nextReconcileFor(result, time.milliseconds());
-
-        assertEquals(NextReconcile.Type.ON_EVENT, nextReconcile.type());
+        assertEquals(Long.MAX_VALUE, fetcher.timeUntilNextPollMs(result, time.milliseconds()));
     }
 
     @Test
@@ -3872,7 +3894,9 @@ public class FetchRequestManagerTest {
             futures.add(future);
         }
 
-        assertEquals(0, futures.stream().filter(CompletableFuture::isDone).count());
+        // One future represents the retained intent. Equivalent requests complete immediately instead of adding
+        // callbacks to a future which may remain pending across a long retryable blocker.
+        assertEquals(futures.size() - 1, futures.stream().filter(CompletableFuture::isDone).count());
 
         assertEquals(1, sendFetches(false));
         assertEquals(futures.size(), futures.stream().filter(CompletableFuture::isDone).count());
@@ -4575,7 +4599,7 @@ public class FetchRequestManagerTest {
 
         private final FetchCollector<K, V> fetchCollector;
         private AuthenticationException authenticationException;
-        private ManagerReconcileResult lastReconcileResult;
+        private NetworkClientDelegate.PollResult lastPollResult;
 
         public TestableFetchRequestManager(LogContext logContext,
                                            Time time,
@@ -4627,26 +4651,26 @@ public class FetchRequestManagerTest {
             if (requestFetch)
                 createFetchRequests();
 
-            lastReconcileResult = reconcile(time.milliseconds());
-            networkClientDelegate.addAll(lastReconcileResult.pollResult().unsentRequests);
-            return lastReconcileResult.pollResult().unsentRequests.size();
+            lastPollResult = poll(time.milliseconds());
+            networkClientDelegate.addAll(lastPollResult.unsentRequests);
+            return lastPollResult.unsentRequests.size();
         }
 
         private List<NetworkClientDelegate.UnsentRequest> sendFetches() {
             offsetFetcher.validatePositionsOnMetadataChange();
             createFetchRequests();
-            lastReconcileResult = reconcile(time.milliseconds());
-            networkClientDelegate.addAll(lastReconcileResult.pollResult().unsentRequests);
-            return lastReconcileResult.pollResult().unsentRequests;
+            lastPollResult = poll(time.milliseconds());
+            networkClientDelegate.addAll(lastPollResult.unsentRequests);
+            return lastPollResult.unsentRequests;
         }
 
         private Set<StateTransition> lastStateTransitions() {
-            return lastReconcileResult == null ? Set.of() : lastReconcileResult.stateTransitions();
+            return lastPollResult == null ? Set.of() : lastPollResult.stateTransitions();
         }
 
-        private Set<StateTransition> reconcileStateTransitions() {
-            lastReconcileResult = reconcile(time.milliseconds());
-            return lastReconcileResult.stateTransitions();
+        private Set<StateTransition> pollStateTransitions() {
+            lastPollResult = poll(time.milliseconds());
+            return lastPollResult.stateTransitions();
         }
 
         private void clearBufferedDataForUnassignedPartitions(Set<TopicPartition> partitions) {

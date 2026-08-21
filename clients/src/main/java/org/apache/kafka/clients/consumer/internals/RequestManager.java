@@ -28,30 +28,6 @@ import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.
 public interface RequestManager {
 
     /**
-     * Reconciles this manager's owned state with the latest application events, network results, and time. The
-     * reactor invokes this method and combines every manager's result into one schedule.
-     *
-     * <p>During migration, {@link #poll(long)} remains the implementation hook for producing network work and
-     * {@link #nextReconcile(long)} adapts the existing wait calculation.</p>
-     */
-    default ManagerReconcileResult reconcile(long currentTimeMs) {
-        PollResult pollResult = poll(currentTimeMs);
-        return ManagerReconcileResult.of(this, pollResult, nextReconcile(currentTimeMs));
-    }
-
-    /**
-     * Describes when this manager needs the reactor to reconcile it again. Implementations that have not migrated
-     * to typed reconciliation retain their existing
-     * {@link #maximumTimeToWait(long)} behavior through this adapter.
-     */
-    default NextReconcile nextReconcile(long currentTimeMs) {
-        return NextReconcile.atCompatibilityDeadlineAfter(
-            currentTimeMs,
-            maximumTimeToWait(currentTimeMs)
-        );
-    }
-
-    /**
      * During normal operation of the {@link Consumer}, a request manager may need to send out network requests.
      * Implementations can return {@link PollResult their need for network I/O} by returning the requests here.
      * This method is called within a single-threaded context from

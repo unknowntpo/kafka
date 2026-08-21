@@ -25,9 +25,7 @@ Discussion thread: TBD
 
 Jira: TBD
 
-## Motivation
-
-### Summary
+## Summary
 
 The regular consumer and share consumer already use a background event loop, request managers, network I/O,
 cross-thread event queues, futures, and data buffers. However, state transitions and the decisions to poll, wait, or
@@ -43,6 +41,8 @@ The reactor is shared infrastructure for the regular consumer and share consumer
 event-processing topology. Their membership, assignment or acquisition, fetch, commit or acknowledgement, and
 callback rules remain in separate protocol-specific components. `ClassicKafkaConsumer` remains a legacy
 compatibility and performance reference and is not retrofitted into the reactor by this proposal.
+
+## Motivation
 
 ### Current problem: decisions are distributed
 
@@ -121,10 +121,11 @@ For each iteration, the reactor must answer two questions from one ordered view 
 2. Which state transition, completion, capacity change, or deadline should cause the next execution or application
    notification?
 
-Request managers continue to own their local state and transition rules. The reactor asks each manager to reconcile
-that state with the latest input. Managers return ready work and the conditions for their next reconciliation. The
-reactor combines those results, performs network polling, publishes the new schedule, and only then dispatches
-application-visible actions. This does not move manager-specific rules into one large class.
+Request managers continue to own their local state and transition rules. The reactor calls the existing
+`RequestManager.poll()` method after applying each ordered input. A manager returns its requests, state transitions,
+and `timeUntilNextPollMs` together. The reactor combines those results, publishes the schedule, performs network
+polling, and only then dispatches application-visible actions. This does not move manager-specific rules into one
+large class.
 
 The proposal changes resource ownership and coordination, not the existing execution topology.
 
@@ -263,18 +264,19 @@ At a high level, one reactor iteration is:
 The proposal names this controller-style flow as follows:
 
 ```text
-Input Event → ConsumerReactor → RequestManager.reconcile()
-            → manager-owned state transition + ManagerReconcileResult
-            → NextReconcile → ReactorSchedule → ReactorAction
+Input Event → ConsumerReactor → RequestManager.poll()
+            → requests + state transitions + timeUntilNextPollMs
+            → ReactorSchedule → ReactorAction
 ```
 
 An input event is an existing application command, network completion, deadline expiry, capacity release, or callback
-acknowledgement. `ConsumerReactor` initiates reconciliation. A manager updates only its own state and returns a
-`ManagerReconcileResult`; it does not call another manager or choose the global schedule. The reactor merges the
-returned `NextReconcile` values, publishes one schedule, and then performs any externally visible action.
+acknowledgement. `ConsumerReactor` decides when to call each manager. A manager updates only its own state and
+returns one `PollResult`; it does not call another manager or choose the global schedule. The reactor converts
+relative delays to retained absolute deadlines, publishes one schedule, and then performs any externally visible
+action.
 
 Ownership is split deliberately: each request manager owns its local state and rules; `ConsumerReactor` owns input
-ordering and reconciliation execution; `ConsumerReactor` also owns the final cross-manager schedule and actions.
+ordering, manager polling, the final cross-manager schedule, and actions.
 
 The remaining sections define each responsibility and its internal representation in that order.
 
@@ -314,233 +316,179 @@ Target ownership is:
 immutable view or a future completed from reactor-owned state. No mutable manager-owned object is concurrently read to
 derive a second scheduling decision on the application thread.
 
-### 4. Reconcile manager-owned state
+### 4. Poll manager-owned state
 
-Request managers already tell the event loop whether they have requests and how long it may wait. Raw relative
-timeouts are not enough to distinguish ready work from a blocked retry or an event-only wait. The reactor therefore
-calls `RequestManager.reconcile()`. The manager reads the latest inputs, advances its own state, and returns one
-`ManagerReconcileResult` containing proposed network work, one or more `NextReconcile` values, and state transitions
-which may require a reactor action.
+Kafka request managers already expose `poll()`. This proposal keeps that familiar entry point and strengthens its
+result. One call returns an immutable `PollResult` containing:
 
-`NextReconcile` says when or under which condition the same manager must be reconciled again. It does not wake a
-thread, invoke another manager, or choose the final poll timeout.
+- proposed network requests;
+- completed state transitions;
+- `timeUntilNextPollMs`.
 
-Migration is incremental. The initial default implementation adapts `poll()` plus `nextReconcile()` into this
-shape. `FetchRequestManager` is the first native implementation and returns its work, schedule inputs, and state
-transitions from one reactor-thread snapshot. The adapter is removed manager by manager; `reconcile()` becomes a
-required implementation only after all managers have migrated.
+These fields come from one manager-owned snapshot. A manager may update its own state while polling, but it cannot
+wake the application, call another manager, or choose the global network timeout.
 
-The target vocabulary is:
+Fetch preparation is the first migrated path. Its typed blockers remain local facts used to form the result:
 
-```text
-NextReconcile.IMMEDIATE(reason, generation)
-NextReconcile.ON_EVENT(source, generation)
-NextReconcile.AT_DEADLINE(source, absoluteDeadlineMs, generation)
-NextReconcile.ON_CAPACITY(resource, generation)
-NextReconcile.ON_CALLBACK(operationId, epoch)
-```
+| Fetch preparation result | `timeUntilNextPollMs` | State transition | Immediate application wake |
+| --- | ---: | --- | --- |
+| Request created | wait for completion | none | no |
+| `DATA_ALREADY_BUFFERED` | unbounded | `FETCH_BUFFER_HAS_DATA` | yes, derived by reactor |
+| `NO_FETCHABLE_PARTITIONS` | retry backoff | none | no |
+| `MISSING_LEADER` | retry backoff | none | no |
+| `RECONNECT_BACKOFF` | remaining reconnect delay | none | no |
+| `REQUEST_IN_FLIGHT` | unbounded | none | no |
+| `WAITING_FOR_BUFFER_DRAIN` or `CLOSING` | unbounded | none | no |
+| Preparation failure | unbounded | `FETCH_PREPARATION_FAILED` | yes, derived by reactor |
 
-Absolute deadlines prevent time spent between computation, publication, and reading from being added again. The
-identity of a deadline is `source + mode + absolute deadline + semantic generation`. Re-observing the same blocked
-operation preserves its deadline and generation. A new operation at the same clock value gets a new generation and
-therefore one new deadline transition.
+When no request can be created, the fetch manager retains the pending fetch intent across retryable blockers.
+Therefore a reconnect deadline causes the reactor to poll the manager again and create the request without asking
+the application thread to resubmit work. If the same poll creates any request, the intent is consumed; completion of
+that request or a later application poll supplies the next input.
+
+During migration, other managers continue to implement their existing `poll()` and
+`maximumTimeToWait()`. The latter contributes only a compatibility application-wait deadline. It is removed
+manager by manager after equivalent state transitions and poll deadlines exist.
 
 ### 5. Form one `ReactorSchedule`
 
-The reactor calls `ReactorSchedule.merge(...)` to reduce all `ManagerReconcileResult` values into one immutable
-schedule. `merge` is a pure calculation, not another component or decision owner:
+The reactor converts every relative `timeUntilNextPollMs` to an absolute deadline and retains one contribution from
+each manager. While a manager's deadline is still pending, polling that manager may shorten it but cannot move it
+later. After the deadline expires, the manager's next poll replaces it. This prevents an unrelated early network
+return or repeated observation of the same blocker from postponing required work. `ReactorSchedule.from(...)` is a
+pure minimum calculation over that retained state; it is not a second scheduler or owner.
 
-1. `IMMEDIATE` work executes fairly across managers until no immediate check remains or the iteration work budget is
-   exhausted.
-2. If `IMMEDIATE` remains after budget exhaustion, the reactor performs a non-blocking network poll and continues
-   the work in the next iteration. `IMMEDIATE` alone never synthesizes an application wake; only an externally
-   observable transition does.
-3. If no work is ready, the earliest finite deadline bounds the network poll. The earliest application-visible
-   deadline bounds the application wait. Both are projections of the same immutable `ReactorSchedule`.
-4. Event, capacity, and callback blockers remain observable but cannot hide a finite deadline contributed by other
-   work.
-5. Urgency cannot make work ready when its prerequisite is unavailable.
+The schedule has two projections during migration:
 
-For example, an in-flight fetch on one node does not hide reconnect backoff on another node. The per-iteration work
-budget prevents a continuously ready manager from starving network polling or another manager.
+1. the earliest manager poll deadline, which bounds network polling and never directly wakes the application;
+2. the earliest compatibility application deadline from managers not yet migrated.
 
-During migration, an adapter may translate `RequestManager.maximumTimeToWait()` into a compatibility `NextReconcile`.
-The adapter is explicitly tagged because a relative legacy delay needs conservative preservation across early
-network returns. Native `NextReconcile` producers must not inherit that heuristic.
+Updating one manager cannot erase an earlier deadline from an unaffected manager. An early heartbeat response, for
+example, cannot postpone an existing fetch reconnect deadline. An expired manager deadline is consumed by polling
+that manager again. It is not itself an application-visible transition.
 
-The reactor retains the latest scheduling contribution from each manager. Updating one manager therefore cannot
-erase an earlier deadline from an unaffected manager. Once a compatibility deadline has been delivered, repeatedly
-reporting the same zero wait does not create a new deadline or wakeup; the manager must report new progress or a new
-positive wait. This is deliberately conservative: the legacy API cannot distinguish a new zero-delay operation from
-the previously delivered one. Managers which require that distinction migrate to a native semantic generation.
+The reactor publishes the immutable schedule before any associated action. It logs at `TRACE` only when the schedule
+materially changes:
 
-The resulting schedule is the only scheduling decision consumed by the application wait and network poll. It records
-whether another iteration is immediate, the earliest Reactor deadline, the earliest application-visible deadline,
-the observed event/capacity/callback conditions, and their semantic generations. A Reactor-only deadline may shorten
-network polling without synthesizing an application wakeup.
+```text
+Reactor schedule changed:
+source=FetchRequestManager
+previousDeadline=MAX
+deadline=100
+networkPollTimeout=100
+```
 
 #### Multi-manager scheduling rules
 
-`NextReconcile` values are triggers, not transferred protocol policy. When one trigger fires, the reactor rechecks the
-subscribed manager, which evaluates all of its current prerequisites again. This permits a manager to report both an
-event dependency and an operation deadline without teaching the reactor that manager's state machine.
+1. Poll every manager in a stable pre-I/O pass before blocking.
+2. Preserve each manager's absolute deadline across early returns from unrelated I/O.
+3. A request completion marks only its owning manager for a post-I/O poll. Results from unaffected managers remain
+   cached.
+4. Managers never call one another recursively. Cross-manager dependencies become state transitions or are observed
+   in the next ordered full pass while migration is incomplete.
+5. A future work budget will bound continuously ready work and force a non-blocking network poll before one manager
+   can starve I/O or another manager.
+6. Every wait chain must end in an input event, finite deadline, capacity release, callback acknowledgement,
+   cancellation, or shutdown.
 
-The reactor's merge and execution rules are:
-
-1. Merge checks from every manager before blocking. An event, capacity, or callback wait cannot hide another
-   manager's finite deadline.
-2. Execute `IMMEDIATE` managers in stable round-robin order under a per-iteration budget. Budget exhaustion forces a
-   non-blocking network poll before more immediate work, so one manager cannot starve I/O, deadlines, or another
-   manager.
-3. Require each `IMMEDIATE` recheck to advance a state generation, request cursor, or bounded work item. Reissuing the
-   same-generation `IMMEDIATE` without progress is a livelock invariant violation, not a reason to spin.
-4. Represent cross-manager dependencies as named events. For example, heartbeat and commit may wait on
-   `COORDINATOR_DISCOVERED`, while `CoordinatorRequestManager` independently waits on a response or retry deadline.
-5. Do not invoke another manager recursively from a completion callback. A completion produces an input event or
-   transition output; the reactor schedules dependent managers in its normal ordered pass.
-6. Require every wait chain to terminate in an external event, absolute deadline, capacity release, callback
-   acknowledgement, cancellation, or shutdown. A manager cannot wait for an action that is itself withheld until
-   that manager becomes ready.
-7. Tag events, schedules, callbacks, and terminal actions with operation id plus semantic generation or epoch. Stale
-   completions are ignored, while each admitted operation still receives exactly one terminal action.
-8. Keep user callbacks off the reactor thread and reserve control-path capacity for callback completion, fatal error,
-   cancellation, and close, even when data queues are saturated.
-
-For coordinator discovery, this produces one ordered causal chain:
+For coordinator discovery, the ordered chain is:
 
 ```text
-DISCONNECTED
-  -> Reactor reconciles CoordinatorRequestManager
-  -> READY becomes UNKNOWN; NextReconcile.AT_DEADLINE(retry)
+disconnect observed
+  -> ConsumerReactor polls CoordinatorRequestManager
+  -> manager records UNKNOWN and returns retry delay
 retry deadline expires
-  -> Reactor reconciles CoordinatorRequestManager
-  -> UNKNOWN becomes DISCOVERING; FindCoordinatorRequest + NextReconcile.ON_EVENT(response)
+  -> ConsumerReactor polls CoordinatorRequestManager
+  -> manager creates FindCoordinator request and waits for completion
 response succeeds
-  -> coordinator becomes READY(node, generation); COORDINATOR_DISCOVERED
-  -> Reactor reconciles dependent heartbeat work
+  -> manager records READY and reports COORDINATOR_DISCOVERED
+  -> ConsumerReactor polls dependent heartbeat work in its ordered pass
 ```
 
-The coordinator and heartbeat managers do not call each other recursively.
-
-These rules replace several existing local timeout substitutions:
-
-| Existing condition | `NextReconcile` representation | Failure avoided |
-| --- | --- | --- |
-| FindCoordinator request is in flight while its remaining backoff reads as zero | `NextReconcile.ON_EVENT(FIND_COORDINATOR_COMPLETION)` | network-thread busy spin |
-| Heartbeat is due but coordinator is unknown or the member cannot heartbeat | `NextReconcile.ON_EVENT(COORDINATOR_DISCOVERED)` or `NextReconcile.ON_EVENT(MEMBER_STATE_CHANGED)` | application/network wakeup loop |
-| Auto-commit is due while a previous commit remains in flight | `NextReconcile.ON_EVENT(COMMIT_COMPLETION)` plus its absolute operation deadline | arbitrary-delay retry and application spin |
-| Reconciliation waits for commit and then an application callback | `NextReconcile.ON_EVENT(COMMIT_COMPLETION)`, then `NextReconcile.ON_CALLBACK(operationId, epoch)` while heartbeat deadlines remain scheduled | callback/commit/heartbeat cyclic wait |
-| Share acknowledgement waits for a busy node while fetch work also exists | `NextReconcile.ON_EVENT(NODE_REQUEST_COMPLETION)` plus acknowledgement deadlines and capacity checks | per-node spin and cross-manager starvation |
-
-The first three rows generalize the local fixes behind KAFKA-20426 and KAFKA-20253 instead of preserving their
-special timeout values. The action ordering and generation rules likewise cover the duplicate fetch wakeup in
-KAFKA-20854, the metadata-error publication race in KAFKA-20397, and the skipped callback acknowledgement in
-KAFKA-18160.
+The coordinator and heartbeat managers do not call each other, and heartbeat urgency cannot hide the coordinator's
+finite retry deadline.
 
 ### 6. Execute `ReactorAction` after publishing the schedule
 
-Today, different completion paths may complete a future, publish data, enqueue a background event, or wake the
-application directly. This proposal first routes those existing application-visible actions through the reactor. A
-small internal value named `ReactorAction` records the external action after the reactor has published the schedule.
-Protocol-specific components report facts and completed transitions; only the reactor orders, coalesces, and
-dispatches actions. In particular, protocol-specific code cannot request a synthetic application wake directly.
+A `ReactorAction` is an external effect selected by the reactor after state and schedule publication. Managers report
+transitions; they do not select actions.
 
-Representative actions are:
+The current migration slice supports `WAKE_APPLICATION`. Equivalent transitions within one iteration are coalesced
+into one primitive wakeup while their reasons remain observable. A meaningful trace is emitted only when an action
+actually executes:
 
 ```text
-ReactorAction.COMPLETE_OPERATION(operationId, outcome)
-ReactorAction.PUBLISH_BACKGROUND_EVENT(event)
-ReactorAction.PUBLISH_DATA(batch, ownershipToken)
-ReactorAction.REQUIRE_CALLBACK(operationId, epoch, callback)
-ReactorAction.WAKE_APPLICATION(reason, generation)
-ReactorAction.TERMINATE_CONSUMER(cause)
+Executing reactor action:
+action=WAKE_APPLICATION
+reason=STATE_TRANSITION
+transitions=[FETCH_BUFFER_HAS_DATA]
 ```
 
-`COMPLETE_OPERATION` is the only terminal operation truth source. `NextReconcile` contains only scheduling conditions and
-blocking facts. `WAKE_APPLICATION` is derived by the reactor from a published state transition, deadline expiry, or
-capacity release; it is never a protocol-component-selected scheduling policy.
+The broader migration will add operation completion, background-event publication, data publication, callback
+requirements, and consumer termination. Explicit `Consumer.wakeup()` remains a user interruption and is not
+coalesced with synthetic actions.
 
-Action identities make duplicate delivery testable. Different synthetic reasons or generations covered by the same
-published snapshot collapse into one primitive signal, while the full reason/generation set remains available for
-diagnostics and tests. Explicit `Consumer.wakeup()` is a user interruption and never participates in this
-coalescing. Operation completion and callback acknowledgement are not freely coalesced: each operation id has
-exactly one terminal result.
+The ordering invariant is:
 
-The current POC uses `StateTransition` as a bounded manager-to-reactor transition set. The reactor combines those
-transitions with the published `ReactorSchedule` and derives `ReactorAction.WAKE_APPLICATION`; managers do not select
-the external action. Other action kinds remain part of the staged migration.
+> Apply transition, publish resulting state and schedule, then execute the action.
 
-Actual data insertion and explicit `Consumer.wakeup()` remain distinct primitives during migration. Adding data to
-a mailbox signals the condition that truly changed; an explicit user wakeup keeps its existing interruption
-semantics. A data response must not also enqueue a synthetic terminal wake for the same transition.
+Fetched data is a temporary migration exception. Today `FetchBuffer.add()` atomically inserts data and signals its
+condition from the response path; this state-bearing notification is not yet a reactor-selected synthetic wake.
+Phase 3 moves data publication behind `ReactorAction.PUBLISH_DATA`. The `FETCH_BUFFER_HAS_DATA` transition in the
+current POC covers the separate case where fetch preparation discovers data that was already buffered.
 
 ### 7. Fetch reconnect-backoff example
 
-A fetch reconnect backoff follows the same flow without treating an empty request result as progress:
-
 ```text
-Input Event: network disconnect
-  -> ConsumerReactor calls FetchRequestManager.reconcile()
-  -> FetchRequestManager records reconnectDeadline in its owned state
-  -> ManagerReconcileResult includes NextReconcile.AT_DEADLINE(reconnectDeadline)
-  -> ReactorSchedule uses reconnectDeadline as its earliest deadline
-  -> deadline expiry becomes the next Input Event
-  -> ConsumerReactor reconciles FetchRequestManager and a request is prepared
-  -> NextReconcile.ON_EVENT(fetch response)
-  -> fetch response becomes an Input Event and produces a batch
-  -> NextReconcile.IMMEDIATE(next fetch)
-  -> publish ReactorSchedule
-  -> ReactorAction.PUBLISH_DATA
+Application poll command
+  -> ConsumerReactor polls FetchRequestManager
+  -> fetch manager observes RECONNECT_BACKOFF
+  -> PollResult(requests=[], transitions=[], timeUntilNextPollMs=remainingBackoff)
+  -> ConsumerReactor publishes ReactorSchedule(deadline=reconnectDeadline)
+  -> network poll is bounded by reconnectDeadline
+  -> no application wakeup
+
+Reconnect deadline expires
+  -> ConsumerReactor polls FetchRequestManager again
+  -> FetchRequest is created from the retained fetch intent
+  -> PollResult(requests=[FetchRequest], transitions=[], timeUntilNextPollMs=MAX)
+  -> ConsumerReactor publishes the new schedule and sends the request
+
+Fetch response adds data
+  -> FetchBuffer atomically inserts and signals the batch during migration
+  -> a later phase publishes the batch through ReactorAction.PUBLISH_DATA
 ```
 
-Entering backoff does not wake the application merely because no fetch request was produced. A compatibility path
-which still requires the application to resubmit work may emit one `WAKE_APPLICATION` action when that specific
-deadline generation expires, after the new schedule is published.
+This replaces the no-progress application/background ping-pong: backoff schedules reactor work; data availability
+notifies the application.
 
 ### 8. Define the reactor iteration and publication order
 
 One iteration follows this order:
 
-1. Drain a bounded number of application commands and callback acknowledgements.
-2. Apply commands through the selected protocol-specific consumer component.
-3. Call each manager's `reconcile()` and collect its `ManagerReconcileResult`.
-4. Aggregate and publish the pre-I/O `ReactorSchedule` which bounds network polling.
-5. Dispatch only actions whose required state and schedule have already been published.
-6. Poll network I/O no longer than the earliest aggregate deadline.
-7. Collect completed transport responses and mark the owning managers as affected.
-8. Reconcile a stable snapshot of affected managers; merge their updated results with the cached contributions of
-   unaffected managers, then derive post-I/O actions.
-9. Publish the resulting `ReactorSchedule`.
-10. Dispatch coalesced post-I/O actions and one-shot deadline notifications.
+1. Drain application commands and callback acknowledgements.
+2. Apply them through the selected protocol-specific consumer component.
+3. Call each manager's `poll()`; atomically collect requests, transitions, and poll delays.
+4. Retain per-manager deadlines, form one `ReactorSchedule`, and publish it.
+5. Derive and execute pre-I/O actions from reported transitions.
+6. Poll network I/O no longer than the aggregate deadline.
+7. Let same-thread network completions mark their owning managers.
+8. Poll the stable set of affected managers and merge their results with cached unaffected-manager results.
+9. Publish the post-I/O schedule.
+10. Derive and execute post-I/O actions.
 
-For synthetic wake actions, this produces one ordering rule:
+Request managers and `NetworkClientDelegate` are direct, same-thread collaborators. This proposal does not add a
+queue between them. `Input Event` is a semantic term: application commands use `ApplicationEventQueue`, while
+network completions occur directly during `NetworkClientDelegate.poll()`.
 
-> Apply transition, publish resulting state and schedule, then notify.
-
-Until `PUBLISH_DATA` migration is complete, atomic mailbox insertion remains a state-bearing notification
-exception. Today `FetchBuffer.add()` inserts data and signals its condition during the network callback, before the
-post-I/O schedule is published. This is safe because the notification carries the state that satisfies the waiter;
-it must not be described as a synthetic scheduling decision. A later phase moves data publication into post-I/O
-action dispatch so the general action ordering also covers mailbox delivery.
-
-Request managers and `NetworkClientDelegate` are direct, same-thread collaborators. Adding a queue between them
-would add latency and another unbounded ownership boundary without isolating any mutable state.
-
-`Input Event` is a semantic term, not a requirement that all inputs share one queue. Application commands arrive
-through `ApplicationEventQueue`; network completions occur directly during `NetworkClientDelegate.poll()` on the
-reactor thread; schedule deadlines are materialized by the reactor from `Time`; capacity and callback completions
-become typed inputs as their migration phases land.
-
-During migration, every iteration still performs a full pre-I/O reconciliation. This is the correctness fallback
-for metadata changes, disconnects, and cross-manager dependencies which are not yet explicit affected-manager inputs.
-Managers marked during post-I/O reconciliation are deferred to that next ordered pass, preventing recursive or
-unbounded reconciliation in one iteration.
+During migration, every iteration retains a full pre-I/O manager pass. It is the correctness fallback for metadata,
+disconnect, capacity, and cross-manager dependencies which are not yet typed inputs.
 
 ### 9. Keep regular and share protocol rules outside the reactor
 
-The shared behavior is their event-processing topology, not the granularity of their manager-owned state. To make this
-boundary explicit and independently testable, this proposal uses a small protocol-specific driver on each side of
-the shared reactor:
+The shared behavior is their event-processing topology, not the granularity of their manager-owned state. Phase 4
+makes this boundary explicit and independently testable with a small protocol-specific driver on each side of the
+shared reactor:
 
 | Component | Protocol policy owned |
 | --- | --- |
@@ -555,6 +503,10 @@ The reactor must not branch on regular/share protocol types; construction may se
 shared event-processing layer. A driver may implement a common interface, but its internal state and transitions
 remain protocol-specific.
 
+The current `RequestManagers.wakeupApplicationThread()` regular/share branch is a migration exception: it selects
+the existing fetch-buffer wake target after the reactor has chosen the action. Phase 4 moves that target selection
+behind the selected driver so the shared reactor no longer contains the protocol branch.
+
 ### 10. Define the schedule and wakeup protocol
 
 The reactor must satisfy all of these properties:
@@ -563,10 +515,10 @@ The reactor must satisfy all of these properties:
 2. A newly shorter schedule is published before releasing an application waiter that may hold an older
    snapshot.
 3. The same schedule bounds the network poll, so progress does not depend on the application polling again.
-4. Expiry is delivered once for each semantic schedule generation.
+4. Each retained compatibility deadline is delivered at most once.
 5. Expiry is marked delivered before notification, preventing repeated observation of stale `0 ms` waits.
 6. An event-only wait does not create a periodic wakeup unless a compatibility deadline is explicitly present.
-7. Every synthetic wake records a reason and generation; a no-progress method return is not a wake reason.
+7. Every synthetic wake records a transition or deadline reason; a no-progress method return is not a wake reason.
 
 This protocol replaces application-side safety rescans. A safety rescan is a second calculation performed by the
 application thread before it waits, such as re-reading `SubscriptionState` or `FetchBuffer` to shorten a cached
@@ -602,9 +554,9 @@ These are consumer admission limits over queues, buffers, and in-flight work; th
 | --- | --- | --- | --- |
 | Application event queue | Per-consumer command count and retained-byte budget | Producer atomically reserves queue, byte, and operation permits within the API deadline | Queue slot at dequeue; bytes when command payload is released; operation permit at terminal completion |
 | Background event queue | Count and retained-byte budget, with terminal delivery reserved | Boundary atomically reserves permits; coalesce replaceable snapshots; throttle producer work; never silently drop terminal/error events | Queue slot at dequeue; retained bytes after application processing |
-| Callback queue | Pending callback count | Stop admitting dependent transitions and report `NextReconcile.ON_CALLBACK`; reactor never executes user code | Epoch-tagged callback completion |
-| Fetch/share data mailbox | Configured memory budget plus per-partition/acquisition accounting | Stop new fetch/acquisition work and report `NextReconcile.ON_CAPACITY` | Application consumes or discards owned batch |
-| Unsent requests | Global and per-node count/bytes | Driver reports `NextReconcile.ON_CAPACITY`; do not grow an unbounded transport queue | Send, timeout, cancellation, or failure |
+| Callback queue | Pending callback count | Stop admitting dependent transitions until callback completion; reactor never executes user code | Epoch-tagged callback completion |
+| Fetch/share data mailbox | Configured memory budget plus per-partition/acquisition accounting | Stop new fetch/acquisition work until capacity is released | Application consumes or discards owned batch |
+| Unsent requests | Global and per-node count/bytes | Stop request production until capacity is released; do not grow an unbounded transport queue | Send, timeout, cancellation, or failure |
 | In-flight requests | Global and per-node count/bytes | Request production is gated by protocol and transport capacity | Response, disconnect, timeout, or cancellation |
 | Pending operations/futures | Per-consumer count | Admission observes API deadline; every admitted id gets exactly one terminal acknowledgement | Success, failure, timeout, cancellation, or close |
 | Retained response/deserialization buffers | Per-consumer byte budget | Transfer ownership only when destination capacity is reserved | Parse completion, delivery, discard, or close |
@@ -617,7 +569,7 @@ be silently dropped.
 
 Protocol operations not created by an application API require the same reservation discipline. Before entering a
 broker-triggered rebalance or share callback-required state, the driver atomically reserves a callback slot and its
-terminal permit from an internal control budget. If reservation is unavailable, it reports `NextReconcile.ON_CAPACITY` without
+terminal permit from an internal control budget. If reservation is unavailable, it reports a capacity blocker without
 publishing a half-admitted callback state; any applicable protocol deadline remains visible to schedule reduction.
 
 Exact default capacities and whether any require public configuration are unresolved in this draft. Phase 7 is not
@@ -639,13 +591,13 @@ behind replaceable work.
 Exit evidence: aggregation, elapsed-time, publish-before-wakeup, and early-network-return tests pass with no public
 API change.
 
-### Phase 2: Introduce typed fetch blockers and reconciliation
+### Phase 2: Return fetch scheduling facts from `poll()`
 
 - Represent fetch preparation as requests plus `FetchRequestPreparationBlocker` values.
-- Migrate fetch retry deadlines to `NextReconcile`.
-- Preserve compatibility adapters for other managers.
+- Return fetch requests, transitions, and `timeUntilNextPollMs` from one `PollResult`.
+- Preserve the `maximumTimeToWait()` compatibility projection for other managers.
 - Treat PR #23014 as the baseline if it merges; evolve its boolean wake decision into typed blockers and
-  `NextReconcile` instead of introducing a competing result type.
+  an explicit poll delay and state transitions instead of introducing a competing result type.
 
 Exit evidence: missing leader, reconnect backoff, in-flight, buffer drain, no-fetchable, paused partition, and mixed
 condition tests prove that only real deadlines or transitions cause progress.
@@ -663,7 +615,7 @@ real blocked waiter; data plus completion does not leave a duplicate retained wa
 
 ### Phase 4: Move subscription and acquisition transitions behind drivers
 
-- Move regular assignment, position, seek, pause/resume, commit snapshots, and reconciliation behind
+- Move regular assignment, position, seek, pause/resume, commit snapshots, and assignment processing behind
   `RegularConsumerDriver` commands.
 - Move share acquisition, locks, acknowledgements, and share membership behind `ShareConsumerDriver` commands.
 - Replace application-thread mutable reads with immutable snapshots or operation futures.
@@ -709,18 +661,19 @@ Testing is organized around observable event-processing behavior rather than pri
 ### Deterministic component tests
 
 - schedule aggregation across event waits, absolute deadlines, and capacity waits;
-- a continuously `IMMEDIATE` manager plus another manager's finite deadline, proving that the fair work budget and
+- a continuously ready manager plus another manager's finite deadline, proving that the fair work budget and
   non-blocking network poll still deliver the deadline on time;
-- same-generation `IMMEDIATE` without a state, cursor, request, or bounded-work change is detected as no progress;
+- repeatedly reporting ready work without a state, cursor, request, or bounded-work change is detected as no
+  progress;
 - coordinator discovery in flight while heartbeat is due and commit is pending, proving that the response event
   rechecks all dependents once without a zero-timeout loop;
 - an expired auto-commit timer with an in-flight commit plus an independent heartbeat deadline, proving that the
   commit wait neither spins nor hides the heartbeat;
-- reconciliation waiting first for commit completion and then for an application callback, proving that heartbeat
-  and reconciliation deadlines continue while user code runs;
+- assignment processing waiting first for commit completion and then for an application callback, proving that
+  heartbeat and assignment deadlines continue while user code runs;
 - a stale callback or response from an older operation generation cannot mutate state or complete the replacement
   operation;
-- elapsed-time subtraction and preservation of native deadline generations;
+- elapsed-time subtraction and preservation of retained absolute deadlines;
 - publish-before-wakeup ordering for synthetic pre-I/O and post-I/O transitions;
 - one-shot expiry and no stale zero-timeout schedule;
 - mixed partition/node conditions where a finite reconnect deadline survives an in-flight blocker;
@@ -736,7 +689,7 @@ Testing is organized around observable event-processing behavior rather than pri
 - real `AsyncKafkaConsumer -> reactor handle -> ConsumerReactor -> FetchRequestManager -> FetchBuffer` with only the
   socket replaced by `MockClient`;
 - groupless manual assignment with a valid position and reconnect backoff;
-- unsent fetch expiration through the real network delegate, the next ordered manager reconciliation, and a
+- unsent fetch expiration through the real network delegate, the next ordered manager poll, and a
   blocking application waiter;
 - equivalent share-consumer acquisition/acknowledgement paths through `ShareConsumerDriver`;
 - share acknowledgement and fetch work for the same busy node, proving protocol priority without reactor starvation
@@ -757,10 +710,10 @@ Testing is organized around observable event-processing behavior rather than pri
 | Design goal | Required observable assertion |
 | --- | --- |
 | One resource coordinator | Application wait and network poll derive from the same published `ReactorSchedule`; no application rescan changes it. |
-| No no-progress wakeups | The same generation produces at most one synthetic wake; a fixed virtual-time window has a bounded poll/wakeup count while paused, backing off, or in flight. |
+| No no-progress wakeups | One unchanged transition or deadline produces at most one synthetic wake; a fixed virtual-time window has a bounded poll/wakeup count while paused, backing off, or in flight. |
 | No lost shorter deadline | An application waiter using an older snapshot is released only after the shorter schedule is visible. |
-| Exactly-once deadline transition | One semantic generation produces at most one expiry notification, including same-timestamp retries. |
-| No manager starvation | A continuously immediate manager cannot prevent network polling, another manager's deadline, or a terminal action. |
+| Exactly-once deadline transition | One retained compatibility deadline produces at most one expiry notification, including same-timestamp retries. |
+| No manager starvation | A continuously ready manager cannot prevent network polling, another manager's deadline, or a terminal action. |
 | No cyclic wait | Commit, coordinator, heartbeat, membership callback, and share acknowledgement waits each retain an external event, deadline, capacity, callback, cancellation, or shutdown edge. |
 | No reentrant transition | Completion callbacks enqueue facts; dependent manager transitions occur only in the reactor's ordered pass. |
 | No stale completion | An older operation id/generation cannot mutate current state or consume the current operation's terminal action. |
@@ -850,7 +803,7 @@ second scheduler. A publish-before-wakeup protocol directly fixes the stale-snap
 ### Use a generic wakeup boolean
 
 A boolean cannot distinguish data availability, in-flight completion, reconnect deadline, missing metadata, callback
-completion, or capacity release. It also cannot represent mixed conditions or semantic generations.
+completion, or capacity release. It also cannot represent mixed conditions or operation identity.
 
 ### Put all protocol logic in one omniscient reactor class
 
@@ -898,7 +851,8 @@ adapters permit staged replacement with explicit exit criteria.
   but does not depend on KIP-945's completion.
 - [KAFKA-20854 / PR #23014](https://github.com/apache/kafka/pull/23014) is open and narrows one busy-loop cause by
   distinguishing whether an empty fetch-preparation result may wake the fetch buffer. This proposal adopts its
-  problem decomposition; if the PR merges, Phase 2 evolves that result into typed blockers and `NextReconcile`
+  problem decomposition; if the PR merges, Phase 2 evolves that result into typed blockers, state transitions, and
+  `timeUntilNextPollMs`
   instead of introducing a competing result type.
 - KAFKA-20426 / PR 22018 and KAFKA-20253 / PR 22836 demonstrate that raw wait-time minima are insufficient when
   urgency and feasibility are computed in separate components.

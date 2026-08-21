@@ -762,13 +762,13 @@ public class OffsetsRequestManagerTest {
             requestManager.updateFetchPositionsForAsyncPoll(time.milliseconds());
         assertTrue(updatePositions.isCompletedExceptionally());
 
-        ManagerReconcileResult firstResult = requestManager.reconcile(time.milliseconds());
+        NetworkClientDelegate.PollResult firstResult = requestManager.poll(time.milliseconds());
         assertEquals(
             Set.of(StateTransition.FETCH_POSITIONS_UPDATE_FAILED),
             firstResult.stateTransitions()
         );
 
-        ManagerReconcileResult secondResult = requestManager.reconcile(time.milliseconds());
+        NetworkClientDelegate.PollResult secondResult = requestManager.poll(time.milliseconds());
         assertTrue(secondResult.stateTransitions().isEmpty());
     }
 

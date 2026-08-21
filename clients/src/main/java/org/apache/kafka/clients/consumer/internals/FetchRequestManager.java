@@ -47,10 +47,8 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     private final NetworkClientDelegate networkClientDelegate;
     private final long retryBackoffMs;
+    private boolean fetchRequestPending;
     private CompletableFuture<Void> pendingFetchRequestFuture;
-    private NextReconcile fetchNextReconcile =
-        NextReconcile.onEvent();
-    private long fetchNextReconcileGeneration;
     private EnumSet<StateTransition> pendingStateTransitions =
         EnumSet.noneOf(StateTransition.class);
 
@@ -85,22 +83,6 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     }
 
     /**
-     * {@inheritDoc}
-     *
-     * The latest fetch preparation result is owned by the reactor thread, so the application wait can use the
-     * decision directly without rescanning {@link SubscriptionState} and {@link FetchBuffer}.
-     */
-    @Override
-    public long maximumTimeToWait(long currentTimeMs) {
-        return nextReconcile(currentTimeMs).remainingMs(currentTimeMs);
-    }
-
-    @Override
-    public NextReconcile nextReconcile(long currentTimeMs) {
-        return fetchNextReconcile;
-    }
-
-    /**
      * Signals the {@link Consumer} wants requests be created for the broker nodes to fetch the next
      * batch of records.
      *
@@ -109,20 +91,15 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     public CompletableFuture<Void> createFetchRequests() {
         CompletableFuture<Void> future = new CompletableFuture<>();
-
-        if (pendingFetchRequestFuture != null) {
-            // In this case, we have an outstanding fetch request, so chain the newly created future to be
-            // completed when the "pending" future is completed.
-            pendingFetchRequestFuture.whenComplete((value, exception) -> {
-                if (exception != null) {
-                    future.completeExceptionally(exception);
-                } else {
-                    future.complete(value);
-                }
-            });
-        } else {
-            pendingFetchRequestFuture = future;
+        if (fetchRequestPending) {
+            // The manager already owns an equivalent intent. A future must not be retained for every application
+            // poll while a retryable blocker persists; the reactor will keep polling the retained intent.
+            future.complete(null);
+            return future;
         }
+
+        fetchRequestPending = true;
+        pendingFetchRequestFuture = future;
 
         return future;
     }
@@ -137,22 +114,6 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             this::prepareFetchRequests,
             this::handleFetchSuccess,
             this::handleFetchFailure
-        );
-    }
-
-    /**
-     * Atomically reports the fetch manager's proposed network work, next reconciliation, and state transitions from
-     * one reactor-thread snapshot. Other managers continue to use the compatibility adapter in
-     * {@link RequestManager#reconcile(long)} while they migrate.
-     */
-    @Override
-    public ManagerReconcileResult reconcile(long currentTimeMs) {
-        PollResult pollResult = poll(currentTimeMs);
-        return ManagerReconcileResult.of(
-            this,
-            pollResult,
-            drainPendingStateTransitions(),
-            nextReconcile(currentTimeMs)
         );
     }
 
@@ -187,20 +148,22 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                                     FetchRequestPreparer fetchRequestPreparer,
                                     ResponseHandler<ClientResponse> successHandler,
                                     ResponseHandler<Throwable> errorHandler) {
-        if (pendingFetchRequestFuture == null) {
-            // If no explicit request for creating fetch requests was issued, just short-circuit.
-            return PollResult.EMPTY;
+        if (!fetchRequestPending) {
+            // Network completions can report a state transition without creating new network work.
+            return pollResult(PollResult.WAIT_FOREVER, List.of());
         }
 
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
-            fetchNextReconcile = nextReconcileFor(result, currentTimeMs);
+            long timeUntilNextPollMs = timeUntilNextPollMs(result, currentTimeMs);
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
                 reportPreparationStateTransition(result);
-                pendingFetchRequestFuture.complete(null);
-                return PollResult.EMPTY;
+                fetchRequestPending = shouldRetryPreparation(result);
+                if (pendingFetchRequestFuture != null)
+                    pendingFetchRequestFuture.complete(null);
+                return pollResult(timeUntilNextPollMs, List.of());
             }
 
             List<UnsentRequest> requests = fetchRequests.entrySet().stream().map(entry -> {
@@ -217,24 +180,27 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
             }).collect(Collectors.toList());
 
-            pendingFetchRequestFuture.complete(null);
-            return new PollResult(requests);
+            fetchRequestPending = false;
+            if (pendingFetchRequestFuture != null)
+                pendingFetchRequestFuture.complete(null);
+            return pollResult(PollResult.WAIT_FOREVER, requests);
         } catch (Throwable t) {
             // A "dummy" poll result is returned here rather than rethrowing the error because any error
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
-            pendingFetchRequestFuture.completeExceptionally(t);
-            fetchNextReconcile = NextReconcile.onEvent();
+            fetchRequestPending = false;
+            if (pendingFetchRequestFuture != null)
+                pendingFetchRequestFuture.completeExceptionally(t);
             pendingStateTransitions.add(
                 StateTransition.FETCH_PREPARATION_FAILED
             );
-            return PollResult.EMPTY;
+            return pollResult(PollResult.WAIT_FOREVER, List.of());
         } finally {
             pendingFetchRequestFuture = null;
         }
     }
 
-    NextReconcile nextReconcileFor(
+    long timeUntilNextPollMs(
         final FetchRequestPreparationResult result,
         final long currentTimeMs
     ) {
@@ -251,20 +217,23 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             if (reconnectBackoff)
                 delayMs = Math.min(delayMs, result.reconnectBackoffRemainingMs());
 
-            NextReconcile candidate =
-                NextReconcile.atDeadlineAfter(currentTimeMs, delayMs);
-            // Re-observing the same class of blocked state must not move an existing deadline forward. Otherwise,
-            // unrelated application events can perpetually postpone the retry and turn a bounded wait into
-            // starvation. A newly observed capacity deadline is still allowed to shorten the existing decision.
-            if (fetchNextReconcile.type() == NextReconcile.Type.AT_DEADLINE
-                && fetchNextReconcile.remainingMs(currentTimeMs) > 0L
-                && fetchNextReconcile.deadlineAtMs() <= candidate.deadlineAtMs()) {
-                return fetchNextReconcile;
-            }
-            return candidate.withSemanticGeneration(++fetchNextReconcileGeneration);
+            return delayMs;
         }
 
-        return NextReconcile.onEvent();
+        return PollResult.WAIT_FOREVER;
+    }
+
+    private boolean shouldRetryPreparation(final FetchRequestPreparationResult result) {
+        if (result.blockers().contains(FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED))
+            return false;
+        return result.blockers().contains(FetchRequestPreparationBlocker.NO_FETCHABLE_PARTITIONS)
+            || result.blockers().contains(FetchRequestPreparationBlocker.MISSING_LEADER)
+            || result.blockers().contains(FetchRequestPreparationBlocker.RECONNECT_BACKOFF);
+    }
+
+    private PollResult pollResult(final long timeUntilNextPollMs,
+                                  final List<UnsentRequest> requests) {
+        return new PollResult(timeUntilNextPollMs, requests, drainPendingStateTransitions());
     }
 
     private void reportPreparationStateTransition(final FetchRequestPreparationResult result) {
