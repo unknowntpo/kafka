@@ -133,6 +133,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
@@ -2502,6 +2503,7 @@ public class AsyncKafkaConsumerTest {
         final AtomicBoolean captureReconnectPoll = new AtomicBoolean(false);
         final AtomicBoolean reconnectBackoffObserved = new AtomicBoolean(false);
         final AtomicLong reconnectPollTimeoutMs = new AtomicLong(-1L);
+        final AtomicInteger fetchRequestsBeforeBackoffExpiry = new AtomicInteger(-1);
         final MockClient client = new MockClient(time, realMetadata) {
             @Override
             public boolean connectionFailed(Node node) {
@@ -2513,8 +2515,12 @@ public class AsyncKafkaConsumerTest {
 
             @Override
             public List<ClientResponse> poll(long timeoutMs, long now) {
-                if (reconnectBackoffObserved.get() && reconnectPollTimeoutMs.compareAndSet(-1L, timeoutMs))
+                if (reconnectBackoffObserved.get() && reconnectPollTimeoutMs.compareAndSet(-1L, timeoutMs)) {
+                    fetchRequestsBeforeBackoffExpiry.set((int) requests().stream()
+                        .filter(request -> request.requestBuilder().apiKey() == ApiKeys.FETCH)
+                        .count());
                     time.sleep(timeoutMs);
+                }
                 return super.poll(0L, now);
             }
         };
@@ -2553,6 +2559,7 @@ public class AsyncKafkaConsumerTest {
                     .anyMatch(request -> request.requestBuilder().apiKey() == ApiKeys.FETCH),
                 "Groupless consumer did not retry its fetch after reconnect backoff expired"
             );
+            assertEquals(0, fetchRequestsBeforeBackoffExpiry.get());
             assertEquals(retryBackoffMs, reconnectPollTimeoutMs.get());
         } finally {
             consumer.wakeup();

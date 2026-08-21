@@ -52,6 +52,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
@@ -337,10 +338,18 @@ public class NetworkClientDelegate implements AutoCloseable {
         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
         public final long timeUntilNextPollMs;
         public final List<UnsentRequest> unsentRequests;
+        private final Set<StateTransition> stateTransitions;
 
         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
+            this(timeUntilNextPollMs, unsentRequests, Set.of());
+        }
+
+        PollResult(final long timeUntilNextPollMs,
+                   final List<UnsentRequest> unsentRequests,
+                   final Set<StateTransition> stateTransitions) {
             this.timeUntilNextPollMs = timeUntilNextPollMs;
             this.unsentRequests = Collections.unmodifiableList(unsentRequests);
+            this.stateTransitions = Set.copyOf(stateTransitions);
         }
 
         public PollResult(final List<UnsentRequest> unsentRequests) {
@@ -353,6 +362,10 @@ public class NetworkClientDelegate implements AutoCloseable {
 
         public PollResult(final long timeUntilNextPollMs) {
             this(timeUntilNextPollMs, Collections.emptyList());
+        }
+
+        Set<StateTransition> stateTransitions() {
+            return stateTransitions;
         }
     }
 

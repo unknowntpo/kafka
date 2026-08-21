@@ -173,19 +173,12 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
         // Copy the outgoing request list and clear it.
         List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>(requestsToSend);
         requestsToSend.clear();
-        return new NetworkClientDelegate.PollResult(unsentRequests);
-    }
-
-    @Override
-    public ManagerReconcileResult reconcile(final long currentTimeMs) {
-        NetworkClientDelegate.PollResult pollResult = poll(currentTimeMs);
         Set<StateTransition> stateTransitions = Set.copyOf(pendingStateTransitions);
         pendingStateTransitions.clear();
-        return ManagerReconcileResult.of(
-            this,
-            pollResult,
-            stateTransitions,
-            nextReconcile(currentTimeMs)
+        return new NetworkClientDelegate.PollResult(
+            NetworkClientDelegate.PollResult.WAIT_FOREVER,
+            unsentRequests,
+            stateTransitions
         );
     }
 

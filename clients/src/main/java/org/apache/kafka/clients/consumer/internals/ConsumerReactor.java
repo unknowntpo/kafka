@@ -62,11 +62,11 @@ import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.DEFAULT_
 import static org.apache.kafka.common.utils.Utils.closeQuietly;
 
 /**
- * Single-owner event loop that consumes {@link ApplicationEvent}, reconciles manager-owned state, decides the
+ * Single-owner event loop that consumes {@link ApplicationEvent}, polls manager-owned state, decides the
  * shared schedule, produces {@link BackgroundEvent}, and polls the network client.
  *
  * <p>The reactor is the only component that combines manager results into network-poll, application-wait, and
- * external-action decisions. Request managers retain their local state and reconciliation rules.</p>
+ * external-action decisions. Request managers retain their local state and request-building rules.</p>
  */
 public class ConsumerReactor extends KafkaThread implements Closeable {
 
@@ -91,7 +91,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
     private volatile ReactorSchedule reactorSchedule;
-    private final ManagerReconcileCache managerReconcileCache = new ManagerReconcileCache();
+    private final ManagerPollCache managerPollCache = new ManagerPollCache();
     private final Set<RequestManager> affectedManagers =
         Collections.newSetFromMap(new IdentityHashMap<>());
     private final EnumSet<StateTransition> pendingStateTransitions =
@@ -215,7 +215,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      *         {@link ApplicationEventProcessor}
      *     </li>
      *     <li>
-     *         Reconcile each {@link RequestManager} and collect its proposed network work and next reconciliation
+     *         Poll each {@link RequestManager} and collect its proposed network work, state transitions, and next
+     *         poll delay
      *     </li>
      *     <li>
      *         Stage each {@link AbstractRequest.Builder request} to be sent via
@@ -241,45 +242,47 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
 
         // A full pre-I/O pass remains the correctness fallback while metadata, disconnect, capacity, and
         // cross-manager dependencies are migrated to typed input events. It supersedes and discards any completion
-        // marks deferred from a previous post-I/O reconciliation because every manager is reconciled below.
+        // marks deferred from a previous post-I/O pass because every manager is polled below.
         affectedManagers.clear();
-        List<ManagerReconcileResult> reconcileResults = new ArrayList<>();
+        List<NetworkClientDelegate.PollResult> pollResults = new ArrayList<>();
+        List<RequestManager> managers = new ArrayList<>();
         for (RequestManager rm : requestManagers.entries()) {
-            ManagerReconcileResult result = rm.reconcile(currentTimeMs);
-            reconcileResults.add(result);
-            stageReconcileResult(result, currentTimeMs);
-            networkClientDelegate.addAll(result.pollResult().unsentRequests);
+            NetworkClientDelegate.PollResult result = rm.poll(currentTimeMs);
+            managers.add(rm);
+            pollResults.add(result);
+            stagePollResult(rm, result, currentTimeMs);
+            networkClientDelegate.addAll(result.unsentRequests);
         }
-        managerReconcileCache.retainManagers(reconcileResults);
+        managerPollCache.retainManagers(managers);
 
-        ReactorSchedule proposedSchedule = ReactorSchedule.merge(
-            managerReconcileCache.scheduleResults(),
+        ReactorSchedule proposedSchedule = ReactorSchedule.from(
+            managerPollCache.states(),
             currentTimeMs
         );
         proposedSchedule = publishReactorSchedule(proposedSchedule, currentTimeMs);
         pollWaitTimeMs = Math.min(
             pollWaitTimeMs,
-            timeUntilNextReconcile(proposedSchedule, currentTimeMs)
+            proposedSchedule.networkPollTimeoutMs(currentTimeMs)
         );
-        collectStateTransitions(reconcileResults);
+        collectStateTransitions(pollResults);
         executeReactorActions();
 
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
-        // Deliver the exact decision which bounded this network poll before asking managers for a fresh one. Legacy
-        // managers describe relative waits, so recomputing first could move an expired deadline into the future.
+        // Deliver an expired legacy application deadline before asking managers for a fresh one. The manager poll
+        // deadline itself is consumed by polling the manager again and never directly wakes the application thread.
         long afterNetworkPollMs = time.milliseconds();
-        deliverExpiredReactorSchedule(afterNetworkPollMs);
+        deliverExpiredApplicationDeadline(afterNetworkPollMs);
 
-        // Request completion callbacks mark their owning manager. Reconcile only that stable snapshot here;
-        // marks produced by this reconciliation are intentionally deferred to the next full pre-I/O pass.
-        List<ManagerReconcileResult> postIoResults = reconcileAffectedManagers(afterNetworkPollMs);
+        // Request completion callbacks mark their owning manager. Poll only that stable snapshot here; marks produced
+        // by this pass are intentionally deferred to the next full pre-I/O pass.
+        List<NetworkClientDelegate.PollResult> postIoResults = pollAffectedManagers(afterNetworkPollMs);
         if (!postIoResults.isEmpty()) {
             publishReactorSchedule(
-                ReactorSchedule.merge(managerReconcileCache.scheduleResults(), afterNetworkPollMs),
+                ReactorSchedule.from(managerPollCache.states(), afterNetworkPollMs),
                 afterNetworkPollMs
             );
-            deliverExpiredReactorSchedule(afterNetworkPollMs);
+            deliverExpiredApplicationDeadline(afterNetworkPollMs);
             collectStateTransitions(postIoResults);
         }
         executeReactorActions();
@@ -392,15 +395,16 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return reactorSchedule.remainingMsForApplication(time.milliseconds());
     }
 
-    private void stageReconcileResult(final ManagerReconcileResult result,
-                                      final long currentTimeMs) {
-        managerReconcileCache.update(result, currentTimeMs);
-        for (NetworkClientDelegate.UnsentRequest request : result.pollResult().unsentRequests) {
-            request.whenComplete((response, error) -> affectedManagers.add(result.manager()));
+    private void stagePollResult(final RequestManager manager,
+                                 final NetworkClientDelegate.PollResult result,
+                                 final long currentTimeMs) {
+        managerPollCache.update(manager, result, manager.maximumTimeToWait(currentTimeMs), currentTimeMs);
+        for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
+            request.whenComplete((response, error) -> affectedManagers.add(manager));
         }
     }
 
-    private List<ManagerReconcileResult> reconcileAffectedManagers(final long currentTimeMs) {
+    private List<NetworkClientDelegate.PollResult> pollAffectedManagers(final long currentTimeMs) {
         if (affectedManagers.isEmpty())
             return List.of();
 
@@ -408,12 +412,12 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         managers.addAll(affectedManagers);
         affectedManagers.clear();
 
-        List<ManagerReconcileResult> results = new ArrayList<>(managers.size());
+        List<NetworkClientDelegate.PollResult> results = new ArrayList<>(managers.size());
         for (RequestManager manager : managers) {
-            ManagerReconcileResult result = manager.reconcile(currentTimeMs);
+            NetworkClientDelegate.PollResult result = manager.poll(currentTimeMs);
             results.add(result);
-            stageReconcileResult(result, currentTimeMs);
-            networkClientDelegate.addAll(result.pollResult().unsentRequests);
+            stagePollResult(manager, result, currentTimeMs);
+            networkClientDelegate.addAll(result.unsentRequests);
         }
         return results;
     }
@@ -425,16 +429,23 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         ReactorSchedule previous = reactorSchedule;
         ReactorSchedule next = decision;
 
-        if (next.sameSchedule(previous) && previous.deadlineNotificationDelivered())
-            next = next.withDeadlineNotificationDelivered();
-
         // Publish before signaling. Fetch buffers latch wakeups, so the application either observes the new
         // snapshot before waiting or is released after it has started waiting on the old snapshot.
         reactorSchedule = next;
 
-        // An already-expired decision is delivered by deliverExpiredReactorSchedule so it produces exactly one
-        // notification. Future deadlines wake a caller which may already be blocked using an older snapshot.
-        if (next.shortens(previous) && next.remainingMs(currentTimeMs) > 0L) {
+        if (log.isTraceEnabled() && !next.sameSchedule(previous)) {
+            log.trace(
+                "Reactor schedule changed: source={}, previousDeadline={}, deadline={}, networkPollTimeout={}",
+                next.pollSource().orElse("none"),
+                previous.pollDeadlineMs(),
+                next.pollDeadlineMs(),
+                next.networkPollTimeoutMs(currentTimeMs)
+            );
+        }
+
+        // This compatibility action only applies to the legacy application wait projection. Manager poll deadlines
+        // such as fetch reconnect backoff are reactor-only and cannot enter this branch.
+        if (next.shortensApplicationWait(previous) && next.applicationRemainingMs(currentTimeMs) > 0L) {
             pendingReactorActions.add(ReactorAction.WAKE_APPLICATION);
             pendingReactorActionReasons.add(
                 ReactorActionReason.SCHEDULE_SHORTENED
@@ -444,26 +455,26 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return next;
     }
 
-    private void deliverExpiredReactorSchedule(final long currentTimeMs) {
+    private void deliverExpiredApplicationDeadline(final long currentTimeMs) {
         ReactorSchedule current = reactorSchedule;
-        if (current.applicationNextReconcileType() != NextReconcile.Type.AT_DEADLINE
+        if (current.applicationDeadlineMs() == Long.MAX_VALUE
             || current.applicationRemainingMs(currentTimeMs) > 0L
-            || current.deadlineNotificationDelivered()) {
+            || current.applicationDeadlineDelivered()) {
             return;
         }
 
         // Mark delivery in the published snapshot before signaling. This prevents the released application thread
         // from observing a stale 0ms timeout and spinning while the manager processes the resulting event.
-        managerReconcileCache.markDeadlineDelivered(current);
-        reactorSchedule = current.withDeadlineNotificationDelivered();
+        managerPollCache.markApplicationDeadlineDelivered(current);
+        reactorSchedule = current.withApplicationDeadlineDelivered();
         pendingReactorActions.add(ReactorAction.WAKE_APPLICATION);
         pendingReactorActionReasons.add(
             ReactorActionReason.WAIT_DEADLINE_EXPIRED
         );
     }
 
-    private void collectStateTransitions(final Collection<ManagerReconcileResult> results) {
-        for (ManagerReconcileResult result : results)
+    private void collectStateTransitions(final Collection<NetworkClientDelegate.PollResult> results) {
+        for (NetworkClientDelegate.PollResult result : results)
             pendingStateTransitions.addAll(result.stateTransitions());
         if (!pendingStateTransitions.isEmpty()) {
             pendingReactorActions.add(ReactorAction.WAKE_APPLICATION);
@@ -477,24 +488,19 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         if (pendingReactorActions.isEmpty())
             return;
 
-        log.trace(
-            "Executing reactor actions {} for reasons {} and state transitions {}",
-            pendingReactorActions,
-            pendingReactorActionReasons,
-            pendingStateTransitions
-        );
+        if (log.isTraceEnabled()) {
+            log.trace(
+                "Executing reactor action: actions={}, reasons={}, stateTransitions={}",
+                pendingReactorActions,
+                pendingReactorActionReasons,
+                pendingStateTransitions
+            );
+        }
         if (pendingReactorActions.contains(ReactorAction.WAKE_APPLICATION))
             requestManagers.wakeupApplicationThread();
         pendingReactorActions.clear();
         pendingReactorActionReasons.clear();
         pendingStateTransitions.clear();
-    }
-
-    private long timeUntilNextReconcile(final ReactorSchedule decision,
-                                        final long currentTimeMs) {
-        if (decision.nextReconcileType() == NextReconcile.Type.ON_EVENT)
-            return Long.MAX_VALUE;
-        return decision.remainingMs(currentTimeMs);
     }
 
     // Visible for testing. The immutable snapshot is safe to inspect without exposing request-manager state.
