@@ -36,7 +36,7 @@ public class ManagerPollCacheTest {
         cache.update(manager, new PollResult(100L), Long.MAX_VALUE, 20L);
 
         ManagerPollCache.PollState state = cache.states().iterator().next();
-        assertEquals(110L, state.networkDeadlineMs());
+        assertEquals(110L, state.reactorDeadlineMs());
     }
 
     @Test
@@ -48,7 +48,7 @@ public class ManagerPollCacheTest {
         cache.update(manager, new PollResult(100L), Long.MAX_VALUE, 110L);
 
         ManagerPollCache.PollState state = cache.states().iterator().next();
-        assertEquals(210L, state.networkDeadlineMs());
+        assertEquals(210L, state.reactorDeadlineMs());
     }
 
     @Test

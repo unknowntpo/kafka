@@ -208,7 +208,7 @@ public class ConsumerReactorTest {
 
         verify(networkClientDelegate).poll(100L, startMs);
         verify(requestManagers, never()).wakeupApplicationThread();
-        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().networkDeadlineMs());
+        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().reactorDeadlineMs());
         assertEquals(Long.MAX_VALUE, consumerReactor.reactorSchedule().applicationDeadlineMs());
     }
 
@@ -224,7 +224,7 @@ public class ConsumerReactorTest {
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
         when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(result);
         doAnswer(invocation -> {
-            deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().networkDeadlineMs());
+            deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().reactorDeadlineMs());
             return null;
         }).when(requestManagers).wakeupApplicationThread();
 
@@ -328,7 +328,7 @@ public class ConsumerReactorTest {
             return null;
         }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
         doAnswer(invocation -> {
-            deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().networkDeadlineMs());
+            deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().reactorDeadlineMs());
             return null;
         }).when(requestManagers).wakeupApplicationThread();
 
@@ -365,7 +365,7 @@ public class ConsumerReactorTest {
         verify(networkClientDelegate).poll(30L, startMs + 30L);
         verify(networkClientDelegate).poll(40L, startMs + 60L);
         verify(requestManagers, never()).wakeupApplicationThread();
-        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().networkDeadlineMs());
+        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().reactorDeadlineMs());
     }
 
     @Test

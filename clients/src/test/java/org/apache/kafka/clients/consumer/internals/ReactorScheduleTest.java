@@ -36,7 +36,7 @@ public class ReactorScheduleTest {
     }
 
     @Test
-    public void testScheduleChoosesEarliestNetworkAndApplicationDeadlinesIndependently() {
+    public void testScheduleChoosesEarliestReactorAndApplicationDeadlinesIndependently() {
         RequestManager fetch = mock(FetchRequestManager.class);
         RequestManager heartbeat = mock(ConsumerHeartbeatRequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
@@ -47,7 +47,7 @@ public class ReactorScheduleTest {
 
         assertEquals(25L, schedule.networkPollTimeoutMs(42L));
         assertEquals(50L, schedule.remainingMsForApplication(42L));
-        assertEquals(ConsumerHeartbeatRequestManager.class.getSimpleName(), schedule.pollSource().orElseThrow());
+        assertEquals(ConsumerHeartbeatRequestManager.class.getSimpleName(), schedule.deadlineSource().orElseThrow());
     }
 
     @Test
@@ -81,6 +81,6 @@ public class ReactorScheduleTest {
         cache.update(heartbeat, new PollResult(100L), Long.MAX_VALUE, 60L);
         ReactorSchedule third = ReactorSchedule.from(cache.states(), 60L);
         assertEquals(40L, third.networkPollTimeoutMs(60L));
-        assertEquals(FetchRequestManager.class.getSimpleName(), third.pollSource().orElseThrow());
+        assertEquals(FetchRequestManager.class.getSimpleName(), third.deadlineSource().orElseThrow());
     }
 }
