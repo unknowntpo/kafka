@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.clients.consumer.internals.events.MetadataErrorNotifiableEvent;
 import org.apache.kafka.common.KafkaException;
 
 import java.util.Objects;
@@ -29,6 +30,7 @@ public abstract class ReactorAction {
 
     public enum Type {
         WAKE_APPLICATION,
+        NOTIFY_METADATA_ERROR,
         MARK_ASYNC_POLL_RECONCILIATION_COMPLETE,
         MARK_ASYNC_POLL_VALIDATE_POSITIONS_COMPLETE,
         COMPLETE_ASYNC_POLL
@@ -68,6 +70,23 @@ public abstract class ReactorAction {
             @Override
             public String toString() {
                 return type() + "(" + event.type() + ")";
+            }
+        };
+    }
+
+    public static ReactorAction notifyMetadataError(final MetadataErrorNotifiableEvent event,
+                                                    final Exception error) {
+        Objects.requireNonNull(event);
+        Objects.requireNonNull(error);
+        return new ReactorAction(Type.NOTIFY_METADATA_ERROR) {
+            @Override
+            public void execute(final RequestManagers requestManagers) {
+                event.onMetadataError(error);
+            }
+
+            @Override
+            public String toString() {
+                return type() + "(" + event + ")";
             }
         };
     }
