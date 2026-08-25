@@ -271,6 +271,35 @@ public class ConsumerReactorTest {
     }
 
     @Test
+    public void testMetadataErrorExecutesAfterSchedulePublicationAndBeforeWakeup() {
+        long currentTimeMs = time.milliseconds();
+        KafkaException metadataError = new KafkaException("metadata error");
+        AtomicLong completionGeneration = new AtomicLong(-1L);
+        AsyncPollEvent event = new AsyncPollEvent(currentTimeMs + 1_000L, currentTimeMs) {
+            @Override
+            public void onMetadataError(final Exception error) {
+                super.onMetadataError(error);
+                completionGeneration.set(consumerReactor.reactorScheduleGeneration());
+            }
+        };
+        applicationEventQueue.add(event);
+        when(networkClientDelegate.getAndClearMetadataError()).thenReturn(Optional.of(metadataError));
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        doAnswer(invocation -> {
+            assertTrue(event.isComplete(), "Metadata error must complete the event before wakeup");
+            assertEquals(completionGeneration.get(), consumerReactor.reactorScheduleGeneration());
+            return null;
+        }).when(requestManagers).wakeupApplicationThread();
+
+        consumerReactor.runOnce();
+
+        assertEquals(metadataError, event.error().orElseThrow());
+        assertTrue(completionGeneration.get() > 0L);
+        verify(applicationEventProcessor, never()).process(event);
+        verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
     public void testRequestCompletionPollsOnlyAffectedManagerAndPublishesBeforeWakeup() {
         long currentTimeMs = time.milliseconds();
         NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(

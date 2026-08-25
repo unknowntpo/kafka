@@ -290,7 +290,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
 
         reapExpiredApplicationEvents(currentTimeMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
-        maybeFailOnMetadataError(uncompletedEvents);
+        if (stageMetadataErrorActions(uncompletedEvents))
+            executeReactorActions();
     }
 
     /**
@@ -314,7 +315,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
                 // This call is meant to handle "immediately completed events" which may not enter the
                 // awaiting state, so metadata errors need to be checked and handled right away.
                 if (event instanceof MetadataErrorNotifiableEvent) {
-                    if (maybeFailOnMetadataError(List.of(event)))
+                    if (stageMetadataErrorActions(List.of(event)))
                         continue;
                 }
                 applicationEventProcessor.process(event);
@@ -624,9 +625,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     }
 
     /**
-     * If there is a metadata error, complete all uncompleted events that require subscription metadata.
+     * If there is a metadata error, stage completion of all uncompleted events that require subscription metadata.
+     * The caller publishes the current schedule before these actions complete the events and wake the application.
      */
-    private boolean maybeFailOnMetadataError(List<?> events) {
+    private boolean stageMetadataErrorActions(List<?> events) {
         List<MetadataErrorNotifiableEvent> filteredEvents = new ArrayList<>();
 
         for (Object obj : events) {
@@ -642,7 +644,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         Optional<Exception> metadataError = networkClientDelegate.getAndClearMetadataError();
 
         if (metadataError.isPresent()) {
-            filteredEvents.forEach(e -> e.onMetadataError(metadataError.get()));
+            filteredEvents.forEach(e -> pendingReactorActions.add(
+                ReactorAction.notifyMetadataError(e, metadataError.get())
+            ));
+            stageWakeApplication();
+            pendingReactorActionReasons.add(ReactorActionReason.METADATA_ERROR);
             return true;
         } else {
             return false;

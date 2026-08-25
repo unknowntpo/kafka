@@ -76,6 +76,7 @@ import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.InvalidGroupIdException;
+import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.errors.WakeupException;
@@ -2648,6 +2649,117 @@ public class AsyncKafkaConsumerTest {
         assertFalse(hasRequest(client, ApiKeys.FETCH));
         assertEquals(0, fetchBufferWakeups.get(),
             "A paused partition cannot make progress, so its empty preparation must not wake the fetch buffer");
+    }
+
+    @Test
+    public void testPollSurfacesMetadataErrorWithoutWaitingForFetchTimeout() throws Exception {
+        final Properties props = requiredConsumerConfigAndGroupId("group-id");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        final ConsumerConfig config = new ConsumerConfig(props);
+
+        final LogContext realLogContext = new LogContext();
+        final TopicPartition topicPartition = new TopicPartition("topic1", 0);
+        final SubscriptionState subscriptions = new SubscriptionState(
+            realLogContext,
+            AutoOffsetResetStrategy.EARLIEST
+        );
+        final ConsumerMetadata realMetadata = new ConsumerMetadata(
+            0,
+            0,
+            Long.MAX_VALUE,
+            false,
+            false,
+            subscriptions,
+            realLogContext,
+            new ClusterResourceListeners()
+        );
+        final AtomicBoolean blockReactorPoll = new AtomicBoolean();
+        final CountDownLatch reactorPollBlocked = new CountDownLatch(1);
+        final CountDownLatch releaseReactorPoll = new CountDownLatch(1);
+        final MockClient client = new MockClient(time, realMetadata) {
+            @Override
+            public List<ClientResponse> poll(final long timeoutMs, final long now) {
+                if (blockReactorPoll.compareAndSet(true, false)) {
+                    reactorPollBlocked.countDown();
+                    try {
+                        if (!releaseReactorPoll.await(5, TimeUnit.SECONDS))
+                            throw new AssertionError("Timed out waiting to release the reactor network poll");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError("Interrupted while holding the reactor network poll", e);
+                    }
+                }
+                return super.poll(0L, now);
+            }
+        };
+        final CountDownLatch applicationFetchWaitStarted = new CountDownLatch(1);
+        final AtomicInteger metadataErrorWakeups = new AtomicInteger();
+        final FetchBuffer observedFetchBuffer = new FetchBuffer(realLogContext) {
+            @Override
+            void awaitWakeup(final Timer timer) {
+                applicationFetchWaitStarted.countDown();
+                super.awaitWakeup(timer);
+            }
+
+            @Override
+            void wakeup() {
+                metadataErrorWakeups.incrementAndGet();
+                super.wakeup();
+            }
+        };
+
+        consumer = new AsyncKafkaConsumer<>(
+            realLogContext,
+            time,
+            config,
+            new StringDeserializer(),
+            new StringDeserializer(),
+            client,
+            subscriptions,
+            realMetadata,
+            observedFetchBuffer
+        );
+        consumer.assign(Set.of(topicPartition));
+        final ApplicationEventHandler handler = consumer.applicationEventHandler();
+        observedFetchBuffer.awaitWakeup(time.timer(0L));
+        metadataErrorWakeups.set(0);
+
+        blockReactorPoll.set(true);
+        handler.wakeupReactor();
+        assertTrue(reactorPollBlocked.await(5, TimeUnit.SECONDS), "The reactor did not enter the controlled network poll");
+
+        Future<ConsumerRecords<String, String>> pollingFuture = CompletableFuture.supplyAsync(
+            () -> consumer.poll(Duration.ofSeconds(30))
+        );
+        try {
+            assertTrue(applicationFetchWaitStarted.await(5, TimeUnit.SECONDS),
+                "The application did not enter the fetch-buffer wait");
+            realMetadata.fatalError(new TopicAuthorizationException(Set.of(topicPartition.topic())));
+            releaseReactorPoll.countDown();
+
+            final ExecutionException executionException;
+            try {
+                pollingFuture.get(5, TimeUnit.SECONDS);
+                throw new AssertionError("The poll unexpectedly completed without the metadata error");
+            } catch (ExecutionException expected) {
+                executionException = expected;
+            } catch (java.util.concurrent.TimeoutException timeoutException) {
+                throw new AssertionError(
+                    "The poll remained blocked after metadata error publication; wakeups=" + metadataErrorWakeups.get()
+                        + ", scheduleGeneration=" + handler.reactorScheduleGeneration(),
+                    timeoutException
+                );
+            }
+            assertInstanceOf(TopicAuthorizationException.class, executionException.getCause());
+            assertEquals(1, metadataErrorWakeups.get(),
+                "The metadata error must release the application fetch wait exactly once");
+        } finally {
+            releaseReactorPoll.countDown();
+            if (!pollingFuture.isDone()) {
+                consumer.wakeup();
+                TestUtils.assertFutureThrows(WakeupException.class, pollingFuture);
+            }
+        }
     }
 
     @Test
