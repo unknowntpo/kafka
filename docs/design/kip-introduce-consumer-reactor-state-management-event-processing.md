@@ -33,9 +33,10 @@ wake are still distributed across the application thread, background thread, req
 paths. These components can act on different snapshots, causing repeated wakeups, busy loops, lost notifications,
 and state-publication races.
 
-This proposal introduces `ConsumerReactor` as the single execution owner and coordinator of consumer-level logical
-resources: consumer state, queued work, deadlines, in-flight operations, buffer capacity, and
-application-visible actions. It serializes their transitions and derives poll, wait, and notification decisions.
+This proposal introduces `ConsumerReactor` as the single cross-resource execution coordinator and final decision
+owner for consumer state, queued work, deadlines, in-flight operations, buffer capacity, and application-visible
+actions. Resource-specific components retain their local state and rules; the reactor orders their execution and
+derives the final poll, wait, and notification decisions.
 
 The reactor is shared infrastructure for the regular consumer and share consumer because they use the same
 event-processing topology. Their membership, assignment or acquisition, fetch, commit or acknowledgement, and
@@ -112,9 +113,10 @@ points. It makes their ordering harder to define and test.
 
 ### Why the Reactor Pattern
 
-The Reactor Pattern gives event-driven resources one execution owner. `ConsumerReactor` applies that ownership to
-consumer state, work, deadlines, capacity, and actions. Resource-specific components encapsulate their representation
-and local rules, but only the reactor drives their transitions.
+The Reactor Pattern gives event-driven resources one execution context and one final coordinator. `ConsumerReactor`
+applies that coordination to consumer state, work, deadlines, capacity, and actions. Resource-specific components
+retain their local state and rules, but the reactor orders when their transitions run and combines their results into
+the final schedule and external actions.
 
 For each iteration, the reactor must answer two questions from one ordered view of state:
 
@@ -189,10 +191,10 @@ ConsumerNetworkThread
   -> callback-required event                       cross-thread publication
 ```
 
-`ApplicationEventHandler` is not the handler which executes protocol commands. It is the application-side gateway
-and lifecycle handle: submit, submit-and-wait, wake, read the published `ReactorSchedule`, and close. The actual command
-logic is in `ApplicationEventProcessor`, while `ConsumerNetworkThread` drains and orders the commands. A later
-mechanical rename to `ConsumerReactorHandle` would make that role clearer, but the rename is not required for this
+`ApplicationEventHandler` is not the handler which executes protocol commands. It is the application-side gateway:
+submit, submit-and-wait, wake, read the published `ReactorSchedule`, and close. The actual command logic is in
+`ApplicationEventProcessor`, while `ConsumerNetworkThread` drains and orders the commands. A later mechanical rename
+to `ConsumerReactorGateway` would make that cross-thread boundary clearer, but the rename is not required for this
 state ownership change.
 
 The background loop, request managers, and network delegate already execute on one thread, but their consumer-level
@@ -239,7 +241,7 @@ Before
 After
   Application thread
     -> ApplicationEventQueue
-       -> ConsumerReactor                 one resource and state-transition owner
+       -> ConsumerReactor                 one cross-resource decision owner
           -> protocol-specific consumer logic
           -> RequestManagers
           -> NetworkClientDelegate        same-thread direct calls
@@ -252,6 +254,23 @@ After
 The application thread and background thread remain. Application commands still cross the existing event queue,
 network I/O still runs on the background thread, and user callbacks still run on the application thread. The change
 is that application-visible reactor schedules are no longer recomputed in multiple places.
+
+The target responsibility change is:
+
+| Responsibility | Before this KIP | Target after this KIP |
+| --- | --- | --- |
+| Execution topology | Application thread plus `ConsumerNetworkThread` background loop | The same application/background topology; the background loop takes the `ConsumerReactor` responsibility |
+| Input ordering | Application commands are ordered on their queue, but completion, deadline, capacity, and notification decisions can occur on separate paths | `ConsumerReactor` defines the execution order across application commands and same-thread completion, deadline, capacity, and callback inputs |
+| Manager-owned state | Each request manager owns its local rules, but its requests, delays, transitions, and wake decisions can be reported through separate methods or paths | Each request manager keeps its local state and rules and returns requests, completed transitions, and `timeUntilNextPollMs` from one `poll()` snapshot |
+| Cross-manager scheduling | Network poll bounds and application waits can be computed independently, including application-side safety rescans | `ConsumerReactor` retains each manager's contribution and publishes one immutable `ReactorSchedule` |
+| Network boundary | `NetworkClientDelegate` owns transport mechanics and can also select an application-visible error or notification path | `NetworkClientDelegate` keeps transport and correlation ownership but returns outcomes; the reactor and selected driver choose consumer actions |
+| Application-visible effects | Managers and completion paths may complete futures, enqueue events or data, and wake the application directly | Managers report transitions; `ConsumerReactor` publishes state and schedule before executing ordered `ReactorAction` values |
+| Regular/share policy | Shared infrastructure contains regular/share branches and policy flags | One thin reactor kernel coordinates execution; separate regular and share drivers retain their own rules and state |
+| Resource admission | Queues, pending operations, in-flight work, and retained buffers have independent or missing limits | Each boundary enforces an explicit limit under the reactor's aggregate capacity plan, introduced in the resource-admission phase |
+
+The reactor therefore does not absorb manager logic or transport mechanics. It becomes the final owner of when
+inputs are applied, when managers are polled, which deadline bounds the next wait, and which external actions execute
+after publication.
 
 At a high level, one reactor iteration is:
 
@@ -278,6 +297,33 @@ action.
 
 Ownership is split deliberately: each request manager owns its local state and rules; `ConsumerReactor` owns input
 ordering, manager polling, the final cross-manager schedule, and actions.
+
+#### Event ordering and decision aggregation
+
+The reactor does not merge state-changing input events into one mutation. It applies application commands, network
+completions, deadline expirations, capacity releases, and callback acknowledgements in a deterministic order. After
+applying the ready inputs, it polls the affected managers and aggregates their results into one schedule. Only
+semantically equivalent external actions, such as multiple synthetic wake reasons in the same iteration, are
+coalesced. Requests, callbacks, and terminal operation results retain their own identities and ordering.
+
+For example:
+
+```text
+AssignmentChange({tp1, tp2})
+  -> apply the new assignment
+older OffsetFetch completion(scope={tp1})
+  -> update tp1 only; it cannot reset tp2
+heartbeat deadline expiry
+  -> poll heartbeat work
+
+manager results
+  -> retain each manager deadline
+  -> form and publish one ReactorSchedule
+  -> execute any coalesced wake action after publication
+```
+
+This distinction is important: input events are ordered, manager scheduling results are aggregated, and only
+equivalent actions are coalesced.
 
 The remaining sections define each responsibility and its internal representation in that order.
 
@@ -694,6 +740,8 @@ Testing is organized around observable event-processing behavior rather than pri
   OffsetFetch for `tp1`, add `tp2`, complete the older response, verify that `tp2` is not reset or sent to
   `ListOffsets`, then verify that the next OffsetFetch initializes `tp2`; the schedule must be published before the
   first application event completes;
+- KAFKA-20854 paused-partition ordering through the real consumer, reactor, fetch manager, and fetch buffer: an empty
+  fetch preparation completes without a Fetch request and without waking the application-side buffer;
 - groupless manual assignment with a valid position and reconnect backoff;
 - unsent fetch expiration through the real network delegate, the next ordered manager poll, and a
   blocking application waiter;
@@ -715,7 +763,7 @@ manager unit test alone is partial evidence.
 | KAFKA-18641, KAFKA-15529 | Manager regressions exist; cross-component transition-order tests pending. |
 | KAFKA-17439, KAFKA-17182 | Fetch unit coverage exists; exact cross-component reproductions pending. |
 | KAFKA-20426, KAFKA-20253 | Busy-loop and multi-manager schedule coverage is partial; exact production-chain reproductions pending. |
-| KAFKA-20854 | Action, schedule, and MockClient tests cover the invariant; exact paused-partition reproduction pending. |
+| KAFKA-20854 | Deterministic paused-partition component proof complete; the proposal records zero buffer wakes while pre-PR commit `9521d77da3` records one invalid wake. |
 | KAFKA-20397 | Publish-before-wakeup invariant is covered; exact metadata-error reproduction pending. |
 | KAFKA-18160 | Existing callback tests are partial; exactly-once acknowledgement component proof pending. |
 
@@ -741,6 +789,7 @@ manager unit test alone is partial evidence.
 | No reentrant transition | Completion callbacks enqueue facts; dependent manager transitions occur only in the reactor's ordered pass. |
 | No stale completion | An older operation id/generation cannot mutate current state or consume the current operation's terminal action. |
 | Captured operation scope | The KAFKA-17674 scenario passes in the proposal and fails at post-17066/pre-17674 commit `6744a718c2` because the older tp1 completion incorrectly produces `ListOffsets` work for newly added tp2. |
+| Transition-specific wake | The KAFKA-20854 paused-partition scenario produces no fetch-buffer wake in the proposal and one no-progress wake at pre-PR commit `9521d77da3`. |
 | Protocol isolation | Regular and share outcomes are tested through separate drivers with no type switch in the reactor. |
 | Transport/policy separation | Network delegate returns an outcome and never chooses an application event channel. |
 | Hard resource limits | Load beyond each bound has documented timeout/backpressure behavior and stable retained memory. |
@@ -814,20 +863,11 @@ will be documented as a separate compatibility item rather than implied by the `
 
 ## Rejected Alternatives
 
-### Continue adding local busy-loop conditions
+### Keep distributed decisions with local fixes
 
-Local timeout exceptions can fix one reproduction but preserve multiple decision authorities. New manager-owned states or
-mixed conditions then recreate the same class of bug elsewhere.
-
-### Keep an application-side safety rescan
-
-The rescan can compensate for a stale reactor snapshot, but it cannot atomically observe reactor state and creates a
-second scheduler. A publish-before-wakeup protocol directly fixes the stale-snapshot problem.
-
-### Use a generic wakeup boolean
-
-A boolean cannot distinguish data availability, in-flight completion, reconnect deadline, missing metadata, callback
-completion, or capacity release. It also cannot represent mixed conditions or operation identity.
+Local timeout conditions, application-side rescans, and generic wakeup booleans can address individual failures but
+retain multiple decision authorities. They cannot consistently preserve reason, identity, and publication ordering;
+the reactor provides one boundary for those decisions.
 
 ### Put all protocol logic in one omniscient reactor class
 
@@ -835,27 +875,11 @@ This centralizes code rather than decisions. It produces regular/share branches,
 and makes the reactor harder to evolve. Drivers keep policy local while the reactor remains the final execution
 authority.
 
-### Implement two complete reactor stacks
+### Implement separate regular and share reactor stacks
 
 Duplicating queue drain, polling, publication, shutdown, and resource-limit logic invites different concurrency bugs
-in regular and share consumers. Their common execution topology justifies a shared reactor layer; their protocol semantics
-justify separate drivers.
-
-### Add cross-thread queues between all components
-
-Queues are useful at ownership boundaries. Between components already running on the reactor thread, they weaken
-ordering, add wakeups, and introduce more capacity and shutdown problems.
-
-### Leave queues unbounded and rely on caller discipline
-
-An asynchronous client cannot guarantee bounded memory if internal admission is implicit. Caller discipline also
-cannot reserve capacity for terminal events or coordinate multiple internal producers.
-
-### Make KIP-945 completion a prerequisite
-
-KIP-945 documents the broader threading model, but its key detailed sections remain WIP/TBD while the implementation
-and bug history continue to evolve. Treating it as related history preserves continuity without blocking a focused,
-testable ownership and progress design.
+in regular and share consumers. Their common execution topology justifies a shared reactor layer, while separate
+drivers retain their different protocol rules.
 
 ### Migrate all managers and state in one patch
 
@@ -883,7 +907,7 @@ adapters permit staged replacement with explicit exit criteria.
 
 ## Open decisions before vote
 
-1. Whether `ApplicationEventHandler` should be mechanically renamed to `ConsumerReactorHandle` in the same proposal.
+1. Whether `ApplicationEventHandler` should be mechanically renamed to `ConsumerReactorGateway` in the same proposal.
 2. Exact default capacities, byte-accounting rules, overload behavior, and any required public configuration.
 3. Whether callback and application-wait notification share a single internal signal or retain specialized
    primitives behind one reactor schedule.
