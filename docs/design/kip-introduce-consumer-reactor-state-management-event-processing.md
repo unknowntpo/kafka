@@ -76,6 +76,7 @@ proposed design.
 | Evidence | Invalid intermediate state | Required behavior |
 | --- | --- | --- |
 | [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885) | Position update work was split across application and background threads. | One owner for a complete position transition. |
+| [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | Completion of an older OffsetFetch operation reset a partition added while that request was in flight. | A completion mutates only its captured operation scope; the later partition is handled by a later ordered operation. |
 | [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737) | Application position advancement raced with a background auto-commit snapshot. | Ordered position update and commit-snapshot creation. |
 | [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Consumed state became visible before its corresponding position. | Atomic publication of a completed transition. |
 | [KAFKA-17439 / PR 17035](https://github.com/apache/kafka/pull/17035) | Application and background threads inspected fetch-buffer state at different times. | One fetch scheduling decision from one snapshot. |
@@ -413,9 +414,10 @@ finite retry deadline.
 A `ReactorAction` is an external effect selected by the reactor after state and schedule publication. Managers report
 transitions; they do not select actions.
 
-The current migration slice supports `WAKE_APPLICATION`. Equivalent transitions within one iteration are coalesced
-into one primitive wakeup while their reasons remain observable. A meaningful trace is emitted only when an action
-actually executes:
+The current migration slice supports `WAKE_APPLICATION` and stages async-poll progress markers and terminal
+completion behind the same publish-before-action boundary. Equivalent wake transitions within one iteration are
+coalesced into one primitive wakeup while their reasons remain observable. A meaningful trace is emitted only when
+an action actually executes:
 
 ```text
 Executing reactor action:
@@ -424,9 +426,9 @@ reason=STATE_TRANSITION
 transitions=[FETCH_BUFFER_HAS_DATA]
 ```
 
-The broader migration will add operation completion, background-event publication, data publication, callback
-requirements, and consumer termination. Explicit `Consumer.wakeup()` remains a user interruption and is not
-coalesced with synthetic actions.
+The broader migration will move the remaining operation completions, background-event publication, data
+publication, callback requirements, and consumer termination behind this boundary. Explicit `Consumer.wakeup()`
+remains a user interruption and is not coalesced with synthetic actions.
 
 The ordering invariant is:
 
@@ -688,6 +690,10 @@ Testing is organized around observable event-processing behavior rather than pri
 
 - real `AsyncKafkaConsumer -> reactor handle -> ConsumerReactor -> FetchRequestManager -> FetchBuffer` with only the
   socket replaced by `MockClient`;
+- KAFKA-17066/17674 ordering through the real consumer, reactor, request managers, and `MockClient`: start an
+  OffsetFetch for `tp1`, add `tp2`, complete the older response, verify that `tp2` is not reset or sent to
+  `ListOffsets`, then verify that the next OffsetFetch initializes `tp2`; the schedule must be published before the
+  first application event completes;
 - groupless manual assignment with a valid position and reconnect backoff;
 - unsent fetch expiration through the real network delegate, the next ordered manager poll, and a
   blocking application waiter;
@@ -695,6 +701,23 @@ Testing is organized around observable event-processing behavior rather than pri
 - share acknowledgement and fetch work for the same busy node, proving protocol priority without reactor starvation
   or repeated empty polling;
 - callback-required/completed handshake under wakeup, interruption, and close.
+
+### Historical issue proof gates
+
+Each issue cited in Motivation is a test obligation, not evidence that the architecture fixes it automatically. A
+row is complete only when the proposal passes the original ordering through the relevant production components. A
+manager unit test alone is partial evidence.
+
+| Issue | Current proof state |
+| --- | --- |
+| KAFKA-17066 | Real consumer/reactor/manager/`MockClient` position-initialization path verified; pre-17066 negative baseline pending. |
+| KAFKA-17674 | Deterministic component proof complete; the same scenario fails at `6744a718c2` and passes in the proposal. |
+| KAFKA-18641, KAFKA-15529 | Manager regressions exist; cross-component transition-order tests pending. |
+| KAFKA-17439, KAFKA-17182 | Fetch unit coverage exists; exact cross-component reproductions pending. |
+| KAFKA-20426, KAFKA-20253 | Busy-loop and multi-manager schedule coverage is partial; exact production-chain reproductions pending. |
+| KAFKA-20854 | Action, schedule, and MockClient tests cover the invariant; exact paused-partition reproduction pending. |
+| KAFKA-20397 | Publish-before-wakeup invariant is covered; exact metadata-error reproduction pending. |
+| KAFKA-18160 | Existing callback tests are partial; exactly-once acknowledgement component proof pending. |
 
 ### Broker integration and system tests
 
@@ -717,6 +740,7 @@ Testing is organized around observable event-processing behavior rather than pri
 | No cyclic wait | Commit, coordinator, heartbeat, membership callback, and share acknowledgement waits each retain an external event, deadline, capacity, callback, cancellation, or shutdown edge. |
 | No reentrant transition | Completion callbacks enqueue facts; dependent manager transitions occur only in the reactor's ordered pass. |
 | No stale completion | An older operation id/generation cannot mutate current state or consume the current operation's terminal action. |
+| Captured operation scope | The KAFKA-17674 scenario passes in the proposal and fails at post-17066/pre-17674 commit `6744a718c2` because the older tp1 completion incorrectly produces `ListOffsets` work for newly added tp2. |
 | Protocol isolation | Regular and share outcomes are tested through separate drivers with no type switch in the reactor. |
 | Transport/policy separation | Network delegate returns an outcome and never chooses an application event channel. |
 | Hard resource limits | Load beyond each bound has documented timeout/backpressure behavior and stable retained memory. |
