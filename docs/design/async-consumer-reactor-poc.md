@@ -348,6 +348,10 @@ the next ordered fetch-manager poll, and a blocking fetch waiter.
   completion of the older tp1 OffsetFetch incorrectly creates `ListOffsets` work for newly added tp2.
 * Async-poll progress and completion are staged as `ReactorAction` values and execute only after schedule
   publication; a component assertion records the publication generation observed by completion.
+* `AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup` records zero buffer wakes through the
+  production consumer/reactor/fetch-manager path. The same behavior test records one invalid wake at pre-PR #23014
+  commit `9521d77da3`. PR #23014 can fix this symptom locally; the POC preserves that behavior while moving the final
+  notification decision behind the reactor action boundary.
 * The complete `AsyncKafkaConsumerTest`, `ConsumerReactorTest`, `ApplicationEventProcessorTest`,
   `ShareConsumerImplTest`, and `ShareHeartbeatRequestManagerTest` classes passed with Checkstyle and SpotBugs.
 * The full `clients` suite had one unrelated local TLS channel-readiness timeout. Its exact
