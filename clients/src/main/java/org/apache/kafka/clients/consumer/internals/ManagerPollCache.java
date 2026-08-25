@@ -27,8 +27,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Retains each request manager's latest poll deadlines. Relative delays are converted to absolute deadlines before
- * an early network response can cause an unrelated manager's deadline to move forward.
+ * Retains each request manager's latest reactor deadline. Relative poll delays are converted to absolute deadlines
+ * before an early reactor iteration can cause an unrelated manager's deadline to move forward.
  */
 final class ManagerPollCache {
     private final Map<RequestManager, PollState> states = new IdentityHashMap<>();
@@ -69,7 +69,7 @@ final class ManagerPollCache {
 
     static final class PollState {
         private final RequestManager manager;
-        private long networkDeadlineMs = Long.MAX_VALUE;
+        private long reactorDeadlineMs = Long.MAX_VALUE;
         private long applicationDeadlineMs = Long.MAX_VALUE;
         private boolean applicationDeadlineDelivered;
 
@@ -77,12 +77,12 @@ final class ManagerPollCache {
             this.manager = manager;
         }
 
-        private void update(final long networkPollDelayMs,
+        private void update(final long timeUntilNextPollMs,
                             final long applicationWaitMs,
                             final long currentTimeMs) {
-            networkDeadlineMs = preservePendingDeadline(
-                networkDeadlineMs,
-                deadlineAfter(currentTimeMs, networkPollDelayMs),
+            reactorDeadlineMs = preservePendingDeadline(
+                reactorDeadlineMs,
+                deadlineAfter(currentTimeMs, timeUntilNextPollMs),
                 currentTimeMs
             );
 
@@ -109,8 +109,8 @@ final class ManagerPollCache {
             return manager;
         }
 
-        long networkDeadlineMs() {
-            return networkDeadlineMs;
+        long reactorDeadlineMs() {
+            return reactorDeadlineMs;
         }
 
         long activeApplicationDeadlineMs() {

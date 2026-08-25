@@ -21,30 +21,30 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Immutable scheduling decision published by the reactor. The network deadline controls when managers are polled
+ * Immutable scheduling decision published by the reactor. The reactor deadline controls when managers are polled
  * again. The application deadline is a migration bridge for managers which still expose
  * {@link RequestManager#maximumTimeToWait(long)}; reactor-only deadlines never wake the application thread.
  */
 final class ReactorSchedule {
-    private final long networkDeadlineMs;
+    private final long reactorDeadlineMs;
     private final long applicationDeadlineMs;
     private final long decidedAtMs;
-    private final RequestManager networkSource;
+    private final RequestManager deadlineSource;
     private final RequestManager applicationSource;
     private final boolean applicationDeadlineDelivered;
     private final long generation;
 
-    private ReactorSchedule(final long networkDeadlineMs,
+    private ReactorSchedule(final long reactorDeadlineMs,
                             final long applicationDeadlineMs,
                             final long decidedAtMs,
-                            final RequestManager networkSource,
+                            final RequestManager deadlineSource,
                             final RequestManager applicationSource,
                             final boolean applicationDeadlineDelivered,
                             final long generation) {
-        this.networkDeadlineMs = networkDeadlineMs;
+        this.reactorDeadlineMs = reactorDeadlineMs;
         this.applicationDeadlineMs = applicationDeadlineMs;
         this.decidedAtMs = decidedAtMs;
-        this.networkSource = networkSource;
+        this.deadlineSource = deadlineSource;
         this.applicationSource = applicationSource;
         this.applicationDeadlineDelivered = applicationDeadlineDelivered;
         this.generation = generation;
@@ -61,14 +61,14 @@ final class ReactorSchedule {
                                 final long currentTimeMs) {
         Objects.requireNonNull(states, "Manager poll states must be non-null");
 
-        long networkDeadlineMs = Long.MAX_VALUE;
+        long reactorDeadlineMs = Long.MAX_VALUE;
         long applicationDeadlineMs = Long.MAX_VALUE;
-        RequestManager networkSource = null;
+        RequestManager deadlineSource = null;
         RequestManager applicationSource = null;
         for (ManagerPollCache.PollState state : states) {
-            if (state.networkDeadlineMs() < networkDeadlineMs) {
-                networkDeadlineMs = state.networkDeadlineMs();
-                networkSource = state.manager();
+            if (state.reactorDeadlineMs() < reactorDeadlineMs) {
+                reactorDeadlineMs = state.reactorDeadlineMs();
+                deadlineSource = state.manager();
             }
             if (state.activeApplicationDeadlineMs() < applicationDeadlineMs) {
                 applicationDeadlineMs = state.activeApplicationDeadlineMs();
@@ -76,10 +76,10 @@ final class ReactorSchedule {
             }
         }
         return new ReactorSchedule(
-            networkDeadlineMs,
+            reactorDeadlineMs,
             applicationDeadlineMs,
             currentTimeMs,
-            networkSource,
+            deadlineSource,
             applicationSource,
             false,
             0L
@@ -112,14 +112,14 @@ final class ReactorSchedule {
         return applicationDeadlineMs;
     }
 
-    long networkDeadlineMs() {
-        return networkDeadlineMs;
+    long reactorDeadlineMs() {
+        return reactorDeadlineMs;
     }
 
     long pollDeadlineMs() {
-        if (!applicationDeadlineDelivered && applicationDeadlineMs < networkDeadlineMs)
+        if (!applicationDeadlineDelivered && applicationDeadlineMs < reactorDeadlineMs)
             return applicationDeadlineMs;
-        return networkDeadlineMs;
+        return reactorDeadlineMs;
     }
 
     long decidedAtMs() {
@@ -135,16 +135,16 @@ final class ReactorSchedule {
     }
 
     boolean sameSchedule(final ReactorSchedule other) {
-        return networkDeadlineMs == other.networkDeadlineMs
+        return reactorDeadlineMs == other.reactorDeadlineMs
             && applicationDeadlineMs == other.applicationDeadlineMs
-            && Objects.equals(networkSource, other.networkSource)
+            && Objects.equals(deadlineSource, other.deadlineSource)
             && Objects.equals(applicationSource, other.applicationSource);
     }
 
-    Optional<String> pollSource() {
-        if (!applicationDeadlineDelivered && applicationDeadlineMs < networkDeadlineMs)
+    Optional<String> deadlineSource() {
+        if (!applicationDeadlineDelivered && applicationDeadlineMs < reactorDeadlineMs)
             return sourceName(applicationSource);
-        return sourceName(networkSource);
+        return sourceName(deadlineSource);
     }
 
     Optional<String> applicationSource() {
@@ -155,10 +155,10 @@ final class ReactorSchedule {
         if (applicationDeadlineMs == Long.MAX_VALUE)
             throw new IllegalStateException("An unbounded application wait cannot expire");
         return new ReactorSchedule(
-            networkDeadlineMs,
+            reactorDeadlineMs,
             applicationDeadlineMs,
             decidedAtMs,
-            networkSource,
+            deadlineSource,
             applicationSource,
             true,
             generation
@@ -167,10 +167,10 @@ final class ReactorSchedule {
 
     ReactorSchedule withGeneration(final long nextGeneration) {
         return new ReactorSchedule(
-            networkDeadlineMs,
+            reactorDeadlineMs,
             applicationDeadlineMs,
             decidedAtMs,
-            networkSource,
+            deadlineSource,
             applicationSource,
             applicationDeadlineDelivered,
             nextGeneration

@@ -438,7 +438,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         if (log.isTraceEnabled() && !next.sameSchedule(previous)) {
             log.trace(
                 "Reactor schedule changed: source={}, previousDeadline={}, deadline={}, networkPollTimeout={}",
-                next.pollSource().orElse("none"),
+                next.deadlineSource().orElse("none"),
                 previous.pollDeadlineMs(),
                 next.pollDeadlineMs(),
                 next.networkPollTimeoutMs(currentTimeMs)
