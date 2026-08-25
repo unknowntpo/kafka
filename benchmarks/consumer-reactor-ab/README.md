@@ -194,14 +194,18 @@ checkout. Selecting the method without parameters is a short smoke run:
 tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision
 ```
 
-Formal runs must inject the profile, logical variant, and workload explicitly. The current `ducker-ak` parser accepts
-Ducktape arguments after `--`; when this is carried through the Jenkins `TC_PATHS` value, the proposal value is:
+Formal runs must inject the profile, logical variant, and workload explicitly. Jenkins `run_tests.sh` already
+appends the single `--` separator consumed by `ducker-ak` before its Ducktape options. Therefore, a Jenkins
+`TC_PATHS` value must put `--parameters` directly after the test selector and must not add another `--`:
 
 ```text
-tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision -- --parameters \{\"metadata_quorum\":\"COMBINED_KRAFT\",\"reactor_ab_profile\":\"formal\",\"reactor_ab_variant\":\"proposal\",\"reactor_ab_repetitions\":5,\"reactor_ab_idle_duration_ms\":60000,\"reactor_ab_first_record_warmup_samples\":10,\"reactor_ab_first_record_samples\":100,\"reactor_ab_first_record_idle_ms\":1000,\"reactor_ab_poll_timeout_ms\":30000\}
+tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision --parameters \{\"metadata_quorum\":\"COMBINED_KRAFT\",\"reactor_ab_profile\":\"formal\",\"reactor_ab_variant\":\"proposal\",\"reactor_ab_repetitions\":5,\"reactor_ab_idle_duration_ms\":60000,\"reactor_ab_first_record_warmup_samples\":10,\"reactor_ab_first_record_samples\":100,\"reactor_ab_first_record_idle_ms\":1000,\"reactor_ab_poll_timeout_ms\":30000\}
 ```
 
 The backslashes preserve the JSON braces and quotes through `run_tests.sh` and `ducker-ak` shell argument forwarding.
+The resulting Ducktape invocation contains `--parameters` and Jenkins' `--max-parallel` option, with no stray
+separator passed to Ducktape. A direct `ducker-ak test` invocation outside `run_tests.sh` still uses `--` before
+Ducktape arguments, as documented by `ducker-ak --help`.
 Use the identical value with `reactor_ab_variant` set to `pre-refactor-async-baseline` on the baseline+harness revision.
 The wrapper rejects a formal profile without one of those two explicit variant names. Passing the bare file or class
 is discouraged; the method selector above makes the Jenkins scope auditable. Revalidate this forwarding against the
