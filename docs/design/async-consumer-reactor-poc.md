@@ -170,7 +170,7 @@ the final decision must not turn the reactor into a switch statement containing 
 | Decision | Current authority | Coverage | Remaining gap |
 | --- | --- | --- | --- |
 | Earliest application deadline across managers | Reactor | absolute deadlines, elapsed-time subtraction, same-source preservation | most managers still use the compatibility timeout adapter |
-| Network poll duration | Reactor | manager `timeUntilNextPollMs` deadlines cap every poll | inputs are not yet typed by reason |
+| Reactor deadline and network poll duration | Reactor | manager `timeUntilNextPollMs` produces `reactorDeadlineMs`; `networkPollTimeoutMs(now)` projects its remaining time onto the network poll | inputs are not yet typed by reason |
 | Publish-before-wakeup ordering | Reactor | shorter schedules, deadline expiry, and named fetch state transitions are coalesced into `ReactorAction` after publication | dedicated application-wait primitive remains a possible follow-up |
 | Deadline delivery | Reactor | one-shot delivery, no stale `0 ms`, distinct source and native fetch generation at the same timestamp | compatibility managers still lack explicit operation generations |
 | Fetch blocked by missing leader | Fetch manager reports a typed blocker; reactor schedules | bounded retry deadline | metadata completion is not yet a named reactor action |
@@ -226,6 +226,10 @@ is therefore not added to the wait again. Re-observing the same blocking conditi
 otherwise unrelated events could continuously move the retry forward and create starvation. The reactor retains each
 manager's contribution separately, so updating one manager cannot erase another manager's deadline. A delivered
 compatibility `0 ms` application deadline remains suppressed until that manager reports a new positive wait.
+
+The retained value is named `reactorDeadlineMs` because `timeUntilNextPollMs` can represent reconnect backoff,
+metadata, capacity, callback, or local-state progress without producing network I/O. `networkPollTimeoutMs(now)` is
+only the remaining-time projection passed to `NetworkClientDelegate.poll()`.
 
 The fourth POC slice removes the application-side `SubscriptionState` / `FetchBuffer` safety rescan. Fetchable
 partitions now rely on their concrete preparation blockers: missing leader and reconnect use reactor deadlines,
