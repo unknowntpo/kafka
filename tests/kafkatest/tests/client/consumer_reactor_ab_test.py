@@ -94,14 +94,14 @@ rm -rf -- "$root"
 mkdir -p "$root/classes" "$root/raw"
 
 client_jar_count="$(find "$repo/clients/build/libs" -maxdepth 1 -type f \
-    -name 'kafka-clients-*.jar' ! -name '*-test-fixtures.jar' \
+    -name 'kafka-clients-*.jar' ! -name '*-test.jar' ! -name '*-test-fixtures.jar' \
     ! -name '*-sources.jar' ! -name '*-javadoc.jar' | wc -l)"
 if [[ "$client_jar_count" -ne 1 ]]; then
     echo "Expected exactly one current-revision kafka-clients jar; found $client_jar_count" >&2
     exit 1
 fi
 client_jar="$(find "$repo/clients/build/libs" -maxdepth 1 -type f \
-    -name 'kafka-clients-*.jar' ! -name '*-test-fixtures.jar' \
+    -name 'kafka-clients-*.jar' ! -name '*-test.jar' ! -name '*-test-fixtures.jar' \
     ! -name '*-sources.jar' ! -name '*-javadoc.jar')"
 classpath="$client_jar"
 while IFS= read -r dependency; do
