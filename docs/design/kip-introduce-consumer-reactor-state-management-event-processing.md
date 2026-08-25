@@ -208,6 +208,11 @@ For every manager result, the reactor converts `timeUntilNextPollMs` into an abs
 manager's contribution. `ReactorSchedule` selects the earliest retained deadline. Updating one manager cannot erase
 an earlier deadline from another manager, and an unrelated early network return cannot postpone existing work.
 
+This absolute value is the reactor deadline, not a promise of network I/O. It means the reactor must poll the manager
+again by that time; reconnect backoff, metadata, capacity, callback, or local-state progress may be the reason. The
+reactor derives `networkPollTimeoutMs(now)` from the remaining reactor deadline only when it calls the existing
+network client.
+
 The published schedule satisfies these properties:
 
 - the same snapshot bounds network polling and application waiting;
