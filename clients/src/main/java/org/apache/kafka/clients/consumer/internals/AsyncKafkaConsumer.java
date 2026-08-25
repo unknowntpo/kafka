@@ -668,11 +668,34 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                        KafkaClient client,
                        SubscriptionState subscriptions,
                        ConsumerMetadata metadata) {
+        this(
+            logContext,
+            time,
+            config,
+            keyDeserializer,
+            valueDeserializer,
+            client,
+            subscriptions,
+            metadata,
+            new FetchBuffer(logContext)
+        );
+    }
+
+    // Visible for deterministic component tests that need to observe the application/reactor wait boundary.
+    AsyncKafkaConsumer(LogContext logContext,
+                       Time time,
+                       ConsumerConfig config,
+                       Deserializer<K> keyDeserializer,
+                       Deserializer<V> valueDeserializer,
+                       KafkaClient client,
+                       SubscriptionState subscriptions,
+                       ConsumerMetadata metadata,
+                       FetchBuffer fetchBuffer) {
         this.log = logContext.logger(getClass());
         this.subscriptions = subscriptions;
         this.clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
         this.autoCommitEnabled = config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
-        this.fetchBuffer = new FetchBuffer(logContext);
+        this.fetchBuffer = fetchBuffer;
         this.isolationLevel = IsolationLevel.READ_UNCOMMITTED;
         this.time = time;
         this.metrics = new Metrics(time);

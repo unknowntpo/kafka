@@ -2529,7 +2529,7 @@ public class AsyncKafkaConsumerTest {
         consumer.assign(Set.of(tp1));
         final ApplicationEventHandler handler = consumer.applicationEventHandler();
         final AtomicLong completionScheduleGeneration = new AtomicLong(-1L);
-        final AsyncPollEvent firstPoll = new AsyncPollEvent(30_000L, time.milliseconds()) {
+        final AsyncPollEvent firstPoll = new AsyncPollEvent(time.milliseconds() + 30_000L, time.milliseconds()) {
             @Override
             public void completeSuccessfully() {
                 completionScheduleGeneration.set(handler.reactorScheduleGeneration());
@@ -2550,7 +2550,7 @@ public class AsyncKafkaConsumerTest {
         final long assignmentGeneration = handler.reactorScheduleGeneration();
         handler.addAndGet(new AssignmentChangeEvent(
             time.milliseconds(),
-            30_000L,
+            time.milliseconds() + 30_000L,
             Set.of(tp1, tp2)
         ));
         TestUtils.waitForCondition(
@@ -2574,7 +2574,7 @@ public class AsyncKafkaConsumerTest {
         assertEquals(10L, subscriptions.validPosition(tp1).offset);
         assertNull(subscriptions.validPosition(tp2));
 
-        final AsyncPollEvent secondPoll = new AsyncPollEvent(30_000L, time.milliseconds());
+        final AsyncPollEvent secondPoll = new AsyncPollEvent(time.milliseconds() + 30_000L, time.milliseconds());
         handler.add(secondPoll);
         final ClientRequest secondOffsetFetch = waitForRequest(client, ApiKeys.OFFSET_FETCH);
         assertEquals(Set.of(tp2), offsetFetchPartitions(secondOffsetFetch, groupId),
@@ -2585,6 +2585,69 @@ public class AsyncKafkaConsumerTest {
         handler.wakeupReactor();
         TestUtils.waitForCondition(secondPoll::isComplete, "The second poll did not complete");
         assertEquals(20L, subscriptions.validPosition(tp2).offset);
+    }
+
+    @Test
+    public void testPausedPartitionDoesNotProduceNoProgressWakeup() throws Exception {
+        final Properties props = requiredConsumerConfig();
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        final ConsumerConfig config = new ConsumerConfig(props);
+
+        final LogContext realLogContext = new LogContext();
+        final TopicPartition topicPartition = new TopicPartition("topic1", 0);
+        final SubscriptionState subscriptions = new SubscriptionState(
+            realLogContext,
+            AutoOffsetResetStrategy.EARLIEST
+        );
+        final ConsumerMetadata realMetadata = new ConsumerMetadata(
+            0,
+            0,
+            Long.MAX_VALUE,
+            false,
+            false,
+            subscriptions,
+            realLogContext,
+            new ClusterResourceListeners()
+        );
+        final MockClient client = new MockClient(time, realMetadata);
+        final AtomicInteger fetchBufferWakeups = new AtomicInteger();
+        final FetchBuffer observedFetchBuffer = new FetchBuffer(realLogContext) {
+            @Override
+            void wakeup() {
+                fetchBufferWakeups.incrementAndGet();
+                super.wakeup();
+            }
+        };
+
+        consumer = new AsyncKafkaConsumer<>(
+            realLogContext,
+            time,
+            config,
+            new StringDeserializer(),
+            new StringDeserializer(),
+            client,
+            subscriptions,
+            realMetadata,
+            observedFetchBuffer
+        );
+        consumer.assign(Set.of(topicPartition));
+        consumer.seek(topicPartition, 0L);
+        consumer.pause(Set.of(topicPartition));
+        assertEquals(Set.of(topicPartition), consumer.paused());
+
+        final ApplicationEventHandler handler = consumer.applicationEventHandler();
+        fetchBufferWakeups.set(0);
+        final AsyncPollEvent pollEvent = new AsyncPollEvent(
+            time.milliseconds() + 30_000L,
+            time.milliseconds()
+        );
+        handler.add(pollEvent);
+        TestUtils.waitForCondition(pollEvent::isComplete, "Paused-partition poll event did not complete");
+
+        assertTrue(pollEvent.error().isEmpty());
+        assertFalse(hasRequest(client, ApiKeys.FETCH));
+        assertEquals(0, fetchBufferWakeups.get(),
+            "A paused partition cannot make progress, so its empty preparation must not wake the fetch buffer");
     }
 
     @Test
