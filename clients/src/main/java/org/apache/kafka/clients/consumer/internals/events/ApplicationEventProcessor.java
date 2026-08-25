@@ -64,7 +64,15 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
     private final Metadata metadata;
     private final SubscriptionState subscriptions;
     private final RequestManagers requestManagers;
+
+    /**
+     * Application-visible effects produced while handling an event or one of its completion callbacks. The
+     * processor only stages these effects; {@link ConsumerReactor} drains them after publishing the schedule for
+     * the same phase, preserving publish-before-complete/wakeup ordering.
+     */
     private final ConcurrentLinkedQueue<ReactorAction> pendingReactorActions = new ConcurrentLinkedQueue<>();
+
+    /** Last metadata generation evaluated for a pattern subscription, used to avoid reapplying the same snapshot. */
     private int metadataVersionSnapshot;
 
     public ApplicationEventProcessor(final LogContext logContext,

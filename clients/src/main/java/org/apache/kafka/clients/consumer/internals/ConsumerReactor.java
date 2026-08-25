@@ -90,13 +90,34 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
+
+    /**
+     * Latest immutable decision published to the application thread. Volatile publication is the ownership
+     * boundary: readers may derive a wait bound, but only the reactor thread replaces the schedule.
+     */
     private volatile ReactorSchedule reactorSchedule;
+
+    /** Retains one absolute deadline per manager so unrelated early I/O cannot postpone another manager's work. */
     private final ManagerPollCache managerPollCache = new ManagerPollCache();
+
+    /**
+     * Managers whose requests completed during network polling. Request callbacks add their owning manager and
+     * the post-I/O pass polls only this stable snapshot; newly affected managers wait for the next full pass.
+     */
     private final Set<RequestManager> affectedManagers =
         Collections.newSetFromMap(new IdentityHashMap<>());
+
+    /** State changes observed in the current phase, coalesced into one application notification and trace entry. */
     private final EnumSet<StateTransition> pendingStateTransitions =
         EnumSet.noneOf(StateTransition.class);
+
+    /**
+     * Effects staged for the current reactor phase. They execute only after schedule publication; application
+     * wakeup is de-duplicated and executed last so the released thread observes all preceding effects.
+     */
     private final List<ReactorAction> pendingReactorActions = new ArrayList<>();
+
+    /** Diagnostic causes associated with {@link #pendingReactorActions}; these do not make scheduling decisions. */
     private final EnumSet<ReactorActionReason> pendingReactorActionReasons =
         EnumSet.noneOf(ReactorActionReason.class);
     private long lastPollTimeMs = 0L;

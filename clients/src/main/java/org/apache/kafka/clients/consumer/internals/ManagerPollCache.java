@@ -31,7 +31,10 @@ import java.util.Set;
  * before an early reactor iteration can cause an unrelated manager's deadline to move forward.
  */
 final class ManagerPollCache {
+    /** Manager identity is the cache key; managers are execution components, not value objects. */
     private final Map<RequestManager, PollState> states = new IdentityHashMap<>();
+
+    /** Stable manager order used when exposing states, including deterministic tie-breaking and diagnostics. */
     private final List<RequestManager> managerOrder = new ArrayList<>();
 
     void update(final RequestManager manager,
@@ -69,8 +72,14 @@ final class ManagerPollCache {
 
     static final class PollState {
         private final RequestManager manager;
+
+        /** Absolute form of the manager's latest retained {@code timeUntilNextPollMs}. */
         private long reactorDeadlineMs = Long.MAX_VALUE;
+
+        /** Absolute compatibility deadline derived from {@link RequestManager#maximumTimeToWait(long)}. */
         private long applicationDeadlineMs = Long.MAX_VALUE;
+
+        /** One-shot delivery marker for an expired compatibility deadline. */
         private boolean applicationDeadlineDelivered;
 
         private PollState(final RequestManager manager) {

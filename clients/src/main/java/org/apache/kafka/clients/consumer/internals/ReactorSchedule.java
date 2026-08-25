@@ -26,12 +26,25 @@ import java.util.Optional;
  * {@link RequestManager#maximumTimeToWait(long)}; reactor-only deadlines never wake the application thread.
  */
 final class ReactorSchedule {
+    /** Earliest retained deadline at which the reactor must poll a manager again. */
     private final long reactorDeadlineMs;
+
+    /** Compatibility deadline which may release the application while managers still expose legacy wait hints. */
     private final long applicationDeadlineMs;
+
+    /** Clock value at which this immutable snapshot was formed, used to project absolute deadlines to delays. */
     private final long decidedAtMs;
+
+    /** Manager contributing {@link #reactorDeadlineMs}; retained for diagnostics rather than policy dispatch. */
     private final RequestManager deadlineSource;
+
+    /** Manager contributing {@link #applicationDeadlineMs}; retained for diagnostics and delivery tracking. */
     private final RequestManager applicationSource;
+
+    /** Prevents one expired compatibility deadline from repeatedly waking the application. */
     private final boolean applicationDeadlineDelivered;
+
+    /** Monotonic publication sequence used to verify that effects observe their phase's published schedule. */
     private final long generation;
 
     private ReactorSchedule(final long reactorDeadlineMs,
