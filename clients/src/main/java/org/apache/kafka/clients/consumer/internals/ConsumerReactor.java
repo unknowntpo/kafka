@@ -96,8 +96,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         Collections.newSetFromMap(new IdentityHashMap<>());
     private final EnumSet<StateTransition> pendingStateTransitions =
         EnumSet.noneOf(StateTransition.class);
-    private final EnumSet<ReactorAction> pendingReactorActions =
-        EnumSet.noneOf(ReactorAction.class);
+    private final List<ReactorAction> pendingReactorActions = new ArrayList<>();
     private final EnumSet<ReactorActionReason> pendingReactorActionReasons =
         EnumSet.noneOf(ReactorActionReason.class);
     private long lastPollTimeMs = 0L;
@@ -264,6 +263,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             pollWaitTimeMs,
             proposedSchedule.networkPollTimeoutMs(currentTimeMs)
         );
+        collectApplicationEventActions();
         collectStateTransitions(pollResults);
         executeReactorActions();
 
@@ -285,6 +285,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             deliverExpiredApplicationDeadline(afterNetworkPollMs);
             collectStateTransitions(postIoResults);
         }
+        collectApplicationEventActions();
         executeReactorActions();
 
         reapExpiredApplicationEvents(currentTimeMs);
@@ -427,7 +428,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         final long currentTimeMs
     ) {
         ReactorSchedule previous = reactorSchedule;
-        ReactorSchedule next = decision;
+        ReactorSchedule next = decision.withGeneration(previous.generation() + 1L);
 
         // Publish before signaling. Fetch buffers latch wakeups, so the application either observes the new
         // snapshot before waiting or is released after it has started waiting on the old snapshot.
@@ -446,7 +447,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         // This compatibility action only applies to the legacy application wait projection. Manager poll deadlines
         // such as fetch reconnect backoff are reactor-only and cannot enter this branch.
         if (next.shortensApplicationWait(previous) && next.applicationRemainingMs(currentTimeMs) > 0L) {
-            pendingReactorActions.add(ReactorAction.WAKE_APPLICATION);
+            stageWakeApplication();
             pendingReactorActionReasons.add(
                 ReactorActionReason.SCHEDULE_SHORTENED
             );
@@ -467,7 +468,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         // from observing a stale 0ms timeout and spinning while the manager processes the resulting event.
         managerPollCache.markApplicationDeadlineDelivered(current);
         reactorSchedule = current.withApplicationDeadlineDelivered();
-        pendingReactorActions.add(ReactorAction.WAKE_APPLICATION);
+        stageWakeApplication();
         pendingReactorActionReasons.add(
             ReactorActionReason.WAIT_DEADLINE_EXPIRED
         );
@@ -477,7 +478,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         for (NetworkClientDelegate.PollResult result : results)
             pendingStateTransitions.addAll(result.stateTransitions());
         if (!pendingStateTransitions.isEmpty()) {
-            pendingReactorActions.add(ReactorAction.WAKE_APPLICATION);
+            stageWakeApplication();
             pendingReactorActionReasons.add(
                 ReactorActionReason.STATE_TRANSITION
             );
@@ -496,16 +497,39 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
                 pendingStateTransitions
             );
         }
-        if (pendingReactorActions.contains(ReactorAction.WAKE_APPLICATION))
-            requestManagers.wakeupApplicationThread();
+        // Complete or publish event state before releasing the application thread. A wakeup is retained and
+        // coalesced, so executing it last cannot lose the notification.
+        for (ReactorAction action : pendingReactorActions) {
+            if (action.type() != ReactorAction.Type.WAKE_APPLICATION)
+                action.execute(requestManagers);
+        }
+        if (pendingReactorActions.contains(ReactorAction.wakeApplication()))
+            ReactorAction.wakeApplication().execute(requestManagers);
         pendingReactorActions.clear();
         pendingReactorActionReasons.clear();
         pendingStateTransitions.clear();
     }
 
+    private void collectApplicationEventActions() {
+        List<ReactorAction> actions = applicationEventProcessor.drainReactorActions();
+        pendingReactorActions.addAll(actions);
+        if (!actions.isEmpty())
+            pendingReactorActionReasons.add(ReactorActionReason.APPLICATION_EVENT_PROGRESS);
+    }
+
+    private void stageWakeApplication() {
+        ReactorAction wakeApplication = ReactorAction.wakeApplication();
+        if (!pendingReactorActions.contains(wakeApplication))
+            pendingReactorActions.add(wakeApplication);
+    }
+
     // Visible for testing. The immutable snapshot is safe to inspect without exposing request-manager state.
     ReactorSchedule reactorSchedule() {
         return reactorSchedule;
+    }
+
+    public long reactorScheduleGeneration() {
+        return reactorSchedule.generation();
     }
 
     @Override

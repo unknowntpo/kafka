@@ -29,6 +29,7 @@ import org.apache.kafka.clients.consumer.internals.FetchRequestManager;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
 import org.apache.kafka.clients.consumer.internals.OffsetsRequestManager;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
+import org.apache.kafka.clients.consumer.internals.ReactorAction;
 import org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager;
 import org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManager;
 import org.apache.kafka.clients.consumer.internals.ShareMembershipManager;
@@ -62,6 +63,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.apache.kafka.clients.consumer.internals.events.CompletableEvent.calculateDeadlineMs;
@@ -299,6 +301,14 @@ public class ApplicationEventProcessorTest {
             .thenReturn(CompletableFuture.completedFuture(null));
         when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
         processor.process(event);
+        assertFalse(event.isComplete());
+        List<ReactorAction> actions = processor.drainReactorActions();
+        assertEquals(List.of(
+            ReactorAction.Type.MARK_ASYNC_POLL_RECONCILIATION_COMPLETE,
+            ReactorAction.Type.MARK_ASYNC_POLL_VALIDATE_POSITIONS_COMPLETE,
+            ReactorAction.Type.COMPLETE_ASYNC_POLL
+        ), actions.stream().map(ReactorAction::type).collect(Collectors.toList()));
+        actions.forEach(action -> action.execute(null));
         assertTrue(event.isComplete());
         verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());
         verify(membershipManager).onConsumerPoll();
@@ -758,6 +768,8 @@ public class ApplicationEventProcessorTest {
         AsyncPollEvent event = new AsyncPollEvent(110, 100);
         processor.process(event);
         verify(offsetsRequestManager).updateFetchPositionsForAsyncPoll(anyLong());
+        assertFalse(event.isComplete());
+        processor.drainReactorActions().forEach(action -> action.execute(null));
         assertTrue(event.isComplete());
         assertFalse(event.error().isEmpty());
     }

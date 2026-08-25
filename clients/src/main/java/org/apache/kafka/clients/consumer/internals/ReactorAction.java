@@ -16,7 +16,98 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-/** External actions selected and coalesced by the reactor after it publishes a schedule. */
-enum ReactorAction {
-    WAKE_APPLICATION
+import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.common.KafkaException;
+
+import java.util.Objects;
+
+/**
+ * An application-visible effect selected by the reactor and executed only after the corresponding
+ * {@link ReactorSchedule} has been published.
+ */
+public abstract class ReactorAction {
+
+    public enum Type {
+        WAKE_APPLICATION,
+        MARK_ASYNC_POLL_RECONCILIATION_COMPLETE,
+        MARK_ASYNC_POLL_VALIDATE_POSITIONS_COMPLETE,
+        COMPLETE_ASYNC_POLL
+    }
+
+    private static final ReactorAction WAKE_APPLICATION = new ReactorAction(Type.WAKE_APPLICATION) {
+        @Override
+        public void execute(final RequestManagers requestManagers) {
+            requestManagers.wakeupApplicationThread();
+        }
+    };
+
+    private final Type type;
+
+    private ReactorAction(final Type type) {
+        this.type = Objects.requireNonNull(type);
+    }
+
+    public Type type() {
+        return type;
+    }
+
+    public abstract void execute(RequestManagers requestManagers);
+
+    public static ReactorAction wakeApplication() {
+        return WAKE_APPLICATION;
+    }
+
+    public static ReactorAction markAsyncPollReconciliationComplete(final AsyncPollEvent event) {
+        Objects.requireNonNull(event);
+        return new ReactorAction(Type.MARK_ASYNC_POLL_RECONCILIATION_COMPLETE) {
+            @Override
+            public void execute(final RequestManagers requestManagers) {
+                event.markReconciliationCheckComplete();
+            }
+
+            @Override
+            public String toString() {
+                return type() + "(" + event.type() + ")";
+            }
+        };
+    }
+
+    public static ReactorAction markAsyncPollValidatePositionsComplete(final AsyncPollEvent event) {
+        Objects.requireNonNull(event);
+        return new ReactorAction(Type.MARK_ASYNC_POLL_VALIDATE_POSITIONS_COMPLETE) {
+            @Override
+            public void execute(final RequestManagers requestManagers) {
+                event.markValidatePositionsComplete();
+            }
+
+            @Override
+            public String toString() {
+                return type() + "(" + event.type() + ")";
+            }
+        };
+    }
+
+    public static ReactorAction completeAsyncPoll(final AsyncPollEvent event,
+                                                  final KafkaException error) {
+        Objects.requireNonNull(event);
+        return new ReactorAction(Type.COMPLETE_ASYNC_POLL) {
+            @Override
+            public void execute(final RequestManagers requestManagers) {
+                if (error == null)
+                    event.completeSuccessfully();
+                else
+                    event.completeExceptionally(error);
+            }
+
+            @Override
+            public String toString() {
+                return type() + "(" + event.type() + ", success=" + (error == null) + ")";
+            }
+        };
+    }
+
+    @Override
+    public String toString() {
+        return type.toString();
+    }
 }

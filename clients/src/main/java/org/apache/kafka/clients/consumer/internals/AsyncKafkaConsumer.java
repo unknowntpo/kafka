@@ -2517,6 +2517,11 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         return asyncConsumerMetrics;
     }
 
+    // Visible for deterministic component tests which exercise the real application-to-reactor gateway.
+    ApplicationEventHandler applicationEventHandler() {
+        return applicationEventHandler;
+    }
+
     // Visible for testing
     SubscriptionState subscriptions() {
         return subscriptions;
