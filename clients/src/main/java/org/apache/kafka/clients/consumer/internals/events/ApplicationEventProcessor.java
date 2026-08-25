@@ -26,6 +26,7 @@ import org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
 import org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal;
+import org.apache.kafka.clients.consumer.internals.ReactorAction;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
 import org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager;
 import org.apache.kafka.clients.consumer.internals.ShareMembershipManager;
@@ -47,6 +48,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
@@ -62,6 +64,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
     private final Metadata metadata;
     private final SubscriptionState subscriptions;
     private final RequestManagers requestManagers;
+    private final ConcurrentLinkedQueue<ReactorAction> pendingReactorActions = new ConcurrentLinkedQueue<>();
     private int metadataVersionSnapshot;
 
     public ApplicationEventProcessor(final LogContext logContext,
@@ -733,7 +736,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
 
         // We completed checking pending reconciliations (commits triggered, revoked partitions marked to prevent fetching)
         // so the application thread poll loop can safely continue progress now (fetching)
-        event.markReconciliationCheckComplete();
+        pendingReactorActions.add(ReactorAction.markAsyncPollReconciliationComplete(event));
 
         if (requestManagers.commitRequestManager.isPresent()) {
             CommitRequestManager commitRequestManager = requestManagers.commitRequestManager.get();
@@ -755,17 +758,17 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
 
         CompletableFuture<Void> updatePositionsFuture =
             requestManagers.offsetsRequestManager.updateFetchPositionsForAsyncPoll(event.deadlineMs());
-        event.markValidatePositionsComplete();
+        pendingReactorActions.add(ReactorAction.markAsyncPollValidatePositionsComplete(event));
 
         updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
-            if (maybeCompleteAsyncPollEventExceptionally(event, updatePositionsError))
+            if (maybeStageAsyncPollCompletionExceptionally(event, updatePositionsError))
                 return;
 
             requestManagers.fetchRequestManager.createFetchRequests().whenComplete((___, fetchError) -> {
-                if (maybeCompleteAsyncPollEventExceptionally(event, fetchError))
+                if (maybeStageAsyncPollCompletionExceptionally(event, fetchError))
                     return;
 
-                event.completeSuccessfully();
+                pendingReactorActions.add(ReactorAction.completeAsyncPoll(event, null));
             });
         });
     }
@@ -774,7 +777,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
      * If there's an error to report to the user, the current event will be completed and this method will
      * return {@code true}. Otherwise, it will return {@code false}.
      */
-    private boolean maybeCompleteAsyncPollEventExceptionally(AsyncPollEvent event, Throwable t) {
+    private boolean maybeStageAsyncPollCompletionExceptionally(AsyncPollEvent event, Throwable t) {
         if (t == null)
             return false;
 
@@ -788,9 +791,21 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
         }
 
         KafkaException e = ConsumerUtils.maybeWrapAsKafkaException(t);
-        event.completeExceptionally(e);
+        pendingReactorActions.add(ReactorAction.completeAsyncPoll(event, e));
         log.trace("Failing event processing for {}", event, e);
         return true;
+    }
+
+    /**
+     * Drain application-visible actions staged while processing events or their asynchronous completions. The
+     * {@link ConsumerReactor} calls this only after publishing the schedule for the same phase.
+     */
+    public List<ReactorAction> drainReactorActions() {
+        List<ReactorAction> actions = new java.util.ArrayList<>();
+        ReactorAction action;
+        while ((action = pendingReactorActions.poll()) != null)
+            actions.add(action);
+        return actions;
     }
 
     private <T> BiConsumer<? super T, ? super Throwable> complete(final CompletableFuture<T> b) {

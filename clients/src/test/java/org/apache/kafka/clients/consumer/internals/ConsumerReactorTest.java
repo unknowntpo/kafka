@@ -235,6 +235,42 @@ public class ConsumerReactorTest {
     }
 
     @Test
+    public void testApplicationEventCompletionExecutesAfterSchedulePublicationAndBeforeWakeup() {
+        long currentTimeMs = time.milliseconds();
+        AtomicLong completionGeneration = new AtomicLong(-1L);
+        AtomicLong generationObservedByWakeup = new AtomicLong(-1L);
+        AsyncPollEvent event = new AsyncPollEvent(currentTimeMs + 1_000L, currentTimeMs) {
+            @Override
+            public void completeSuccessfully() {
+                completionGeneration.set(consumerReactor.reactorScheduleGeneration());
+                super.completeSuccessfully();
+            }
+        };
+        NetworkClientDelegate.PollResult result = new NetworkClientDelegate.PollResult(
+            100L,
+            List.of(),
+            Set.of(StateTransition.FETCH_REQUEST_TERMINATED)
+        );
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(result);
+        when(applicationEventProcessor.drainReactorActions()).thenReturn(
+            List.of(ReactorAction.completeAsyncPoll(event, null)),
+            List.of()
+        );
+        doAnswer(invocation -> {
+            assertTrue(event.isComplete(), "Event completion must be visible before wakeup");
+            generationObservedByWakeup.set(consumerReactor.reactorScheduleGeneration());
+            return null;
+        }).when(requestManagers).wakeupApplicationThread();
+
+        consumerReactor.runOnce();
+
+        assertTrue(completionGeneration.get() > 0L);
+        assertEquals(completionGeneration.get(), generationObservedByWakeup.get());
+        verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
     public void testRequestCompletionPollsOnlyAffectedManagerAndPublishesBeforeWakeup() {
         long currentTimeMs = time.milliseconds();
         NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(

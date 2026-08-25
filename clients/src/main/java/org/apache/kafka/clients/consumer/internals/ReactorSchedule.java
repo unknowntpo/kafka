@@ -32,25 +32,28 @@ final class ReactorSchedule {
     private final RequestManager networkSource;
     private final RequestManager applicationSource;
     private final boolean applicationDeadlineDelivered;
+    private final long generation;
 
     private ReactorSchedule(final long networkDeadlineMs,
                             final long applicationDeadlineMs,
                             final long decidedAtMs,
                             final RequestManager networkSource,
                             final RequestManager applicationSource,
-                            final boolean applicationDeadlineDelivered) {
+                            final boolean applicationDeadlineDelivered,
+                            final long generation) {
         this.networkDeadlineMs = networkDeadlineMs;
         this.applicationDeadlineMs = applicationDeadlineMs;
         this.decidedAtMs = decidedAtMs;
         this.networkSource = networkSource;
         this.applicationSource = applicationSource;
         this.applicationDeadlineDelivered = applicationDeadlineDelivered;
+        this.generation = generation;
     }
 
     static ReactorSchedule initial(final long timeoutMs,
                                    final long currentTimeMs) {
         long deadlineMs = deadlineAfter(currentTimeMs, timeoutMs);
-        return new ReactorSchedule(deadlineMs, deadlineMs, currentTimeMs, null, null, false);
+        return new ReactorSchedule(deadlineMs, deadlineMs, currentTimeMs, null, null, false, 0L);
     }
 
     /** Pure aggregation: the reactor remains the caller and sole owner of the published schedule. */
@@ -78,7 +81,8 @@ final class ReactorSchedule {
             currentTimeMs,
             networkSource,
             applicationSource,
-            false
+            false,
+            0L
         );
     }
 
@@ -122,6 +126,10 @@ final class ReactorSchedule {
         return decidedAtMs;
     }
 
+    long generation() {
+        return generation;
+    }
+
     boolean shortensApplicationWait(final ReactorSchedule previous) {
         return applicationDeadlineMs < previous.applicationDeadlineMs;
     }
@@ -152,7 +160,20 @@ final class ReactorSchedule {
             decidedAtMs,
             networkSource,
             applicationSource,
-            true
+            true,
+            generation
+        );
+    }
+
+    ReactorSchedule withGeneration(final long nextGeneration) {
+        return new ReactorSchedule(
+            networkDeadlineMs,
+            applicationDeadlineMs,
+            decidedAtMs,
+            networkSource,
+            applicationSource,
+            applicationDeadlineDelivered,
+            nextGeneration
         );
     }
 

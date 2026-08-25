@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.ClientResponse;
+import org.apache.kafka.clients.ClientRequest;
 import org.apache.kafka.clients.Metadata.LeaderAndEpoch;
 import org.apache.kafka.clients.MockClient;
 import org.apache.kafka.clients.NodeApiVersions;
@@ -80,6 +81,7 @@ import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
+import org.apache.kafka.common.message.OffsetFetchResponseData;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
@@ -88,6 +90,8 @@ import org.apache.kafka.common.requests.FindCoordinatorResponse;
 import org.apache.kafka.common.requests.JoinGroupRequest;
 import org.apache.kafka.common.requests.ListOffsetsRequest;
 import org.apache.kafka.common.requests.MetadataResponse;
+import org.apache.kafka.common.requests.OffsetFetchRequest;
+import org.apache.kafka.common.requests.OffsetFetchResponse;
 import org.apache.kafka.common.requests.RequestTestUtils;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.utils.LogCaptureAppender;
@@ -2473,6 +2477,117 @@ public class AsyncKafkaConsumerTest {
     }
 
     @Test
+    public void testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion() throws Exception {
+        final String groupId = "group-id";
+        final Properties props = requiredConsumerConfig();
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        final ConsumerConfig config = new ConsumerConfig(props);
+
+        final LogContext realLogContext = new LogContext();
+        final TopicPartition tp1 = new TopicPartition("topic1", 0);
+        final TopicPartition tp2 = new TopicPartition("topic2", 0);
+        final SubscriptionState subscriptions = new SubscriptionState(
+            realLogContext,
+            AutoOffsetResetStrategy.EARLIEST
+        );
+        final ConsumerMetadata realMetadata = new ConsumerMetadata(
+            0,
+            0,
+            Long.MAX_VALUE,
+            false,
+            false,
+            subscriptions,
+            realLogContext,
+            new ClusterResourceListeners()
+        );
+        final MockClient client = new MockClient(time, realMetadata);
+        client.updateMetadata(RequestTestUtils.metadataUpdateWithIds(
+            1,
+            Map.of(tp1.topic(), 1, tp2.topic(), 1),
+            Map.of(tp1.topic(), Uuid.randomUuid(), tp2.topic(), Uuid.randomUuid())
+        ));
+        final Node broker = realMetadata.fetch().nodes().get(0);
+        assertNotNull(broker);
+        client.prepareResponseFrom(
+            request -> request.apiKey() == ApiKeys.FIND_COORDINATOR,
+            FindCoordinatorResponse.prepareResponse(Errors.NONE, groupId, broker),
+            broker
+        );
+
+        consumer = new AsyncKafkaConsumer<>(
+            realLogContext,
+            time,
+            config,
+            new StringDeserializer(),
+            new StringDeserializer(),
+            client,
+            subscriptions,
+            realMetadata
+        );
+        consumer.assign(Set.of(tp1));
+        final ApplicationEventHandler handler = consumer.applicationEventHandler();
+        final AtomicLong completionScheduleGeneration = new AtomicLong(-1L);
+        final AsyncPollEvent firstPoll = new AsyncPollEvent(30_000L, time.milliseconds()) {
+            @Override
+            public void completeSuccessfully() {
+                completionScheduleGeneration.set(handler.reactorScheduleGeneration());
+                super.completeSuccessfully();
+            }
+
+            @Override
+            public void completeExceptionally(final KafkaException error) {
+                completionScheduleGeneration.set(handler.reactorScheduleGeneration());
+                super.completeExceptionally(error);
+            }
+        };
+        handler.add(firstPoll);
+
+        final ClientRequest firstOffsetFetch = waitForRequest(client, ApiKeys.OFFSET_FETCH);
+        assertEquals(Set.of(tp1), offsetFetchPartitions(firstOffsetFetch, groupId));
+
+        final long assignmentGeneration = handler.reactorScheduleGeneration();
+        handler.addAndGet(new AssignmentChangeEvent(
+            time.milliseconds(),
+            30_000L,
+            Set.of(tp1, tp2)
+        ));
+        TestUtils.waitForCondition(
+            () -> handler.reactorScheduleGeneration() > assignmentGeneration,
+            "Reactor did not publish the schedule after adding tp2"
+        );
+        final long generationBeforeOldResponse = handler.reactorScheduleGeneration();
+
+        client.respondToRequest(firstOffsetFetch, offsetFetchResponse(groupId, tp1, 10L));
+        handler.wakeupReactor();
+        TestUtils.waitForCondition(
+            () -> firstPoll.isComplete() || hasRequest(client, ApiKeys.LIST_OFFSETS),
+            "The first poll neither completed nor exposed an invalid ListOffsets reset"
+        );
+
+        assertFalse(hasRequest(client, ApiKeys.LIST_OFFSETS),
+            "The older tp1 OffsetFetch completion must not reset newly assigned tp2");
+        assertTrue(firstPoll.isComplete());
+        assertTrue(completionScheduleGeneration.get() > generationBeforeOldResponse,
+            "The Reactor schedule must be published after the OffsetFetch completion and before the event completes");
+        assertEquals(10L, subscriptions.validPosition(tp1).offset);
+        assertNull(subscriptions.validPosition(tp2));
+
+        final AsyncPollEvent secondPoll = new AsyncPollEvent(30_000L, time.milliseconds());
+        handler.add(secondPoll);
+        final ClientRequest secondOffsetFetch = waitForRequest(client, ApiKeys.OFFSET_FETCH);
+        assertEquals(Set.of(tp2), offsetFetchPartitions(secondOffsetFetch, groupId),
+            "The next position-update operation must fetch the committed offset for tp2 only");
+        assertFalse(hasRequest(client, ApiKeys.LIST_OFFSETS));
+
+        client.respondToRequest(secondOffsetFetch, offsetFetchResponse(groupId, tp2, 20L));
+        handler.wakeupReactor();
+        TestUtils.waitForCondition(secondPoll::isComplete, "The second poll did not complete");
+        assertEquals(20L, subscriptions.validPosition(tp2).offset);
+    }
+
+    @Test
     public void testGrouplessPollRetriesFetchWhenReconnectBackoffExpires() throws InterruptedException {
         final long retryBackoffMs = 100L;
         final Properties props = requiredConsumerConfig();
@@ -2565,6 +2680,58 @@ public class AsyncKafkaConsumerTest {
             consumer.wakeup();
         }
         TestUtils.assertFutureThrows(WakeupException.class, pollingFuture);
+    }
+
+    private ClientRequest waitForRequest(final MockClient client,
+                                         final ApiKeys apiKey) throws InterruptedException {
+        final AtomicReference<ClientRequest> result = new AtomicReference<>();
+        TestUtils.waitForCondition(() -> {
+            for (ClientRequest request : client.requests()) {
+                if (request.requestBuilder().apiKey() == apiKey) {
+                    result.set(request);
+                    return true;
+                }
+            }
+            return false;
+        }, "No " + apiKey + " request was sent");
+        return result.get();
+    }
+
+    private boolean hasRequest(final MockClient client,
+                               final ApiKeys apiKey) {
+        return client.requests().stream()
+            .anyMatch(request -> request.requestBuilder().apiKey() == apiKey);
+    }
+
+    private Set<TopicPartition> offsetFetchPartitions(final ClientRequest clientRequest,
+                                                      final String groupId) {
+        OffsetFetchRequest request = assertInstanceOf(
+            OffsetFetchRequest.class,
+            clientRequest.requestBuilder().build()
+        );
+        return Set.copyOf(request.groupIdsToPartitions().get(groupId));
+    }
+
+    private OffsetFetchResponse offsetFetchResponse(final String groupId,
+                                                    final TopicPartition topicPartition,
+                                                    final long offset) {
+        OffsetFetchResponseData.OffsetFetchResponseGroup group =
+            new OffsetFetchResponseData.OffsetFetchResponseGroup()
+                .setGroupId(groupId)
+                .setErrorCode(Errors.NONE.code())
+                .setTopics(List.of(
+                    new OffsetFetchResponseData.OffsetFetchResponseTopics()
+                        .setName(topicPartition.topic())
+                        .setPartitions(List.of(
+                            new OffsetFetchResponseData.OffsetFetchResponsePartitions()
+                                .setPartitionIndex(topicPartition.partition())
+                                .setCommittedOffset(offset)
+                                .setCommittedLeaderEpoch(-1)
+                                .setMetadata("")
+                                .setErrorCode(Errors.NONE.code())
+                        ))
+                ));
+        return new OffsetFetchResponse.Builder(group).build(ApiKeys.OFFSET_FETCH.latestVersion());
     }
 
     @Test

@@ -124,6 +124,14 @@ public class ApplicationEventHandler implements Closeable {
     }
 
     /**
+     * Monotonic publication generation used by component tests and diagnostics to verify that an
+     * application-visible action observes the schedule published for its reactor phase.
+     */
+    public long reactorScheduleGeneration() {
+        return reactor.reactorScheduleGeneration();
+    }
+
+    /**
      * Add a {@link CompletableApplicationEvent} to the handler. The method blocks waiting for the result, and will
      * return the result value upon successful completion; otherwise throws an error.
      *
