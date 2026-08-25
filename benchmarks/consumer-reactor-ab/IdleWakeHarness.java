@@ -32,9 +32,6 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 
-import com.sun.management.OperatingSystemMXBean;
-
-import java.lang.management.ManagementFactory;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -312,7 +309,9 @@ public final class IdleWakeHarness {
     }
 
     private static long processCpuTimeNs() {
-        return ((OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean()).getProcessCpuTime();
+        return ProcessHandle.current().info().totalCpuDuration()
+            .orElseThrow(() -> new IllegalStateException("Process CPU time is unavailable"))
+            .toNanos();
     }
 
     private static Map<String, String> parseArgs(String[] args) {
