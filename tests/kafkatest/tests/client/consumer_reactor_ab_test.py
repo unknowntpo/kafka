@@ -364,12 +364,9 @@ class ConsumerReactorABTest(Test):
             )
 
         parameters = dict(self.PROFILES[profile])
-        for name in list(parameters):
-            argument_name = "reactor_ab_%s" % name
-            if argument_name in injected:
-                parameters[name] = int(injected[argument_name])
-            if parameters[name] <= 0:
-                raise ValueError("%s must be positive" % argument_name)
+        for name, value in parameters.items():
+            if value <= 0:
+                raise ValueError("Profile value %s must be positive" % name)
 
         self.profile = profile
         self.variant = variant
@@ -395,12 +392,6 @@ class ConsumerReactorABTest(Test):
         metadata_quorum=quorum.combined_kraft,
         reactor_ab_profile="smoke",
         reactor_ab_variant="checkout-current-smoke",
-        reactor_ab_repetitions=None,
-        reactor_ab_idle_duration_ms=None,
-        reactor_ab_first_record_warmup_samples=None,
-        reactor_ab_first_record_samples=None,
-        reactor_ab_first_record_idle_ms=None,
-        reactor_ab_poll_timeout_ms=None,
     ):
         """Run only the explicitly checked-out revision; never checks out another tree."""
         self.kafka.start()

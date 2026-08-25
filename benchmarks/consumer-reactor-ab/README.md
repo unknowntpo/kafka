@@ -194,19 +194,27 @@ checkout. Selecting the method without parameters is a short smoke run:
 tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision
 ```
 
-Formal runs must inject the profile, logical variant, and workload explicitly. Jenkins `run_tests.sh` already
+Formal runs inject only the metadata quorum, profile, and logical variant. The profile expands to fixed workload
+values inside the test, keeping Ducktape's parameter-derived result-directory names safely below filesystem limits.
+Jenkins `run_tests.sh` already
 appends the single `--` separator consumed by `ducker-ak` before its Ducktape options. Therefore, a Jenkins
 `TC_PATHS` value must put `--parameters` directly after the test selector and must not add another `--`:
 
 ```text
-tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision --parameters \{\"metadata_quorum\":\"COMBINED_KRAFT\",\"reactor_ab_profile\":\"formal\",\"reactor_ab_variant\":\"proposal\",\"reactor_ab_repetitions\":5,\"reactor_ab_idle_duration_ms\":60000,\"reactor_ab_first_record_warmup_samples\":10,\"reactor_ab_first_record_samples\":100,\"reactor_ab_first_record_idle_ms\":1000,\"reactor_ab_poll_timeout_ms\":30000\}
+tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision --parameters '{"metadata_quorum":"COMBINED_KRAFT","reactor_ab_profile":"formal","reactor_ab_variant":"proposal"}'
 ```
 
-The backslashes preserve the JSON braces and quotes through `run_tests.sh` and `ducker-ak` shell argument forwarding.
-The resulting Ducktape invocation contains `--parameters` and Jenkins' `--max-parallel` option, with no stray
-separator passed to Ducktape. A direct `ducker-ak test` invocation outside `run_tests.sh` still uses `--` before
-Ducktape arguments, as documented by `ducker-ak --help`.
-Use the identical value with `reactor_ab_variant` set to `pre-refactor-async-baseline` on the baseline+harness revision.
+The outer single quotes are part of the Jenkins `TC_PATHS` value. They preserve the JSON double quotes through
+`run_tests.sh`, `ducker-ak`, and the inner `bash -c`, while Jenkins' `--max-parallel` remains a separate Ducktape
+option. A direct `ducker-ak test` invocation outside `run_tests.sh` still uses `--` before Ducktape arguments, as
+documented by `ducker-ak --help`.
+
+For the baseline+harness revision, use:
+
+```text
+tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision --parameters '{"metadata_quorum":"COMBINED_KRAFT","reactor_ab_profile":"formal","reactor_ab_variant":"pre-refactor-async-baseline"}'
+```
+
 The wrapper rejects a formal profile without one of those two explicit variant names. Passing the bare file or class
 is discouraged; the method selector above makes the Jenkins scope auditable. Revalidate this forwarding against the
 live job before submission if its wrapper script changes.
