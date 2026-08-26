@@ -1,0 +1,194 @@
+// Licensed to the Apache Software Foundation (ASF) under one or more
+// contributor license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright ownership.
+// The ASF licenses this file to You under the Apache License, Version 2.0
+// (the "License"); you may not use this file except in compliance with
+// the License. You may obtain a copy of the License at
+//
+//    http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+digraph Kafka20253BeforeAfter {
+  graph [
+    bgcolor="white",
+    fontname="Arial",
+    fontsize=24,
+    label="KAFKA-20253: heartbeat is due while coordinator discovery is in flight",
+    labelloc="t",
+    labeljust="c",
+    nodesep=0.42,
+    ranksep=0.54,
+    pad=0.28,
+    splines=ortho,
+    newrank=true
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Arial",
+    fontsize=15,
+    color="#94a3b8",
+    fillcolor="#f8fafc",
+    fontcolor="#0f172a",
+    penwidth=1.5,
+    margin="0.18,0.12"
+  ];
+
+  edge [
+    color="#64748b",
+    penwidth=1.8,
+    arrowsize=0.75
+  ];
+
+  subgraph cluster_before {
+    label="BEFORE — independent zero-delay decisions";
+    labelloc="t";
+    fontsize=19;
+    fontname="Arial";
+    fontcolor="#991b1b";
+    color="#fca5a5";
+    fillcolor="#fffafa";
+    style="rounded,filled";
+    penwidth=2;
+    margin=22;
+
+    before_state [
+      label="Observed state\n• heartbeat timer expired\n• coordinator unavailable\n• FindCoordinator request in flight",
+      color="#f97316",
+      fillcolor="#fff7ed"
+    ];
+
+    before_coordinator [
+      label="CoordinatorRequestManager\nrequest in flight, but remaining backoff = 0\ntimeUntilNextPollMs = 0",
+      color="#dc2626",
+      fillcolor="#fef2f2"
+    ];
+
+    before_heartbeat [
+      label="Heartbeat wait calculation\nheartbeat is due, but no coordinator\nmaximumTimeToWait = 0",
+      color="#dc2626",
+      fillcolor="#fef2f2"
+    ];
+
+    before_network [
+      label="Background thread\nNetworkClient.poll(0) returns immediately",
+      color="#dc2626",
+      fillcolor="#fef2f2"
+    ];
+
+    before_application [
+      label="Application thread\npollForFetches returns immediately",
+      color="#dc2626",
+      fillcolor="#fef2f2"
+    ];
+
+    before_repeat [
+      label="Both threads recheck the same unchanged state",
+      color="#dc2626",
+      fillcolor="#fef2f2",
+      penwidth=2
+    ];
+
+    before_failure [
+      label="NO PROGRESS\nno request, completion, or state transition\n→ high-CPU busy loop",
+      color="#991b1b",
+      fillcolor="#fee2e2",
+      penwidth=2.5
+    ];
+
+    before_state -> before_coordinator [color="#dc2626"];
+    before_state -> before_heartbeat [color="#dc2626"];
+    before_coordinator -> before_network [color="#dc2626"];
+    before_heartbeat -> before_application [color="#dc2626"];
+    before_network -> before_repeat [color="#dc2626"];
+    before_application -> before_repeat [color="#dc2626"];
+    before_repeat -> before_failure [color="#dc2626"];
+    before_failure -> before_state [color="#dc2626", style=dashed, constraint=false];
+  }
+
+  subgraph cluster_after {
+    label="AFTER — ConsumerReactor owns the final progress decision";
+    labelloc="t";
+    fontsize=19;
+    fontname="Arial";
+    fontcolor="#1d4ed8";
+    color="#93c5fd";
+    fillcolor="#f8fbff";
+    style="rounded,filled";
+    penwidth=2;
+    margin=22;
+
+    after_state [
+      label="Observed state\n• heartbeat timer expired\n• coordinator unavailable\n• FindCoordinator request in flight",
+      color="#f97316",
+      fillcolor="#fff7ed"
+    ];
+
+    after_coordinator [
+      label="CoordinatorRequestManager.poll()\nrequest in flight → wait for completion\nno immediate deadline",
+      color="#64748b",
+      fillcolor="#f8fafc"
+    ];
+
+    after_heartbeat [
+      label="HeartbeatRequestManager.poll()\nno coordinator → no heartbeat request\nno application-visible transition",
+      color="#64748b",
+      fillcolor="#f8fafc"
+    ];
+
+    after_reactor [
+      label="ConsumerReactor combines both manager results\nand publishes one ordered decision",
+      color="#2563eb",
+      fillcolor="#dbeafe",
+      penwidth=2.3
+    ];
+
+    after_schedule [
+      label="ReactorSchedule: wait for network completion\nReactorAction: NONE\n(no synthetic application wakeup)",
+      color="#8b5cf6",
+      fillcolor="#f5f3ff",
+      penwidth=2
+    ];
+
+    after_completion [
+      label="FindCoordinator response completes",
+      color="#f97316",
+      fillcolor="#fff7ed"
+    ];
+
+    after_transition [
+      label="CoordinatorRequestManager reports\nCOORDINATOR_DISCOVERED",
+      color="#10b981",
+      fillcolor="#ecfdf5",
+      penwidth=2
+    ];
+
+    after_heartbeat_retry [
+      label="ConsumerReactor re-polls heartbeat in the same phase\n→ heartbeat request can be created",
+      color="#10b981",
+      fillcolor="#ecfdf5",
+      penwidth=2.3
+    ];
+
+    after_state -> after_coordinator [color="#2563eb"];
+    after_state -> after_heartbeat [color="#2563eb"];
+    after_coordinator -> after_reactor [color="#2563eb"];
+    after_heartbeat -> after_reactor [color="#2563eb"];
+    after_reactor -> after_schedule [color="#8b5cf6"];
+    after_schedule -> after_completion [color="#f97316"];
+    after_completion -> after_transition [color="#10b981"];
+    after_transition -> after_heartbeat_retry [color="#10b981"];
+  }
+
+  { rank=same; before_state; after_state; }
+  { rank=same; before_coordinator; before_heartbeat; after_coordinator; after_heartbeat; }
+  { rank=same; before_failure; after_heartbeat_retry; }
+
+  before_state -> after_state [style=invis, weight=120];
+}
