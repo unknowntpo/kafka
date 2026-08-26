@@ -146,6 +146,13 @@ public class RequestManagers implements Closeable {
         return managers;
     }
 
+    /** Manager whose ability to discover a coordinator changes when another manager invalidates it. */
+    List<RequestManager> coordinatorRequestManagers() {
+        List<RequestManager> managers = new ArrayList<>(1);
+        coordinatorRequestManager.ifPresent(managers::add);
+        return managers;
+    }
+
     /**
      * Wake the application-side fetch wait after a shorter reactor schedule has been published. The fetch buffers
      * latch wakeups, so publishing first prevents both stale reads and lost notifications.

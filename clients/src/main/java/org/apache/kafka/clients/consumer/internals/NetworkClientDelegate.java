@@ -47,6 +47,7 @@ import org.slf4j.Logger;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
@@ -366,6 +367,16 @@ public class NetworkClientDelegate implements AutoCloseable {
 
         Set<StateTransition> stateTransitions() {
             return stateTransitions;
+        }
+
+        PollResult withStateTransitions(final Set<StateTransition> additionalTransitions) {
+            if (additionalTransitions.isEmpty())
+                return this;
+
+            EnumSet<StateTransition> combinedTransitions = EnumSet.noneOf(StateTransition.class);
+            combinedTransitions.addAll(stateTransitions);
+            combinedTransitions.addAll(additionalTransitions);
+            return new PollResult(timeUntilNextPollMs, unsentRequests, combinedTransitions);
         }
     }
 
