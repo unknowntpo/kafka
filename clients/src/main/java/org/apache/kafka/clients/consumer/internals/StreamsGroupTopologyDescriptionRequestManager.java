@@ -38,6 +38,8 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
     private final StreamsRebalanceData streamsRebalanceData;
     private final CoordinatorRequestManager coordinatorRequestManager;
     private final RequestState pushRequestState;
+    /** Cross-manager changes completed by topology callbacks and published atomically by the next poll. */
+    private final PendingStateTransitions pendingStateTransitions = new PendingStateTransitions();
 
     private long nextPushTimeMs = 0L;
 
@@ -63,7 +65,7 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         if (!shouldSendTopologyDescriptionUpdate(currentTimeMs)) {
-            return NetworkClientDelegate.PollResult.EMPTY;
+            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.EMPTY);
         }
 
         final StreamsGroupTopologyDescriptionUpdateRequestData data = new StreamsGroupTopologyDescriptionUpdateRequestData()
@@ -81,7 +83,8 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
         unsent.whenComplete((response, exception) -> onResponse(response, exception));
 
         pushRequestState.onSendAttempt(currentTimeMs);
-        return new NetworkClientDelegate.PollResult(Collections.singletonList(unsent));
+        return pendingStateTransitions.publishWith(
+            new NetworkClientDelegate.PollResult(Collections.singletonList(unsent)));
     }
 
     @Override
@@ -96,6 +99,11 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
             return waitMs;
         }
         return shouldSendTopologyDescriptionUpdate(currentTimeMs) ? 0L : Long.MAX_VALUE;
+    }
+
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
     }
 
     private boolean shouldSendTopologyDescriptionUpdate(final long currentTimeMs) {
@@ -118,7 +126,9 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
         if (exception != null) {
             if (exception instanceof RetriableException) {
                 pushRequestState.onFailedAttempt(responseTimeMs);
-                coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+                pendingStateTransitions.addIf(
+                    coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs),
+                    StateTransition.COORDINATOR_INVALIDATED);
                 logger.warn("Topology description push failed with retriable exception; will retry on next poll", exception);
             } else {
                 // Non-retriable exceptions should clear the flag and give up.
@@ -149,7 +159,9 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
             case COORDINATOR_NOT_AVAILABLE:
                 pushRequestState.onFailedAttempt(responseTimeMs);
                 logger.info("Coordinator error {} pushing topology description. Will rediscover and retry: {}", error, errorMessage);
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, responseTimeMs);
+                pendingStateTransitions.addIf(
+                    coordinatorRequestManager.markCoordinatorUnknown(errorMessage, responseTimeMs),
+                    StateTransition.COORDINATOR_INVALIDATED);
                 break;
 
             case COORDINATOR_LOAD_IN_PROGRESS:

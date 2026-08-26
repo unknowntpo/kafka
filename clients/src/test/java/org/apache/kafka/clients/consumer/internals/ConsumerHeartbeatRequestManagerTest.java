@@ -339,11 +339,15 @@ public class ConsumerHeartbeatRequestManagerTest
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No heartbeat should be sent while a " +
                 "previous one is in-flight");
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs,
+            "an in-flight heartbeat must await its completion event");
 
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No heartbeat should be sent when the " +
                 "interval expires if there is a previous HB request in-flight");
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs,
+            "elapsed heartbeat timing must not turn in-flight work into an immediate repoll");
 
         // Receive response for the inflight after the interval expired. The next HB should be sent
         // on the next poll waiting only for the minimal backoff.
@@ -378,6 +382,7 @@ public class ConsumerHeartbeatRequestManagerTest
 
     @Test
     public void testDisconnect() {
+        when(coordinatorRequestManager.handleCoordinatorDisconnect(any(), anyLong())).thenReturn(true);
         createHeartbeatRequestStateWithZeroHeartbeatInterval();
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size());
@@ -391,10 +396,12 @@ public class ConsumerHeartbeatRequestManagerTest
         time.sleep(DEFAULT_RETRY_BACKOFF_MS - 1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No request should be generated before the backoff expires");
+        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED), result.stateTransitions());
 
         time.sleep(1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size(), "A new request should be generated after the backoff expires");
+        assertTrue(result.stateTransitions().isEmpty(), "coordinator invalidation must be published once");
     }
 
     @Test

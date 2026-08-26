@@ -29,12 +29,14 @@ import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -120,6 +122,27 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
         assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
         assertEquals(0, result.unsentRequests.size());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = Errors.class, names = {"NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE"})
+    public void testCoordinatorInvalidationIsPublishedExactlyOnce(final Errors error) {
+        when(coordinatorRequestManager.markCoordinatorUnknown(any(), anyLong())).thenReturn(true);
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        NetworkClientDelegate.PollResult heartbeat = heartbeatRequestManager.poll(time.milliseconds());
+        assertEquals(1, heartbeat.unsentRequests.size());
+
+        heartbeat.unsentRequests.get(0).handler().onComplete(
+            createHeartbeatResponse(heartbeat.unsentRequests.get(0), error)
+        );
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+
+        NetworkClientDelegate.PollResult invalidated = heartbeatRequestManager.poll(time.milliseconds());
+        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED), invalidated.stateTransitions());
+        assertEquals(0, invalidated.unsentRequests.size());
+
+        NetworkClientDelegate.PollResult nextPoll = heartbeatRequestManager.poll(time.milliseconds());
+        assertTrue(nextPoll.stateTransitions().isEmpty(), "coordinator invalidation must be published once");
     }
 
     /**
