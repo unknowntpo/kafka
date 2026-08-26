@@ -647,7 +647,13 @@ public class ConsumerReactorTest {
     public void testCleanupExecutesStagedAsyncPollCompletion() {
         AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 1_000L, time.milliseconds());
         when(applicationEventProcessor.drainReactorActions()).thenReturn(
+            List.of(),
+            List.of(),
             List.of(ReactorAction.completeAsyncPoll(event, null)));
+
+        consumerReactor.runOnce();
+        assertFalse(event.isComplete());
+        assertTrue(consumerReactor.reactorScheduleGeneration() > 0L);
 
         consumerReactor.cleanup();
 
