@@ -36,8 +36,47 @@ import static org.apache.kafka.test.TestUtils.requiredConsumerConfig;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 public class RequestManagersTest {
+
+    @Test
+    public void testRegularConsumerWakeupTargetIsSelectedAtConstruction() {
+        FetchRequestManager fetchRequestManager = mock(FetchRequestManager.class);
+        RequestManagers requestManagers = new RequestManagers(
+            new LogContext(),
+            mock(OffsetsRequestManager.class),
+            mock(TopicMetadataRequestManager.class),
+            fetchRequestManager,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty()
+        );
+
+        requestManagers.wakeupApplicationThread();
+
+        verify(fetchRequestManager).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testShareConsumerWakeupTargetIsSelectedAtConstruction() {
+        ShareConsumeRequestManager shareConsumeRequestManager = mock(ShareConsumeRequestManager.class);
+        RequestManagers requestManagers = new RequestManagers(
+            new LogContext(),
+            shareConsumeRequestManager,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty()
+        );
+
+        requestManagers.wakeupApplicationThread();
+
+        verify(shareConsumeRequestManager).wakeupApplicationThread();
+    }
 
     @Test
     public void testHeartbeatRequestManagersIncludesRegularAndStreamsManagers() {

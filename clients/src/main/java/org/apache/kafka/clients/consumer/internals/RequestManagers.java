@@ -63,6 +63,8 @@ public class RequestManagers implements Closeable {
     public final Optional<StreamsGroupHeartbeatRequestManager> streamsGroupHeartbeatRequestManager;
     public final Optional<StreamsGroupTopologyDescriptionRequestManager> streamsGroupTopologyDescriptionRequestManager;
     private final List<RequestManager> entries;
+    /** Consumer-specific wakeup target selected once at composition time, outside the reactor action path. */
+    private final Runnable applicationThreadWakeup;
     private final IdempotentCloser closer = new IdempotentCloser();
 
     public RequestManagers(LogContext logContext,
@@ -81,7 +83,8 @@ public class RequestManagers implements Closeable {
         this.coordinatorRequestManager = coordinatorRequestManager;
         this.commitRequestManager = commitRequestManager;
         this.topicMetadataRequestManager = topicMetadataRequestManager;
-        this.fetchRequestManager = fetchRequestManager;
+        this.fetchRequestManager = requireNonNull(fetchRequestManager, "FetchRequestManager cannot be null");
+        this.applicationThreadWakeup = this.fetchRequestManager::wakeupApplicationThread;
         this.shareConsumeRequestManager = Optional.empty();
         this.consumerHeartbeatRequestManager = heartbeatRequestManager;
         this.shareHeartbeatRequestManager = Optional.empty();
@@ -111,7 +114,10 @@ public class RequestManagers implements Closeable {
                            Optional<ShareHeartbeatRequestManager> shareHeartbeatRequestManager,
                            Optional<ShareMembershipManager> shareMembershipManager) {
         this.log = logContext.logger(RequestManagers.class);
-        this.shareConsumeRequestManager = Optional.of(shareConsumeRequestManager);
+        ShareConsumeRequestManager manager = requireNonNull(
+            shareConsumeRequestManager, "ShareConsumeRequestManager cannot be null");
+        this.shareConsumeRequestManager = Optional.of(manager);
+        this.applicationThreadWakeup = manager::wakeupApplicationThread;
         this.coordinatorRequestManager = coordinatorRequestManager;
         this.commitRequestManager = Optional.empty();
         this.consumerHeartbeatRequestManager = Optional.empty();
@@ -158,10 +164,7 @@ public class RequestManagers implements Closeable {
      * latch wakeups, so publishing first prevents both stale reads and lost notifications.
      */
     void wakeupApplicationThread() {
-        if (fetchRequestManager != null)
-            fetchRequestManager.wakeupApplicationThread();
-        else
-            shareConsumeRequestManager.ifPresent(ShareConsumeRequestManager::wakeupApplicationThread);
+        applicationThreadWakeup.run();
     }
 
     @Override
