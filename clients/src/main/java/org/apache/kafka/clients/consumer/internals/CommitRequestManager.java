@@ -70,7 +70,6 @@ import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED;
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 import static org.apache.kafka.common.protocol.Errors.COORDINATOR_LOAD_IN_PROGRESS;
 
 public class CommitRequestManager implements RequestManager, MemberStateListener {
@@ -192,7 +191,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         .forEach(request -> request.future().completeExceptionally(exception));
             }
 
-            return pendingStateTransitions.publishWith(EMPTY);
+            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
         }
 
         if (closing) {
@@ -200,15 +199,14 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         }
 
         if (!pendingRequests.hasUnsentRequests())
-            return pendingStateTransitions.publishWith(EMPTY);
+            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
 
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
         // min of the remainingBackoffMs of all the request that are still backing off
         final long timeUntilNextPoll = Math.min(
             findMinTime(unsentOffsetCommitRequests(), currentTimeMs),
             findMinTime(unsentOffsetFetchRequests(), currentTimeMs));
-        return pendingStateTransitions.publishWith(
-            new NetworkClientDelegate.PollResult(timeUntilNextPoll, requests));
+        return pendingStateTransitions.publishWith(resultForRequestsOrWait(requests, timeUntilNextPoll));
     }
 
     @Override
@@ -230,6 +228,17 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     @Override
     public boolean usesLegacyApplicationWait() {
         return true;
+    }
+
+    private static NetworkClientDelegate.PollResult resultForRequestsOrWait(
+        final List<NetworkClientDelegate.UnsentRequest> requests,
+        final long timeUntilNextPollMs
+    ) {
+        if (!requests.isEmpty())
+            return NetworkClientDelegate.PollResult.progress(requests, Set.of(), timeUntilNextPollMs);
+        if (timeUntilNextPollMs == NetworkClientDelegate.PollResult.WAIT_FOREVER)
+            return NetworkClientDelegate.PollResult.awaitEvent();
+        return NetworkClientDelegate.PollResult.retryAfter(timeUntilNextPollMs);
     }
 
     private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
@@ -727,9 +736,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     public NetworkClientDelegate.PollResult drainPendingOffsetCommitRequests() {
         if (pendingRequests.unsentOffsetCommits.isEmpty())
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitEvent();
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drainPendingCommits();
-        return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, requests);
+        return NetworkClientDelegate.PollResult.progress(
+            requests, Set.of(), NetworkClientDelegate.PollResult.WAIT_FOREVER);
     }
 
     private void maybeUpdateLastSeenEpochIfNewer(final Map<TopicPartition, OffsetAndMetadata> offsets) {

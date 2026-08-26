@@ -196,6 +196,18 @@ public class ConsumerReactorTest {
     }
 
     @Test
+    public void testEmptyImmediatePollResultViolatesProgressContract() {
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong()))
+            .thenReturn(new NetworkClientDelegate.PollResult(0L));
+
+        AssertionError error = assertThrows(AssertionError.class, consumerReactor::runOnce);
+
+        assertTrue(error.getMessage().contains("returned no progress with an immediate repoll"));
+        verify(networkClientDelegate, never()).poll(anyLong(), anyLong());
+    }
+
+    @Test
     public void testMaximumTimeToWait() {
         final int defaultHeartbeatIntervalMs = 1000;
         // Initial value before runOnce has been called

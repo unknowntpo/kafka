@@ -48,9 +48,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -64,6 +66,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -108,6 +111,50 @@ public class NetworkClientDelegateTest {
                     new ArrayList<>());
             assertEquals(10, ncd.addAll(failure));
         }
+    }
+
+    @Test
+    void testPollResultProgressAllowsImmediateRepollOnlyWithProgress() {
+        NetworkClientDelegate.UnsentRequest request = mock(NetworkClientDelegate.UnsentRequest.class);
+
+        NetworkClientDelegate.PollResult requestProgress = NetworkClientDelegate.PollResult.progress(
+            List.of(request), Set.of(), 0L);
+        NetworkClientDelegate.PollResult transitionProgress = NetworkClientDelegate.PollResult.progress(
+            List.of(), Set.of(StateTransition.COORDINATOR_DISCOVERED), 0L);
+
+        assertTrue(requestProgress.satisfiesProgressContract());
+        assertTrue(transitionProgress.satisfiesProgressContract());
+        assertEquals(1L, NetworkClientDelegate.PollResult.progress(
+            List.of(request), Set.of(), 1L).timeUntilNextPollMs);
+        assertEquals(Long.MAX_VALUE, NetworkClientDelegate.PollResult.progress(
+            List.of(request), Set.of(), Long.MAX_VALUE).timeUntilNextPollMs);
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.progress(List.of(), Set.of(), 0L));
+    }
+
+    @Test
+    void testPollResultRetryRequiresFinitePositiveDelay() {
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.retryAfter(1L);
+
+        assertEquals(1L, result.timeUntilNextPollMs);
+        assertTrue(result.satisfiesProgressContract());
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.retryAfter(0L));
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.retryAfter(-1L));
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.retryAfter(Long.MAX_VALUE));
+    }
+
+    @Test
+    void testPollResultAwaitEventHasNoTimerDeadline() {
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.awaitEvent();
+
+        assertTrue(result.unsentRequests.isEmpty());
+        assertTrue(result.stateTransitions().isEmpty());
+        assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        assertTrue(result.satisfiesProgressContract());
+        assertFalse(new NetworkClientDelegate.PollResult(0L).satisfiesProgressContract());
     }
 
     @Test

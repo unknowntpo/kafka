@@ -421,6 +421,9 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private void stagePollResult(final RequestManager manager,
                                  final NetworkClientDelegate.PollResult result,
                                  final long currentTimeMs) {
+        assert result.satisfiesProgressContract()
+            : "Request manager " + manager.getClass().getName()
+                + " returned no progress with an immediate repoll";
         long applicationWaitMs = manager.usesLegacyApplicationWait()
             ? manager.maximumTimeToWait(currentTimeMs)
             : Long.MAX_VALUE;
