@@ -378,6 +378,7 @@ public class ConsumerHeartbeatRequestManagerTest
 
     @Test
     public void testDisconnect() {
+        when(coordinatorRequestManager.handleCoordinatorDisconnect(any(), anyLong())).thenReturn(true);
         createHeartbeatRequestStateWithZeroHeartbeatInterval();
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size());

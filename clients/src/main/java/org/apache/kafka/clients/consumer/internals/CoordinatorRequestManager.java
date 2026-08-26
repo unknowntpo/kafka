@@ -162,11 +162,13 @@ public class CoordinatorRequestManager implements RequestManager {
      *
      * @param exception     The exception to handle, which was received as part of a request response.
      * @param currentTimeMs The current time in milliseconds.
+     * @return {@code true} if this call changed a known coordinator to unknown.
      */
-    public void handleCoordinatorDisconnect(Throwable exception, long currentTimeMs) {
+    public boolean handleCoordinatorDisconnect(Throwable exception, long currentTimeMs) {
         if (exception instanceof DisconnectException) {
-            markCoordinatorUnknown(exception.getMessage(), currentTimeMs);
+            return markCoordinatorUnknown(exception.getMessage(), currentTimeMs);
         }
+        return false;
     }
 
     /**
@@ -180,8 +182,10 @@ public class CoordinatorRequestManager implements RequestManager {
      *
      * @param cause         String explanation of why the coordinator is marked unknown
      * @param currentTimeMs Current time in milliseconds
+     * @return {@code true} if this call changed a known coordinator to unknown.
      */
-    public void markCoordinatorUnknown(final String cause, final long currentTimeMs) {
+    public boolean markCoordinatorUnknown(final String cause, final long currentTimeMs) {
+        final boolean coordinatorWasKnown = coordinator != null;
         if (coordinator != null || timeMarkedUnknownMs == -1) {
             timeMarkedUnknownMs = currentTimeMs;
             totalDisconnectedMin = 0;
@@ -203,6 +207,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 totalDisconnectedMin = currDisconnectMin;
             }
         }
+        return coordinatorWasKnown;
     }
 
     private void onSuccessfulResponse(

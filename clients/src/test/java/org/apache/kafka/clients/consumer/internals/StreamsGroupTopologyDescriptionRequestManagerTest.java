@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.message.StreamsGroupTopologyDescriptionUpdateRequestData;
 import org.apache.kafka.common.message.StreamsGroupTopologyDescriptionUpdateResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -33,6 +34,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -213,6 +215,7 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
      */
     @Test
     public void testCoordinatorErrorTriggersRediscovery() {
+        when(coordinatorRequestManager.markCoordinatorUnknown(any(), anyLong())).thenReturn(true);
         for (final Errors error : new Errors[]{Errors.NOT_COORDINATOR, Errors.COORDINATOR_NOT_AVAILABLE}) {
             streamsRebalanceData.setWireTopologyDescription(
                 new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
@@ -226,8 +229,32 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
 
             assertTrue(streamsRebalanceData.topologyPushRequired(),
                 "Flag should remain set after " + error);
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
+                manager.poll(time.milliseconds()).stateTransitions());
+            assertTrue(manager.poll(time.milliseconds()).stateTransitions().isEmpty(),
+                "coordinator invalidation must be published once");
         }
         verify(coordinatorRequestManager, times(2)).markCoordinatorUnknown(any(), anyLong());
+    }
+
+    @Test
+    public void testDisconnectPublishesCoordinatorInvalidationExactlyOnce() {
+        streamsRebalanceData.setWireTopologyDescription(
+            new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
+        streamsRebalanceData.setTopologyPushRequired(true);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        when(coordinatorRequestManager.handleCoordinatorDisconnect(any(), anyLong())).thenReturn(true);
+
+        final NetworkClientDelegate.UnsentRequest unsent =
+            manager.poll(time.milliseconds()).unsentRequests.get(0);
+        unsent.handler().onFailure(time.milliseconds(), DisconnectException.INSTANCE);
+
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
+            manager.poll(time.milliseconds()).stateTransitions());
+        assertTrue(manager.poll(time.milliseconds()).stateTransitions().isEmpty(),
+            "coordinator invalidation must be published once");
     }
 
     /**
