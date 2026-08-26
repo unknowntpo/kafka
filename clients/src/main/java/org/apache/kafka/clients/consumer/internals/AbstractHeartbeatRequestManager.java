@@ -284,6 +284,11 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
 
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
+    }
+
     /**
      * Reset the poll timer, indicating that the user has called consumer.poll(). If the member
      * is in {@link MemberState#STALE} state due to expired poll timer, this will transition the

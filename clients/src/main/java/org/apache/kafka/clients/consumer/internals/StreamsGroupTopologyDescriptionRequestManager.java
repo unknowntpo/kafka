@@ -101,6 +101,11 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
         return shouldSendTopologyDescriptionUpdate(currentTimeMs) ? 0L : Long.MAX_VALUE;
     }
 
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
+    }
+
     private boolean shouldSendTopologyDescriptionUpdate(final long currentTimeMs) {
         if (!pushRequestState.canSendRequest(currentTimeMs) || currentTimeMs < nextPushTimeMs) {
             return false;

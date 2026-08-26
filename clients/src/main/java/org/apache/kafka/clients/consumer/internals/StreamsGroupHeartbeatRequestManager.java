@@ -544,6 +544,11 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
 
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
+    }
+
     public void resetPollTimer(final long pollMs) {
         pollTimer.update(pollMs);
         if (pollTimer.isExpired()) {

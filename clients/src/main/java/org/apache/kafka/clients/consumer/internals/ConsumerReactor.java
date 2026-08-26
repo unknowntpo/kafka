@@ -421,7 +421,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private void stagePollResult(final RequestManager manager,
                                  final NetworkClientDelegate.PollResult result,
                                  final long currentTimeMs) {
-        managerPollCache.update(manager, result, manager.maximumTimeToWait(currentTimeMs), currentTimeMs);
+        long applicationWaitMs = manager.usesLegacyApplicationWait()
+            ? manager.maximumTimeToWait(currentTimeMs)
+            : Long.MAX_VALUE;
+        managerPollCache.update(manager, result, applicationWaitMs, currentTimeMs);
         for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
             request.whenComplete((response, error) -> affectedManagers.add(manager));
         }
@@ -561,6 +564,12 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             pendingReactorActionReasons.add(ReactorActionReason.APPLICATION_EVENT_PROGRESS);
     }
 
+    /**
+     * Records and coalesces a wakeup for the current reactor phase; this method does not wake the application
+     * thread immediately. The reactor first publishes the corresponding state and schedule and executes other
+     * completion actions, then performs the staged wakeup last so the application cannot observe stale state or
+     * lose a notification.
+     */
     private void stageWakeApplication() {
         ReactorAction wakeApplication = ReactorAction.wakeApplication();
         if (!pendingReactorActions.contains(wakeApplication))
