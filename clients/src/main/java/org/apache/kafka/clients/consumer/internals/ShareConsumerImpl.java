@@ -28,7 +28,6 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.ShareConsumer;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
-import org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
@@ -111,7 +110,7 @@ import static org.apache.kafka.common.utils.Utils.isBlank;
 import static org.apache.kafka.common.utils.Utils.swallow;
 
 /**
- * This {@link ShareConsumer} implementation uses an {@link ApplicationEventHandler event handler} to process
+ * This {@link ShareConsumer} implementation uses an {@link ConsumerReactorGateway event handler} to process
  * {@link ApplicationEvent application events} so that the network I/O can be processed in a dedicated
  * {@link ConsumerReactor reactor}.
  */
@@ -167,7 +166,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
         }
     }
 
-    private final ApplicationEventHandler applicationEventHandler;
+    private final ConsumerReactorGateway consumerReactorGateway;
     private final Time time;
     private final ShareFetchMetricsManager shareFetchMetricsManager;
     private final KafkaShareConsumerMetrics kafkaShareConsumerMetrics;
@@ -223,7 +222,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                 keyDeserializer,
                 valueDeserializer,
                 Time.SYSTEM,
-                ApplicationEventHandler::new,
+                ConsumerReactorGateway::new,
                 CompletableEventReaper::new,
                 ShareFetchCollector::new,
                 new LinkedBlockingQueue<>(),
@@ -236,7 +235,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                       final Deserializer<K> keyDeserializer,
                       final Deserializer<V> valueDeserializer,
                       final Time time,
-                      final ApplicationEventHandlerFactory applicationEventHandlerFactory,
+                      final ConsumerReactorGatewayFactory consumerReactorGatewayFactory,
                       final AsyncKafkaConsumer.CompletableEventReaperFactory backgroundEventReaperFactory,
                       final ShareFetchCollectorFactory<K, V> fetchCollectorFactory,
                       final LinkedBlockingQueue<ShareAcknowledgementEvent> acknowledgementEventQueue,
@@ -320,7 +319,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                     requestManagersSupplier
             );
 
-            this.applicationEventHandler = applicationEventHandlerFactory.build(
+            this.consumerReactorGateway = consumerReactorGatewayFactory.build(
                     logContext,
                     time,
                     config.getInt(CommonClientConfigs.DEFAULT_API_TIMEOUT_MS_CONFIG),
@@ -431,7 +430,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                 requestManagersSupplier
         );
 
-        this.applicationEventHandler = new ApplicationEventHandler(
+        this.consumerReactorGateway = new ConsumerReactorGateway(
                 logContext,
                 time,
                 config.getInt(CommonClientConfigs.DEFAULT_API_TIMEOUT_MS_CONFIG),
@@ -460,7 +459,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                       final ShareFetchCollector<K, V> fetchCollector,
                       final ShareFetchMetricsManager shareFetchMetricsManager,
                       final Time time,
-                      final ApplicationEventHandler applicationEventHandler,
+                      final ConsumerReactorGateway consumerReactorGateway,
                       final BlockingQueue<ShareAcknowledgementEvent> acknowledgementEventQueue,
                       final BlockingQueue<BackgroundEvent> backgroundEventQueue,
                       final CompletableEventReaper backgroundEventReaper,
@@ -491,7 +490,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
         this.acknowledgementMode = ShareAcknowledgementMode.fromString(acknowledgementModeConfig);
         this.deserializers = new Deserializers<>(keyDeserializer, valueDeserializer, metrics);
         this.currentFetch = ShareFetch.empty();
-        this.applicationEventHandler = applicationEventHandler;
+        this.consumerReactorGateway = consumerReactorGateway;
         this.kafkaShareConsumerMetrics = new KafkaShareConsumerMetrics(metrics);
         this.clientTelemetryReporter = Optional.empty();
         this.completedAcknowledgements = List.of();
@@ -502,9 +501,9 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
     }
 
     // auxiliary interface for testing
-    interface ApplicationEventHandlerFactory {
+    interface ConsumerReactorGatewayFactory {
 
-        ApplicationEventHandler build(
+        ConsumerReactorGateway build(
                 final LogContext logContext,
                 final Time time,
                 final int initializationTimeoutMs,
@@ -563,7 +562,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
 
                 // Trigger subscribe event to effectively join the group if not already part of it,
                 // or just send the new subscription to the broker.
-                applicationEventHandler.addAndGet(new ShareSubscriptionChangeEvent(topics));
+                consumerReactorGateway.submitAndAwait(new ShareSubscriptionChangeEvent(topics));
 
                 log.info("Subscribed to topics: {}", String.join(", ", topics));
             }
@@ -581,7 +580,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
         try {
             Timer timer = time.timer(defaultApiTimeoutMs);
             ShareUnsubscribeEvent unsubscribeApplicationEvent = new ShareUnsubscribeEvent(calculateDeadlineMs(timer));
-            applicationEventHandler.addAndGet(unsubscribeApplicationEvent);
+            consumerReactorGateway.submitAndAwait(unsubscribeApplicationEvent);
 
             log.info("Unsubscribed all topics");
         } finally {
@@ -669,7 +668,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
             inFlightPoll = new SharePollEvent(calculateDeadlineMs(timer), timer.currentTimeMs());
             newlySubmittedEvent = true;
             log.trace("In-flight event {} submitted", inFlightPoll);
-            applicationEventHandler.add(inFlightPoll);
+            consumerReactorGateway.submit(inFlightPoll);
         }
 
         timer.update();
@@ -702,7 +701,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
     }
 
     private ShareFetch<K, V> pollForFetches(final Timer timer) {
-        long pollTimeout = Math.min(applicationEventHandler.maximumTimeToWait(), timer.remainingMs());
+        long pollTimeout = Math.min(consumerReactorGateway.applicationWaitMs(), timer.remainingMs());
 
         Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap = currentFetch.takeAcknowledgedRecords();
 
@@ -744,10 +743,8 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
 
                 // We only send one ShareFetchEvent per poll call.
                 if (shouldSendShareFetchEvent) {
-                    applicationEventHandler.add(new ShareFetchEvent(acksToSend));
+                    consumerReactorGateway.submit(new ShareFetchEvent(acksToSend));
                     shouldSendShareFetchEvent = false;
-                    // Notify the reactor to wake up and start the next round of fetching
-                    applicationEventHandler.wakeupReactor();
                     acksToSend = Map.of();
                 }
             }
@@ -765,10 +762,8 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
             if (currentFetch.hasRenewals()) {
                 // We only send one ShareFetchEvent per poll call.
                 if (shouldSendShareFetchEvent) {
-                    applicationEventHandler.add(new ShareFetchEvent(acksToSend));
+                    consumerReactorGateway.submit(new ShareFetchEvent(acksToSend));
                     shouldSendShareFetchEvent = false;
-                    // Notify the reactor to wake up and start the next round of fetching
-                    applicationEventHandler.wakeupReactor();
                     acksToSend = Map.of();
                 }
             }
@@ -783,10 +778,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
 
     private void sendShareAcknowledgeAsyncEvent(Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap) {
         Timer timer = time.timer(defaultApiTimeoutMs);
-        applicationEventHandler.add(new ShareAcknowledgeAsyncEvent(acknowledgementsMap, calculateDeadlineMs(timer)));
-
-        // Notify the reactor to wake up and start the next round of fetching
-        applicationEventHandler.wakeupReactor();
+        consumerReactorGateway.submit(new ShareAcknowledgeAsyncEvent(acknowledgementsMap, calculateDeadlineMs(timer)));
     }
 
     /**
@@ -851,7 +843,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                 return Map.of();
             } else {
                 ShareAcknowledgeSyncEvent event = new ShareAcknowledgeSyncEvent(acknowledgementsMap, calculateDeadlineMs(requestTimer));
-                applicationEventHandler.add(event);
+                consumerReactorGateway.submit(event);
                 CompletableFuture<Map<TopicIdPartition, Acknowledgements>> commitFuture = event.future();
                 wakeupTrigger.setActiveTask(commitFuture);
                 try {
@@ -896,7 +888,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
             if (!acknowledgementsMap.isEmpty()) {
                 Timer timer = time.timer(defaultApiTimeoutMs);
                 ShareAcknowledgeAsyncEvent event = new ShareAcknowledgeAsyncEvent(acknowledgementsMap, calculateDeadlineMs(timer));
-                applicationEventHandler.add(event);
+                consumerReactorGateway.submit(event);
             }
         } finally {
             release();
@@ -913,13 +905,13 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
             if (callback != null) {
                 if (acknowledgementCommitCallbackHandler == null) {
                     ShareAcknowledgementCommitCallbackRegistrationEvent event = new ShareAcknowledgementCommitCallbackRegistrationEvent(true);
-                    applicationEventHandler.add(event);
+                    consumerReactorGateway.submit(event);
                 }
                 acknowledgementCommitCallbackHandler = new AcknowledgementCommitCallbackHandler(callback);
             } else {
                 if (acknowledgementCommitCallbackHandler != null) {
                     ShareAcknowledgementCommitCallbackRegistrationEvent event = new ShareAcknowledgementCommitCallbackRegistrationEvent(false);
-                    applicationEventHandler.add(event);
+                    consumerReactorGateway.submit(event);
                 }
                 completedAcknowledgements.clear();
                 acknowledgementCommitCallbackHandler = null;
@@ -1034,8 +1026,8 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                 this::handleCompletedAcknowledgements, firstException);
         swallow(log, Level.ERROR, "Failed processing background events",
                 this::processBackgroundEventsOnClose, firstException);
-        if (applicationEventHandler != null)
-            closeQuietly(() -> applicationEventHandler.close(Duration.ofMillis(closeTimer.remainingMs())), "Failed shutting down reactor", firstException);
+        if (consumerReactorGateway != null)
+            closeQuietly(() -> consumerReactorGateway.close(Duration.ofMillis(closeTimer.remainingMs())), "Failed shutting down reactor", firstException);
         closeTimer.update();
 
         // close() can be called from inside one of the constructors. In that case, it's possible that neither
@@ -1062,11 +1054,11 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
     }
 
     private void stopFindCoordinatorOnClose() {
-        if (applicationEventHandler == null) {
+        if (consumerReactorGateway == null) {
             return;
         }
         log.debug("Stop finding coordinator during consumer close");
-        applicationEventHandler.add(new StopFindCoordinatorOnCloseEvent());
+        consumerReactorGateway.submit(new StopFindCoordinatorOnCloseEvent());
     }
 
     private Timer createTimerForCloseRequests(Duration timeout) {
@@ -1081,17 +1073,17 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
      * 2. leave the group
      */
     private void sendAcknowledgementsAndLeaveGroup(final Timer timer, final AtomicReference<Throwable> firstException) {
-        if (applicationEventHandler == null || backgroundEventProcessor == null ||
+        if (consumerReactorGateway == null || backgroundEventProcessor == null ||
             backgroundEventReaper == null || backgroundEventQueue == null) {
             return;
         }
         completeQuietly(
-                () -> applicationEventHandler.addAndGet(new ShareAcknowledgeOnCloseEvent(acknowledgementsToSend(), calculateDeadlineMs(timer))),
+                () -> consumerReactorGateway.submitAndAwait(new ShareAcknowledgeOnCloseEvent(acknowledgementsToSend(), calculateDeadlineMs(timer))),
                 "Failed to send pending acknowledgements with a timeout(ms)=" + timer.timeoutMs(), firstException);
         timer.update();
 
         ShareUnsubscribeEvent unsubscribeEvent = new ShareUnsubscribeEvent(calculateDeadlineMs(timer));
-        applicationEventHandler.add(unsubscribeEvent);
+        consumerReactorGateway.submit(unsubscribeEvent);
         try {
             // If users have fatal error, they will get some exceptions in the background queue.
             // When running unsubscribe, these exceptions should be ignored, or users can't unsubscribe successfully.

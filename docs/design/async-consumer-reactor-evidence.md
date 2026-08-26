@@ -132,7 +132,7 @@ The rescan-removal slice uses the following properties as its deterministic gate
 
 The POC now covers the stale-wait publication protocol at two deterministic levels: a real application-side
 `FetchBuffer` wait running concurrently with the reactor scheduler, and the complete
-`AsyncKafkaConsumer -> ApplicationEventHandler -> ConsumerReactor -> FetchRequestManager -> FetchBuffer`
+`AsyncKafkaConsumer -> ConsumerReactorGateway -> ConsumerReactor -> FetchRequestManager -> FetchBuffer`
 chain with only the socket replaced by a controllable `MockClient`. `testPollWaitUsesOnlyPublishedReactorDecision`
 also proves that the application thread no longer derives a competing timeout from `SubscriptionState` or
 `FetchBuffer`. The real KRaft `PlaintextConsumerPollTest` suite also remains green. The POC removes the rescan, but

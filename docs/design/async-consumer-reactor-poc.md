@@ -92,15 +92,14 @@ decision source has already migrated.
 
 ### Ownership and communication topology
 
-`AsyncKafkaConsumer` indirectly owns the reactor through `ApplicationEventHandler`. Despite its current name,
-`ApplicationEventHandler` is not the Reactor-pattern handler: it is the application-side cross-thread gateway and
-lifecycle handle (`add`, `addAndGet`, `wakeup`, wait-snapshot access, and close). A later mechanical rename to
-`ConsumerReactorHandle` would make this role clearer. `ApplicationEventProcessor` executes application-command
-logic; `ConsumerReactor` drains and dispatches the commands.
+`AsyncKafkaConsumer` indirectly owns the reactor through `ConsumerReactorGateway`. The gateway is the
+application-side cross-thread submission and lifecycle boundary (`submit`, `submitAndAwait`, `signalReactor`,
+published application-wait access, and `close`). `ApplicationEventProcessor` executes application-command logic;
+`ConsumerReactor` drains and dispatches the commands.
 
 ```text
 AsyncKafkaConsumer
-  -> ConsumerReactorHandle (currently ApplicationEventHandler)
+  -> ConsumerReactorGateway
      -> ApplicationEventQueue -- enqueue, then wake --> ConsumerReactor
 
 ConsumerReactor
@@ -113,11 +112,11 @@ so an extra hop would weaken ordering and add capacity management without isolat
 paths require explicit admission bounds. The current application and background queues are unbounded
 `LinkedBlockingQueue` instances, so resource ownership is not complete yet.
 
-Regular and share consumers should reuse a thin reactor kernel, not one combined protocol policy. The kernel owns
+Regular and share consumers should reuse a thin reactor kernel without combining their consumer behavior. The kernel owns
 queue drain, ordering, deadline aggregation, network polling, publish-before-wakeup, shutdown, and resource limits.
-A `RegularConsumerDriver` can own membership/fetch/offset policy; a `ShareConsumerDriver` can own acquisition,
-lock-renewal, and acknowledgement policy. Branches such as `RequestManagers.wakeupApplicationThread()` and boolean
-transport policy flags are evidence that this boundary has not yet been extracted. New `isShareConsumer` branches,
+A `RegularConsumerDriver` can own group membership, fetch, and offset management; a `ShareConsumerDriver` can own
+record acquisition, lock renewal, and acknowledgement. Branches such as `RequestManagers.wakeupApplicationThread()`
+and boolean transport behavior flags are evidence that this boundary has not yet been extracted. New `isShareConsumer` branches,
 union-shaped optionals, or policy booleans in the kernel should be treated as boundary leaks.
 
 `NetworkClientDelegate` currently owns a `BackgroundEventHandler` and
@@ -163,9 +162,10 @@ published schedule and time source. No queue is added between the reactor and ne
 
 ## Current Decision Coverage
 
-The architectural boundary is: request managers own protocol-specific transitions and report constraints; the
+The architectural boundary is: request managers own their state transitions and report constraints; the
 reactor alone combines those constraints into cross-component scheduling and notification decisions. Centralizing
-the final decision must not turn the reactor into a switch statement containing every protocol rule.
+the final decision must not turn the reactor into a switch statement containing every coordinator, heartbeat,
+fetch, commit, and acknowledgement rule.
 
 | Decision | Current authority | Coverage | Remaining gap |
 | --- | --- | --- | --- |
@@ -318,12 +318,12 @@ callbacks, in-flight requests, and retained response buffers.
 
 ## POC Scope and Non-goals
 
-The POC now names the execution component `ConsumerReactor`, but does not yet move `SubscriptionState`, change
-callback threading, rename `ApplicationEventHandler` or existing runtime thread/metric identifiers, extract
-regular/share protocol drivers, or claim to fix every busy loop. It has established a progress-decision publication
-seam, a typed fetch-preparation result, a state-bearing `PollResult`, and a bounded/coalesced
-state-transition-to-action boundary. It preserves Kafka's `poll()` terminology; it does not introduce a parallel
-`reconcile` lifecycle or a `NextPoll` abstraction.
+The POC now names the execution component `ConsumerReactor` and the application-side boundary
+`ConsumerReactorGateway`, but does not yet move `SubscriptionState`, change callback threading or existing runtime
+thread/metric identifiers, extract regular/share consumer drivers, or claim to fix every busy loop. It has
+established a progress-decision publication seam, a typed fetch-preparation result, a state-bearing `PollResult`, and
+a bounded/coalesced state-transition-to-action boundary. It preserves Kafka's `poll()` terminology; it does not
+introduce a parallel `reconcile` lifecycle or a `NextPoll` abstraction.
 
 The POC includes a deterministic `FetchBuffer` concurrency test plus a cross-component test of the complete async
 consumer chain with only its socket replaced by `MockClient`. In the latter, a consumer without a group id and with
