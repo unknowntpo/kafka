@@ -25,7 +25,6 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaShareConsumer;
 import org.apache.kafka.clients.consumer.ShareConsumer;
-import org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
@@ -122,7 +121,7 @@ public class ShareConsumerImplTest {
     private final ShareFetchCollector<String, String> fetchCollector = mock(ShareFetchCollector.class);
     private final ShareFetchMetricsManager shareFetchMetricsManager = mock(ShareFetchMetricsManager.class);
     private final ShareConsumerMetadata metadata = mock(ShareConsumerMetadata.class);
-    private final ApplicationEventHandler applicationEventHandler = mock(ApplicationEventHandler.class);
+    private final ConsumerReactorGateway consumerReactorGateway = mock(ConsumerReactorGateway.class);
     private final LinkedBlockingQueue<ShareAcknowledgementEvent> acknowledgementEventQueue = new LinkedBlockingQueue<>();
     private final LinkedBlockingQueue<BackgroundEvent> backgroundEventQueue = new LinkedBlockingQueue<>();
     private final CompletableEventReaper backgroundEventReaper = mock(CompletableEventReaper.class);
@@ -161,7 +160,7 @@ public class ShareConsumerImplTest {
                 new StringDeserializer(),
                 new StringDeserializer(),
                 time,
-                (a, b, c, d, e, f, g, h, i) -> applicationEventHandler,
+                (a, b, c, d, e, f, g, h, i) -> consumerReactorGateway,
                 a -> backgroundEventReaper,
                 (a, b, c, d, e) -> fetchCollector,
                 acknowledgementEventQueue,
@@ -199,7 +198,7 @@ public class ShareConsumerImplTest {
                 fetchCollector,
                 shareFetchMetricsManager,
                 time,
-                applicationEventHandler,
+                consumerReactorGateway,
                 acknowledgementEventQueue,
                 backgroundEventQueue,
                 backgroundEventReaper,
@@ -293,7 +292,7 @@ public class ShareConsumerImplTest {
         consumer.poll(Duration.ZERO);
 
         // Verify that a ShareAcknowledgeAsyncEvent was sent with the acknowledgement GAP for offset 1
-        verify(applicationEventHandler).add(argThat(event -> {
+        verify(consumerReactorGateway).submit(argThat(event -> {
             if (!(event instanceof ShareAcknowledgeAsyncEvent)) {
                 return false;
             }
@@ -386,10 +385,10 @@ public class ShareConsumerImplTest {
         completeShareSubscriptionChangeApplicationEventSuccessfully(subscriptions, topics);
         consumer.subscribe(topics);
 
-        doReturn(0L).when(applicationEventHandler).maximumTimeToWait();
+        doReturn(0L).when(consumerReactorGateway).applicationWaitMs();
         // Check that only 1 ShareFetchEvent is sent per poll
         consumer.poll(Duration.ofMillis(100));
-        verify(applicationEventHandler, times(1)).add(argThat(event -> event instanceof ShareFetchEvent));
+        verify(consumerReactorGateway, times(1)).submit(argThat(event -> event instanceof ShareFetchEvent));
     }
 
     @Test
@@ -605,10 +604,10 @@ public class ShareConsumerImplTest {
         consumer.close();
 
         // Verify events are sent in correct order using InOrder
-        InOrder inOrder = inOrder(applicationEventHandler);
-        inOrder.verify(applicationEventHandler).addAndGet(any(ShareAcknowledgeOnCloseEvent.class));
-        inOrder.verify(applicationEventHandler).add(any(ShareUnsubscribeEvent.class));
-        inOrder.verify(applicationEventHandler).add(any(StopFindCoordinatorOnCloseEvent.class));
+        InOrder inOrder = inOrder(consumerReactorGateway);
+        inOrder.verify(consumerReactorGateway).submitAndAwait(any(ShareAcknowledgeOnCloseEvent.class));
+        inOrder.verify(consumerReactorGateway).submit(any(ShareUnsubscribeEvent.class));
+        inOrder.verify(consumerReactorGateway).submit(any(StopFindCoordinatorOnCloseEvent.class));
     }
 
     @Test
@@ -619,8 +618,8 @@ public class ShareConsumerImplTest {
         completeShareAcknowledgeOnCloseApplicationEventSuccessfully();
         completeShareUnsubscribeApplicationEventSuccessfully(subscriptions);
         consumer.close();
-        verify(applicationEventHandler).addAndGet(any(ShareAcknowledgeOnCloseEvent.class));
-        verify(applicationEventHandler).add(any(ShareUnsubscribeEvent.class));
+        verify(consumerReactorGateway).submitAndAwait(any(ShareAcknowledgeOnCloseEvent.class));
+        verify(consumerReactorGateway).submit(any(ShareUnsubscribeEvent.class));
     }
 
     @Test
@@ -629,14 +628,14 @@ public class ShareConsumerImplTest {
         AcknowledgementCommitCallback callback = mock(AcknowledgementCommitCallback.class);
 
         consumer.setAcknowledgementCommitCallback(callback);
-        verify(applicationEventHandler).add(argThat(event ->
+        verify(consumerReactorGateway).submit(argThat(event ->
             event instanceof ShareAcknowledgementCommitCallbackRegistrationEvent &&
             ((ShareAcknowledgementCommitCallbackRegistrationEvent) event).isCallbackRegistered()
         ));
 
         consumer.setAcknowledgementCommitCallback(callback);
         // As we have already set the callback, we should not add another event. We only add when we initially register.
-        verify(applicationEventHandler, times(1)).add(any(ShareAcknowledgementCommitCallbackRegistrationEvent.class));
+        verify(consumerReactorGateway, times(1)).submit(any(ShareAcknowledgementCommitCallbackRegistrationEvent.class));
     }
 
     @Test
@@ -646,14 +645,14 @@ public class ShareConsumerImplTest {
 
         consumer.setAcknowledgementCommitCallback(null);
         // Initially callback is set to null, setting again to null should not add an event.
-        verify(applicationEventHandler, times(0)).add(any(ShareAcknowledgementCommitCallbackRegistrationEvent.class));
+        verify(consumerReactorGateway, times(0)).submit(any(ShareAcknowledgementCommitCallbackRegistrationEvent.class));
 
         consumer.setAcknowledgementCommitCallback(callback);
-        verify(applicationEventHandler, times(1)).add(any(ShareAcknowledgementCommitCallbackRegistrationEvent.class));
+        verify(consumerReactorGateway, times(1)).submit(any(ShareAcknowledgementCommitCallbackRegistrationEvent.class));
 
         // Now we are changing from a non-null callback to null, this should add an event.
         consumer.setAcknowledgementCommitCallback(null);
-        verify(applicationEventHandler).add(argThat(event ->
+        verify(consumerReactorGateway).submit(argThat(event ->
                 event instanceof ShareAcknowledgementCommitCallbackRegistrationEvent &&
                 !((ShareAcknowledgementCommitCallbackRegistrationEvent) event).isCallbackRegistered()));
     }
@@ -683,7 +682,7 @@ public class ShareConsumerImplTest {
         completeShareSubscriptionChangeApplicationEventSuccessfully(subscriptions, subscriptionTopic);
         consumer.subscribe(subscriptionTopic);
         assertEquals(Set.of(topic), consumer.subscription());
-        verify(applicationEventHandler).addAndGet(ArgumentMatchers.isA(ShareSubscriptionChangeEvent.class));
+        verify(consumerReactorGateway).submitAndAwait(ArgumentMatchers.isA(ShareSubscriptionChangeEvent.class));
     }
 
     @Test
@@ -695,7 +694,7 @@ public class ShareConsumerImplTest {
 
         consumer.unsubscribe();
 
-        verify(applicationEventHandler).addAndGet(ArgumentMatchers.isA(ShareUnsubscribeEvent.class));
+        verify(consumerReactorGateway).submitAndAwait(ArgumentMatchers.isA(ShareUnsubscribeEvent.class));
     }
 
     @Test
@@ -707,7 +706,7 @@ public class ShareConsumerImplTest {
 
         consumer.subscribe(List.of());
 
-        verify(applicationEventHandler).addAndGet(ArgumentMatchers.isA(ShareUnsubscribeEvent.class));
+        verify(consumerReactorGateway).submitAndAwait(ArgumentMatchers.isA(ShareUnsubscribeEvent.class));
     }
 
     @Test
@@ -818,13 +817,13 @@ public class ShareConsumerImplTest {
         consumer.subscribe(subscriptionTopic);
 
         consumer.poll(Duration.ofMillis(100));
-        verify(applicationEventHandler).add(any(SharePollEvent.class));
-        verify(applicationEventHandler).addAndGet(any(ShareSubscriptionChangeEvent.class));
+        verify(consumerReactorGateway).submit(any(SharePollEvent.class));
+        verify(consumerReactorGateway).submitAndAwait(any(ShareSubscriptionChangeEvent.class));
 
         completeShareAcknowledgeOnCloseApplicationEventSuccessfully();
         completeShareUnsubscribeApplicationEventSuccessfully(subscriptions);
         consumer.close();
-        verify(applicationEventHandler).addAndGet(any(ShareAcknowledgeOnCloseEvent.class));
+        verify(consumerReactorGateway).submitAndAwait(any(ShareAcknowledgeOnCloseEvent.class));
     }
 
     @Test
@@ -838,7 +837,7 @@ public class ShareConsumerImplTest {
         subscriptions.seek(tp, 0);
 
         // Keep pollForFetches from spinning by making it "wait" and advance MockTime.
-        doReturn(100L).when(applicationEventHandler).maximumTimeToWait();
+        doReturn(100L).when(consumerReactorGateway).applicationWaitMs();
         doAnswer(invocation -> {
             Timer pollTimer = invocation.getArgument(0, Timer.class);
             ((MockTime) time).sleep(pollTimer.remainingMs());
@@ -855,7 +854,7 @@ public class ShareConsumerImplTest {
         verify(fetchBuffer, atLeastOnce()).awaitNotEmpty(any(Timer.class));
 
         // Only one SharePollEvent must have been added despite multiple poll loop iterations.
-        verify(applicationEventHandler, times(1)).add(any(SharePollEvent.class));
+        verify(consumerReactorGateway, times(1)).submit(any(SharePollEvent.class));
     }
 
     @ParameterizedTest
@@ -870,12 +869,12 @@ public class ShareConsumerImplTest {
         // Complete the unsubscribe event successfully
         completeShareUnsubscribeApplicationEventSuccessfully(subscriptions);
 
-        // Mock the applicationEventHandler to add errors to the queue after unsubscribe
+        // Mock the consumerReactorGateway to add errors to the queue after unsubscribe
         doAnswer(invocation -> {
             // Add errors to the queue after unsubscribe event is processed
             backgroundEventQueue.add(new ErrorEvent(error.exception()));
             return null;
-        }).when(applicationEventHandler).add(any(StopFindCoordinatorOnCloseEvent.class));
+        }).when(consumerReactorGateway).submit(any(StopFindCoordinatorOnCloseEvent.class));
 
         // Close should complete successfully despite the errors in the background queue
         assertDoesNotThrow(() -> consumer.close());
@@ -1091,7 +1090,7 @@ public class ShareConsumerImplTest {
             subscriptions.subscribeToShareGroup(new HashSet<>(topics));
             event.future().complete(null);
             return null;
-        }).when(applicationEventHandler).addAndGet(ArgumentMatchers.isA(ShareSubscriptionChangeEvent.class));
+        }).when(consumerReactorGateway).submitAndAwait(ArgumentMatchers.isA(ShareSubscriptionChangeEvent.class));
     }
 
     private void completeShareUnsubscribeApplicationEventSuccessfully(SubscriptionState subscriptions) {
@@ -1100,7 +1099,7 @@ public class ShareConsumerImplTest {
             subscriptions.unsubscribe();
             event.future().complete(null);
             return null;
-        }).when(applicationEventHandler).add(ArgumentMatchers.isA(ShareUnsubscribeEvent.class));
+        }).when(consumerReactorGateway).submit(ArgumentMatchers.isA(ShareUnsubscribeEvent.class));
     }
 
     private void completeShareAcknowledgeOnCloseApplicationEventSuccessfully() {
@@ -1108,6 +1107,6 @@ public class ShareConsumerImplTest {
             ShareAcknowledgeOnCloseEvent event = invocation.getArgument(0);
             event.future().complete(null);
             return null;
-        }).when(applicationEventHandler).addAndGet(ArgumentMatchers.isA(ShareAcknowledgeOnCloseEvent.class));
+        }).when(consumerReactorGateway).submitAndAwait(ArgumentMatchers.isA(ShareAcknowledgeOnCloseEvent.class));
     }
 }

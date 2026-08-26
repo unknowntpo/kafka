@@ -14,12 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.kafka.clients.consumer.internals.events;
+package org.apache.kafka.clients.consumer.internals;
 
-import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
-import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
-import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
-import org.apache.kafka.clients.consumer.internals.RequestManagers;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.CompletableApplicationEvent;
+import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.errors.InterruptException;
@@ -38,19 +38,27 @@ import java.util.concurrent.Future;
 import java.util.function.Supplier;
 
 /**
- * An event handler that receives {@link ApplicationEvent application events} from the application thread which
- * are then readable from the {@link ApplicationEventProcessor} in the {@link ConsumerReactor reactor}.
+ * Thread-safe application-side gateway to the {@link ConsumerReactor}. The application thread can submit input,
+ * wait for a submitted operation, signal the reactor, and read the published application wait. State transitions,
+ * manager polling, schedule publication, and external action ordering remain owned by the reactor.
  */
-public class ApplicationEventHandler implements Closeable {
+public class ConsumerReactorGateway implements Closeable {
 
     private final Logger log;
     private final Time time;
+
+    /**
+     * Ownership-transfer queue from application callers to the single reactor thread. Admission uses
+     * {@link BlockingQueue#offer(Object)} so a configured capacity is enforced without blocking the caller.
+     */
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
+
+    /** Execution owner hidden behind this thread-safe submission and lifecycle boundary. */
     private final ConsumerReactor reactor;
     private final IdempotentCloser closer = new IdempotentCloser();
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
-    public ApplicationEventHandler(final LogContext logContext,
+    public ConsumerReactorGateway(final LogContext logContext,
                                    final Time time,
                                    final int initializationTimeoutMs,
                                    final BlockingQueue<ApplicationEvent> applicationEventQueue,
@@ -59,7 +67,7 @@ public class ApplicationEventHandler implements Closeable {
                                    final Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
                                    final Supplier<RequestManagers> requestManagersSupplier,
                                    final AsyncConsumerMetrics asyncConsumerMetrics) {
-        this.log = logContext.logger(ApplicationEventHandler.class);
+        this.log = logContext.logger(ConsumerReactorGateway.class);
         this.time = time;
         this.applicationEventQueue = applicationEventQueue;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
@@ -87,27 +95,29 @@ public class ApplicationEventHandler implements Closeable {
     }
 
     /**
-     * Add an {@link ApplicationEvent} to the handler and then internally invoke {@link #wakeupReactor()}
-     * to alert the reactor thread that it has something to process.
+     * Submit an {@link ApplicationEvent} and then signal the reactor. Admission always occurs before signaling.
      *
      * @param event An {@link ApplicationEvent} created by the application thread
      * @throws KafkaException if the consumer reactor is no longer alive
      */
-    public void add(final ApplicationEvent event) {
-        Objects.requireNonNull(event, "ApplicationEvent provided to add must be non-null");
+    public void submit(final ApplicationEvent event) {
+        Objects.requireNonNull(event, "ApplicationEvent provided to submit must be non-null");
         ensureReactorAlive();
         event.setEnqueuedMs(time.milliseconds());
-        // Record the updated queue size before actually adding the event to the queue
-        // to avoid race conditions (the reactor is continuously removing from this queue)
-        asyncConsumerMetrics.recordApplicationEventQueueSize(applicationEventQueue.size() + 1);
-        applicationEventQueue.add(event);
-        wakeupReactor();
+        int queueSizeBeforeSubmit = applicationEventQueue.size();
+        if (!applicationEventQueue.offer(event)) {
+            throw new KafkaException("The consumer reactor input queue is full and cannot accept " + event.type());
+        }
+        // Use the pre-admission snapshot because the reactor may drain the event immediately after offer succeeds.
+        asyncConsumerMetrics.recordApplicationEventQueueSize(queueSizeBeforeSubmit + 1);
+        reactor.wakeup();
     }
 
     /**
      * Wakeup the {@link ConsumerReactor reactor thread} to pull the next event(s) from the queue.
      */
-    public void wakeupReactor() {
+    public void signalReactor() {
+        ensureReactorAlive();
         reactor.wakeup();
     }
 
@@ -119,7 +129,7 @@ public class ApplicationEventHandler implements Closeable {
      *
      * @return The maximum delay in milliseconds
      */
-    public long maximumTimeToWait() {
+    public long applicationWaitMs() {
         return reactor.maximumTimeToWait();
     }
 
@@ -132,7 +142,7 @@ public class ApplicationEventHandler implements Closeable {
     }
 
     /**
-     * Add a {@link CompletableApplicationEvent} to the handler. The method blocks waiting for the result, and will
+     * Submit a {@link CompletableApplicationEvent}. The method blocks waiting for the result, and will
      * return the result value upon successful completion; otherwise throws an error.
      *
      * <p/>
@@ -143,9 +153,9 @@ public class ApplicationEventHandler implements Closeable {
      * @return      Value that is the result of the event
      * @param <T>   Type of return value of the event
      */
-    public <T> T addAndGet(final CompletableApplicationEvent<T> event) {
-        Objects.requireNonNull(event, "CompletableApplicationEvent provided to addAndGet must be non-null");
-        add(event);
+    public <T> T submitAndAwait(final CompletableApplicationEvent<T> event) {
+        Objects.requireNonNull(event, "CompletableApplicationEvent provided to submitAndAwait must be non-null");
+        submit(event);
         // Check if the thread was interrupted before we start waiting, to ensure that we
         // propagate the exception even if we end up not having to wait (the event could complete
         // between the time it's added and the time we attempt to getResult)
@@ -163,7 +173,7 @@ public class ApplicationEventHandler implements Closeable {
     public void close(final Duration timeout) {
         closer.close(
                 () -> Utils.closeQuietly(() -> reactor.close(timeout), "consumer reactor"),
-                () -> log.warn("The application event handler was already closed")
+                () -> log.warn("The consumer reactor gateway was already closed")
         );
     }
 
@@ -174,8 +184,8 @@ public class ApplicationEventHandler implements Closeable {
      * fails fast with a clear error message.
      *
      * <p>Note: this is inherently racy — the thread could die between this check and the
-     * subsequent {@code applicationEventQueue.add()}. That narrow window is acceptable because
-     * any subsequent call to {@code add()} will detect the dead thread immediately.
+     * subsequent queue admission. That narrow window is acceptable because any subsequent call to
+     * {@link #submit(ApplicationEvent)} will detect the dead thread immediately.
      *
      * @throws KafkaException if the reactor is not alive
      */
