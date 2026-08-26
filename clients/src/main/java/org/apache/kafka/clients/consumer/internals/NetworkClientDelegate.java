@@ -353,6 +353,34 @@ public class NetworkClientDelegate implements AutoCloseable {
             this.stateTransitions = Set.copyOf(stateTransitions);
         }
 
+        /**
+         * Reports work completed by this poll and the earliest delay before the manager must be polled again.
+         * Progress may request an immediate repoll because at least one request or state transition was produced.
+         */
+        static PollResult progress(final List<UnsentRequest> unsentRequests,
+                                   final Set<StateTransition> stateTransitions,
+                                   final long timeUntilNextPollMs) {
+            Objects.requireNonNull(unsentRequests, "Unsent requests must be non-null");
+            Objects.requireNonNull(stateTransitions, "State transitions must be non-null");
+            if (unsentRequests.isEmpty() && stateTransitions.isEmpty())
+                throw new IllegalArgumentException("Progress requires a request or state transition");
+            if (timeUntilNextPollMs < 0L)
+                throw new IllegalArgumentException("Progress delay must be non-negative");
+            return new PollResult(timeUntilNextPollMs, List.copyOf(unsentRequests), stateTransitions);
+        }
+
+        /** Reports no progress and a finite, positive delay before the manager should be polled again. */
+        static PollResult retryAfter(final long delayMs) {
+            if (delayMs <= 0L || delayMs == WAIT_FOREVER)
+                throw new IllegalArgumentException("Retry delay must be finite and positive");
+            return new PollResult(delayMs);
+        }
+
+        /** Reports no progress and no manager timer deadline; an input event must make the manager runnable again. */
+        static PollResult awaitEvent() {
+            return EMPTY;
+        }
+
         public PollResult(final List<UnsentRequest> unsentRequests) {
             this(WAIT_FOREVER, unsentRequests);
         }
@@ -369,6 +397,12 @@ public class NetworkClientDelegate implements AutoCloseable {
             return stateTransitions;
         }
 
+        /** Generic contract used by the reactor while legacy constructor call sites are migrated incrementally. */
+        boolean satisfiesProgressContract() {
+            return timeUntilNextPollMs >= 0L
+                && (!unsentRequests.isEmpty() || !stateTransitions.isEmpty() || timeUntilNextPollMs > 0L);
+        }
+
         PollResult withStateTransitions(final Set<StateTransition> additionalTransitions) {
             if (additionalTransitions.isEmpty())
                 return this;
@@ -376,7 +410,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             EnumSet<StateTransition> combinedTransitions = EnumSet.noneOf(StateTransition.class);
             combinedTransitions.addAll(stateTransitions);
             combinedTransitions.addAll(additionalTransitions);
-            return new PollResult(timeUntilNextPollMs, unsentRequests, combinedTransitions);
+            return progress(unsentRequests, combinedTransitions, timeUntilNextPollMs);
         }
     }
 

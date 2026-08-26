@@ -293,6 +293,21 @@ public class CommitRequestManagerTest {
     }
 
     @Test
+    public void testInFlightCommitAwaitsCompletionEvent() {
+        CommitRequestManager commitRequestManager = create(false, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        commitRequestManager.commitAsync(Map.of(
+            new TopicPartition("topic", 0), new OffsetAndMetadata(1L)));
+
+        NetworkClientDelegate.PollResult progress = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, progress.unsentRequests.size());
+
+        NetworkClientDelegate.PollResult inFlight = commitRequestManager.poll(time.milliseconds());
+        assertTrue(inFlight.unsentRequests.isEmpty());
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, inFlight.timeUntilNextPollMs);
+    }
+
+    @Test
     public void testCommitSync() {
         subscriptionState = mock(SubscriptionState.class);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));

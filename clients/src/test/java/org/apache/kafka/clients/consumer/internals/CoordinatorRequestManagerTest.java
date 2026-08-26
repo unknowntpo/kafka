@@ -261,9 +261,8 @@ public class CoordinatorRequestManagerTest {
 
         NetworkClientDelegate.PollResult res2 = coordinatorManager.poll(time.milliseconds());
         assertEquals(0, res2.unsentRequests.size(), "no new request should be sent while one is in flight");
-        assertTrue(res2.timeUntilNextPollMs > 0,
-            "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got "
-                + res2.timeUntilNextPollMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, res2.timeUntilNextPollMs,
+            "an in-flight FindCoordinator request must await its completion event");
     }
 
     @ParameterizedTest

@@ -339,11 +339,15 @@ public class ConsumerHeartbeatRequestManagerTest
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No heartbeat should be sent while a " +
                 "previous one is in-flight");
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs,
+            "an in-flight heartbeat must await its completion event");
 
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No heartbeat should be sent when the " +
                 "interval expires if there is a previous HB request in-flight");
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs,
+            "elapsed heartbeat timing must not turn in-flight work into an immediate repoll");
 
         // Receive response for the inflight after the interval expired. The next HB should be sent
         // on the next poll waiting only for the minimal backoff.

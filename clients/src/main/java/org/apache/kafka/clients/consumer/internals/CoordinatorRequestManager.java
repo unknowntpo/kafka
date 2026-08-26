@@ -35,7 +35,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
  * This is responsible for timing to send the next {@link FindCoordinatorRequest} based on the following criteria:
@@ -104,33 +103,35 @@ public class CoordinatorRequestManager implements RequestManager {
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         if (closing)
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitEvent();
 
         if (this.coordinator != null) {
             if (coordinatorDiscoveredSinceLastPoll) {
                 coordinatorDiscoveredSinceLastPoll = false;
-                return new NetworkClientDelegate.PollResult(
-                    NetworkClientDelegate.PollResult.WAIT_FOREVER,
+                return NetworkClientDelegate.PollResult.progress(
                     List.of(),
-                    Set.of(StateTransition.COORDINATOR_DISCOVERED)
+                    Set.of(StateTransition.COORDINATOR_DISCOVERED),
+                    NetworkClientDelegate.PollResult.WAIT_FOREVER
                 );
             }
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitEvent();
         }
 
         if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(request);
+            return NetworkClientDelegate.PollResult.progress(
+                List.of(request), Set.of(), NetworkClientDelegate.PollResult.WAIT_FOREVER);
         }
 
         // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
         // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
         // backoff
         if (coordinatorRequestState.requestInFlight()) {
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitEvent();
         }
 
-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+        return NetworkClientDelegate.PollResult.retryAfter(
+            coordinatorRequestState.remainingBackoffMs(currentTimeMs));
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {

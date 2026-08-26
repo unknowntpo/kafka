@@ -35,8 +35,8 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.Collections;
+import java.util.Set;
 
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 import static org.apache.kafka.clients.consumer.internals.RequestState.RETRY_BACKOFF_JITTER;
 
 /**
@@ -168,7 +168,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
             membershipManager().onHeartbeatRequestSkipped();
             maybePropagateCoordinatorFatalErrorEvent();
-            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.EMPTY);
+            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
         }
         pollTimer.update(currentTimeMs);
         if (pollTimer.isExpired() && !membershipManager().isLeavingGroup()) {
@@ -184,9 +184,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             resetHeartbeatState();
-            return pendingStateTransitions.publishWith(new NetworkClientDelegate.PollResult(
-                heartbeatRequestState.heartbeatIntervalMs(),
-                Collections.singletonList(leaveHeartbeat)
+            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(leaveHeartbeat),
+                Set.of(),
+                heartbeatRequestState.heartbeatIntervalMs()
             ));
         }
 
@@ -198,15 +199,21 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
 
         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
-            return pendingStateTransitions.publishWith(
-                new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs))
-            );
+            if (heartbeatRequestState.requestInFlight())
+                return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+
+            long delayMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
+            NetworkClientDelegate.PollResult result = delayMs == NetworkClientDelegate.PollResult.WAIT_FOREVER
+                ? NetworkClientDelegate.PollResult.awaitEvent()
+                : NetworkClientDelegate.PollResult.retryAfter(delayMs);
+            return pendingStateTransitions.publishWith(result);
         }
 
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
-        return pendingStateTransitions.publishWith(new NetworkClientDelegate.PollResult(
-            heartbeatRequestState.heartbeatIntervalMs(),
-            Collections.singletonList(request)
+        return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.progress(
+            Collections.singletonList(request),
+            Set.of(),
+            heartbeatRequestState.heartbeatIntervalMs()
         ));
     }
 
@@ -242,9 +249,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
     public PollResult pollOnClose(long currentTimeMs) {
         if (membershipManager().isLeavingGroup()) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, true);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+            return NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(request), Set.of(), heartbeatRequestState.heartbeatIntervalMs());
         }
-        return EMPTY;
+        return NetworkClientDelegate.PollResult.awaitEvent();
     }
 
     /**
