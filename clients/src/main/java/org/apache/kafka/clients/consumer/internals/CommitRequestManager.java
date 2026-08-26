@@ -227,6 +227,11 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
     }
 
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
+    }
+
     private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
         return requests.stream()
             .mapToLong(request -> request.remainingBackoffMs(currentTimeMs))

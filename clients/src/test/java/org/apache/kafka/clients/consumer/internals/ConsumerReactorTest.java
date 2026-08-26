@@ -122,6 +122,7 @@ public class ConsumerReactorTest {
         when(offsetsRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         when(coordinatorRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
+        when(heartbeatRequestManager.usesLegacyApplicationWait()).thenReturn(true);
         consumerReactor.initializeResources();
     }
 
@@ -158,7 +159,8 @@ public class ConsumerReactorTest {
         consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(Math.min(exampleTime, ConsumerReactor.MAX_POLL_TIMEOUT_MS), time.milliseconds());
-        assertEquals(consumerReactor.maximumTimeToWait(), exampleTime);
+        assertEquals(exampleTime + 100, consumerReactor.maximumTimeToWait(),
+            "only managers explicitly using the legacy application wait may constrain the application");
     }
 
     @Test
@@ -186,7 +188,9 @@ public class ConsumerReactorTest {
         when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         consumerReactor.runOnce();
         requestManagers.entries().forEach(rm -> verify(rm).poll(anyLong()));
-        requestManagers.entries().forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));
+        verify(heartbeatRequestManager).maximumTimeToWait(anyLong());
+        verify(coordinatorRequestManager, never()).maximumTimeToWait(anyLong());
+        verify(offsetsRequestManager, never()).maximumTimeToWait(anyLong());
         verify(networkClientDelegate, times(list.size())).addAll(anyList());
         verify(networkClientDelegate).poll(anyLong(), anyLong());
     }
