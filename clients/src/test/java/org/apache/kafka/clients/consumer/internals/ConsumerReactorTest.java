@@ -20,6 +20,7 @@ import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.clients.consumer.internals.events.CheckAndUpdatePositionsEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.PausePartitionsEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
@@ -44,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InOrder;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -70,6 +72,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -122,6 +125,7 @@ public class ConsumerReactorTest {
         when(offsetsRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         when(coordinatorRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
+        when(heartbeatRequestManager.usesLegacyApplicationWait()).thenReturn(true);
         consumerReactor.initializeResources();
     }
 
@@ -158,7 +162,8 @@ public class ConsumerReactorTest {
         consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(Math.min(exampleTime, ConsumerReactor.MAX_POLL_TIMEOUT_MS), time.milliseconds());
-        assertEquals(consumerReactor.maximumTimeToWait(), exampleTime);
+        assertEquals(exampleTime + 100, consumerReactor.maximumTimeToWait(),
+            "only managers explicitly using the legacy application wait may constrain the application");
     }
 
     @Test
@@ -186,9 +191,27 @@ public class ConsumerReactorTest {
         when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         consumerReactor.runOnce();
         requestManagers.entries().forEach(rm -> verify(rm).poll(anyLong()));
-        requestManagers.entries().forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));
+        verify(heartbeatRequestManager).maximumTimeToWait(anyLong());
+        verify(coordinatorRequestManager, never()).maximumTimeToWait(anyLong());
+        verify(offsetsRequestManager, never()).maximumTimeToWait(anyLong());
         verify(networkClientDelegate, times(list.size())).addAll(anyList());
         verify(networkClientDelegate).poll(anyLong(), anyLong());
+    }
+
+    @Test
+    public void testPersistentEmptyImmediatePollResultIdentifiesManager() {
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong()))
+            .thenReturn(new NetworkClientDelegate.PollResult(0L));
+
+        AssertionError firstError = assertThrows(AssertionError.class, consumerReactor::runOnce);
+        AssertionError secondError = assertThrows(AssertionError.class, consumerReactor::runOnce);
+
+        assertTrue(firstError.getMessage().contains(coordinatorRequestManager.getClass().getName()));
+        assertTrue(firstError.getMessage().contains("returned no progress with an immediate repoll"));
+        assertEquals(firstError.getMessage(), secondError.getMessage());
+        verify(coordinatorRequestManager, times(2)).poll(anyLong());
+        verify(networkClientDelegate, never()).poll(anyLong(), anyLong());
     }
 
     @Test
@@ -308,6 +331,41 @@ public class ConsumerReactorTest {
     }
 
     @Test
+    public void testWakeupDeduplicationIsPerReactorPhase() {
+        long currentTimeMs = time.milliseconds();
+        NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.PollResult preIo = new NetworkClientDelegate.PollResult(
+            NetworkClientDelegate.PollResult.WAIT_FOREVER,
+            List.of(request),
+            Set.of(StateTransition.FETCH_BUFFER_HAS_DATA)
+        );
+        NetworkClientDelegate.PollResult postIo = new NetworkClientDelegate.PollResult(
+            NetworkClientDelegate.PollResult.WAIT_FOREVER,
+            List.of(),
+            Set.of(StateTransition.FETCH_BUFFER_HAS_DATA)
+        );
+        CheckAndUpdatePositionsEvent metadataEvent =
+            new CheckAndUpdatePositionsEvent(currentTimeMs + 1_000L);
+
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        doReturn(preIo, postIo).when(heartbeatRequestManager).poll(currentTimeMs);
+        doAnswer(invocation -> {
+            request.future().complete(null);
+            return null;
+        }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        when(applicationEventReaper.uncompletedEvents()).thenReturn(List.of(metadataEvent));
+        when(networkClientDelegate.getAndClearMetadataError()).thenReturn(
+            Optional.of(new KafkaException("metadata error")));
+
+        consumerReactor.runOnce();
+
+        verify(requestManagers, times(3)).wakeupApplicationThread();
+    }
+
+    @Test
     public void testRequestCompletionPollsOnlyAffectedManagerAndPublishesBeforeWakeup() {
         long currentTimeMs = time.milliseconds();
         NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
@@ -349,10 +407,11 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testCoordinatorDiscoveryRepollsHeartbeatWithoutApplicationWakeup() {
+    public void testCoordinatorDiscoveryIsObservedByHeartbeatAndCommitOnNextFullPass() {
         long initialTimeMs = time.milliseconds();
         String groupId = "group-id";
         Node coordinatorNode = new Node(1, "localhost", 9092);
+        CommitRequestManager commitRequestManager = mock(CommitRequestManager.class);
         CoordinatorRequestManager realCoordinatorRequestManager = new CoordinatorRequestManager(
             new LogContext(),
             100L,
@@ -378,12 +437,22 @@ public class ConsumerReactorTest {
             1_000L,
             List.of(heartbeatRequest)
         );
+        NetworkClientDelegate.UnsentRequest commitRequest = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.PollResult commitReady =
+            NetworkClientDelegate.PollResult.progress(List.of(commitRequest), Set.of(), 1_000L);
         AtomicReference<NetworkClientDelegate.UnsentRequest> findCoordinatorRequest = new AtomicReference<>();
 
         when(requestManagers.entries()).thenReturn(
-            List.of(realCoordinatorRequestManager, heartbeatRequestManager)
+            List.of(realCoordinatorRequestManager, commitRequestManager, heartbeatRequestManager)
         );
-        when(requestManagers.heartbeatRequestManagers()).thenReturn(List.of(heartbeatRequestManager));
+        when(commitRequestManager.poll(currentTimeMs)).thenAnswer(invocation ->
+            realCoordinatorRequestManager.coordinator().isEmpty()
+                ? NetworkClientDelegate.PollResult.awaitEvent()
+                : commitReady
+        );
         when(heartbeatRequestManager.poll(currentTimeMs)).thenAnswer(invocation ->
             realCoordinatorRequestManager.coordinator().isEmpty()
                 ? NetworkClientDelegate.PollResult.EMPTY
@@ -402,15 +471,82 @@ public class ConsumerReactorTest {
             assertTrue(request != null, "FindCoordinator request must be staged before network poll");
             request.handler().onComplete(buildCoordinatorResponse(request, coordinatorNode, groupId));
             return null;
-        }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        }).doNothing().when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
 
         consumerReactor.runOnce();
 
+        verify(networkClientDelegate, never()).addAll(heartbeatReady.unsentRequests);
+        verify(networkClientDelegate, never()).addAll(commitReady.unsentRequests);
+        verify(heartbeatRequestManager).poll(currentTimeMs);
+        verify(commitRequestManager).poll(currentTimeMs);
+
+        consumerReactor.runOnce();
+
+        InOrder networkOrder = inOrder(networkClientDelegate);
+        networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        networkOrder.verify(networkClientDelegate).addAll(commitReady.unsentRequests);
+        networkOrder.verify(networkClientDelegate).addAll(heartbeatReady.unsentRequests);
+        networkOrder.verify(networkClientDelegate).poll(1_000L, currentTimeMs);
+        verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        verify(networkClientDelegate).poll(1_000L, currentTimeMs);
         verify(heartbeatRequestManager, times(2)).poll(currentTimeMs);
+        verify(commitRequestManager, times(2)).poll(currentTimeMs);
+        verify(networkClientDelegate).addAll(commitReady.unsentRequests);
         verify(networkClientDelegate).addAll(heartbeatReady.unsentRequests);
         verify(requestManagers, never()).wakeupApplicationThread();
         assertTrue(realCoordinatorRequestManager.coordinator().isPresent());
         assertEquals(currentTimeMs + 1_000L, consumerReactor.reactorSchedule().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testCoordinatorInvalidationIsObservedByCoordinatorOnNextFullPass() {
+        long currentTimeMs = time.milliseconds();
+        NetworkClientDelegate.UnsentRequest heartbeatRequest = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.UnsentRequest findCoordinatorRequest = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.PollResult heartbeatInFlight =
+            new NetworkClientDelegate.PollResult(heartbeatRequest);
+        NetworkClientDelegate.PollResult coordinatorInvalidated = new NetworkClientDelegate.PollResult(
+            NetworkClientDelegate.PollResult.WAIT_FOREVER,
+            List.of(),
+            Set.of(StateTransition.COORDINATOR_INVALIDATED)
+        );
+        NetworkClientDelegate.PollResult rediscovery =
+            new NetworkClientDelegate.PollResult(findCoordinatorRequest);
+
+        when(requestManagers.entries()).thenReturn(
+            List.of(coordinatorRequestManager, heartbeatRequestManager)
+        );
+        doReturn(NetworkClientDelegate.PollResult.EMPTY, rediscovery)
+            .when(coordinatorRequestManager).poll(currentTimeMs);
+        doReturn(heartbeatInFlight, coordinatorInvalidated, NetworkClientDelegate.PollResult.awaitEvent())
+            .when(heartbeatRequestManager).poll(currentTimeMs);
+        doAnswer(invocation -> {
+            heartbeatRequest.future().complete(null);
+            return null;
+        }).doNothing().when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+
+        consumerReactor.runOnce();
+
+        verify(networkClientDelegate, never()).addAll(rediscovery.unsentRequests);
+        verify(coordinatorRequestManager).poll(currentTimeMs);
+
+        consumerReactor.runOnce();
+
+        InOrder networkOrder = inOrder(networkClientDelegate);
+        networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        networkOrder.verify(networkClientDelegate).addAll(rediscovery.unsentRequests);
+        networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        verify(networkClientDelegate, times(2)).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        verify(heartbeatRequestManager, times(3)).poll(currentTimeMs);
+        verify(coordinatorRequestManager, times(2)).poll(currentTimeMs);
+        verify(networkClientDelegate).addAll(rediscovery.unsentRequests);
+        verify(requestManagers, never()).wakeupApplicationThread();
     }
 
     private ClientResponse buildCoordinatorResponse(final NetworkClientDelegate.UnsentRequest request,
@@ -530,6 +666,23 @@ public class ConsumerReactorTest {
         consumerReactor.cleanup();
         verify(applicationEventReaper).reap(applicationEventQueue);
         verify(asyncConsumerMetrics).recordApplicationEventExpiredSize(1L);
+    }
+
+    @Test
+    public void testCleanupExecutesStagedAsyncPollCompletion() {
+        AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 1_000L, time.milliseconds());
+        when(applicationEventProcessor.drainReactorActions()).thenReturn(
+            List.of(),
+            List.of(),
+            List.of(ReactorAction.completeAsyncPoll(event, null)));
+
+        consumerReactor.runOnce();
+        assertFalse(event.isComplete());
+        assertTrue(consumerReactor.reactorScheduleGeneration() > 0L);
+
+        consumerReactor.cleanup();
+
+        assertTrue(event.isComplete(), "cleanup must not drop an async-poll completion staged after the final loop drain");
     }
 
     @Test

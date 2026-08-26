@@ -35,7 +35,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
  * This is responsible for timing to send the next {@link FindCoordinatorRequest} based on the following criteria:
@@ -104,33 +103,35 @@ public class CoordinatorRequestManager implements RequestManager {
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         if (closing)
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitEvent();
 
         if (this.coordinator != null) {
             if (coordinatorDiscoveredSinceLastPoll) {
                 coordinatorDiscoveredSinceLastPoll = false;
-                return new NetworkClientDelegate.PollResult(
-                    NetworkClientDelegate.PollResult.WAIT_FOREVER,
+                return NetworkClientDelegate.PollResult.progress(
                     List.of(),
-                    Set.of(StateTransition.COORDINATOR_DISCOVERED)
+                    Set.of(StateTransition.COORDINATOR_DISCOVERED),
+                    NetworkClientDelegate.PollResult.WAIT_FOREVER
                 );
             }
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitEvent();
         }
 
         if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(request);
+            return NetworkClientDelegate.PollResult.progress(
+                List.of(request), Set.of(), NetworkClientDelegate.PollResult.WAIT_FOREVER);
         }
 
         // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
         // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
         // backoff
         if (coordinatorRequestState.requestInFlight()) {
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitEvent();
         }
 
-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+        return NetworkClientDelegate.PollResult.retryAfter(
+            coordinatorRequestState.remainingBackoffMs(currentTimeMs));
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {
@@ -162,11 +163,13 @@ public class CoordinatorRequestManager implements RequestManager {
      *
      * @param exception     The exception to handle, which was received as part of a request response.
      * @param currentTimeMs The current time in milliseconds.
+     * @return {@code true} if this call changed a known coordinator to unknown.
      */
-    public void handleCoordinatorDisconnect(Throwable exception, long currentTimeMs) {
+    public boolean handleCoordinatorDisconnect(Throwable exception, long currentTimeMs) {
         if (exception instanceof DisconnectException) {
-            markCoordinatorUnknown(exception.getMessage(), currentTimeMs);
+            return markCoordinatorUnknown(exception.getMessage(), currentTimeMs);
         }
+        return false;
     }
 
     /**
@@ -180,8 +183,10 @@ public class CoordinatorRequestManager implements RequestManager {
      *
      * @param cause         String explanation of why the coordinator is marked unknown
      * @param currentTimeMs Current time in milliseconds
+     * @return {@code true} if this call changed a known coordinator to unknown.
      */
-    public void markCoordinatorUnknown(final String cause, final long currentTimeMs) {
+    public boolean markCoordinatorUnknown(final String cause, final long currentTimeMs) {
+        final boolean coordinatorWasKnown = coordinator != null;
         if (coordinator != null || timeMarkedUnknownMs == -1) {
             timeMarkedUnknownMs = currentTimeMs;
             totalDisconnectedMin = 0;
@@ -203,6 +208,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 totalDisconnectedMin = currDisconnectMin;
             }
         }
+        return coordinatorWasKnown;
     }
 
     private void onSuccessfulResponse(

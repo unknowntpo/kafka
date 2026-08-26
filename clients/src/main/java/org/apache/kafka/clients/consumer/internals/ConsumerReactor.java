@@ -421,7 +421,13 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private void stagePollResult(final RequestManager manager,
                                  final NetworkClientDelegate.PollResult result,
                                  final long currentTimeMs) {
-        managerPollCache.update(manager, result, manager.maximumTimeToWait(currentTimeMs), currentTimeMs);
+        assert result.satisfiesProgressContract()
+            : "Request manager " + manager.getClass().getName()
+                + " returned no progress with an immediate repoll";
+        long applicationWaitMs = manager.usesLegacyApplicationWait()
+            ? manager.maximumTimeToWait(currentTimeMs)
+            : Long.MAX_VALUE;
+        managerPollCache.update(manager, result, applicationWaitMs, currentTimeMs);
         for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
             request.whenComplete((response, error) -> affectedManagers.add(manager));
         }
@@ -440,19 +446,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         affectedManagers.clear();
 
         List<NetworkClientDelegate.PollResult> results = new ArrayList<>(managers.size());
-        for (int index = 0; index < managers.size(); index++) {
-            RequestManager manager = managers.get(index);
+        for (RequestManager manager : managers) {
             NetworkClientDelegate.PollResult result = manager.poll(currentTimeMs);
             results.add(result);
             stagePollResult(manager, result, currentTimeMs);
             networkClientDelegate.addAll(result.unsentRequests);
-
-            if (result.stateTransitions().contains(StateTransition.COORDINATOR_DISCOVERED)) {
-                for (RequestManager heartbeatManager : requestManagers.heartbeatRequestManagers()) {
-                    if (scheduledManagers.add(heartbeatManager))
-                        managers.add(heartbeatManager);
-                }
-            }
         }
         return results;
     }
@@ -555,6 +553,12 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             pendingReactorActionReasons.add(ReactorActionReason.APPLICATION_EVENT_PROGRESS);
     }
 
+    /**
+     * Records and coalesces a wakeup for the current reactor phase; this method does not wake the application
+     * thread immediately. The reactor first publishes the corresponding state and schedule and executes other
+     * completion actions, then performs the staged wakeup last so the application cannot observe stale state or
+     * lose a notification.
+     */
     private void stageWakeApplication() {
         ReactorAction wakeApplication = ReactorAction.wakeApplication();
         if (!pendingReactorActions.contains(wakeApplication))
@@ -652,6 +656,17 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             // enough that there aren't any outstanding requests to be sent anyway.
             if (networkClientDelegate != null)
                 sendUnsentRequests(timer);
+
+            // An asynchronous completion can stage an action after the final runOnce drain. AsyncPollEvent is not
+            // tracked by the CompletableEventReaper, so execute already-selected actions before closing resources.
+            if (applicationEventProcessor != null) {
+                try {
+                    collectApplicationEventActions();
+                    executeReactorActions();
+                } catch (Exception e) {
+                    log.error("Unexpected error executing staged reactor actions during shutdown", e);
+                }
+            }
 
             asyncConsumerMetrics.recordApplicationEventExpiredSize(applicationEventReaper.reap(applicationEventQueue));
 

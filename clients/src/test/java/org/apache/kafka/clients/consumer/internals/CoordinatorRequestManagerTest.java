@@ -168,7 +168,8 @@ public class CoordinatorRequestManagerTest {
         // been demoted. This can cause a tight loop in which FindCoordinator continues to
         // return node X while that node continues to reply with NOT_COORDINATOR. Hence we
         // still want to ensure a backoff after successfully finding the coordinator.
-        coordinatorManager.markCoordinatorUnknown("coordinator changed", time.milliseconds());
+        assertTrue(coordinatorManager.markCoordinatorUnknown("coordinator changed", time.milliseconds()));
+        assertFalse(coordinatorManager.markCoordinatorUnknown("already unknown", time.milliseconds()));
         assertEquals(Collections.emptyList(), coordinatorManager.poll(time.milliseconds()).unsentRequests);
 
         time.sleep(RETRY_BACKOFF_MS - 1);
@@ -260,9 +261,8 @@ public class CoordinatorRequestManagerTest {
 
         NetworkClientDelegate.PollResult res2 = coordinatorManager.poll(time.milliseconds());
         assertEquals(0, res2.unsentRequests.size(), "no new request should be sent while one is in flight");
-        assertTrue(res2.timeUntilNextPollMs > 0,
-            "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got "
-                + res2.timeUntilNextPollMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, res2.timeUntilNextPollMs,
+            "an in-flight FindCoordinator request must await its completion event");
     }
 
     @ParameterizedTest

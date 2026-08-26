@@ -81,6 +81,17 @@ public interface RequestManager {
     }
 
     /**
+     * Temporary migration marker for managers whose legacy application wait calculation has not yet been
+     * represented by {@link PollResult#timeUntilNextPollMs} and typed state transitions.
+     *
+     * <p>New managers must not opt in. Existing overrides should be removed together with this marker as each
+     * manager is migrated to the reactor scheduling model.
+     */
+    default boolean usesLegacyApplicationWait() {
+        return false;
+    }
+
+    /**
      * Signals the request manager that the consumer is closing to prepare for the proper actions to be taken.
      */
     default void signalClose() { }

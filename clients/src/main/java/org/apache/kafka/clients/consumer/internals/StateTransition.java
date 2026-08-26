@@ -19,6 +19,7 @@ package org.apache.kafka.clients.consumer.internals;
 /** Manager-owned state transitions consumed by the reactor for ordering or application-visible actions. */
 enum StateTransition {
     COORDINATOR_DISCOVERED(false),
+    COORDINATOR_INVALIDATED(false),
     FETCH_BUFFER_HAS_DATA(true),
     FETCH_PREPARATION_FAILED(true),
     FETCH_REQUEST_TERMINATED(true),

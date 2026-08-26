@@ -26,7 +26,6 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -36,42 +35,46 @@ import static org.apache.kafka.test.TestUtils.requiredConsumerConfig;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 public class RequestManagersTest {
 
     @Test
-    public void testHeartbeatRequestManagersIncludesRegularAndStreamsManagers() {
-        ConsumerHeartbeatRequestManager consumerHeartbeat = mock(ConsumerHeartbeatRequestManager.class);
-        StreamsGroupHeartbeatRequestManager streamsHeartbeat = mock(StreamsGroupHeartbeatRequestManager.class);
+    public void testRegularConsumerWakeupTargetIsSelectedAtConstruction() {
+        FetchRequestManager fetchRequestManager = mock(FetchRequestManager.class);
         RequestManagers requestManagers = new RequestManagers(
             new LogContext(),
             mock(OffsetsRequestManager.class),
             mock(TopicMetadataRequestManager.class),
-            mock(FetchRequestManager.class),
+            fetchRequestManager,
             Optional.empty(),
             Optional.empty(),
-            Optional.of(consumerHeartbeat),
             Optional.empty(),
-            Optional.of(streamsHeartbeat),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty(),
             Optional.empty()
         );
 
-        assertEquals(List.of(consumerHeartbeat, streamsHeartbeat), requestManagers.heartbeatRequestManagers());
+        requestManagers.wakeupApplicationThread();
+
+        verify(fetchRequestManager).wakeupApplicationThread();
     }
 
     @Test
-    public void testHeartbeatRequestManagersIncludesShareManager() {
-        ShareHeartbeatRequestManager shareHeartbeat = mock(ShareHeartbeatRequestManager.class);
+    public void testShareConsumerWakeupTargetIsSelectedAtConstruction() {
+        ShareConsumeRequestManager shareConsumeRequestManager = mock(ShareConsumeRequestManager.class);
         RequestManagers requestManagers = new RequestManagers(
             new LogContext(),
-            mock(ShareConsumeRequestManager.class),
+            shareConsumeRequestManager,
             Optional.empty(),
-            Optional.of(shareHeartbeat),
+            Optional.empty(),
             Optional.empty()
         );
 
-        assertEquals(List.of(shareHeartbeat), requestManagers.heartbeatRequestManagers());
+        requestManagers.wakeupApplicationThread();
+
+        verify(shareConsumeRequestManager).wakeupApplicationThread();
     }
 
     @Test

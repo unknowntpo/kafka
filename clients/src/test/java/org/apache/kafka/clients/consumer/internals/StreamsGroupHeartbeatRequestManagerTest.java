@@ -2021,6 +2021,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
             final StreamsGroupHeartbeatRequestManager.HeartbeatState heartbeatState = heartbeatStateMockedConstruction.constructed().get(0);
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+            when(coordinatorRequestManager.handleCoordinatorDisconnect(any(), anyLong())).thenReturn(true);
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
@@ -2035,6 +2036,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
             verify(heartbeatState).reset();
             verify(coordinatorRequestManager).handleCoordinatorDisconnect(disconnectException, completionTimeMs);
             verify(membershipManager).onRetriableHeartbeatFailure();
+
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
+                heartbeatRequestManager.poll(time.milliseconds()).stateTransitions());
+            assertTrue(heartbeatRequestManager.poll(time.milliseconds()).stateTransitions().isEmpty(),
+                "coordinator invalidation must be published once");
         }
     }
 
@@ -2126,6 +2133,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final StreamsGroupHeartbeatRequestManager.HeartbeatState heartbeatState = heartbeatStateMockedConstruction.constructed().get(0);
             final HeartbeatRequestState heartbeatRequestState = heartbeatRequestStateMockedConstruction.constructed().get(0);
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+            when(coordinatorRequestManager.markCoordinatorUnknown(any(), anyLong())).thenReturn(true);
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
@@ -2142,6 +2150,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
             verify(heartbeatState).reset();
             verify(heartbeatRequestState).reset();
             verify(membershipManager).onFatalHeartbeatFailure();
+
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
+                heartbeatRequestManager.poll(time.milliseconds()).stateTransitions());
+            assertTrue(heartbeatRequestManager.poll(time.milliseconds()).stateTransitions().isEmpty(),
+                "coordinator invalidation must be published once");
         }
     }
 
