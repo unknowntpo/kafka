@@ -671,6 +671,17 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             if (networkClientDelegate != null)
                 sendUnsentRequests(timer);
 
+            // An asynchronous completion can stage an action after the final runOnce drain. AsyncPollEvent is not
+            // tracked by the CompletableEventReaper, so execute already-selected actions before closing resources.
+            if (applicationEventProcessor != null) {
+                try {
+                    collectApplicationEventActions();
+                    executeReactorActions();
+                } catch (Exception e) {
+                    log.error("Unexpected error executing staged reactor actions during shutdown", e);
+                }
+            }
+
             asyncConsumerMetrics.recordApplicationEventExpiredSize(applicationEventReaper.reap(applicationEventQueue));
 
             closeQuietly(requestManagers, "request managers");
