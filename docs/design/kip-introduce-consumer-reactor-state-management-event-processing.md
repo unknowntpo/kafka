@@ -45,43 +45,69 @@ this model.
 
 ## Motivation
 
-### Current problem
+A local deadline can be urgent even when the Consumer as a whole cannot make progress. Today, no single component
+combines those facts before selecting the next wait or application-visible action.
 
-The background loop already polls request managers and performs network I/O, but it is not the only place that
-decides what should happen next:
+### A motivating failure: urgent work without progress
 
-- the application thread may rescan subscription or fetch-buffer state before waiting;
-- request managers report network delays and application delays through separate paths;
-- response paths may complete futures, publish data or errors, or wake the application directly;
-- regular and share behavior can be selected by policy branches in shared infrastructure.
+[KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) fixed a high-CPU loop after failed
+re-authentication. Once the coordinator became unavailable, a heartbeat could be due but could not be sent. At the
+same time, coordinator discovery or auto-commit could already be in flight. Two zero-delay paths were enough to spin
+the application and background threads, and the same missing feasibility check also existed in auto-commit:
 
-These paths can act on different snapshots. Urgency does not necessarily mean that progress is possible, an empty
-result does not necessarily represent a state transition, and a wakeup is unsafe if the state or shorter deadline
-that caused it has not been published first.
+| Component | Local observation | Local result | Global reality |
+| --- | --- | --- | --- |
+| Heartbeat request manager | The heartbeat deadline had expired and no heartbeat was in flight. | Application wait `0`. | No coordinator existed, so no heartbeat request could be created. |
+| Coordinator request manager | The retry backoff had elapsed. | Network poll delay `0`. | A `FindCoordinator` request was already in flight, so another request could not be created. |
+| Auto-commit state | The commit interval had elapsed. | Application wait `0`. | A previous commit was still in flight, so another commit could not start. |
 
-The recurring failure mode is:
+The application thread repeatedly observed a zero wait, while the background thread repeatedly called
+`NetworkClient.poll(0)`. Both threads ran, but neither could change the state required for progress.
 
-> State has local owners, but no single owner combines their results into the next cross-resource decision.
+PR 22836 correctly added a feasibility guard to each path. This fixed the bug, but it also demonstrates the
+maintenance problem: one progress rule had to be recognized and implemented independently in heartbeat scheduling,
+coordinator discovery, and auto-commit scheduling. Diagnosing the failure required correlating their timers,
+in-flight state, the cached application wait, and the network poll timeout.
 
-### Bug evidence
+### Proposed decision boundary
 
-The following issues demonstrate this failure pattern. The claim is not that a reactor automatically prevents every
-consumer bug; each issue remains a concrete test obligation.
+This proposal makes the shared rule explicit. Request managers retain their local state and protocol rules, but
+return typed results describing proposed requests, completed state transitions, and `timeUntilNextPollMs`.
+`ConsumerReactor` orders those results, publishes one `ReactorSchedule`, and then executes the required
+`ReactorAction`s.
 
-| Evidence | Failure pattern | Required property |
-| --- | --- | --- |
-| [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885), [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | Position initialization was split, and an older completion could affect a partition added while its request was in flight. | One ordered position operation that can mutate only its captured partition scope. |
-| [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737), [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Position and consumed-state publication could race with commit or application observation. | Apply and publish a complete transition before dependent work. |
-| [KAFKA-20426 / PR 22018](https://github.com/apache/kafka/pull/22018), [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) | An urgent heartbeat produced a zero wait while coordinator or assignment state made progress impossible. | Combine urgency and progress feasibility across managers. |
-| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. | Wake only for a real application-visible transition. |
-| [KAFKA-20397 / PR 21991](https://github.com/apache/kafka/pull/21991) | Metadata error publication raced with an application thread waiting on the fetch buffer. | Publish state and schedule before notification. |
-| [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) | Wakeup or interruption could skip callback acknowledgement. | Every admitted operation reaches one ordered terminal outcome. |
+For the KAFKA-20253 state, the combined result is:
 
-### Why a Consumer Reactor
+```text
+Heartbeat: deadline expired; coordinator required; no request created
+Coordinator: FindCoordinator request in flight
+Auto-commit: deadline expired; commit request in flight
+                              ↓
+                       ConsumerReactor
+                              ↓
+No immediately executable request or completed application-visible transition
+                              ↓
+Wait for network completion or another valid deadline; do not wake the application
+```
 
-Local timeout conditions, wakeup booleans, and application-side safety rescans can fix one reproduction while
-preserving multiple decision authorities. A consumer-level reactor instead provides one execution boundary for the
-facts that determine progress.
+The reactor does not replace manager-local rules or invent their deadlines. It is the single owner that combines
+their outputs into the next cross-manager schedule and application-visible action.
+
+### Bug evidence and expected benefit
+
+KAFKA-20253 is one instance of a recurring decision-ownership problem. The following rows state the expected Reactor
+benefit and the corresponding test obligation; they do not claim that implementation coverage is already complete.
+
+| Evidence | Before Reactor | With ConsumerReactor | Expected benefit and test obligation |
+| --- | --- | --- | --- |
+| [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885), [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | An older position-initialization completion could affect a partition added while its request was in flight. | Reactor orders assignment input and completion; the operation may mutate only its captured partition scope. | A stale completion cannot reset a new partition; verify the complete application-event, network-completion, and next-position-update path. |
+| [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737), [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Position and consumed-state publication could race with commit or application observation. | Reactor applies and publishes the complete transition before dependent work or notification. | Commit and fetch observation use one ordered snapshot; verify publish-before-dependent-action ordering. |
+| [KAFKA-20426 / PR 22018](https://github.com/apache/kafka/pull/22018), [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) | Heartbeat urgency produced a zero wait while coordinator, assignment, or in-flight state made progress impossible. | Reactor combines manager deadlines with whether any request or transition can execute. | No zero-delay loop without progress; reproduce the original multi-manager ordering through the Consumer path. |
+| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. | Only a named application-visible transition can produce `WAKE_APPLICATION`. | A no-progress fetch result does not wake the application; verify the real fetch-buffer wait path. |
+| [KAFKA-20397 / PR 21991](https://github.com/apache/kafka/pull/21991) | Metadata-error publication raced with an application thread entering its fetch-buffer wait. | Reactor publishes state and schedule before issuing a retained notification. | No lost wakeup or stale observation; reproduce the publication/wait ordering. |
+| [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) | Wakeup or interruption could skip callback acknowledgement. | Reactor orders each admitted operation to exactly one terminal action. | No missing or duplicate acknowledgement; verify callback, interruption, cancellation, and close outcomes. |
+
+### Ownership and progress invariants
 
 This proposal relies on three invariants:
 
@@ -109,6 +135,29 @@ This proposal relies on three invariants:
 - Rewriting every request manager in one patch.
 - Defining new public queue-capacity or overload configuration. Resource admission can be proposed separately after
   the decision boundary is established.
+
+### Current and proposed execution flow
+
+Today, `AsyncKafkaConsumer` and `ShareConsumerImpl` each create a background execution context. They reuse the same
+event-loop and network infrastructure, but state, wait, completion, publication, and wakeup decisions can still be
+made by different components along the path:
+
+![Current and proposed Consumer execution flow](../images/kip-1371-consumer-reactor-before-after.png)
+
+The proposal keeps the event-driven topology and the existing application/background thread boundary. It changes
+which component owns the following final cross-component decisions:
+
+- the order in which input events and request managers are processed, including which managers are polled again
+  after network completion;
+- the earliest retained manager deadline, the resulting network poll timeout, and the application wait projection;
+- the ordering of completed state transitions and the `ReactorAction`s they require; and
+- publication of `ReactorSchedule` before completing futures, publishing data or errors, or issuing one retained
+  application wakeup.
+
+Request managers continue to own their local state and rules. `ConsumerReactor` becomes the only component that
+orders inputs, combines manager results into the final cross-manager schedule, and orders application-visible
+actions after publication. `NetworkClientDelegate` retains transport and correlation responsibilities, and user
+callbacks remain on the application thread. The change is decision ownership, not a new thread model.
 
 ## Public Interfaces
 
@@ -153,8 +202,8 @@ After
 ```
 
 `ConsumerReactorGateway` describes the application-side submit, submit-and-wait, wake, schedule-read, and close
-boundary currently implemented by `ApplicationEventHandler`. This internal rename is not required to change runtime
-thread names or behavior.
+boundary. It replaces the less precise `ApplicationEventHandler` name without changing runtime thread names or
+behavior.
 
 | Component | Responsibility after the KIP |
 | --- | --- |
@@ -202,7 +251,50 @@ One reactor iteration is:
 Managers do not call one another recursively. A completion marks its owning manager, while cross-manager
 dependencies are observed in the next ordered pass.
 
-### 3. Publish one schedule before executing actions
+### 3. Preserve operation identity and shared dependencies
+
+Input events, logical operations, and network attempts are not interchangeable. The implementation retains the
+smallest identity required at each layer:
+
+| Identity | Purpose |
+| --- | --- |
+| Input sequence | Orders events accepted by the reactor and supports causal tracing. |
+| Operation ID | Tracks an admitted application-visible operation until exactly one terminal result. |
+| Request attempt identity | Distinguishes network attempts and retries within an operation; transport correlation remains in `NetworkClientDelegate`. |
+| State generation and scope | Prevents an older completion from mutating newer manager state or partitions outside the operation's captured scope. |
+
+These identities do not imply a one-to-one relationship. One application event can produce multiple operations, and
+shared infrastructure work can serve multiple events and operations. Coordinator discovery is an example:
+
+```text
+Input 101: authentication failure
+  -> coordinator UNKNOWN, generation=7
+  -> FindCoordinator(discovery=7, attempt=1, origin=101)
+
+Input 102: commit operation=55
+  -> waits for coordinator generation 7
+
+Input 103: heartbeat deadline
+  -> also waits for coordinator generation 7
+
+Network completion: discovery=7, attempt=1
+  -> apply only if coordinator generation is still 7
+  -> coordinator READY
+  -> Reactor polls the affected heartbeat and commit managers
+```
+
+The `FindCoordinator` request has one originating input for tracing, but it is not owned by that event. Later
+heartbeat, commit, join, or acknowledgement work may depend on the same discovery. Dependent operations remain in
+their owning managers rather than being copied into an unbounded central dependency graph. A shared request retains
+only compact diagnostic identity and manager-owned generation; bounded manager queues retain application operation
+IDs.
+
+If a completion belongs to an older generation, the manager treats it as stale and does not publish a transition for
+the current state. If it is current, the reactor orders the resulting transitions, publishes the new schedule, and
+only then completes dependent operations or executes application-visible actions. These identities are internal and
+do not change Kafka protocol correlation IDs or public Consumer APIs.
+
+### 4. Publish one schedule before executing actions
 
 For every manager result, the reactor converts `timeUntilNextPollMs` into an absolute deadline and retains that
 manager's contribution. `ReactorSchedule` selects the earliest retained deadline. Updating one manager cannot erase
@@ -233,7 +325,7 @@ The ordering invariant is:
 
 > Apply transitions, publish the resulting state and `ReactorSchedule`, then execute `ReactorAction` values.
 
-### 4. Share the reactor kernel, not consumer rules
+### 5. Share the reactor kernel, not consumer rules
 
 The regular consumer and share consumer use separate reactor instances but the same execution kernel because they
 share the same concurrency topology. Their rules remain separate:
@@ -246,7 +338,7 @@ share the same concurrency topology. Their rules remain separate:
 The shared reactor must not branch on consumer type. An `isShareConsumer` switch, optional union, or policy boolean in
 the kernel indicates that consumer-specific rules have leaked across the boundary.
 
-### 5. Example: reconnect backoff with another manager deadline
+### 6. Example: reconnect backoff with another manager deadline
 
 Assume the fetch manager is blocked by a reconnect backoff that expires in 100 ms while the heartbeat manager must be
 polled in 50 ms:
