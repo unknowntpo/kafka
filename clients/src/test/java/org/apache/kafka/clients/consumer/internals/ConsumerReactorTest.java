@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
@@ -23,8 +24,14 @@ import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper
 import org.apache.kafka.clients.consumer.internals.events.PausePartitionsEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.protocol.ApiKeys;
+import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.AbstractRequest;
+import org.apache.kafka.common.requests.FindCoordinatorRequest;
+import org.apache.kafka.common.requests.FindCoordinatorResponse;
+import org.apache.kafka.common.requests.RequestHeader;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.LogContext;
@@ -47,6 +54,7 @@ import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
@@ -338,6 +346,93 @@ public class ConsumerReactorTest {
         verify(coordinatorRequestManager).poll(currentTimeMs);
         verify(requestManagers).wakeupApplicationThread();
         assertEquals(currentTimeMs + 6_000L, deadlineObservedByWakeup.get());
+    }
+
+    @Test
+    public void testCoordinatorDiscoveryRepollsHeartbeatWithoutApplicationWakeup() {
+        long initialTimeMs = time.milliseconds();
+        String groupId = "group-id";
+        Node coordinatorNode = new Node(1, "localhost", 9092);
+        CoordinatorRequestManager realCoordinatorRequestManager = new CoordinatorRequestManager(
+            new LogContext(),
+            100L,
+            1_000L,
+            groupId
+        );
+        NetworkClientDelegate.UnsentRequest initialDiscovery =
+            realCoordinatorRequestManager.poll(initialTimeMs).unsentRequests.get(0);
+        initialDiscovery.handler().onComplete(
+            buildCoordinatorResponse(initialDiscovery, coordinatorNode, groupId)
+        );
+        realCoordinatorRequestManager.poll(initialTimeMs);
+        time.sleep(1_000L);
+        long currentTimeMs = time.milliseconds();
+        realCoordinatorRequestManager.markCoordinatorUnknown("test coordinator loss", currentTimeMs);
+        assertTrue(realCoordinatorRequestManager.coordinator().isEmpty());
+
+        NetworkClientDelegate.UnsentRequest heartbeatRequest = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.PollResult heartbeatReady = new NetworkClientDelegate.PollResult(
+            1_000L,
+            List.of(heartbeatRequest)
+        );
+        AtomicReference<NetworkClientDelegate.UnsentRequest> findCoordinatorRequest = new AtomicReference<>();
+
+        when(requestManagers.entries()).thenReturn(
+            List.of(realCoordinatorRequestManager, heartbeatRequestManager)
+        );
+        when(requestManagers.heartbeatRequestManagers()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(currentTimeMs)).thenAnswer(invocation ->
+            realCoordinatorRequestManager.coordinator().isEmpty()
+                ? NetworkClientDelegate.PollResult.EMPTY
+                : heartbeatReady
+        );
+        doAnswer(invocation -> {
+            List<NetworkClientDelegate.UnsentRequest> requests = invocation.getArgument(0);
+            for (NetworkClientDelegate.UnsentRequest request : requests) {
+                if (request.requestBuilder() instanceof FindCoordinatorRequest.Builder)
+                    findCoordinatorRequest.set(request);
+            }
+            return null;
+        }).when(networkClientDelegate).addAll(anyList());
+        doAnswer(invocation -> {
+            NetworkClientDelegate.UnsentRequest request = findCoordinatorRequest.get();
+            assertTrue(request != null, "FindCoordinator request must be staged before network poll");
+            request.handler().onComplete(buildCoordinatorResponse(request, coordinatorNode, groupId));
+            return null;
+        }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+
+        consumerReactor.runOnce();
+
+        verify(heartbeatRequestManager, times(2)).poll(currentTimeMs);
+        verify(networkClientDelegate).addAll(heartbeatReady.unsentRequests);
+        verify(requestManagers, never()).wakeupApplicationThread();
+        assertTrue(realCoordinatorRequestManager.coordinator().isPresent());
+        assertEquals(currentTimeMs + 1_000L, consumerReactor.reactorSchedule().reactorDeadlineMs());
+    }
+
+    private ClientResponse buildCoordinatorResponse(final NetworkClientDelegate.UnsentRequest request,
+                                                    final Node coordinatorNode,
+                                                    final String groupId) {
+        FindCoordinatorRequest findCoordinatorRequest = (FindCoordinatorRequest) request.requestBuilder().build();
+        FindCoordinatorResponse response = FindCoordinatorResponse.prepareResponse(
+            Errors.NONE,
+            groupId,
+            coordinatorNode
+        );
+        return new ClientResponse(
+            new RequestHeader(ApiKeys.FIND_COORDINATOR, findCoordinatorRequest.version(), "", 1),
+            request.handler(),
+            coordinatorNode.idString(),
+            time.milliseconds(),
+            time.milliseconds(),
+            false,
+            null,
+            null,
+            response
+        );
     }
 
     @Test
