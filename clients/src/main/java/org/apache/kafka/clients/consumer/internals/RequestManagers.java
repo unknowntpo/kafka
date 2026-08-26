@@ -143,22 +143,6 @@ public class RequestManagers implements Closeable {
         return entries;
     }
 
-    /** Managers whose ability to make progress changes when a group coordinator is discovered. */
-    List<RequestManager> heartbeatRequestManagers() {
-        List<RequestManager> managers = new ArrayList<>(3);
-        consumerHeartbeatRequestManager.ifPresent(managers::add);
-        shareHeartbeatRequestManager.ifPresent(managers::add);
-        streamsGroupHeartbeatRequestManager.ifPresent(managers::add);
-        return managers;
-    }
-
-    /** Manager whose ability to discover a coordinator changes when another manager invalidates it. */
-    List<RequestManager> coordinatorRequestManagers() {
-        List<RequestManager> managers = new ArrayList<>(1);
-        coordinatorRequestManager.ifPresent(managers::add);
-        return managers;
-    }
-
     /**
      * Wake the application-side fetch wait after a shorter reactor schedule has been published. The fetch buffers
      * latch wakeups, so publishing first prevents both stale reads and lost notifications.

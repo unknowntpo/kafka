@@ -407,7 +407,7 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testCoordinatorDiscoveryRepollsHeartbeatButNotCommitWithoutApplicationWakeup() {
+    public void testCoordinatorDiscoveryIsObservedByHeartbeatAndCommitOnNextFullPass() {
         long initialTimeMs = time.milliseconds();
         String groupId = "group-id";
         Node coordinatorNode = new Node(1, "localhost", 9092);
@@ -437,13 +437,22 @@ public class ConsumerReactorTest {
             1_000L,
             List.of(heartbeatRequest)
         );
+        NetworkClientDelegate.UnsentRequest commitRequest = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.PollResult commitReady =
+            NetworkClientDelegate.PollResult.progress(List.of(commitRequest), Set.of(), 1_000L);
         AtomicReference<NetworkClientDelegate.UnsentRequest> findCoordinatorRequest = new AtomicReference<>();
 
         when(requestManagers.entries()).thenReturn(
             List.of(realCoordinatorRequestManager, commitRequestManager, heartbeatRequestManager)
         );
-        when(requestManagers.heartbeatRequestManagers()).thenReturn(List.of(heartbeatRequestManager));
-        when(commitRequestManager.poll(currentTimeMs)).thenReturn(NetworkClientDelegate.PollResult.awaitEvent());
+        when(commitRequestManager.poll(currentTimeMs)).thenAnswer(invocation ->
+            realCoordinatorRequestManager.coordinator().isEmpty()
+                ? NetworkClientDelegate.PollResult.awaitEvent()
+                : commitReady
+        );
         when(heartbeatRequestManager.poll(currentTimeMs)).thenAnswer(invocation ->
             realCoordinatorRequestManager.coordinator().isEmpty()
                 ? NetworkClientDelegate.PollResult.EMPTY
@@ -462,16 +471,27 @@ public class ConsumerReactorTest {
             assertTrue(request != null, "FindCoordinator request must be staged before network poll");
             request.handler().onComplete(buildCoordinatorResponse(request, coordinatorNode, groupId));
             return null;
-        }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        }).doNothing().when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+
+        consumerReactor.runOnce();
+
+        verify(networkClientDelegate, never()).addAll(heartbeatReady.unsentRequests);
+        verify(networkClientDelegate, never()).addAll(commitReady.unsentRequests);
+        verify(heartbeatRequestManager).poll(currentTimeMs);
+        verify(commitRequestManager).poll(currentTimeMs);
 
         consumerReactor.runOnce();
 
         InOrder networkOrder = inOrder(networkClientDelegate);
         networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        networkOrder.verify(networkClientDelegate).addAll(commitReady.unsentRequests);
         networkOrder.verify(networkClientDelegate).addAll(heartbeatReady.unsentRequests);
+        networkOrder.verify(networkClientDelegate).poll(1_000L, currentTimeMs);
         verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        verify(networkClientDelegate).poll(1_000L, currentTimeMs);
         verify(heartbeatRequestManager, times(2)).poll(currentTimeMs);
-        verify(commitRequestManager).poll(currentTimeMs);
+        verify(commitRequestManager, times(2)).poll(currentTimeMs);
+        verify(networkClientDelegate).addAll(commitReady.unsentRequests);
         verify(networkClientDelegate).addAll(heartbeatReady.unsentRequests);
         verify(requestManagers, never()).wakeupApplicationThread();
         assertTrue(realCoordinatorRequestManager.coordinator().isPresent());
@@ -479,7 +499,7 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testHeartbeatCoordinatorInvalidationRepollsCoordinatorWithoutApplicationWakeup() {
+    public void testCoordinatorInvalidationIsObservedByCoordinatorOnNextFullPass() {
         long currentTimeMs = time.milliseconds();
         NetworkClientDelegate.UnsentRequest heartbeatRequest = new NetworkClientDelegate.UnsentRequest(
             mock(AbstractRequest.Builder.class),
@@ -502,23 +522,28 @@ public class ConsumerReactorTest {
         when(requestManagers.entries()).thenReturn(
             List.of(coordinatorRequestManager, heartbeatRequestManager)
         );
-        when(requestManagers.coordinatorRequestManagers()).thenReturn(List.of(coordinatorRequestManager));
         doReturn(NetworkClientDelegate.PollResult.EMPTY, rediscovery)
             .when(coordinatorRequestManager).poll(currentTimeMs);
-        doReturn(heartbeatInFlight, coordinatorInvalidated)
+        doReturn(heartbeatInFlight, coordinatorInvalidated, NetworkClientDelegate.PollResult.awaitEvent())
             .when(heartbeatRequestManager).poll(currentTimeMs);
         doAnswer(invocation -> {
             heartbeatRequest.future().complete(null);
             return null;
-        }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        }).doNothing().when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+
+        consumerReactor.runOnce();
+
+        verify(networkClientDelegate, never()).addAll(rediscovery.unsentRequests);
+        verify(coordinatorRequestManager).poll(currentTimeMs);
 
         consumerReactor.runOnce();
 
         InOrder networkOrder = inOrder(networkClientDelegate);
         networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
         networkOrder.verify(networkClientDelegate).addAll(rediscovery.unsentRequests);
-        verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
-        verify(heartbeatRequestManager, times(2)).poll(currentTimeMs);
+        networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        verify(networkClientDelegate, times(2)).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        verify(heartbeatRequestManager, times(3)).poll(currentTimeMs);
         verify(coordinatorRequestManager, times(2)).poll(currentTimeMs);
         verify(networkClientDelegate).addAll(rediscovery.unsentRequests);
         verify(requestManagers, never()).wakeupApplicationThread();
