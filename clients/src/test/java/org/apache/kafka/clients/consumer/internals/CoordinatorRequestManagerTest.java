@@ -168,7 +168,8 @@ public class CoordinatorRequestManagerTest {
         // been demoted. This can cause a tight loop in which FindCoordinator continues to
         // return node X while that node continues to reply with NOT_COORDINATOR. Hence we
         // still want to ensure a backoff after successfully finding the coordinator.
-        coordinatorManager.markCoordinatorUnknown("coordinator changed", time.milliseconds());
+        assertTrue(coordinatorManager.markCoordinatorUnknown("coordinator changed", time.milliseconds()));
+        assertFalse(coordinatorManager.markCoordinatorUnknown("already unknown", time.milliseconds()));
         assertEquals(Collections.emptyList(), coordinatorManager.poll(time.milliseconds()).unsentRequests);
 
         time.sleep(RETRY_BACKOFF_MS - 1);

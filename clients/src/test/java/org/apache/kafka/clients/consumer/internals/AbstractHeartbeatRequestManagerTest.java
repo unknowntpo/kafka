@@ -127,6 +127,7 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
     @ParameterizedTest
     @EnumSource(value = Errors.class, names = {"NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE"})
     public void testCoordinatorInvalidationIsPublishedExactlyOnce(final Errors error) {
+        when(coordinatorRequestManager.markCoordinatorUnknown(any(), anyLong())).thenReturn(true);
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
         NetworkClientDelegate.PollResult heartbeat = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, heartbeat.unsentRequests.size());

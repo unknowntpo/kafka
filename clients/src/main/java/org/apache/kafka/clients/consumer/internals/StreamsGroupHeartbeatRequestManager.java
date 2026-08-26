@@ -364,6 +364,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
 
     private final CoordinatorRequestManager coordinatorRequestManager;
 
+    /** Cross-manager changes completed by heartbeat callbacks and published atomically by the next poll. */
+    private final PendingStateTransitions pendingStateTransitions = new PendingStateTransitions();
+
     private final HeartbeatRequestState heartbeatRequestState;
 
     private final HeartbeatState heartbeatState;
@@ -452,7 +455,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
             membershipManager.onHeartbeatRequestSkipped();
             maybePropagateCoordinatorFatalErrorEvent();
-            return NetworkClientDelegate.PollResult.EMPTY;
+            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.EMPTY);
         }
         pollTimer.update(currentTimeMs);
         if (pollTimer.isExpired() && !membershipManager.isLeavingGroup()) {
@@ -468,20 +471,23 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             heartbeatState.reset();
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat));
+            return pendingStateTransitions.publishWith(new NetworkClientDelegate.PollResult(
+                heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat)));
         }
         if (membershipManager.state() == MemberState.LEAVING && shouldSkipLeaveHeartbeat()) {
             logger.info("Dynamic member {} skipping leave heartbeat (operation=REMAIN_IN_GROUP). " +
                 "The broker will remove the member from the group via session timeout.",
                 membershipManager.memberId());
             membershipManager.onHeartbeatRequestSkipped();
-            return EMPTY;
+            return pendingStateTransitions.publishWith(EMPTY);
         }
         if (shouldHeartbeatBeforeIntervalExpires() || heartbeatRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+            return pendingStateTransitions.publishWith(new NetworkClientDelegate.PollResult(
+                heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request)));
         } else {
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+            return pendingStateTransitions.publishWith(
+                new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
         }
     }
 
@@ -737,7 +743,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingStateTransitions.addIf(
+                    coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs),
+                    StateTransition.COORDINATOR_INVALIDATED);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -749,7 +757,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingStateTransitions.addIf(
+                    coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs),
+                    StateTransition.COORDINATOR_INVALIDATED);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -847,7 +857,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         heartbeatRequestState.onFailedAttempt(responseTimeMs);
         heartbeatState.reset();
         if (exception instanceof RetriableException) {
-            coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+            pendingStateTransitions.addIf(
+                coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs),
+                StateTransition.COORDINATOR_INVALIDATED);
             String message = String.format("StreamsGroupHeartbeatRequest failed because of a retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),
                 exception.getMessage());
