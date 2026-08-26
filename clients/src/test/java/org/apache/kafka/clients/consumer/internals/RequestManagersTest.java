@@ -26,6 +26,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -37,6 +38,41 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 public class RequestManagersTest {
+
+    @Test
+    public void testHeartbeatRequestManagersIncludesRegularAndStreamsManagers() {
+        ConsumerHeartbeatRequestManager consumerHeartbeat = mock(ConsumerHeartbeatRequestManager.class);
+        StreamsGroupHeartbeatRequestManager streamsHeartbeat = mock(StreamsGroupHeartbeatRequestManager.class);
+        RequestManagers requestManagers = new RequestManagers(
+            new LogContext(),
+            mock(OffsetsRequestManager.class),
+            mock(TopicMetadataRequestManager.class),
+            mock(FetchRequestManager.class),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(consumerHeartbeat),
+            Optional.empty(),
+            Optional.of(streamsHeartbeat),
+            Optional.empty(),
+            Optional.empty()
+        );
+
+        assertEquals(List.of(consumerHeartbeat, streamsHeartbeat), requestManagers.heartbeatRequestManagers());
+    }
+
+    @Test
+    public void testHeartbeatRequestManagersIncludesShareManager() {
+        ShareHeartbeatRequestManager shareHeartbeat = mock(ShareHeartbeatRequestManager.class);
+        RequestManagers requestManagers = new RequestManagers(
+            new LogContext(),
+            mock(ShareConsumeRequestManager.class),
+            Optional.empty(),
+            Optional.of(shareHeartbeat),
+            Optional.empty()
+        );
+
+        assertEquals(List.of(shareHeartbeat), requestManagers.heartbeatRequestManagers());
+    }
 
     @Test
     public void testConsumerGroupRequestManagersAndListenersWired() {

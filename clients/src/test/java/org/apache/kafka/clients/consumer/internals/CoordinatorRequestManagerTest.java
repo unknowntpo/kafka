@@ -40,6 +40,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -81,6 +82,10 @@ public class CoordinatorRequestManagerTest {
 
         NetworkClientDelegate.PollResult pollResult = coordinatorManager.poll(time.milliseconds());
         assertEquals(Collections.emptyList(), pollResult.unsentRequests);
+        assertEquals(Set.of(StateTransition.COORDINATOR_DISCOVERED), pollResult.stateTransitions());
+
+        NetworkClientDelegate.PollResult nextPollResult = coordinatorManager.poll(time.milliseconds());
+        assertTrue(nextPollResult.stateTransitions().isEmpty(), "discovery must be published exactly once");
     }
 
     /**

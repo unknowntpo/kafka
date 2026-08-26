@@ -107,7 +107,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final Set<RequestManager> affectedManagers =
         Collections.newSetFromMap(new IdentityHashMap<>());
 
-    /** State changes observed in the current phase, coalesced into one application notification and trace entry. */
+    /** Application-visible state changes in the current phase, coalesced into one notification and trace entry. */
     private final EnumSet<StateTransition> pendingStateTransitions =
         EnumSet.noneOf(StateTransition.class);
 
@@ -431,16 +431,28 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         if (affectedManagers.isEmpty())
             return List.of();
 
-        Set<RequestManager> managers = Collections.newSetFromMap(new IdentityHashMap<>());
-        managers.addAll(affectedManagers);
+        Set<RequestManager> scheduledManagers = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<RequestManager> managers = new ArrayList<>();
+        for (RequestManager manager : affectedManagers) {
+            if (scheduledManagers.add(manager))
+                managers.add(manager);
+        }
         affectedManagers.clear();
 
         List<NetworkClientDelegate.PollResult> results = new ArrayList<>(managers.size());
-        for (RequestManager manager : managers) {
+        for (int index = 0; index < managers.size(); index++) {
+            RequestManager manager = managers.get(index);
             NetworkClientDelegate.PollResult result = manager.poll(currentTimeMs);
             results.add(result);
             stagePollResult(manager, result, currentTimeMs);
             networkClientDelegate.addAll(result.unsentRequests);
+
+            if (result.stateTransitions().contains(StateTransition.COORDINATOR_DISCOVERED)) {
+                for (RequestManager heartbeatManager : requestManagers.heartbeatRequestManagers()) {
+                    if (scheduledManagers.add(heartbeatManager))
+                        managers.add(heartbeatManager);
+                }
+            }
         }
         return results;
     }
@@ -497,8 +509,12 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     }
 
     private void collectStateTransitions(final Collection<NetworkClientDelegate.PollResult> results) {
-        for (NetworkClientDelegate.PollResult result : results)
-            pendingStateTransitions.addAll(result.stateTransitions());
+        for (NetworkClientDelegate.PollResult result : results) {
+            for (StateTransition transition : result.stateTransitions()) {
+                if (transition.requiresApplicationWakeup())
+                    pendingStateTransitions.add(transition);
+            }
+        }
         if (!pendingStateTransitions.isEmpty()) {
             stageWakeApplication();
             pendingReactorActionReasons.add(

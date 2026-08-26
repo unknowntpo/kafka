@@ -30,8 +30,10 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.slf4j.Logger;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
@@ -58,6 +60,8 @@ public class CoordinatorRequestManager implements RequestManager {
     private long totalDisconnectedMin = 0;
     private boolean closing = false;
     private Node coordinator;
+    /** Published once after successful discovery so the reactor can re-poll coordinator-dependent managers. */
+    private boolean coordinatorDiscoveredSinceLastPoll = false;
     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
     // appropriate actions. 
     // For example:
@@ -99,8 +103,20 @@ public class CoordinatorRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
-        if (closing || this.coordinator != null)
+        if (closing)
             return EMPTY;
+
+        if (this.coordinator != null) {
+            if (coordinatorDiscoveredSinceLastPoll) {
+                coordinatorDiscoveredSinceLastPoll = false;
+                return new NetworkClientDelegate.PollResult(
+                    NetworkClientDelegate.PollResult.WAIT_FOREVER,
+                    List.of(),
+                    Set.of(StateTransition.COORDINATOR_DISCOVERED)
+                );
+            }
+            return EMPTY;
+        }
 
         if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
@@ -178,6 +194,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 cause
             );
             coordinator = null;
+            coordinatorDiscoveredSinceLastPoll = false;
         } else {
             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
             long currDisconnectMin = durationOfOngoingDisconnectMs / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
@@ -198,6 +215,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 coordinator.port());
         log.info("Discovered group coordinator {}", coordinator);
         coordinatorRequestState.onSuccessfulAttempt(currentTimeMs);
+        coordinatorDiscoveredSinceLastPoll = true;
     }
 
     private void onFailedResponse(final long currentTimeMs, final Throwable exception) {
