@@ -446,25 +446,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         affectedManagers.clear();
 
         List<NetworkClientDelegate.PollResult> results = new ArrayList<>(managers.size());
-        for (int index = 0; index < managers.size(); index++) {
-            RequestManager manager = managers.get(index);
+        for (RequestManager manager : managers) {
             NetworkClientDelegate.PollResult result = manager.poll(currentTimeMs);
             results.add(result);
             stagePollResult(manager, result, currentTimeMs);
             networkClientDelegate.addAll(result.unsentRequests);
-
-            if (result.stateTransitions().contains(StateTransition.COORDINATOR_DISCOVERED)) {
-                for (RequestManager heartbeatManager : requestManagers.heartbeatRequestManagers()) {
-                    if (scheduledManagers.add(heartbeatManager))
-                        managers.add(heartbeatManager);
-                }
-            }
-            if (result.stateTransitions().contains(StateTransition.COORDINATOR_INVALIDATED)) {
-                for (RequestManager coordinatorManager : requestManagers.coordinatorRequestManagers()) {
-                    if (scheduledManagers.add(coordinatorManager))
-                        managers.add(coordinatorManager);
-                }
-            }
         }
         return results;
     }
