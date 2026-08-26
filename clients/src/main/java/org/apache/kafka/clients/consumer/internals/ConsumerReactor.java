@@ -453,6 +453,12 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
                         managers.add(heartbeatManager);
                 }
             }
+            if (result.stateTransitions().contains(StateTransition.COORDINATOR_INVALIDATED)) {
+                for (RequestManager coordinatorManager : requestManagers.coordinatorRequestManagers()) {
+                    if (scheduledManagers.add(coordinatorManager))
+                        managers.add(coordinatorManager);
+                }
+            }
         }
         return results;
     }

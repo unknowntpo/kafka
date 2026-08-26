@@ -24,6 +24,7 @@ import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.HeartbeatMetricsManager;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.protocol.Errors;
@@ -35,6 +36,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.Collections;
+import java.util.EnumSet;
 
 import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 import static org.apache.kafka.clients.consumer.internals.RequestState.RETRY_BACKOFF_JITTER;
@@ -96,6 +98,9 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      * Holding the heartbeat sensor to measure heartbeat timing and response latency
      */
     private final HeartbeatMetricsManager metricsManager;
+
+    /** Cross-manager changes completed by heartbeat callbacks and published atomically by the next poll. */
+    private final EnumSet<StateTransition> pendingStateTransitions = EnumSet.noneOf(StateTransition.class);
 
     public static final String CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG = "The cluster does not support the new CONSUMER " +
         "group protocol. Set group.protocol=classic on the consumer configs to revert to the CLASSIC protocol " +
@@ -165,7 +170,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
             membershipManager().onHeartbeatRequestSkipped();
             maybePropagateCoordinatorFatalErrorEvent();
-            return NetworkClientDelegate.PollResult.EMPTY;
+            return withPendingStateTransitions(NetworkClientDelegate.PollResult.EMPTY);
         }
         pollTimer.update(currentTimeMs);
         if (pollTimer.isExpired() && !membershipManager().isLeavingGroup()) {
@@ -181,7 +186,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             resetHeartbeatState();
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat));
+            return withPendingStateTransitions(new NetworkClientDelegate.PollResult(
+                heartbeatRequestState.heartbeatIntervalMs(),
+                Collections.singletonList(leaveHeartbeat)
+            ));
         }
 
         // Case 1: The member state is LEAVING - if the member is a share consumer, we should immediately send leave;
@@ -192,11 +200,27 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
 
         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+            return withPendingStateTransitions(
+                new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs))
+            );
         }
 
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
-        return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+        return withPendingStateTransitions(new NetworkClientDelegate.PollResult(
+            heartbeatRequestState.heartbeatIntervalMs(),
+            Collections.singletonList(request)
+        ));
+    }
+
+    private NetworkClientDelegate.PollResult withPendingStateTransitions(
+        final NetworkClientDelegate.PollResult pollResult
+    ) {
+        if (pendingStateTransitions.isEmpty())
+            return pollResult;
+
+        NetworkClientDelegate.PollResult result = pollResult.withStateTransitions(pendingStateTransitions);
+        pendingStateTransitions.clear();
+        return result;
     }
 
     /**
@@ -341,6 +365,8 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         resetHeartbeatState();
         if (exception instanceof RetriableException) {
             coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+            if (exception instanceof DisconnectException)
+                pendingStateTransitions.add(StateTransition.COORDINATOR_INVALIDATED);
             String message = String.format("%s failed because of the retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestName(),
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),
@@ -387,6 +413,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                         heartbeatRequestName(), coordinatorRequestManager.coordinator());
                 logInfo(message, response, currentTimeMs);
                 coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingStateTransitions.add(StateTransition.COORDINATOR_INVALIDATED);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -397,6 +424,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                         heartbeatRequestName(), coordinatorRequestManager.coordinator());
                 logInfo(message, response, currentTimeMs);
                 coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingStateTransitions.add(StateTransition.COORDINATOR_INVALIDATED);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;

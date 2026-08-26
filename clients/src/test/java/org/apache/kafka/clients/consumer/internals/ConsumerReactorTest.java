@@ -413,6 +413,48 @@ public class ConsumerReactorTest {
         assertEquals(currentTimeMs + 1_000L, consumerReactor.reactorSchedule().reactorDeadlineMs());
     }
 
+    @Test
+    public void testHeartbeatCoordinatorInvalidationRepollsCoordinatorWithoutApplicationWakeup() {
+        long currentTimeMs = time.milliseconds();
+        NetworkClientDelegate.UnsentRequest heartbeatRequest = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.UnsentRequest findCoordinatorRequest = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        NetworkClientDelegate.PollResult heartbeatInFlight =
+            new NetworkClientDelegate.PollResult(heartbeatRequest);
+        NetworkClientDelegate.PollResult coordinatorInvalidated = new NetworkClientDelegate.PollResult(
+            NetworkClientDelegate.PollResult.WAIT_FOREVER,
+            List.of(),
+            Set.of(StateTransition.COORDINATOR_INVALIDATED)
+        );
+        NetworkClientDelegate.PollResult rediscovery =
+            new NetworkClientDelegate.PollResult(findCoordinatorRequest);
+
+        when(requestManagers.entries()).thenReturn(
+            List.of(coordinatorRequestManager, heartbeatRequestManager)
+        );
+        when(requestManagers.coordinatorRequestManagers()).thenReturn(List.of(coordinatorRequestManager));
+        doReturn(NetworkClientDelegate.PollResult.EMPTY, rediscovery)
+            .when(coordinatorRequestManager).poll(currentTimeMs);
+        doReturn(heartbeatInFlight, coordinatorInvalidated)
+            .when(heartbeatRequestManager).poll(currentTimeMs);
+        doAnswer(invocation -> {
+            heartbeatRequest.future().complete(null);
+            return null;
+        }).when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+
+        consumerReactor.runOnce();
+
+        verify(heartbeatRequestManager, times(2)).poll(currentTimeMs);
+        verify(coordinatorRequestManager, times(2)).poll(currentTimeMs);
+        verify(networkClientDelegate).addAll(rediscovery.unsentRequests);
+        verify(requestManagers, never()).wakeupApplicationThread();
+    }
+
     private ClientResponse buildCoordinatorResponse(final NetworkClientDelegate.UnsentRequest request,
                                                     final Node coordinatorNode,
                                                     final String groupId) {

@@ -391,10 +391,12 @@ public class ConsumerHeartbeatRequestManagerTest
         time.sleep(DEFAULT_RETRY_BACKOFF_MS - 1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No request should be generated before the backoff expires");
+        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED), result.stateTransitions());
 
         time.sleep(1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size(), "A new request should be generated after the backoff expires");
+        assertTrue(result.stateTransitions().isEmpty(), "coordinator invalidation must be published once");
     }
 
     @Test

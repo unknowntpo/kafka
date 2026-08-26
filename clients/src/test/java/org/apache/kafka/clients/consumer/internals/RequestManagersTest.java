@@ -75,6 +75,20 @@ public class RequestManagersTest {
     }
 
     @Test
+    public void testCoordinatorRequestManagersIncludesConfiguredManager() {
+        CoordinatorRequestManager coordinator = mock(CoordinatorRequestManager.class);
+        RequestManagers requestManagers = new RequestManagers(
+            new LogContext(),
+            mock(ShareConsumeRequestManager.class),
+            Optional.of(coordinator),
+            Optional.empty(),
+            Optional.empty()
+        );
+
+        assertEquals(List.of(coordinator), requestManagers.coordinatorRequestManagers());
+    }
+
+    @Test
     public void testConsumerGroupRequestManagersAndListenersWired() {
 
         final MemberStateListener listener = (memberEpoch, memberId) -> { };
