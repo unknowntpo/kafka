@@ -945,8 +945,6 @@ public class CommitRequestManagerTest {
                                                                                    boolean shouldRediscoverCoordinator) {
         CommitRequestManager commitRequestManager = create(false, 100);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
-        when(coordinatorRequestManager.markCoordinatorUnknown(any(), anyLong()))
-            .thenReturn(shouldRediscoverCoordinator);
 
         Set<TopicPartition> partitions = new HashSet<>();
         partitions.add(new TopicPartition("t1", 0));
@@ -966,11 +964,11 @@ public class CommitRequestManagerTest {
         NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
         assertEquals(0, res.unsentRequests.size());
         if (shouldRediscoverCoordinator) {
-            assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED), res.stateTransitions());
-            assertTrue(commitRequestManager.poll(time.milliseconds()).stateTransitions().isEmpty(),
+            assertCoordinatorInvalidation(res);
+            assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
                 "coordinator invalidation must be published once");
         } else {
-            assertTrue(res.stateTransitions().isEmpty());
+            assertTrue(res.managerEvents().isEmpty());
         }
         time.sleep(retryBackoffMs);
         res = commitRequestManager.poll(time.milliseconds());
@@ -981,7 +979,6 @@ public class CommitRequestManagerTest {
     public void testOffsetFetchMarksCoordinatorUnknownOnCoordinatorDisconnectedAndRetries() {
         CommitRequestManager commitRequestManager = create(true, 100);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
-        when(coordinatorRequestManager.handleCoordinatorDisconnect(any(), anyLong())).thenReturn(true);
 
         Set<TopicPartition> partitions = new HashSet<>();
         partitions.add(new TopicPartition("t1", 0));
@@ -998,9 +995,8 @@ public class CommitRequestManagerTest {
         // Request not completed just yet, but should have marked the coordinator unknown
         assertFalse(result.isDone());
         assertCoordinatorDisconnectHandling();
-        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
-            commitRequestManager.poll(time.milliseconds()).stateTransitions());
-        assertTrue(commitRequestManager.poll(time.milliseconds()).stateTransitions().isEmpty(),
+        assertCoordinatorInvalidation(commitRequestManager.poll(time.milliseconds()));
+        assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
             "coordinator invalidation must be published once");
 
         time.sleep(retryBackoffMs);
@@ -1125,16 +1121,14 @@ public class CommitRequestManagerTest {
     public void testOffsetCommitCoordinatorInvalidationIsPublishedExactlyOnce() {
         CommitRequestManager commitRequestManager = create(true, 100);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
-        when(coordinatorRequestManager.markCoordinatorUnknown(any(), anyLong())).thenReturn(true);
 
         Map<TopicPartition, OffsetAndMetadata> offsets = Collections.singletonMap(
             new TopicPartition("topic", 1), new OffsetAndMetadata(0));
         commitRequestManager.commitAsync(offsets);
         completeOffsetCommitRequestWithError(commitRequestManager, Errors.NOT_COORDINATOR);
 
-        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
-            commitRequestManager.poll(time.milliseconds()).stateTransitions());
-        assertTrue(commitRequestManager.poll(time.milliseconds()).stateTransitions().isEmpty(),
+        assertCoordinatorInvalidation(commitRequestManager.poll(time.milliseconds()));
+        assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
             "coordinator invalidation must be published once");
     }
 
@@ -1185,11 +1179,18 @@ public class CommitRequestManagerTest {
     }
 
     private void assertCoordinatorDisconnectHandling() {
-        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong());
+        verify(coordinatorRequestManager, never()).handleCoordinatorDisconnect(any(), anyLong());
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
+        assertEquals(1, result.managerEvents().size());
+        ManagerEvent.CoordinatorInvalidation invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorInvalidation.class, result.managerEvents().get(0));
+        assertEquals(CommitRequestManager.class.getSimpleName(), invalidation.source());
     }
 
     private void assertCoordinatorDisconnectOnCoordinatorError() {
-        verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
     }
 
     private void assertExceptionHandling(CommitRequestManager commitRequestManager, Errors errors,
@@ -1204,7 +1205,7 @@ public class CommitRequestManagerTest {
             case NOT_COORDINATOR:
             case COORDINATOR_NOT_AVAILABLE:
             case REQUEST_TIMED_OUT:
-                verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+                verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
                 assertPollDoesNotReturn(commitRequestManager, remainBackoffMs);
                 break;
             case UNKNOWN_TOPIC_OR_PARTITION:

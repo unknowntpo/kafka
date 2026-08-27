@@ -26,6 +26,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
@@ -38,6 +39,30 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 
 public class RequestManagersTest {
+
+    @Test
+    public void testCoordinatorInvalidationIsRoutedToStateOwner() {
+        CoordinatorRequestManager coordinatorRequestManager = mock(CoordinatorRequestManager.class);
+        RequestManagers requestManagers = new RequestManagers(
+            new LogContext(),
+            mock(OffsetsRequestManager.class),
+            mock(TopicMetadataRequestManager.class),
+            mock(FetchRequestManager.class),
+            Optional.of(coordinatorRequestManager),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty()
+        );
+
+        requestManagers.routeManagerEvents(List.of(
+            new ManagerEvent.CoordinatorInvalidation("ConsumerHeartbeatRequestManager", "not coordinator", 42L)
+        ));
+
+        verify(coordinatorRequestManager).markCoordinatorUnknown("not coordinator", 42L);
+    }
 
     @Test
     public void testRegularConsumerWakeupTargetIsSelectedAtConstruction() {

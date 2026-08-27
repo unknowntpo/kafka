@@ -121,9 +121,16 @@ public class NetworkClientDelegateTest {
             List.of(request), Set.of(), 0L);
         NetworkClientDelegate.PollResult transitionProgress = NetworkClientDelegate.PollResult.progress(
             List.of(), Set.of(StateTransition.COORDINATOR_DISCOVERED), 0L);
+        NetworkClientDelegate.PollResult managerEventProgress = NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            Set.of(),
+            List.of(new ManagerEvent.CoordinatorInvalidation("heartbeat", "not coordinator", 1L)),
+            0L
+        );
 
         assertTrue(requestProgress.satisfiesProgressContract());
         assertTrue(transitionProgress.satisfiesProgressContract());
+        assertTrue(managerEventProgress.satisfiesProgressContract());
         assertEquals(1L, NetworkClientDelegate.PollResult.progress(
             List.of(request), Set.of(), 1L).timeUntilNextPollMs);
         assertEquals(Long.MAX_VALUE, NetworkClientDelegate.PollResult.progress(

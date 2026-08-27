@@ -107,6 +107,12 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final Set<RequestManager> affectedManagers =
         Collections.newSetFromMap(new IdentityHashMap<>());
 
+    /**
+     * Typed facts published by managers in the previous iteration. This is a bounded phase buffer, not a second
+     * event queue: each manager coalesces events by type before returning one immutable poll snapshot.
+     */
+    private final List<ManagerEvent> deferredManagerEvents = new ArrayList<>();
+
     /** Application-visible state changes in the current phase, coalesced into one notification and trace entry. */
     private final EnumSet<StateTransition> pendingStateTransitions =
         EnumSet.noneOf(StateTransition.class);
@@ -250,6 +256,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      */
     void runOnce() {
         // The following code avoids use of the Java Collections Streams API to reduce overhead in this loop.
+        routeDeferredManagerEvents();
         processApplicationEvents();
 
         final long currentTimeMs = time.milliseconds();
@@ -428,9 +435,23 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             ? manager.maximumTimeToWait(currentTimeMs)
             : Long.MAX_VALUE;
         managerPollCache.update(manager, result, applicationWaitMs, currentTimeMs);
+        deferredManagerEvents.addAll(result.managerEvents());
         for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
             request.whenComplete((response, error) -> affectedManagers.add(manager));
         }
+    }
+
+    /**
+     * Applies cross-manager facts before the next full ordered manager pass. The composition owns destination
+     * routing, while this method owns the deterministic phase. Therefore the state owner and every dependent
+     * manager observe the event before the next {@link NetworkClientDelegate#poll(long, long)}.
+     */
+    private void routeDeferredManagerEvents() {
+        if (deferredManagerEvents.isEmpty())
+            return;
+
+        requestManagers.routeManagerEvents(deferredManagerEvents);
+        deferredManagerEvents.clear();
     }
 
     private List<NetworkClientDelegate.PollResult> pollAffectedManagers(final long currentTimeMs) {
@@ -646,8 +667,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             // If an error was thrown from initializeResources(), it's possible that the list of request managers
             // is null, so check before using. If the request manager list is null, there wasn't any real work
             // performed, so not being able to close the request managers isn't so bad.
-            if (requestManagers != null && networkClientDelegate != null)
+            if (requestManagers != null && networkClientDelegate != null) {
+                routeDeferredManagerEvents();
                 runAtClose(requestManagers.entries(), networkClientDelegate, time.milliseconds());
+            }
         } catch (Exception e) {
             log.error("Unexpected error during shutdown. Proceed with closing.", e);
         } finally {
