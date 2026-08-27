@@ -47,7 +47,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     private final NetworkClientDelegate networkClientDelegate;
     private final long retryBackoffMs;
+
+    /** Fetch intent retained until preparation creates requests, reaches a terminal blocker, or fails. */
     private boolean fetchRequestPending;
+
+    /** Sole caller waiting for the next preparation outcome; null when retained intent currently has no waiter. */
     private CompletableFuture<Void> pendingFetchRequestFuture;
     private EnumSet<StateTransition> pendingStateTransitions =
         EnumSet.noneOf(StateTransition.class);
@@ -92,9 +96,13 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     public CompletableFuture<Void> createFetchRequests() {
         CompletableFuture<Void> future = new CompletableFuture<>();
         if (fetchRequestPending) {
-            // The manager already owns an equivalent intent. A future must not be retained for every application
-            // poll while a retryable blocker persists; the reactor will keep polling the retained intent.
-            future.complete(null);
+            // A retryable blocker can retain the fetch intent after the previous caller has completed. Attach the
+            // first caller arriving after that completion so the next preparation outcome, including an exception,
+            // is delivered to it. Keep at most one waiter; additional equivalent callers complete immediately.
+            if (pendingFetchRequestFuture == null)
+                pendingFetchRequestFuture = future;
+            else
+                future.complete(null);
             return future;
         }
 
