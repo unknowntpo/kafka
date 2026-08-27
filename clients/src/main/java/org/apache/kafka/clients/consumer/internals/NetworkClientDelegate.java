@@ -318,8 +318,9 @@ public class NetworkClientDelegate implements AutoCloseable {
 
     public long addAll(PollResult pollResult) {
         Objects.requireNonNull(pollResult);
-        addAll(pollResult.unsentRequests);
-        return pollResult.timeUntilNextPollMs;
+        for (NetworkCommand command : pollResult.networkCommands())
+            add(command.transportRequest());
+        return pollResult.nextPollCondition().delayMs();
     }
 
     public void addAll(final List<UnsentRequest> requests) {
@@ -339,8 +340,13 @@ public class NetworkClientDelegate implements AutoCloseable {
     public static class PollResult {
         public static final long WAIT_FOREVER = Long.MAX_VALUE;
         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
+        /** Compatibility projection for manager producers that still return a numeric delay. */
         public final long timeUntilNextPollMs;
+        /** Compatibility projection for manager producers and tests that still use the transport implementation. */
         public final List<UnsentRequest> unsentRequests;
+        private final List<NetworkCommand> networkCommands;
+        private final NextPollCondition nextPollCondition;
+        /** Compatibility output retained until legacy state-transition producers migrate to manager events. */
         private final Set<StateTransition> stateTransitions;
         private final List<ManagerEvent> managerEvents;
 
@@ -358,10 +364,58 @@ public class NetworkClientDelegate implements AutoCloseable {
                    final List<UnsentRequest> unsentRequests,
                    final Set<StateTransition> stateTransitions,
                    final List<ManagerEvent> managerEvents) {
-            this.timeUntilNextPollMs = timeUntilNextPollMs;
-            this.unsentRequests = Collections.unmodifiableList(unsentRequests);
+            this(
+                List.copyOf(unsentRequests),
+                stateTransitions,
+                managerEvents,
+                conditionFromLegacyDelay(timeUntilNextPollMs)
+            );
+        }
+
+        private PollResult(final List<? extends NetworkCommand> networkCommands,
+                           final Set<StateTransition> stateTransitions,
+                           final List<ManagerEvent> managerEvents,
+                           final NextPollCondition nextPollCondition) {
+            this.networkCommands = List.copyOf(networkCommands);
+            this.unsentRequests = compatibilityRequests(this.networkCommands);
             this.stateTransitions = Set.copyOf(stateTransitions);
             this.managerEvents = List.copyOf(managerEvents);
+            this.nextPollCondition = Objects.requireNonNull(nextPollCondition, "Next-poll condition must be non-null");
+            this.timeUntilNextPollMs = nextPollCondition.delayMs();
+        }
+
+        private static List<UnsentRequest> compatibilityRequests(final List<NetworkCommand> networkCommands) {
+            List<UnsentRequest> requests = new ArrayList<>(networkCommands.size());
+            for (NetworkCommand command : networkCommands) {
+                UnsentRequest request = command instanceof UnsentRequest
+                    ? (UnsentRequest) command
+                    : command.transportRequest();
+                requests.add(Objects.requireNonNull(request, "Transport request must be non-null"));
+            }
+            return List.copyOf(requests);
+        }
+
+        private static NextPollCondition conditionFromLegacyDelay(final long delayMs) {
+            if (delayMs == WAIT_FOREVER)
+                return NextPollCondition.awaitInput();
+            if (delayMs == 0L)
+                return NextPollCondition.pollImmediately();
+            return NextPollCondition.retryAfter(delayMs);
+        }
+
+        /**
+         * Target result factory: facts, transport intents, and the next local poll condition are independent,
+         * typed categories. Legacy state transitions are deliberately absent from this API.
+         */
+        static PollResult progress(final List<? extends NetworkCommand> networkCommands,
+                                   final List<ManagerEvent> managerEvents,
+                                   final NextPollCondition nextPollCondition) {
+            Objects.requireNonNull(networkCommands, "Network commands must be non-null");
+            Objects.requireNonNull(managerEvents, "Manager events must be non-null");
+            Objects.requireNonNull(nextPollCondition, "Next-poll condition must be non-null");
+            if (networkCommands.isEmpty() && managerEvents.isEmpty())
+                throw new IllegalArgumentException("Progress requires a network command or manager event");
+            return new PollResult(networkCommands, Set.of(), managerEvents, nextPollCondition);
         }
 
         /**
@@ -385,19 +439,27 @@ public class NetworkClientDelegate implements AutoCloseable {
                 throw new IllegalArgumentException("Progress requires a request, state transition, or manager event");
             if (timeUntilNextPollMs < 0L)
                 throw new IllegalArgumentException("Progress delay must be non-negative");
-            return new PollResult(timeUntilNextPollMs, List.copyOf(unsentRequests), stateTransitions, managerEvents);
+            return new PollResult(
+                List.copyOf(unsentRequests),
+                stateTransitions,
+                managerEvents,
+                conditionFromLegacyDelay(timeUntilNextPollMs)
+            );
         }
 
         /** Reports no progress and a finite, positive delay before the manager should be polled again. */
         static PollResult retryAfter(final long delayMs) {
-            if (delayMs <= 0L || delayMs == WAIT_FOREVER)
-                throw new IllegalArgumentException("Retry delay must be finite and positive");
-            return new PollResult(delayMs);
+            return new PollResult(List.of(), Set.of(), List.of(), NextPollCondition.retryAfter(delayMs));
         }
 
-        /** Reports no progress and no manager timer deadline; an input event must make the manager runnable again. */
+        /** Reports no progress and no timer deadline; another input must make the manager runnable again. */
+        static PollResult awaitInput() {
+            return new PollResult(List.of(), Set.of(), List.of(), NextPollCondition.awaitInput());
+        }
+
+        /** Compatibility alias retained while manager producers migrate to the more precise {@link #awaitInput()}. */
         static PollResult awaitEvent() {
-            return EMPTY;
+            return awaitInput();
         }
 
         public PollResult(final List<UnsentRequest> unsentRequests) {
@@ -416,8 +478,16 @@ public class NetworkClientDelegate implements AutoCloseable {
             return stateTransitions;
         }
 
+        List<NetworkCommand> networkCommands() {
+            return networkCommands;
+        }
+
         List<ManagerEvent> managerEvents() {
             return managerEvents;
+        }
+
+        NextPollCondition nextPollCondition() {
+            return nextPollCondition;
         }
 
         /** Generic contract used by the reactor while legacy constructor call sites are migrated incrementally. */
@@ -450,7 +520,7 @@ public class NetworkClientDelegate implements AutoCloseable {
         }
     }
 
-    public static class UnsentRequest {
+    public static class UnsentRequest extends NetworkCommand {
         private final AbstractRequest.Builder<?> requestBuilder;
         private final FutureCompletionHandler handler;
         private final Optional<Node> node; // empty if random node can be chosen
@@ -498,6 +568,16 @@ public class NetworkClientDelegate implements AutoCloseable {
 
         UnsentRequest whenComplete(BiConsumer<ClientResponse, Throwable> callback) {
             handler.future().whenComplete(callback);
+            return this;
+        }
+
+        @Override
+        public void onCompletion(final BiConsumer<ClientResponse, Throwable> callback) {
+            handler.future().whenComplete(callback);
+        }
+
+        @Override
+        public UnsentRequest transportRequest() {
             return this;
         }
 

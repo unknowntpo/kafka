@@ -283,6 +283,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             managers.add(rm);
             pollResults.add(result);
             stagePollResult(rm, result, currentTimeMs);
+            // The network delegate still accepts its concrete UnsentRequest implementation during migration.
             networkClientDelegate.addAll(result.unsentRequests);
         }
         stageManagerEventBatch(pollResults, PollPhase.PRE_IO);
@@ -442,9 +443,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             ? manager.maximumTimeToWait(currentTimeMs)
             : Long.MAX_VALUE;
         managerPollCache.update(manager, result, applicationWaitMs, currentTimeMs);
-        for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
-            request.whenComplete((response, error) -> affectedManagers.add(manager));
-        }
+        for (NetworkCommand command : result.networkCommands())
+            command.onCompletion((response, error) -> affectedManagers.add(manager));
     }
 
     /** Evaluates one ordered phase of manager facts as a batch, then stages its derived commands and effects. */
@@ -521,6 +521,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             NetworkClientDelegate.PollResult result = pollManager(manager, currentTimeMs);
             results.add(result);
             stagePollResult(manager, result, currentTimeMs);
+            // The network delegate still accepts its concrete UnsentRequest implementation during migration.
             networkClientDelegate.addAll(result.unsentRequests);
         }
         return results;

@@ -82,7 +82,8 @@ public interface RequestManager {
 
     /**
      * Temporary migration marker for managers whose legacy application wait calculation has not yet been
-     * represented by {@link PollResult#timeUntilNextPollMs} and typed state transitions.
+     * represented by {@link PollResult#nextPollCondition()} and typed manager events. The numeric
+     * {@link PollResult#timeUntilNextPollMs} and state-transition outputs are compatibility projections.
      *
      * <p>New managers must not opt in. Existing overrides should be removed together with this marker as each
      * manager is migrated to the reactor scheduling model.
