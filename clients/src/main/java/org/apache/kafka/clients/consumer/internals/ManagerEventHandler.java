@@ -16,13 +16,9 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-/** Reasons coalesced by the reactor before it executes an application-visible action. */
-enum ReactorActionReason {
-    SCHEDULE_SHORTENED,
-    WAIT_DEADLINE_EXPIRED,
-    STATE_TRANSITION,
-    MANAGER_EVENT,
-    BACKGROUND_EVENT_PUBLISHED,
-    METADATA_ERROR,
-    APPLICATION_EVENT_PROGRESS
+/** Derives coordination commands or reactor actions from one immutable manager fact. */
+interface ManagerEventHandler<E extends ManagerEvent> {
+    Class<E> eventClass();
+
+    CoordinationPlan handle(E event);
 }

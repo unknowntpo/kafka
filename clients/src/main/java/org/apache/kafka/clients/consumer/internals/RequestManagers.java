@@ -50,6 +50,7 @@ import static org.apache.kafka.common.utils.Utils.closeQuietly;
 public class RequestManagers implements Closeable {
 
     private final Logger log;
+    private final ManagerCoordinationPolicy coordinationPolicy = ManagerCoordinationPolicy.standard();
     public final Optional<CoordinatorRequestManager> coordinatorRequestManager;
     public final Optional<CommitRequestManager> commitRequestManager;
     public final Optional<ConsumerHeartbeatRequestManager> consumerHeartbeatRequestManager;
@@ -176,22 +177,22 @@ public class RequestManagers implements Closeable {
         return entries;
     }
 
-    /**
-     * Routes typed cross-manager facts to their mutable-state owner. This composition boundary owns the
-     * dependency mapping; the reactor controls when routing occurs but does not know which producer or consumer
-     * variant emitted an event. No event is exposed for peer managers to read from a shared queue.
-     */
-    void routeManagerEvents(final Collection<ManagerEvent> events) {
-        for (ManagerEvent event : events) {
-            switch (event.type()) {
-                case COORDINATOR_UNAVAILABLE_OBSERVED:
-                    ManagerEvent.CoordinatorUnavailableObserved observation =
-                        (ManagerEvent.CoordinatorUnavailableObserved) event;
-                    log.trace("Routing manager event {} to CoordinatorRequestManager", event);
+    /** Evaluates immutable manager facts without exposing live request-manager objects to the reactor. */
+    CoordinationPlan planManagerEvents(final Collection<ManagerEvent> events) {
+        return coordinationPolicy.evaluate(events);
+    }
+
+    /** Applies typed commands to their single mutable-state owner at the reactor's deterministic input boundary. */
+    void applyManagerCommands(final Collection<ManagerCommand> commands) {
+        for (ManagerCommand command : commands) {
+            switch (command.type()) {
+                case INVALIDATE_COORDINATOR_IF_CURRENT:
+                    ManagerCommand.InvalidateCoordinatorIfCurrent invalidation =
+                        (ManagerCommand.InvalidateCoordinatorIfCurrent) command;
+                    log.trace("Applying manager command {} to CoordinatorRequestManager", command);
                     coordinatorRequestManager.ifPresentOrElse(
-                        manager -> manager.handleCoordinatorUnavailableObserved(observation),
-                        () -> log.debug("Ignoring {} from {} because no coordinator manager is configured",
-                            event.type(), event.source())
+                        manager -> manager.handleCoordinatorUnavailableObserved(invalidation.observation()),
+                        () -> log.debug("Ignoring {} because no coordinator manager is configured", command.type())
                     );
                     break;
             }

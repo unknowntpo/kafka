@@ -60,7 +60,10 @@ public class RequestManagersTest {
         ManagerEvent.CoordinatorUnavailableObserved observation =
             new ManagerEvent.CoordinatorUnavailableObserved(
                 "ConsumerHeartbeatRequestManager", "not coordinator", 42L, 7L);
-        requestManagers.routeManagerEvents(List.of(observation));
+        CoordinationPlan plan = requestManagers.planManagerEvents(List.of(observation));
+        assertEquals(1, plan.managerCommands().size());
+        assertTrue(plan.managerCommands().get(0) instanceof ManagerCommand.InvalidateCoordinatorIfCurrent);
+        requestManagers.applyManagerCommands(plan.managerCommands());
 
         verify(coordinatorRequestManager).handleCoordinatorUnavailableObserved(observation);
     }

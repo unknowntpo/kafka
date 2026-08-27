@@ -293,16 +293,20 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testStateTransitionIsExecutedAfterSchedulePublication() {
+    public void testManagerEventActionIsExecutedAfterSchedulePublication() {
         long currentTimeMs = time.milliseconds();
         AtomicLong deadlineObservedByWakeup = new AtomicLong(-1L);
-        NetworkClientDelegate.PollResult result = new NetworkClientDelegate.PollResult(
-            100L,
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(StateTransition.FETCH_BUFFER_HAS_DATA)
+            Set.of(),
+            List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
+            100L
         );
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
         when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(result);
+        when(requestManagers.planManagerEvents(any())).thenReturn(
+            CoordinationPlan.action(ReactorAction.wakeApplication())
+        );
         doAnswer(invocation -> {
             deadlineObservedByWakeup.set(consumerReactor.reactorSchedule().reactorDeadlineMs());
             return null;
@@ -312,6 +316,27 @@ public class ConsumerReactorTest {
 
         assertEquals(currentTimeMs + 100L, deadlineObservedByWakeup.get());
         verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testPreIoCrossOwnerCommandFailsBeforeNetworkPoll() {
+        long currentTimeMs = time.milliseconds();
+        ManagerEvent.CoordinatorUnavailableObserved observation =
+            new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", currentTimeMs, 7L);
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            Set.of(),
+            List.of(observation),
+            NetworkClientDelegate.PollResult.WAIT_FOREVER
+        );
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(currentTimeMs)).thenReturn(result);
+        when(requestManagers.planManagerEvents(any())).thenReturn(CoordinationPlan.command(
+            new ManagerCommand.InvalidateCoordinatorIfCurrent(observation)
+        ));
+
+        assertThrows(IllegalStateException.class, consumerReactor::runOnce);
+        verify(networkClientDelegate, never()).poll(anyLong(), anyLong());
     }
 
     @Test
@@ -417,20 +442,25 @@ public class ConsumerReactorTest {
             mock(AbstractRequest.Builder.class),
             Optional.empty()
         );
-        NetworkClientDelegate.PollResult preIo = new NetworkClientDelegate.PollResult(
-            NetworkClientDelegate.PollResult.WAIT_FOREVER,
+        NetworkClientDelegate.PollResult preIo = NetworkClientDelegate.PollResult.progress(
             List.of(request),
-            Set.of(StateTransition.FETCH_BUFFER_HAS_DATA)
+            Set.of(),
+            List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
+            NetworkClientDelegate.PollResult.WAIT_FOREVER
         );
-        NetworkClientDelegate.PollResult postIo = new NetworkClientDelegate.PollResult(
-            NetworkClientDelegate.PollResult.WAIT_FOREVER,
+        NetworkClientDelegate.PollResult postIo = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(StateTransition.FETCH_BUFFER_HAS_DATA)
+            Set.of(),
+            List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
+            NetworkClientDelegate.PollResult.WAIT_FOREVER
         );
         CheckAndUpdatePositionsEvent metadataEvent =
             new CheckAndUpdatePositionsEvent(currentTimeMs + 1_000L);
 
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(requestManagers.planManagerEvents(any())).thenReturn(
+            CoordinationPlan.action(ReactorAction.wakeApplication())
+        );
         doReturn(preIo, postIo).when(heartbeatRequestManager).poll(currentTimeMs);
         doAnswer(invocation -> {
             request.future().complete(null);
@@ -688,9 +718,10 @@ public class ConsumerReactorTest {
         try {
             localReactor.runOnce();
             assertTrue(realCoordinatorRequestManager.coordinator().isPresent(),
-                "the post-I/O manager event is deferred to the next full pass");
+                "the post-I/O manager command is deferred to the next full pass");
             assertTrue(findCoordinatorRequest.get() == null);
-            verify(observedRequestManagers, never()).routeManagerEvents(any());
+            verify(observedRequestManagers).planManagerEvents(any());
+            verify(observedRequestManagers, never()).applyManagerCommands(any());
 
             clearInvocations(observedRequestManagers, localNetworkClientDelegate);
 
@@ -701,14 +732,14 @@ public class ConsumerReactorTest {
             assertTrue(realCoordinatorRequestManager.coordinator().isEmpty());
             assertEquals(1L, heartbeatRequestCount.get(),
                 "the post-I/O invalidation result must not admit a heartbeat using the stale coordinator");
-            verify(observedRequestManagers).routeManagerEvents(any());
-            assertEquals(1, observedRequestManagers.routedEvents().size());
-            ManagerEvent event = observedRequestManagers.routedEvents().get(0);
+            verify(observedRequestManagers).applyManagerCommands(any());
+            assertEquals(1, observedRequestManagers.plannedEvents().size());
+            ManagerEvent event = observedRequestManagers.plannedEvents().get(0);
             assertTrue(event instanceof ManagerEvent.CoordinatorUnavailableObserved);
             assertEquals(ConsumerHeartbeatRequestManager.class.getSimpleName(), event.source());
 
             InOrder secondRunOrder = inOrder(observedRequestManagers, localNetworkClientDelegate);
-            secondRunOrder.verify(observedRequestManagers).routeManagerEvents(any());
+            secondRunOrder.verify(observedRequestManagers).applyManagerCommands(any());
             secondRunOrder.verify(localNetworkClientDelegate).addAll(
                 argThat((List<NetworkClientDelegate.UnsentRequest> requests) -> requests.stream()
                     .anyMatch(request -> request.requestBuilder() instanceof FindCoordinatorRequest.Builder))
@@ -768,9 +799,9 @@ public class ConsumerReactorTest {
         );
     }
 
-    /** Captures a snapshot before the reactor clears its bounded deferred-event collection. */
+    /** Captures the event batch before the coordination policy derives commands and actions. */
     private static final class RecordingRequestManagers extends RequestManagers {
-        private List<ManagerEvent> routedEvents = List.of();
+        private List<ManagerEvent> plannedEvents = List.of();
 
         private RecordingRequestManagers(final LogContext logContext,
                                          final RequestManagers delegate) {
@@ -790,13 +821,13 @@ public class ConsumerReactorTest {
         }
 
         @Override
-        void routeManagerEvents(final Collection<ManagerEvent> events) {
-            routedEvents = List.copyOf(events);
-            super.routeManagerEvents(events);
+        CoordinationPlan planManagerEvents(final Collection<ManagerEvent> events) {
+            plannedEvents = List.copyOf(events);
+            return super.planManagerEvents(events);
         }
 
-        private List<ManagerEvent> routedEvents() {
-            return routedEvents;
+        private List<ManagerEvent> plannedEvents() {
+            return plannedEvents;
         }
     }
 

@@ -26,7 +26,8 @@ import java.util.Objects;
 interface ManagerEvent {
 
     enum Type {
-        COORDINATOR_UNAVAILABLE_OBSERVED
+        COORDINATOR_UNAVAILABLE_OBSERVED,
+        FETCH_BUFFER_HAS_DATA
     }
 
     Type type();
@@ -78,6 +79,29 @@ interface ManagerEvent {
                 + ", cause=" + cause
                 + ", observedAtMs=" + observedAtMs
                 + ", observedCoordinatorVersion=" + observedCoordinatorVersion + ")";
+        }
+    }
+
+    /** Reports that the fetch domain already has records that the application may consume. */
+    final class FetchBufferHasData implements ManagerEvent {
+        static final FetchBufferHasData INSTANCE = new FetchBufferHasData();
+
+        private FetchBufferHasData() {
+        }
+
+        @Override
+        public Type type() {
+            return Type.FETCH_BUFFER_HAS_DATA;
+        }
+
+        @Override
+        public String source() {
+            return FetchRequestManager.class.getSimpleName();
+        }
+
+        @Override
+        public String toString() {
+            return type().toString();
         }
     }
 }

@@ -16,13 +16,16 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-/** Reasons coalesced by the reactor before it executes an application-visible action. */
-enum ReactorActionReason {
-    SCHEDULE_SHORTENED,
-    WAIT_DEADLINE_EXPIRED,
-    STATE_TRANSITION,
-    MANAGER_EVENT,
-    BACKGROUND_EVENT_PUBLISHED,
-    METADATA_ERROR,
-    APPLICATION_EVENT_PROGRESS
+/** Converts a coordinator observation into a fenced intent for the coordinator state owner. */
+final class CoordinatorUnavailableObservedHandler
+        implements ManagerEventHandler<ManagerEvent.CoordinatorUnavailableObserved> {
+    @Override
+    public Class<ManagerEvent.CoordinatorUnavailableObserved> eventClass() {
+        return ManagerEvent.CoordinatorUnavailableObserved.class;
+    }
+
+    @Override
+    public CoordinationPlan handle(final ManagerEvent.CoordinatorUnavailableObserved event) {
+        return CoordinationPlan.command(new ManagerCommand.InvalidateCoordinatorIfCurrent(event));
+    }
 }

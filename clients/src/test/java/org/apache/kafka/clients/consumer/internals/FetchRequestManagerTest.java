@@ -570,8 +570,8 @@ public class FetchRequestManagerTest {
 
         assertEquals(0, sendFetches());
         assertEquals(
-            Set.of(StateTransition.FETCH_BUFFER_HAS_DATA),
-            fetcher.lastStateTransitions()
+            List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
+            fetcher.lastManagerEvents()
         );
         assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
     }
@@ -4705,6 +4705,10 @@ public class FetchRequestManagerTest {
 
         private Set<StateTransition> lastStateTransitions() {
             return lastPollResult == null ? Set.of() : lastPollResult.stateTransitions();
+        }
+
+        private List<ManagerEvent> lastManagerEvents() {
+            return lastPollResult == null ? List.of() : lastPollResult.managerEvents();
         }
 
         private Set<StateTransition> pollStateTransitions() {
