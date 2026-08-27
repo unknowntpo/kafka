@@ -82,10 +82,12 @@ event bus, a generic command queue, or dynamic dependency-graph traversal.
 
 ### DR-01 — Are `StateTransition` and `ManagerEvent` separate concepts?
 
-- **Status:** Agreed direction; KIP and code are not aligned.
-- **Current POC:** `PollResult` has both `Set<StateTransition>` and `List<ManagerEvent>`. Fetch produces
-  `FETCH_BUFFER_HAS_DATA`, `FETCH_PREPARATION_FAILED`, and `FETCH_REQUEST_TERMINATED` as `StateTransition` values;
-  coordinator observations use `ManagerEvent`.
+- **Status:** Implemented in the experiment; compatibility cleanup remains.
+- **Historical baseline:** `PollResult` had both `Set<StateTransition>` and `List<ManagerEvent>`. Fetch produced
+  `FETCH_BUFFER_HAS_DATA`, `FETCH_PREPARATION_FAILED`, and `FETCH_REQUEST_TERMINATED` as `StateTransition` values,
+  while coordinator observations used `ManagerEvent`.
+- **Experiment result:** current producers use `ManagerEvent`; the `StateTransition` field and constructors remain
+  localized compatibility adapters and are not part of the target algebra.
 - **Problem:** Both are immutable facts produced from manager-local state. The names force the producer to choose an
   ontology based on downstream handling, and `FETCH_BUFFER_HAS_DATA` is not necessarily a state transition.
 - **Agreed direction:** All manager-produced facts use one explicit `ManagerEvent` family. Concrete event type and the
@@ -98,9 +100,9 @@ event bus, a generic command queue, or dynamic dependency-graph traversal.
 
 ### DR-02 — Is an unsent network request an event, a request, or a command?
 
-- **Status:** Open naming and API decision.
-- **Current POC:** A manager returns `List<UnsentRequest>`; `ConsumerReactor` immediately adds each value to
-  `NetworkClientDelegate` before network polling.
+- **Status:** Accepted for the experiment as `NetworkCommand`.
+- **Current experiment:** canonical `PollResult` exposes `List<NetworkCommand>`; the current concrete
+  `UnsentRequest` implements that abstraction and is still handed to `NetworkClientDelegate` before network polling.
 - **Observation:** The value contains enough request context and completion behavior to execute, but it has not been
   sent, correlated on the wire, or completed. It is an imperative transport intent, not a fact that already happened.
 - **Candidate:** Expose `NetworkCommand.SendRequest(UnsentRequest)` or rename the payload to
@@ -113,9 +115,9 @@ event bus, a generic command queue, or dynamic dependency-graph traversal.
 
 ### DR-03 — Should raw `timeUntilNextPollMs` become a typed next-poll condition?
 
-- **Status:** Open; strong candidate.
-- **Current POC:** `PollResult` uses a raw `long`, plus factories named `progress(...)`, `retryAfter(...)`, and
-  `awaitEvent()`.
+- **Status:** Accepted for the experiment as `NextPollCondition`.
+- **Current experiment:** canonical storage uses `AwaitInput`, positive finite `RetryAfter`, or output-gated
+  `PollImmediately`. The raw delay and `awaitEvent()` remain compatibility adapters.
 - **Problem:** `Long.MAX_VALUE`, zero, and positive values overload duration, no deadline, and immediate progress.
   `awaitEvent()` also sounds like a targeted event subscription even though every loop activation performs another
   full manager pass.
@@ -322,12 +324,12 @@ event bus, a generic command queue, or dynamic dependency-graph traversal.
 
 ### DR-18 — Does the KIP tell one coherent story and distinguish current from target?
 
-- **Status:** Improved, but current uncommitted edits and new decisions conflict.
+- **Status:** Improved and aligned for the experiment; migration gaps remain explicit.
 - **Readability finding:** Earlier Fable review found the content sufficient but ordered incorrectly. The KIP has since
   moved the conceptual model earlier and added concrete examples.
-- **Current contradiction:** The KIP now explains `StateTransition` as a separate concept, while DR-01 records the
-  agreed direction to remove that distinction. It still uses `unsentRequests`, raw `timeUntilNextPollMs`, and
-  `awaitEvent()` while DR-02 through DR-04 remain open.
+- **Resolved contradiction:** the KIP now presents `ManagerEvent`, `NetworkCommand`, and `NextPollCondition` as the
+  target algebra and labels `StateTransition`, `unsentRequests`, raw `timeUntilNextPollMs`, and `awaitEvent()` as
+  compatibility adapters rather than competing concepts.
 - **Additional defects to verify:** Correct the nonexistent `READY` snapshot field; visually recheck sequence-diagram
   group labels and the origin of `FindCoordinator`; keep application-visible state outside the background-thread box;
   retain static diagrams only in the formal KIP.
@@ -501,10 +503,11 @@ post-I/O owner poll emits cross-manager ManagerEvent
        -> the next network poll observes the new owner state
 ```
 
-The prototype must reject or explicitly schedule any cross-owner command produced during the pre-I/O full manager
-pass. Silently deferring such a command while entering a long network poll is unsafe. The first slice should prove
-the currently intended case—coordinator-unavailable observations originate from response completion and are
-published by the post-I/O owner poll—while keeping a fail-fast guard for an unexpected pre-I/O owner command.
+The prototype must admit callback-produced cross-owner facts at the next iteration's input boundary, before the
+pre-I/O full manager pass builds transport work. A fact first created during that pre-I/O pass is different: silently
+deferring it while sending commands built from an older owner snapshot is not generically safe. Until commands carry
+dependency-aware replay/cancellation metadata, that late shape must remain diagnosed containment rather than a
+claimed correctness path.
 
 ### Boundary verdict before implementation
 
@@ -531,8 +534,10 @@ The isolated branch starts from POC commit `4b11a43891`. Its first two vertical 
 - `ManagerCommand.InvalidateCoordinatorIfCurrent` as data routed to the coordinator state owner;
 - current-phase `ReactorAction` staging for fetch wakeup;
 - next-input command application for post-I/O coordinator observations; and
-- a fail-fast guard that prevents a pre-I/O manager pass from silently deferring a cross-owner command while stale
-  requests or a long network wait remain possible;
+- an input-boundary drain that applies callback-produced owner commands before the full manager pass can build stale
+  transport work;
+- lossless diagnostic containment for an unexpected command first derived by the pre-I/O pass, without claiming
+  generic stale-request recovery;
 - one policy evaluation for the complete ordered `ManagerEvent` set produced by each pre-I/O or post-I/O phase;
 - `FETCH_PREPARATION_FAILED`, `FETCH_REQUEST_TERMINATED`, and `FETCH_POSITIONS_UPDATE_FAILED` as manager facts rather
   than the old `StateTransition` shape; and
@@ -566,9 +571,9 @@ What this does **not** prove yet:
   composition has not been demonstrated.
 - Compatibility support for legacy `StateTransition` remains in `PollResult` and `ConsumerReactor`, although all
   current producers of the three fetch/offset wake facts have migrated to `ManagerEvent` in this branch.
-- Failing fast on an unexpected pre-I/O owner command is a safe experiment boundary, not necessarily the final
-  production contract. A final design must either prove such commands cannot originate there or define a bounded
-  re-evaluation mechanism that does not discard manager poll side effects.
+- Callback-produced facts have a safe input-boundary path. A genuinely new cross-owner fact first produced by the
+  pre-I/O manager pass still needs a stronger producer contract or bounded replay/cancellation semantics before it
+  can be treated as a normal correctness path.
 
 Prototype verdict: phase-level batch evaluation is now real and useful for effect coalescing, so a policy/plan layer
 is more than a handler lookup. It still must not claim multi-snapshot decision-making until a concrete rule requires
@@ -712,7 +717,7 @@ Reject or revise the model if any of the following is required:
    without reading implementation code.
 6. Fable must explicitly choose adopt, revise, or reject and identify any hidden phase or ownership exception.
 
-### Executable evidence at `97aac9bd37`
+### Executable evidence at `97aac9bd37` and `de69dca791`
 
 The experiment implements the canonical storage and consumption path without migrating every producer:
 
@@ -726,10 +731,14 @@ The experiment implements the canonical storage and consumption path without mig
 - `awaitEvent()` remains only as an alias of `awaitInput()`; and
 - raw delay, `unsentRequests`, legacy constructors/factories, and `StateTransition` remain localized adapters.
 
-Focused `NetworkClientDelegateTest`, `ManagerPollCacheTest`, and `ConsumerReactorTest` execution completed 64 tests
-with zero failures. Spotless Java, Checkstyle main/test, and SpotBugs main also passed.
+The output-algebra slice at `97aac9bd37` completed 64 focused tests with zero failures. The hardening slice at
+`de69dca791` then added input-boundary pending-event admission and `ManagerEvent.Type` policy dispatch. Its focused
+policy/pending/reactor/composition suites completed 53 tests, and the broader heartbeat, share, Streams topology,
+commit, fetch, offset, and pending-event suites completed 681 tests, all with zero failures. Spotless Java, Checkstyle
+main/test, and SpotBugs main also passed.
 
-This proves that the three-category algebra does not require a manager-specific reactor switch. It does not yet prove
-the final pre-I/O command rule: the current full-pass path stages transport commands before policy evaluation and
-fails fast if the same phase derives a cross-owner command. That guard keeps the experiment safe but remains an
-explicit design question for review.
+This proves that the three-category algebra does not require a manager-specific reactor switch, and that normal
+callback-produced cross-owner facts can be applied before the next request-building pass without loss. It does not
+prove that a new cross-owner fact first created by the pre-I/O manager pass can safely coexist with transport commands
+already built in that same pass. That residual case remains an explicit contract question rather than a hidden
+exception.

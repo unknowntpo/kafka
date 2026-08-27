@@ -51,12 +51,12 @@ digraph ConsumerReactorActionOwnership {
 
   manager [label="RequestManager.poll(now)\nmanager-local state and rules"];
   result [
-    label="PollResult\nwork now: unsentRequests + stateTransitions\nnext poll: timeUntilNextPollMs",
+    label="PollResult\nManagerEvent[] facts\nNetworkCommand[] transport intents\nNextPollCondition activation condition",
     fillcolor="#eff6ff",
     color="#3b82f6"
   ];
   result_factories [
-    label="Proposed PollResult factory methods\nconstruct and validate:\nprogress(requests, transitions, delay)\nretryAfter(delayMs)\nawaitEvent()\n\nRejected: no work + immediate retry",
+    label="Typed PollResult construction\nprogress(commands, events, nextPoll)\nretryAfter(positiveDelayMs)\nawaitInput()\n\nRejected: no output + PollImmediately",
     fillcolor="#fffbeb",
     color="#d97706"
   ];
@@ -78,6 +78,11 @@ digraph ConsumerReactorActionOwnership {
       color="#2563eb",
       penwidth=1.8
     ];
+    policy [
+      label="ManagerCoordinationPolicy\ntyped handlers derive owner commands\nor application-facing actions",
+      fillcolor="#fefce8",
+      color="#ca8a04"
+    ];
     schedule [
       label="1. Publish ReactorSchedule\nimmutable deadlines and generation",
       fillcolor="#ecfdf5",
@@ -92,7 +97,7 @@ digraph ConsumerReactorActionOwnership {
   }
 
   network [
-    label="NetworkClientDelegate\ndirect request handoff",
+    label="NetworkClientDelegate\nstage transport intent, then send during poll",
     fillcolor="#fff7ed",
     color="#f97316"
   ];
@@ -127,7 +132,7 @@ digraph ConsumerReactorActionOwnership {
   route_wakeup [label="WAKE_APPLICATION only", shape=box, style=filled, fillcolor="white", color="white", fontsize=11, margin="0.05,0.03"];
   wake_waiter [label="dispatch by consumer type", shape=box, style=filled, fillcolor="white", color="white", fontsize=11, margin="0.05,0.03"];
   request_handoff [
-    label="unsentRequests\n(not a ReactorAction)",
+    label="NetworkCommand values\n(not ReactorAction values)",
     shape=box,
     style=filled,
     fillcolor="white",
@@ -143,6 +148,8 @@ digraph ConsumerReactorActionOwnership {
   result_factories -> result [style=dashed, constraint=false, color="#d97706"];
   result -> manager_facts [arrowhead=none];
   manager_facts -> reactor;
+  reactor -> policy [label="ordered ManagerEvent batch"];
+  policy -> executor [label="ReactorAction"];
   reactor -> manager [constraint=false];
   reactor -> publish_first [arrowhead=none];
   publish_first -> schedule;
