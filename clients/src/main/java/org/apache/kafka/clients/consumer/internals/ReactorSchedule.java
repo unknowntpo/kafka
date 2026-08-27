@@ -174,7 +174,7 @@ final class ReactorSchedule {
             deadlineSource,
             applicationSource,
             true,
-            generation
+            generation + 1L
         );
     }
 

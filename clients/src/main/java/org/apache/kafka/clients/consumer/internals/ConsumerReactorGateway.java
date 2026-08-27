@@ -49,7 +49,8 @@ public class ConsumerReactorGateway implements Closeable {
 
     /**
      * Ownership-transfer queue from application callers to the single reactor thread. Admission uses
-     * {@link BlockingQueue#offer(Object)} so a configured capacity is enforced without blocking the caller.
+     * {@link BlockingQueue#offer(Object)} so submission remains non-blocking. The current queue is unbounded; any
+     * future capacity or overload policy requires a separate compatibility decision.
      */
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
 

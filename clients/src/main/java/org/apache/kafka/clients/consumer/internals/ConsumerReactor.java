@@ -107,6 +107,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final Set<RequestManager> affectedManagers =
         Collections.newSetFromMap(new IdentityHashMap<>());
 
+    /** Managers currently violating the progress contract, retained only to rate-limit repeated error logs. */
+    private final Set<RequestManager> managersWithPollResultViolation =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+
     /**
      * Manager events already published in a {@link NetworkClientDelegate.PollResult} and accepted while the reactor
      * stages that result. This bounded phase buffer retains them until the next deterministic routing phase, before
@@ -452,18 +456,21 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         try {
             result = manager.poll(currentTimeMs);
         } catch (RuntimeException exception) {
-            log.error("Request manager {} failed while polling; waiting for a new input after publishing the error",
+            log.error("Request manager {} failed while polling; waiting for a new input without skipping network I/O",
                 manager.getClass().getName(), exception);
             asyncConsumerMetrics.recordManagerPollFailure();
-            requestManagers.stageBackgroundError(exception);
             return NetworkClientDelegate.PollResult.awaitEvent();
         }
 
-        if (result.satisfiesProgressContract())
+        if (result.satisfiesProgressContract()) {
+            managersWithPollResultViolation.remove(manager);
             return result;
+        }
 
-        log.error("Request manager {} returned no progress with an immediate repoll; replacing the invalid "
-            + "deadline with an event wait", manager.getClass().getName());
+        if (managersWithPollResultViolation.add(manager)) {
+            log.error("Request manager {} returned no progress with an immediate repoll; replacing the invalid "
+                + "deadline with an event wait", manager.getClass().getName());
+        }
         asyncConsumerMetrics.recordPollResultContractViolation();
         return NetworkClientDelegate.PollResult.awaitEvent();
     }

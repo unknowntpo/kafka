@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 public class ReactorScheduleTest {
@@ -82,5 +83,18 @@ public class ReactorScheduleTest {
         ReactorSchedule third = ReactorSchedule.from(cache.states(), 60L);
         assertEquals(40L, third.networkPollTimeoutMs(60L));
         assertEquals(FetchRequestManager.class.getSimpleName(), third.deadlineSource().orElseThrow());
+    }
+
+    @Test
+    public void testDeliveringApplicationDeadlinePublishesNewGeneration() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+        cache.update(manager, new PollResult(100L), 25L, 42L);
+        ReactorSchedule schedule = ReactorSchedule.from(cache.states(), 42L).withGeneration(7L);
+
+        ReactorSchedule delivered = schedule.withApplicationDeadlineDelivered();
+
+        assertTrue(delivered.applicationDeadlineDelivered());
+        assertEquals(8L, delivered.generation());
     }
 }

@@ -20,7 +20,6 @@ import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.GroupRebalanceConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
-import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.ShareAcknowledgementEventHandler;
 import org.apache.kafka.common.internals.IdempotentCloser;
 import org.apache.kafka.common.metrics.Metrics;
@@ -213,10 +212,6 @@ public class RequestManagers implements Closeable {
 
     int publishPendingBackgroundEvents() {
         return backgroundEventHandler.map(BackgroundEventHandler::publishPendingEvents).orElse(0);
-    }
-
-    void stageBackgroundError(final RuntimeException exception) {
-        backgroundEventHandler.ifPresent(handler -> handler.add(new ErrorEvent(exception)));
     }
 
     @Override

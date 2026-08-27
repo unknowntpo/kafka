@@ -2043,7 +2043,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final HeartbeatRequestState heartbeatRequestState = heartbeatRequestStateMockedConstruction.constructed().get(0);
             verify(heartbeatRequestState).onFailedAttempt(completionTimeMs);
             verify(heartbeatState).reset();
-            verify(coordinatorRequestManager, never()).handleCoordinatorDisconnect(disconnectException, completionTimeMs);
+            verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
             verify(membershipManager).onRetriableHeartbeatFailure();
 
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
@@ -2160,9 +2160,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
             verify(heartbeatRequestState).reset();
             verify(membershipManager).onFatalHeartbeatFailure();
 
-            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
-            assertCoordinatorInvalidation(heartbeatRequestManager.poll(time.milliseconds()), 7L);
+            NetworkClientDelegate.PollResult invalidated = heartbeatRequestManager.poll(time.milliseconds());
+            assertCoordinatorInvalidation(invalidated, 7L);
+            assertTrue(invalidated.unsentRequests.isEmpty(),
+                "the invalidation must be routed before another heartbeat can use the stale coordinator");
             verify(coordinatorRequestManager).coordinatorSnapshot();
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
             assertTrue(heartbeatRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
                 "coordinator invalidation must be published once");
         }

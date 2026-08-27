@@ -226,14 +226,13 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testManagerPollFailureIsPublishedWithoutSkippingNetworkIo() {
+    public void testManagerPollFailureIsIsolatedWithoutSkippingNetworkIo() {
         RuntimeException failure = new RuntimeException("manager poll failed");
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
         when(coordinatorRequestManager.poll(anyLong())).thenThrow(failure);
 
         consumerReactor.runOnce();
 
-        verify(requestManagers).stageBackgroundError(failure);
         verify(asyncConsumerMetrics).recordManagerPollFailure();
         verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, time.milliseconds());
     }
@@ -649,12 +648,15 @@ public class ConsumerReactorTest {
         realMembershipManager.transitionToJoining();
 
         AtomicReference<NetworkClientDelegate.UnsentRequest> heartbeatRequest = new AtomicReference<>();
+        AtomicLong heartbeatRequestCount = new AtomicLong();
         AtomicReference<NetworkClientDelegate.UnsentRequest> findCoordinatorRequest = new AtomicReference<>();
         doAnswer(invocation -> {
             List<NetworkClientDelegate.UnsentRequest> requests = invocation.getArgument(0);
             for (NetworkClientDelegate.UnsentRequest request : requests) {
-                if (request.requestBuilder() instanceof ConsumerGroupHeartbeatRequest.Builder)
+                if (request.requestBuilder() instanceof ConsumerGroupHeartbeatRequest.Builder) {
+                    heartbeatRequestCount.incrementAndGet();
                     heartbeatRequest.compareAndSet(null, request);
+                }
                 if (request.requestBuilder() instanceof FindCoordinatorRequest.Builder)
                     findCoordinatorRequest.set(request);
             }
@@ -697,6 +699,8 @@ public class ConsumerReactorTest {
             localReactor.runOnce();
 
             assertTrue(realCoordinatorRequestManager.coordinator().isEmpty());
+            assertEquals(1L, heartbeatRequestCount.get(),
+                "the post-I/O invalidation result must not admit a heartbeat using the stale coordinator");
             verify(observedRequestManagers).routeManagerEvents(any());
             assertEquals(1, observedRequestManagers.routedEvents().size());
             ManagerEvent event = observedRequestManagers.routedEvents().get(0);

@@ -136,14 +136,16 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         heartbeat.unsentRequests.get(0).handler().onComplete(
             createHeartbeatResponse(heartbeat.unsentRequests.get(0), error)
         );
-        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
         NetworkClientDelegate.PollResult invalidated = heartbeatRequestManager.poll(time.milliseconds());
         assertCoordinatorInvalidation(invalidated);
+        assertTrue(invalidated.unsentRequests.isEmpty(),
+            "the invalidation must be routed before another heartbeat can use the stale coordinator");
         verify(coordinatorRequestManager).coordinatorSnapshot();
         assertEquals(0, invalidated.unsentRequests.size());
         verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
 
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
         NetworkClientDelegate.PollResult nextPoll = heartbeatRequestManager.poll(time.milliseconds());
         assertTrue(nextPoll.managerEvents().isEmpty(), "coordinator invalidation must be published once");
     }
@@ -356,17 +358,28 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
             // Make sure a next heartbeat is sent for all non-fatal errors (to retry or rejoin)
             time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
             NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
+            if (error == Errors.COORDINATOR_NOT_AVAILABLE || error == Errors.NOT_COORDINATOR) {
+                assertCoordinatorInvalidation(result, 0L);
+                assertTrue(result.unsentRequests.isEmpty(),
+                    "the coordinator observation must be published before a follow-up heartbeat");
+                result = heartbeatRequestManager.poll(time.milliseconds());
+            }
             assertEquals(1, result.unsentRequests.size(),
                 "A follow-up heartbeat should be sent after a non-fatal error " + error);
         }
     }
 
     private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
+        assertCoordinatorInvalidation(result, 7L);
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result,
+                                               final long expectedCoordinatorVersion) {
         assertEquals(1, result.managerEvents().size());
         ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
             ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
         assertEquals(heartbeatRequestManager.getClass().getSimpleName(), invalidation.source());
-        assertEquals(7L, invalidation.observedCoordinatorVersion(),
+        assertEquals(expectedCoordinatorVersion, invalidation.observedCoordinatorVersion(),
             "the response must retain the coordinator version captured when its request was built");
     }
 

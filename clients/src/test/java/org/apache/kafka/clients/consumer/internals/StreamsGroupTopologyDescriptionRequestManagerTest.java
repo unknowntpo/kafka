@@ -258,7 +258,7 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         assertCoordinatorUnavailableObserved(manager.poll(time.milliseconds()), 7L);
         assertTrue(manager.poll(time.milliseconds()).managerEvents().isEmpty(),
             "coordinator observation must be published once");
-        verify(coordinatorRequestManager, never()).handleCoordinatorDisconnect(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
     }
 
     /**

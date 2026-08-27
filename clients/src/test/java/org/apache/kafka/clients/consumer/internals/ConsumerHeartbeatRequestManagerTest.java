@@ -392,7 +392,7 @@ public class ConsumerHeartbeatRequestManagerTest
         result.unsentRequests.get(0).handler().onFailure(time.milliseconds(), DisconnectException.INSTANCE);
         verify(membershipManager).onHeartbeatFailure(true);
         // The state owner is not mutated directly; the reactor routes the published event.
-        verify(coordinatorRequestManager, never()).handleCoordinatorDisconnect(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
         verify(backgroundEventHandler, never()).add(any());
 
         time.sleep(DEFAULT_RETRY_BACKOFF_MS - 1);
