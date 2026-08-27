@@ -482,13 +482,18 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             membershipManager.onHeartbeatRequestSkipped();
             return pendingManagerEvents.publishWith(EMPTY);
         }
+        if (heartbeatRequestState.requestInFlight() && !shouldSendLeaveHeartbeat()) {
+            // Once a heartbeat is in flight, time alone cannot make another heartbeat sendable. The response
+            // completion marks this manager for a post-I/O poll, so retaining a zero deadline here would only spin.
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+        }
         if (shouldHeartbeatBeforeIntervalExpires() || heartbeatRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
-            return pendingManagerEvents.publishWith(new NetworkClientDelegate.PollResult(
-                heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request)));
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(request), Set.of(), heartbeatRequestState.heartbeatIntervalMs()));
         } else {
-            return pendingManagerEvents.publishWith(
-                new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.retryAfter(
+                heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
         }
     }
 

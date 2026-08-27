@@ -429,13 +429,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
     @ParameterizedTest
     @EnumSource(value = MemberState.class, names = {"JOINING", "ACKNOWLEDGING"})
     public void testNotSendingHeartbeatIfMemberIsJoiningOrAcknowledgingWhenHeartbeatInFlight(final MemberState memberState) {
-        final long timeToNextHeartbeatMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> heartbeatRequestStateMockedConstruction = mockConstruction(
                 HeartbeatRequestState.class,
                 (mock, context) -> {
                     when(mock.canSendRequest(time.milliseconds())).thenReturn(false);
-                    when(mock.timeToNextHeartbeatMs(time.milliseconds())).thenReturn(timeToNextHeartbeatMs);
+                    when(mock.timeToNextHeartbeatMs(time.milliseconds())).thenReturn(0L);
                     when(mock.requestInFlight()).thenReturn(true);
                 });
             final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(Timer.class)
@@ -448,8 +447,11 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(timeToNextHeartbeatMs, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
+            assertTrue(result.satisfiesProgressContract());
             verify(pollTimer).update(time.milliseconds());
+            verify(heartbeatRequestStateMockedConstruction.constructed().get(0), never())
+                .timeToNextHeartbeatMs(anyLong());
         }
     }
 

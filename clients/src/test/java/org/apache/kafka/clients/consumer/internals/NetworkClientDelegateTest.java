@@ -297,6 +297,7 @@ public class NetworkClientDelegateTest {
 
         assertEquals(0, backgroundEventQueue.size());
         networkClientDelegate.poll(0, time.milliseconds());
+        this.backgroundEventHandler.publishPendingEvents();
         assertEquals(1, backgroundEventQueue.size());
 
         BackgroundEvent event = backgroundEventQueue.poll();
@@ -335,6 +336,7 @@ public class NetworkClientDelegateTest {
 
             assertEquals(0, backgroundEventQueue.size());
             ncd.poll(0, time.milliseconds());
+            this.backgroundEventHandler.publishPendingEvents();
             assertEquals(1, backgroundEventQueue.size());
 
             BackgroundEvent event = backgroundEventQueue.poll();
@@ -346,6 +348,7 @@ public class NetworkClientDelegateTest {
             // even though metadata.maybeThrowAnyException keeps surfacing the permanent error.
             ncd.poll(0, time.milliseconds());
             ncd.poll(0, time.milliseconds());
+            this.backgroundEventHandler.publishPendingEvents();
             assertEquals(0, backgroundEventQueue.size());
         }
     }

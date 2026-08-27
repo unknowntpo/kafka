@@ -185,7 +185,8 @@ abstract class BaseConsumerTest extends AbstractConsumerTest {
     val heartbeatBeforeShutdown = brokerRequestCount(ApiKeys.CONSUMER_GROUP_HEARTBEAT)
     brokers(coordinatorBrokerId).shutdown()
 
-    // This record cannot have been buffered before failover, so observing it proves post-shutdown progress.
+    // Public polling proves end-to-end failover; the deterministic ConsumerReactor component test separately proves
+    // the internal ManagerEvent routing boundary. This record cannot have been buffered before failover.
     sendRecords(producer, 1, tp)
     var recoveredRecordObserved = false
     kafka.utils.TestUtils.pollRecordsUntilTrue(

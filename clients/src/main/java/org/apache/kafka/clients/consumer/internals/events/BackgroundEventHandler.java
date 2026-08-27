@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * An event handler that receives {@link BackgroundEvent background events} from the
@@ -34,6 +35,12 @@ import java.util.concurrent.BlockingQueue;
 public class BackgroundEventHandler {
 
     private final BlockingQueue<BackgroundEvent> backgroundEventQueue;
+    /**
+     * Phase-local publication buffer. Producers call {@link #add(BackgroundEvent)} during manager or transport work;
+     * only {@code ConsumerReactor}, after publishing that phase's schedule, moves these events to the cross-thread
+     * application queue with {@link #publishPendingEvents()}.
+     */
+    private final ConcurrentLinkedQueue<BackgroundEvent> pendingEvents = new ConcurrentLinkedQueue<>();
     private final Time time;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
@@ -46,15 +53,39 @@ public class BackgroundEventHandler {
     }
 
     /**
-     * Add a {@link BackgroundEvent} to the handler.
+     * Stage a {@link BackgroundEvent} for publication to the application thread. The reactor publishes staged
+     * events only after it has published the {@code ReactorSchedule} for the phase that produced them.
      *
      * @param event A {@link BackgroundEvent} created by the {@link ConsumerReactor reactor}
      */
     public void add(BackgroundEvent event) {
         Objects.requireNonNull(event, "BackgroundEvent provided to add must be non-null");
-        event.setEnqueuedMs(time.milliseconds());
-        asyncConsumerMetrics.recordBackgroundEventQueueSize(backgroundEventQueue.size() + 1);
-        backgroundEventQueue.add(event);
+        pendingEvents.add(event);
+    }
+
+    /**
+     * @return whether a producer has staged an event that the reactor has not yet published
+     */
+    public boolean hasPendingEvents() {
+        return !pendingEvents.isEmpty();
+    }
+
+    /**
+     * Publish every currently staged event after the reactor schedule publication boundary.
+     *
+     * @return the number of events published to the application queue
+     */
+    public int publishPendingEvents() {
+        int published = 0;
+        BackgroundEvent event;
+        while ((event = pendingEvents.poll()) != null) {
+            event.setEnqueuedMs(time.milliseconds());
+            backgroundEventQueue.add(event);
+            published++;
+        }
+        if (published > 0)
+            asyncConsumerMetrics.recordBackgroundEventQueueSize(backgroundEventQueue.size());
+        return published;
     }
 
     /**
