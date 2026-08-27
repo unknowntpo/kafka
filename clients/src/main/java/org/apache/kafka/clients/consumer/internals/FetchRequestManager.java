@@ -55,6 +55,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     private CompletableFuture<Void> pendingFetchRequestFuture;
     private EnumSet<StateTransition> pendingStateTransitions =
         EnumSet.noneOf(StateTransition.class);
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
 
     FetchRequestManager(final LogContext logContext,
                         final Time time,
@@ -240,14 +241,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     private PollResult pollResult(final long timeUntilNextPollMs,
                                   final List<UnsentRequest> requests) {
-        return new PollResult(timeUntilNextPollMs, requests, drainPendingStateTransitions());
+        return pendingManagerEvents.publishWith(
+            new PollResult(timeUntilNextPollMs, requests, drainPendingStateTransitions())
+        );
     }
 
     private void reportPreparationStateTransition(final FetchRequestPreparationResult result) {
         if (result.blockers().contains(FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED)) {
-            pendingStateTransitions.add(
-                StateTransition.FETCH_BUFFER_HAS_DATA
-            );
+            pendingManagerEvents.add(ManagerEvent.FetchBufferHasData.INSTANCE);
         }
     }
 

@@ -16,13 +16,15 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-/** Reasons coalesced by the reactor before it executes an application-visible action. */
-enum ReactorActionReason {
-    SCHEDULE_SHORTENED,
-    WAIT_DEADLINE_EXPIRED,
-    STATE_TRANSITION,
-    MANAGER_EVENT,
-    BACKGROUND_EVENT_PUBLISHED,
-    METADATA_ERROR,
-    APPLICATION_EVENT_PROGRESS
+/** Converts the fetch-domain fact into an application-visible reaction without owning reactor ordering. */
+final class FetchBufferHasDataHandler implements ManagerEventHandler<ManagerEvent.FetchBufferHasData> {
+    @Override
+    public Class<ManagerEvent.FetchBufferHasData> eventClass() {
+        return ManagerEvent.FetchBufferHasData.class;
+    }
+
+    @Override
+    public CoordinationPlan handle(final ManagerEvent.FetchBufferHasData event) {
+        return CoordinationPlan.action(ReactorAction.wakeApplication());
+    }
 }

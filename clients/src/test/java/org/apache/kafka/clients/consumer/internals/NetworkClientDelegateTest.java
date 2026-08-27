@@ -120,7 +120,7 @@ public class NetworkClientDelegateTest {
         NetworkClientDelegate.PollResult requestProgress = NetworkClientDelegate.PollResult.progress(
             List.of(request), Set.of(), 0L);
         NetworkClientDelegate.PollResult transitionProgress = NetworkClientDelegate.PollResult.progress(
-            List.of(), Set.of(StateTransition.FETCH_BUFFER_HAS_DATA), 0L);
+            List.of(), Set.of(StateTransition.FETCH_PREPARATION_FAILED), 0L);
         NetworkClientDelegate.PollResult managerEventProgress = NetworkClientDelegate.PollResult.progress(
             List.of(),
             Set.of(),
