@@ -551,7 +551,7 @@ public class ConsumerReactorTest {
                     ConsumerHeartbeatRequestManager.class.getSimpleName(),
                     "heartbeat rejected coordinator",
                     currentTimeMs,
-                    realCoordinatorRequestManager.coordinatorVersion()
+                    realCoordinatorRequestManager.coordinatorSnapshot().version()
                 )
             ));
         doReturn(heartbeatInFlight, coordinatorInvalidated, NetworkClientDelegate.PollResult.awaitEvent())

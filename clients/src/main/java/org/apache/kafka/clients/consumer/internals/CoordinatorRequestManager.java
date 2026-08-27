@@ -299,9 +299,8 @@ public class CoordinatorRequestManager implements RequestManager {
         return Optional.ofNullable(this.coordinator);
     }
 
-    /** Read-only request context used to fence delayed coordinator-dependent responses. */
-    long coordinatorVersion() {
-        return coordinatorVersion;
+    CoordinatorSnapshot coordinatorSnapshot() {
+        return new CoordinatorSnapshot(Optional.ofNullable(coordinator), coordinatorVersion);
     }
     
     public Optional<Throwable> getAndClearFatalError() {

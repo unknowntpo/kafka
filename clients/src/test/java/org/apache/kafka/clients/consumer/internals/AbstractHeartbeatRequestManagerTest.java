@@ -44,6 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -126,7 +127,8 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
     @ParameterizedTest
     @EnumSource(value = Errors.class, names = {"NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE"})
     public void testCoordinatorInvalidationIsPublishedExactlyOnce(final Errors error) {
-        when(coordinatorRequestManager.coordinatorVersion()).thenReturn(7L);
+        doReturn(new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
         NetworkClientDelegate.PollResult heartbeat = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, heartbeat.unsentRequests.size());
@@ -138,7 +140,7 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
 
         NetworkClientDelegate.PollResult invalidated = heartbeatRequestManager.poll(time.milliseconds());
         assertCoordinatorInvalidation(invalidated);
-        verify(coordinatorRequestManager).coordinatorVersion();
+        verify(coordinatorRequestManager).coordinatorSnapshot();
         assertEquals(0, invalidated.unsentRequests.size());
         verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
 

@@ -330,8 +330,8 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
 
     @SuppressWarnings("unchecked")
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final boolean ignoreResponse) {
-        final long coordinatorVersion = coordinatorRequestManager.coordinatorVersion();
-        NetworkClientDelegate.UnsentRequest request = buildHeartbeatRequest();
+        final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
+        NetworkClientDelegate.UnsentRequest request = buildHeartbeatRequest(coordinatorSnapshot);
         if (ignoreResponse)
             return logResponse(request);
         else
@@ -339,9 +339,9 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                 long completionTimeMs = request.handler().completionTimeMs();
                 if (response != null) {
                     metricsManager.recordRequestLatency(response.requestLatencyMs());
-                    onResponse((R) response.responseBody(), completionTimeMs, coordinatorVersion);
+                    onResponse((R) response.responseBody(), completionTimeMs, coordinatorSnapshot.version());
                 } else {
-                    onFailure(exception, completionTimeMs, coordinatorVersion);
+                    onFailure(exception, completionTimeMs, coordinatorSnapshot.version());
                 }
             });
     }
@@ -564,7 +564,12 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      *
      * @return The heartbeat request
      */
-    public abstract NetworkClientDelegate.UnsentRequest buildHeartbeatRequest();
+    public final NetworkClientDelegate.UnsentRequest buildHeartbeatRequest() {
+        return buildHeartbeatRequest(coordinatorRequestManager.coordinatorSnapshot());
+    }
+
+    /** Builds one request from one immutable coordinator target/version pair. */
+    abstract NetworkClientDelegate.UnsentRequest buildHeartbeatRequest(CoordinatorSnapshot coordinatorSnapshot);
 
     /**
      * Returns the heartbeat RPC request name to be used for logging.

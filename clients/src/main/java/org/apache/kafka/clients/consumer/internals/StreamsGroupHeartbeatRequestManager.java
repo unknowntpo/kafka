@@ -627,24 +627,29 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequestAndHandleResponse(final long currentTimeMs) {
-        final long coordinatorVersion = coordinatorRequestManager.coordinatorVersion();
-        NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs);
+        final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
+        NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, coordinatorSnapshot);
         return request.whenComplete((response, exception) -> {
             long completionTimeMs = request.handler().completionTimeMs();
             if (response != null) {
                 metricsManager.recordRequestLatency(response.requestLatencyMs());
                 onResponse((StreamsGroupHeartbeatResponse) response.responseBody(), completionTimeMs,
-                    coordinatorVersion);
+                    coordinatorSnapshot.version());
             } else {
-                onFailure(exception, completionTimeMs, coordinatorVersion);
+                onFailure(exception, completionTimeMs, coordinatorSnapshot.version());
             }
         });
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final long currentTimeMs) {
+        return makeHeartbeatRequest(currentTimeMs, coordinatorRequestManager.coordinatorSnapshot());
+    }
+
+    private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final long currentTimeMs,
+                                                                     final CoordinatorSnapshot coordinatorSnapshot) {
         NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
             new StreamsGroupHeartbeatRequest.Builder(this.heartbeatState.buildRequestData()),
-            coordinatorRequestManager.coordinator()
+            coordinatorSnapshot.coordinator()
         );
         heartbeatRequestState.onSendAttempt(currentTimeMs);
         membershipManager.onHeartbeatRequestGenerated();

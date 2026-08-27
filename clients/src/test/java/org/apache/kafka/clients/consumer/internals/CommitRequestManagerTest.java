@@ -95,6 +95,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -129,6 +131,8 @@ public class CommitRequestManagerTest {
         this.subscriptionState = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.EARLIEST);
         this.metadata = mock(ConsumerMetadata.class);
         this.coordinatorRequestManager = mock(CoordinatorRequestManager.class);
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
         this.offsetCommitCallbackInvoker = mock(OffsetCommitCallbackInvoker.class);
         this.props = new Properties();
         this.props.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 100);
@@ -1121,7 +1125,8 @@ public class CommitRequestManagerTest {
     public void testOffsetCommitCoordinatorInvalidationIsPublishedExactlyOnce() {
         CommitRequestManager commitRequestManager = create(true, 100);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
-        when(coordinatorRequestManager.coordinatorVersion()).thenReturn(7L);
+        doReturn(new CoordinatorSnapshot(Optional.of(mockedNode), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
 
         Map<TopicPartition, OffsetAndMetadata> offsets = Collections.singletonMap(
             new TopicPartition("topic", 1), new OffsetAndMetadata(0));
@@ -1132,7 +1137,7 @@ public class CommitRequestManagerTest {
             mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NOT_COORDINATOR));
 
         assertCoordinatorInvalidation(commitRequestManager.poll(time.milliseconds()), 7L);
-        verify(coordinatorRequestManager).coordinatorVersion();
+        verify(coordinatorRequestManager).coordinatorSnapshot();
         assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
             "coordinator invalidation must be published once");
     }

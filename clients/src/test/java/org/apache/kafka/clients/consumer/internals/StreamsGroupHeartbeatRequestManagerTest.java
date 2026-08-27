@@ -44,6 +44,7 @@ import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.apache.logging.log4j.Level;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -64,7 +65,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
@@ -84,6 +84,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -194,6 +196,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
     private final Metrics metrics = new Metrics(time);
 
     private final Node coordinatorNode = new Node(1, "localhost", 9092);
+
+    @BeforeEach
+    public void setUpCoordinatorSnapshot() {
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
+    }
 
     @Test
     public void testConstructWithNullCoordinatorRequestManager() {
@@ -2131,7 +2139,8 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final StreamsGroupHeartbeatRequestManager.HeartbeatState heartbeatState = heartbeatStateMockedConstruction.constructed().get(0);
             final HeartbeatRequestState heartbeatRequestState = heartbeatRequestStateMockedConstruction.constructed().get(0);
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
-            when(coordinatorRequestManager.coordinatorVersion()).thenReturn(7L);
+            doReturn(new CoordinatorSnapshot(Optional.of(coordinatorNode), 7L))
+                .when(coordinatorRequestManager).coordinatorSnapshot();
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
@@ -2151,7 +2160,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
             assertCoordinatorInvalidation(heartbeatRequestManager.poll(time.milliseconds()), 7L);
-            verify(coordinatorRequestManager).coordinatorVersion();
+            verify(coordinatorRequestManager).coordinatorSnapshot();
             assertTrue(heartbeatRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
                 "coordinator invalidation must be published once");
         }
@@ -2707,12 +2716,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
     }
 
     private static ConsumerConfig config() {
-        Properties prop = new Properties();
-        prop.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        prop.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        prop.setProperty(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, String.valueOf(DEFAULT_MAX_POLL_INTERVAL_MS));
-        prop.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-        return new ConsumerConfig(prop);
+        return new ConsumerConfig(Map.of(
+            ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+            ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+            ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, DEFAULT_MAX_POLL_INTERVAL_MS,
+            ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092"
+        ));
     }
 
     private StreamsGroupHeartbeatRequestManager createStreamsGroupHeartbeatRequestManager() {
