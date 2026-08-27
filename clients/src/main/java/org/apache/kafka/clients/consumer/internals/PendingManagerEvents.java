@@ -19,8 +19,9 @@ package org.apache.kafka.clients.consumer.internals;
 import java.util.EnumMap;
 
 /**
- * Retains at most one event of each type until the manager publishes its next poll snapshot.
- * Repeated facts of the same type are coalesced while retaining the latest diagnostic detail.
+ * Producer-local buffer for facts observed by one request manager but not yet published. It retains at most one
+ * event of each type until the manager publishes its next poll snapshot, coalescing repeated facts while retaining
+ * the latest diagnostic detail.
  */
 final class PendingManagerEvents {
     private final EnumMap<ManagerEvent.Type, ManagerEvent> events =
@@ -37,6 +38,7 @@ final class PendingManagerEvents {
         events.put(event.type(), event);
     }
 
+    /** Attaches the pending facts to the published poll result and clears this producer-local buffer. */
     NetworkClientDelegate.PollResult publishWith(final NetworkClientDelegate.PollResult pollResult) {
         if (events.isEmpty())
             return pollResult;

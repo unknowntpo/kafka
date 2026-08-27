@@ -108,8 +108,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         Collections.newSetFromMap(new IdentityHashMap<>());
 
     /**
-     * Typed facts published by managers in the previous iteration. This is a bounded phase buffer, not a second
-     * event queue: each manager coalesces events by type before returning one immutable poll snapshot.
+     * Manager events already published in a {@link NetworkClientDelegate.PollResult} and accepted while the reactor
+     * stages that result. This bounded phase buffer retains them until the next deterministic routing phase, before
+     * application events and the next full manager pass; it is not a second event queue. Producer-local pending facts
+     * are coalesced before publication by {@link PendingManagerEvents}.
      */
     private final List<ManagerEvent> deferredManagerEvents = new ArrayList<>();
 
@@ -425,6 +427,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return reactorSchedule.remainingMsForApplication(time.milliseconds());
     }
 
+    /**
+     * Stages all parts of one published poll result: its deadlines, manager events, and request-completion ownership.
+     * This is distinct from retaining producer-local pending events or routing reactor-deferred events.
+     */
     private void stagePollResult(final RequestManager manager,
                                  final NetworkClientDelegate.PollResult result,
                                  final long currentTimeMs) {
