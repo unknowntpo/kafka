@@ -2723,20 +2723,20 @@ public class AsyncKafkaConsumerTest {
         consumer.assign(Set.of(topicPartition));
         consumer.seek(topicPartition, 0L);
 
-        final ConsumerReactorGateway handler = consumer.consumerReactorGateway();
+        final ConsumerReactorGateway gateway = consumer.consumerReactorGateway();
         final AsyncPollEvent retainedIntent = new AsyncPollEvent(
             time.milliseconds() + 30_000L,
             time.milliseconds()
         );
-        handler.add(retainedIntent);
+        gateway.submit(retainedIntent);
         TestUtils.waitForCondition(retainedIntent::isComplete, "Initial retained fetch intent did not complete");
         assertTrue(retainedIntent.error().isEmpty());
 
         blockReactorPoll.set(true);
-        handler.wakeupReactor();
+        gateway.signalReactor();
         assertTrue(reactorPollBlocked.await(5, TimeUnit.SECONDS), "The reactor did not enter the controlled network poll");
 
-        final long generationBeforeFailure = handler.reactorScheduleGeneration();
+        final long generationBeforeFailure = gateway.reactorScheduleGeneration();
         preparationFailure.set(new AuthenticationException("one-shot preparation failure"));
         final AtomicLong completionScheduleGeneration = new AtomicLong(-1L);
         final AsyncPollEvent failingPoll = new AsyncPollEvent(
@@ -2745,12 +2745,12 @@ public class AsyncKafkaConsumerTest {
         ) {
             @Override
             public void completeExceptionally(final KafkaException error) {
-                completionScheduleGeneration.set(handler.reactorScheduleGeneration());
+                completionScheduleGeneration.set(gateway.reactorScheduleGeneration());
                 super.completeExceptionally(error);
             }
         };
         try {
-            handler.add(failingPoll);
+            gateway.submit(failingPoll);
             releaseReactorPoll.countDown();
             TestUtils.waitForCondition(failingPoll::isComplete, "Retained fetch intent failure was not published");
         } finally {
