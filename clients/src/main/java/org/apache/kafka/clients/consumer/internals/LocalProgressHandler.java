@@ -16,8 +16,20 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.util.EnumSet;
+import java.util.Set;
+
 /** Maps manager-local progress facts to the application wake effect owned by the reactor phase. */
 final class LocalProgressHandler implements ManagerEventHandler<ManagerEvent.LocalProgress> {
+    @Override
+    public Set<ManagerEvent.Type> eventTypes() {
+        return EnumSet.of(
+            ManagerEvent.Type.FETCH_PREPARATION_FAILED,
+            ManagerEvent.Type.FETCH_REQUEST_TERMINATED,
+            ManagerEvent.Type.FETCH_POSITIONS_UPDATE_FAILED
+        );
+    }
+
     @Override
     public Class<ManagerEvent.LocalProgress> eventClass() {
         return ManagerEvent.LocalProgress.class;

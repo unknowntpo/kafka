@@ -182,6 +182,14 @@ public class RequestManagers implements Closeable {
         return coordinationPolicy.evaluate(events);
     }
 
+    /** Drains producer-local latest-only facts in the same stable order used by the full manager pass. */
+    List<ManagerEvent> drainPendingManagerEvents() {
+        List<ManagerEvent> events = new ArrayList<>();
+        for (RequestManager manager : entries)
+            events.addAll(manager.drainPendingManagerEvents());
+        return events;
+    }
+
     /** Applies typed commands to their single mutable-state owner at the reactor's deterministic input boundary. */
     void applyManagerCommands(final Collection<ManagerCommand> commands) {
         for (ManagerCommand command : commands) {

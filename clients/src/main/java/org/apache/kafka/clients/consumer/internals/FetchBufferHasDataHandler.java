@@ -16,8 +16,15 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.util.Set;
+
 /** Converts the fetch-domain fact into an application-visible reaction without owning reactor ordering. */
 final class FetchBufferHasDataHandler implements ManagerEventHandler<ManagerEvent.FetchBufferHasData> {
+    @Override
+    public Set<ManagerEvent.Type> eventTypes() {
+        return Set.of(ManagerEvent.Type.FETCH_BUFFER_HAS_DATA);
+    }
+
     @Override
     public Class<ManagerEvent.FetchBufferHasData> eventClass() {
         return ManagerEvent.FetchBufferHasData.class;

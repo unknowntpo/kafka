@@ -19,6 +19,8 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult;
 
+import java.util.List;
+
 import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
@@ -90,6 +92,14 @@ public interface RequestManager {
      */
     default boolean usesLegacyApplicationWait() {
         return false;
+    }
+
+    /**
+     * Drains callback-produced facts before the next full manager pass. Managers without cross-boundary facts keep
+     * the default empty implementation. Implementations must retain bounded latest-only state between drains.
+     */
+    default List<ManagerEvent> drainPendingManagerEvents() {
+        return List.of();
     }
 
     /**

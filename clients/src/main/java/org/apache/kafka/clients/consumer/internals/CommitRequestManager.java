@@ -216,6 +216,11 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     }
 
     @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
+    }
+
+    @Override
     public void signalClose() {
         closing = true;
     }

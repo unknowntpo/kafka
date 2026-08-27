@@ -16,9 +16,16 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.util.Set;
+
 /** Converts a coordinator observation into a fenced intent for the coordinator state owner. */
 final class CoordinatorUnavailableObservedHandler
         implements ManagerEventHandler<ManagerEvent.CoordinatorUnavailableObserved> {
+    @Override
+    public Set<ManagerEvent.Type> eventTypes() {
+        return Set.of(ManagerEvent.Type.COORDINATOR_UNAVAILABLE_OBSERVED);
+    }
+
     @Override
     public Class<ManagerEvent.CoordinatorUnavailableObserved> eventClass() {
         return ManagerEvent.CoordinatorUnavailableObserved.class;

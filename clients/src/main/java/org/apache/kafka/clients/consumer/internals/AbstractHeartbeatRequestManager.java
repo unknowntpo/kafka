@@ -36,6 +36,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
 import static org.apache.kafka.clients.consumer.internals.RequestState.RETRY_BACKOFF_JITTER;
@@ -301,6 +302,11 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
     @Override
     public boolean usesLegacyApplicationWait() {
         return true;
+    }
+
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
     }
 
     /**

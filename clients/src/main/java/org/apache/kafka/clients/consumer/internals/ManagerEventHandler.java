@@ -16,8 +16,14 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.util.Set;
+
 /** Derives coordination commands or reactor actions from one immutable manager fact. */
 interface ManagerEventHandler<E extends ManagerEvent> {
+    /** Every semantic event type routed to this handler. */
+    Set<ManagerEvent.Type> eventTypes();
+
+    /** Runtime payload type used only after dispatch by {@link ManagerEvent#type()}. */
     Class<E> eventClass();
 
     CoordinationPlan handle(E event);

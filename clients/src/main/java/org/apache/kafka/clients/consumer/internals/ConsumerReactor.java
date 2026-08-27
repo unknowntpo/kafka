@@ -262,6 +262,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     void runOnce() {
         // The following code avoids use of the Java Collections Streams API to reduce overhead in this loop.
         applyDeferredManagerCommands();
+        stageManagerEvents(requestManagers.drainPendingManagerEvents(), PollPhase.INPUT);
         processApplicationEvents();
 
         final long currentTimeMs = time.milliseconds();
@@ -453,6 +454,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         List<ManagerEvent> events = new ArrayList<>();
         for (NetworkClientDelegate.PollResult result : results)
             events.addAll(result.managerEvents());
+        stageManagerEvents(events, phase);
+    }
+
+    /** Evaluates one stable batch of facts and applies the phase-specific command ordering rule. */
+    private void stageManagerEvents(final Collection<ManagerEvent> events, final PollPhase phase) {
         if (events.isEmpty())
             return;
 
@@ -462,11 +468,20 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         if (!coordinationPlan.reactorActions().isEmpty())
             pendingReactorActionReasons.add(ReactorActionReason.MANAGER_EVENT);
         if (!coordinationPlan.managerCommands().isEmpty()) {
-            if (phase == PollPhase.PRE_IO) {
-                throw new IllegalStateException("A pre-I/O manager-event batch produced a cross-owner command; "
-                    + "applying it after this pass could publish or send work built from stale owner state");
+            if (phase == PollPhase.INPUT) {
+                // Callback-produced facts are drained before the full manager pass, so owner mutation is visible to
+                // every request builder and to the ReactorSchedule published for this iteration.
+                requestManagers.applyManagerCommands(coordinationPlan.managerCommands());
+            } else {
+                if (phase == PollPhase.PRE_IO) {
+                    // This is diagnostic containment, not a generic stale-request solution: managers may already
+                    // have built transport work in this pass. Normal callback-produced cross-owner facts use the
+                    // INPUT path above. Preserve an unexpected fact and apply it at the next input boundary.
+                    log.error("Cross-owner manager command was produced after the input boundary; deferring it "
+                        + "without loss, but transport work from this pass cannot be generically replayed");
+                }
+                deferredManagerCommands.addAll(coordinationPlan.managerCommands());
             }
-            deferredManagerCommands.addAll(coordinationPlan.managerCommands());
         }
     }
 
@@ -500,7 +515,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         if (deferredManagerCommands.isEmpty())
             return;
 
-        requestManagers.applyManagerCommands(deferredManagerCommands);
+        requestManagers.applyManagerCommands(List.copyOf(deferredManagerCommands));
         deferredManagerCommands.clear();
     }
 
@@ -667,6 +682,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     }
 
     private enum PollPhase {
+        INPUT,
         PRE_IO,
         POST_IO
     }
