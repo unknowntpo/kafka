@@ -226,7 +226,7 @@ behavior.
 | --- | --- |
 | `ConsumerReactor` | Order inputs, invoke managers, validate the generic no-progress invariant, retain their scheduling contributions, publish the final schedule, then collect, deduplicate equivalent actions, and execute `ReactorAction` values. |
 | `RequestManagers` composition | Select the regular or share manager set and route `ManagerEvent` values to one state owner without introducing a dynamic dependency graph. |
-| Request manager | Own one domain of mutable consumer state and the conditions required to make progress; publish a small immutable projection for readers, consume only `ManagerEvent` values addressed to it, and return progress, a positive finite retry delay, or an event wait from one snapshot. |
+| Request manager | Own one domain of mutable consumer state and the conditions required to make progress; when another manager needs a coherent cross-manager view, optionally publish a small immutable projection for that reader; consume only `ManagerEvent` values addressed to it; and return progress, a positive finite retry delay, or an event wait from its local poll state. |
 | Proposed `RegularConsumerDriver` / `ShareConsumerDriver` | Keep assignment or acquisition, commit or acknowledgement, and callback coordination outside the shared reactor loop. These types do not yet exist in the codebase. |
 | `NetworkClientDelegate` | Own transport, connection handling, request correlation, and timeouts; do not decide whether to complete an application event or wake the application thread. |
 | Application thread | Execute user callbacks and consume published data, events, and operation results. |
@@ -261,7 +261,8 @@ The target reactor iteration is:
 1. Route typed `ManagerEvent` values retained from the previous post-I/O phase to their state owners through the selected
    regular or share composition.
 2. Drain ready application commands and callback acknowledgements and apply them through the same composition.
-3. Freeze the current owner-produced snapshots used by new work in this ordered pass.
+3. Capture the current references to any opt-in owner-published snapshots used by new cross-manager work in this
+   ordered pass.
 4. Poll the stable manager set in order and collect their `PollResult` values.
 5. Retain per-manager deadlines, form one `ReactorSchedule`, and publish it.
 6. Execute pre-I/O actions derived from completed transitions.
@@ -277,39 +278,39 @@ stable full manager pass rather than embedding hard-coded manager-to-manager rou
 central dependency graph. The current POC applies this rule to coordinator invalidation; membership and offsets peer
 interactions remain explicit migration targets rather than claimed completed coverage.
 
-#### Cross-manager snapshots and stale observations
+#### Owner-published snapshots and stale-observation fencing
 
-A state owner may publish a small immutable snapshot when another manager needs decision-relevant facts. Snapshot
-versions are owner-local internal identities; they are not Kafka protocol `generationId` or `memberEpoch` values.
-Fields which must be observed atomically, such as coordinator target and coordinator version, belong to one snapshot.
-The owner increments the version only when published decision-relevant truth changes, not for every poll, log, or
-metric update.
+A snapshot is an opt-in cross-manager state view, not a required output of every `RequestManager`. A state owner
+publishes a small immutable snapshot only when another manager needs a coherent set of decision-relevant fields.
+Fields which must be observed atomically, such as coordinator target and coordinator version, belong to the same
+snapshot. Snapshot versions are owner-local internal identities; they are not Kafka protocol `generationId` or
+`memberEpoch` values. The owner increments the version only when published decision-relevant truth changes, not for
+every poll, log, or metric update.
 
 An admitted request captures the snapshot version and only the bounded target or scope required for that attempt. An
 old snapshot may therefore remain as captured context for an in-flight request, but it cannot be used to admit new
-work. A later observation is applied only if its observed owner version is still current:
+work. The coordinator example follows the complete fencing path:
 
 ```text
-C7 = CoordinatorSnapshot(READY, node-1, version=7)
-  -> Heartbeat attempt captures node-1 and version 7
-
-C8 = CoordinatorSnapshot(UNKNOWN, version=8)
-C9 = CoordinatorSnapshot(READY, node-2, version=9)
-
-Delayed response for the version-7 attempt reports CoordinatorUnavailableObserved(version=7)
-  -> CoordinatorRequestManager compares 7 with current version 9
-  -> stale observation is ignored; node-2 remains current
+read current CoordinatorSnapshot(READY, node-1, version=7)
+  -> build the heartbeat request and capture target=node-1, observedVersion=7
+  -> the response produces CoordinatorUnavailableObserved(observedVersion=7, cause)
+  -> PendingManagerEvents retains the greatest observedCoordinatorVersion for this event type
+  -> the event is published in PollResult and routed to CoordinatorRequestManager
+  -> the owner compares observedVersion with its current CoordinatorSnapshot version
+  -> apply only if the versions still match; otherwise ignore the stale observation
 ```
 
-Each producer retains at most the latest pending fact of each bounded type until its next `PollResult`; the reactor
-retains only those bounded facts until the next routing phase. Each owner retains one current published snapshot,
-with at most the references needed by the active pass. In-flight work retains a version and bounded request context,
-not a chain of historical snapshots. Optional diagnostic history is a separate fixed-size facility and is not part
-of the scheduling contract.
+If several coordinator-unavailable responses arrive before publication, `PendingManagerEvents` prevents its
+producer-local slot from moving to a lower observed coordinator version. That buffer rule does not decide whether an
+observation is current: after routing, `CoordinatorRequestManager` performs the final comparison against the
+owner's current version. Each producer retains at most one pending fact of each bounded type until its next
+`PollResult`, and the reactor retains only those bounded facts until the next routing phase.
 
-The current POC proves this contract for coordinator-dependent request attempts through `CoordinatorSnapshot`,
-typed `ManagerEvent` values, and stale-version rejection. Freezing a general set of owner projections for every manager in
-one ordered pass is a later migration step, not existing implementation coverage.
+The current POC implements only `CoordinatorSnapshot`. It has no global snapshot registry and retains no snapshot
+history. `CoordinatorRequestManager` owns the current snapshot; a coordinator-dependent request retains only its
+captured target, version, and bounded request context. `ReactorSchedule` is a separate aggregate scheduling
+publication, not a registry of manager domain state. Additional opt-in owner snapshots remain later migration work.
 
 #### Manager poll outcomes and `PollResult`
 
@@ -543,8 +544,8 @@ API change.
 
 - Move remaining manager deadlines and completed transitions into `PollResult`.
 - Replace peer mutation calls with typed immutable `ManagerEvent` values routed through the selected composition to one state owner.
-- Publish small owner-local snapshots for cross-manager reads and fence delayed observations with the captured snapshot
-  version.
+- Where a manager needs a coherent cross-manager view, publish a small opt-in owner-local snapshot and fence delayed
+  observations with the captured snapshot version.
 - Introduce the regular/share driver boundary around the existing managers and remove consumer-type decisions from
   the shared reactor loop.
 - Remove hard-coded coordinator dependency branches from `ConsumerReactor`; the next stable full manager pass observes
@@ -587,9 +588,9 @@ Tests assert observable event-processing behavior rather than private method cov
 - a request target and its owner version come from one immutable snapshot;
 - an observation captured from an older coordinator version cannot invalidate a later coordinator, while an
   observation matching the current version is applied;
-- every manager admitting new work in one ordered pass uses the snapshots frozen for that pass;
-- pending `ManagerEvent` values and owner snapshots remain latest-only and bounded; in-flight work retains a version and
-  bounded scope rather than snapshot history;
+- every manager consuming an opt-in owner-published view in one ordered pass uses the same captured snapshot version;
+- pending `ManagerEvent` values remain latest-only and bounded, the owner retains only its current published snapshot,
+  and in-flight work retains a version and bounded scope rather than snapshot history;
 - no request manager directly invokes another request manager's mutation API;
 - an older offset-fetch completion cannot mutate a partition outside its captured scope;
 - regular and share paths use the same kernel without consumer-type branches;
