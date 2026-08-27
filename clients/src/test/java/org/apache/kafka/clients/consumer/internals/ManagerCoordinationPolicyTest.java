@@ -39,6 +39,18 @@ public class ManagerCoordinationPolicyTest {
     }
 
     @Test
+    public void testDifferentProgressFactsInOneBatchCoalesceApplicationWakeAction() {
+        CoordinationPlan plan = policy.evaluate(List.of(
+            ManagerEvent.FetchBufferHasData.INSTANCE,
+            ManagerEvent.LocalProgress.FETCH_PREPARATION_FAILED,
+            ManagerEvent.LocalProgress.FETCH_POSITIONS_UPDATE_FAILED
+        ));
+
+        assertEquals(List.of(), plan.managerCommands());
+        assertEquals(List.of(ReactorAction.wakeApplication()), plan.reactorActions());
+    }
+
+    @Test
     public void testCoordinatorObservationProducesTargetedOwnerCommand() {
         ManagerEvent.CoordinatorUnavailableObserved observation =
             new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", 42L, 7L);

@@ -755,7 +755,7 @@ public class OffsetsRequestManagerTest {
     }
 
     @Test
-    public void testAsyncPollPositionUpdateFailureReportsTransitionOnce() {
+    public void testAsyncPollPositionUpdateFailureReportsManagerEventOnce() {
         when(subscriptionState.hasAllFetchPositions()).thenThrow(new RuntimeException("position update failed"));
 
         CompletableFuture<Void> updatePositions =
@@ -764,12 +764,12 @@ public class OffsetsRequestManagerTest {
 
         NetworkClientDelegate.PollResult firstResult = requestManager.poll(time.milliseconds());
         assertEquals(
-            Set.of(StateTransition.FETCH_POSITIONS_UPDATE_FAILED),
-            firstResult.stateTransitions()
+            List.of(ManagerEvent.LocalProgress.FETCH_POSITIONS_UPDATE_FAILED),
+            firstResult.managerEvents()
         );
 
         NetworkClientDelegate.PollResult secondResult = requestManager.poll(time.milliseconds());
-        assertTrue(secondResult.stateTransitions().isEmpty());
+        assertTrue(secondResult.managerEvents().isEmpty());
     }
 
     @Test

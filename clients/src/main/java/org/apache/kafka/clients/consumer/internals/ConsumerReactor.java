@@ -282,9 +282,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             NetworkClientDelegate.PollResult result = pollManager(rm, currentTimeMs);
             managers.add(rm);
             pollResults.add(result);
-            stagePollResult(rm, result, currentTimeMs, PollPhase.PRE_IO);
+            stagePollResult(rm, result, currentTimeMs);
             networkClientDelegate.addAll(result.unsentRequests);
         }
+        stageManagerEventBatch(pollResults, PollPhase.PRE_IO);
         managerPollCache.retainManagers(managers);
 
         ReactorSchedule proposedSchedule = ReactorSchedule.from(
@@ -311,6 +312,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         // Request completion callbacks mark their owning manager. Poll only that stable snapshot here; marks produced
         // by this pass are intentionally deferred to the next full pre-I/O pass.
         List<NetworkClientDelegate.PollResult> postIoResults = pollAffectedManagers(afterNetworkPollMs);
+        stageManagerEventBatch(postIoResults, PollPhase.POST_IO);
         if (!postIoResults.isEmpty() || requestManagers.hasPendingBackgroundEvents()) {
             publishReactorSchedule(
                 ReactorSchedule.from(managerPollCache.states(), afterNetworkPollMs),
@@ -432,34 +434,39 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return reactorSchedule.remainingMsForApplication(time.milliseconds());
     }
 
-    /**
-     * Stages all parts of one published poll result: its deadlines, manager events, and request-completion ownership.
-     * This is distinct from retaining producer-local pending events or routing reactor-deferred events.
-     */
+    /** Stages one manager's deadlines and request-completion ownership before phase-level event evaluation. */
     private void stagePollResult(final RequestManager manager,
                                  final NetworkClientDelegate.PollResult result,
-                                 final long currentTimeMs,
-                                 final PollPhase phase) {
+                                 final long currentTimeMs) {
         long applicationWaitMs = manager.usesLegacyApplicationWait()
             ? manager.maximumTimeToWait(currentTimeMs)
             : Long.MAX_VALUE;
         managerPollCache.update(manager, result, applicationWaitMs, currentTimeMs);
-        if (!result.managerEvents().isEmpty()) {
-            CoordinationPlan coordinationPlan = requestManagers.planManagerEvents(result.managerEvents());
-            for (ReactorAction action : coordinationPlan.reactorActions())
-                stageReactorAction(action);
-            if (!coordinationPlan.reactorActions().isEmpty())
-                pendingReactorActionReasons.add(ReactorActionReason.MANAGER_EVENT);
-            if (!coordinationPlan.managerCommands().isEmpty()) {
-                if (phase == PollPhase.PRE_IO) {
-                    throw new IllegalStateException("A pre-I/O manager poll produced a cross-owner command; applying "
-                        + "it after this pass could publish or send work built from stale owner state");
-                }
-                deferredManagerCommands.addAll(coordinationPlan.managerCommands());
-            }
-        }
         for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
             request.whenComplete((response, error) -> affectedManagers.add(manager));
+        }
+    }
+
+    /** Evaluates one ordered phase of manager facts as a batch, then stages its derived commands and effects. */
+    private void stageManagerEventBatch(final Collection<NetworkClientDelegate.PollResult> results,
+                                        final PollPhase phase) {
+        List<ManagerEvent> events = new ArrayList<>();
+        for (NetworkClientDelegate.PollResult result : results)
+            events.addAll(result.managerEvents());
+        if (events.isEmpty())
+            return;
+
+        CoordinationPlan coordinationPlan = requestManagers.planManagerEvents(events);
+        for (ReactorAction action : coordinationPlan.reactorActions())
+            stageReactorAction(action);
+        if (!coordinationPlan.reactorActions().isEmpty())
+            pendingReactorActionReasons.add(ReactorActionReason.MANAGER_EVENT);
+        if (!coordinationPlan.managerCommands().isEmpty()) {
+            if (phase == PollPhase.PRE_IO) {
+                throw new IllegalStateException("A pre-I/O manager-event batch produced a cross-owner command; "
+                    + "applying it after this pass could publish or send work built from stale owner state");
+            }
+            deferredManagerCommands.addAll(coordinationPlan.managerCommands());
         }
     }
 
@@ -513,7 +520,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         for (RequestManager manager : managers) {
             NetworkClientDelegate.PollResult result = pollManager(manager, currentTimeMs);
             results.add(result);
-            stagePollResult(manager, result, currentTimeMs, PollPhase.POST_IO);
+            stagePollResult(manager, result, currentTimeMs);
             networkClientDelegate.addAll(result.unsentRequests);
         }
         return results;

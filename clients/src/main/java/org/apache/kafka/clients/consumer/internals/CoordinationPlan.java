@@ -52,7 +52,10 @@ final class CoordinationPlan {
 
         void add(final CoordinationPlan plan) {
             managerCommands.addAll(plan.managerCommands());
-            reactorActions.addAll(plan.reactorActions());
+            for (ReactorAction action : plan.reactorActions()) {
+                if (action != ReactorAction.wakeApplication() || !reactorActions.contains(action))
+                    reactorActions.add(action);
+            }
         }
 
         CoordinationPlan build() {

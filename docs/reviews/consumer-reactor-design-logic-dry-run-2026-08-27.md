@@ -468,6 +468,21 @@ commands and actions become visible.
 | C — two deadlines | none | none | Intentionally bypasses the policy. `NextPoll` remains manager-local output and `ReactorSchedule` remains a generic reactor aggregation. Moving deadline calculation into the policy would recreate a God object. |
 | D — commit retry | only the coordinator-unavailable observation produced by the failed request attempt | coordinator invalidation command | Partially involved. Commit operation identity, retry ownership, timeout, and exactly-once terminal completion remain with the admitted operation/commit domain and reactor action ordering; they are not policy state. |
 
+### Historical-issue fit for a batch decision
+
+The issue inventory does not justify inventing a global snapshot registry. It supports a narrower phase-level batch:
+
+| Evidence | What must be combined | Batch-policy verdict |
+|---|---|---|
+| KAFKA-20854, KAFKA-20397, and fetch-position failure paths | Different fetch/offset facts may all require release of the same application fetch wait. | Genuine multi-event effect coalescing: collect the whole phase and emit one `WAKE_APPLICATION`. No owner snapshot is required. |
+| KAFKA-19357 and KAFKA-18569 | Auto-commit, coordinator discovery, and leave work must occur in the correct close sequence. | Cross-component lifecycle coordination, but not a same-phase multi-snapshot rule. The established fixes sequence application close commands and let the commit/coordinator owners terminate their local work. |
+| KAFKA-18641 | Membership reconciliation and auto-commit request generation must finish before the application begins fetching again. | A real phase barrier driven by one `PollEvent`; it belongs to application-input orchestration, not a `ManagerEvent` policy. |
+| KAFKA-17066 and KAFKA-17674 | An in-flight offset operation's captured partition scope must be checked against current assignment. | Operation-context fencing against owner state, not correlation of several owner snapshots. |
+
+Therefore the second slice must prove that events from several manager results are evaluated once as an ordered
+phase batch and that equivalent effects are coalesced. Multiple owner snapshots remain opt-in and require a future
+rule with direct evidence; they are not added speculatively.
+
 ### Phase constraint exposed by the stories
 
 One event family does not imply one delivery phase. The reaction type determines the boundary:
@@ -508,7 +523,7 @@ published by the post-I/O owner poll—while keeping a fail-fast guard for an un
 
 ### Prototype evidence — `codex/manager-coordination-policy-poc`
 
-The isolated branch starts from POC commit `4b11a43891`. Its first vertical slice implements:
+The isolated branch starts from POC commit `4b11a43891`. Its first two vertical slices implement:
 
 - `FetchBufferHasData` as a `ManagerEvent` rather than a `StateTransition`;
 - one `ManagerEventHandler` per supported fact;
@@ -517,40 +532,48 @@ The isolated branch starts from POC commit `4b11a43891`. Its first vertical slic
 - current-phase `ReactorAction` staging for fetch wakeup;
 - next-input command application for post-I/O coordinator observations; and
 - a fail-fast guard that prevents a pre-I/O manager pass from silently deferring a cross-owner command while stale
-  requests or a long network wait remain possible.
+  requests or a long network wait remain possible;
+- one policy evaluation for the complete ordered `ManagerEvent` set produced by each pre-I/O or post-I/O phase;
+- `FETCH_PREPARATION_FAILED`, `FETCH_REQUEST_TERMINATED`, and `FETCH_POSITIONS_UPDATE_FAILED` as manager facts rather
+  than the old `StateTransition` shape; and
+- phase-local coalescing of different manager facts into one `WAKE_APPLICATION` action.
 
 Observed evidence:
 
-- `ManagerCoordinationPolicyTest`: 3 tests, 0 failures;
+- `ManagerCoordinationPolicyTest`: 4 tests, 0 failures;
 - `RequestManagersTest`: 5 tests, 0 failures;
-- `ConsumerReactorTest`: 37 tests, 0 failures;
+- `ConsumerReactorTest`: 38 tests, 0 failures;
 - `FetchRequestManagerTest`: 119 tests, 0 failures; and
+- `OffsetsRequestManagerTest`: 37 tests, 0 failures; and
 - Spotless Java, Checkstyle main/test, and SpotBugs main passed.
 
 What this proves:
 
 - `ConsumerReactor` can remain free of manager-event type switches while retaining publication and execution order;
 - one event family can produce either a current-phase action or a next-input owner command;
+- different event types from different manager results are presented to the policy as one ordered phase batch and
+  produce only one application wake effect;
 - the coordinator owner still performs the final stale-version check; and
 - the existing regular consumer heartbeat rediscovery vertical component still routes invalidation before the next
   network poll.
 
 What this does **not** prove yet:
 
-- The policy currently combines independent per-event reactions; it has not implemented a real rule that needs to
-  correlate different event types or read several owner snapshots atomically.
+- The policy now performs a real batch-level effect coalescing rule, but it still has no evidence-backed rule that
+  must read several owner snapshots atomically.
 - The prototype does not yet coalesce equivalent commands emitted by different producers in the same batch.
 - `ManagerCoordinationPolicy.standard()` still selects one shared handler set; regular/share-specific handler
   composition has not been demonstrated.
-- Only `FETCH_BUFFER_HAS_DATA` was migrated from `StateTransition`; other fetch transitions still use the old shape.
+- Compatibility support for legacy `StateTransition` remains in `PollResult` and `ConsumerReactor`, although all
+  current producers of the three fetch/offset wake facts have migrated to `ManagerEvent` in this branch.
 - Failing fast on an unexpected pre-I/O owner command is a safe experiment boundary, not necessarily the final
   production contract. A final design must either prove such commands cannot originate there or define a bounded
   re-evaluation mechanism that does not discard manager poll side effects.
 
-Prototype verdict: the separation is mechanically viable and improves the reactor boundary, but the name
-`ManagerCoordinationPolicy` is justified only if the next slice proves at least one genuine batch/cross-manager
-decision. If every rule remains a one-event mapping, a smaller composition-owned `ManagerEventHandlers` abstraction
-would be more honest.
+Prototype verdict: phase-level batch evaluation is now real and useful for effect coalescing, so a policy/plan layer
+is more than a handler lookup. It still must not claim multi-snapshot decision-making until a concrete rule requires
+it. If no such rule emerges, snapshots should stay outside the policy except as bounded context carried by the
+specific fact or command that needs fencing.
 
 ## First walkthrough checkpoint
 

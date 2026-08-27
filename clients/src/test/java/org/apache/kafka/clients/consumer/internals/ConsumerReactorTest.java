@@ -319,6 +319,37 @@ public class ConsumerReactorTest {
     }
 
     @Test
+    public void testManagerEventsFromOnePhaseAreEvaluatedAsOneBatchAndWakeOnce() {
+        long currentTimeMs = time.milliseconds();
+        NetworkClientDelegate.PollResult fetchResult = NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            Set.of(),
+            List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
+            NetworkClientDelegate.PollResult.WAIT_FOREVER
+        );
+        NetworkClientDelegate.PollResult offsetsResult = NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            Set.of(),
+            List.of(ManagerEvent.LocalProgress.FETCH_POSITIONS_UPDATE_FAILED),
+            NetworkClientDelegate.PollResult.WAIT_FOREVER
+        );
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager, offsetsRequestManager));
+        when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(fetchResult);
+        when(offsetsRequestManager.poll(currentTimeMs)).thenReturn(offsetsResult);
+        when(requestManagers.planManagerEvents(any())).thenAnswer(invocation ->
+            ManagerCoordinationPolicy.standard().evaluate(invocation.getArgument(0)));
+
+        consumerReactor.runOnce();
+
+        verify(requestManagers).planManagerEvents(argThat(events ->
+            events.equals(List.of(
+                ManagerEvent.FetchBufferHasData.INSTANCE,
+                ManagerEvent.LocalProgress.FETCH_POSITIONS_UPDATE_FAILED
+            ))));
+        verify(requestManagers, times(1)).wakeupApplicationThread();
+    }
+
+    @Test
     public void testPreIoCrossOwnerCommandFailsBeforeNetworkPoll() {
         long currentTimeMs = time.milliseconds();
         ManagerEvent.CoordinatorUnavailableObserved observation =

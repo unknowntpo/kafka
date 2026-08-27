@@ -292,7 +292,7 @@ public class FetchRequestManagerTest {
 
     /** A fetch response that carries no records must report progress for the reactor to publish. */
     @Test
-    public void testEmptyFetchResponseReportsStateTransition() throws InterruptedException {
+    public void testEmptyFetchResponseReportsManagerEvent() throws InterruptedException {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
@@ -310,7 +310,7 @@ public class FetchRequestManagerTest {
         networkClientDelegate.poll(time.timer(0));
         fetchRecords();
         fetcher.fetchBuffer.awaitWakeup(time.timer(0));
-        assertTrue(fetcher.lastStateTransitions().isEmpty());
+        assertTrue(fetcher.lastManagerEvents().isEmpty());
 
         // A consumer thread blocked waiting for data on the empty buffer.
         Thread blockedOnBuffer = new Thread(() -> fetcher.fetchBuffer.awaitWakeup(time.timer(3_600_000L)));
@@ -325,8 +325,8 @@ public class FetchRequestManagerTest {
         blockedOnBuffer.join(200);
         assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
         assertEquals(
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            fetcher.pollStateTransitions()
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            fetcher.pollManagerEvents()
         );
 
         // Simulate the reactor applying the returned transition.
@@ -336,15 +336,15 @@ public class FetchRequestManagerTest {
     }
 
     @Test
-    public void testFailedFetchResponseReportsStateTransition() throws InterruptedException {
+    public void testFailedFetchResponseReportsManagerEvent() throws InterruptedException {
         // The response body is irrelevant: it is discarded once the response is marked as disconnected.
-        assertRequestCompletionReportsStateTransition(() -> client.prepareResponse(
+        assertRequestCompletionReportsManagerEvent(() -> client.prepareResponse(
                 fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0), true));
     }
 
     @Test
-    public void testFetchSessionErrorResponseReportsStateTransition() throws InterruptedException {
-        assertRequestCompletionReportsStateTransition(() -> client.prepareResponse(FetchResponse.of(
+    public void testFetchSessionErrorResponseReportsManagerEvent() throws InterruptedException {
+        assertRequestCompletionReportsManagerEvent(() -> client.prepareResponse(FetchResponse.of(
                 Errors.FETCH_SESSION_ID_NOT_FOUND, 0, INVALID_SESSION_ID, new LinkedHashMap<>(), List.of())));
     }
 
@@ -362,6 +362,8 @@ public class FetchRequestManagerTest {
         AtomicInteger applicationWakeups = new AtomicInteger();
         RequestManagers managers = mock(RequestManagers.class);
         when(managers.entries()).thenReturn(List.of(fetcher));
+        when(managers.planManagerEvents(any())).thenAnswer(invocation ->
+            ManagerCoordinationPolicy.standard().evaluate(invocation.getArgument(0)));
         doAnswer(invocation -> {
             assertTrue(networkClientDelegate.unsentRequests().isEmpty());
             applicationWakeups.incrementAndGet();
@@ -404,7 +406,7 @@ public class FetchRequestManagerTest {
         }
     }
 
-    private void assertRequestCompletionReportsStateTransition(Runnable prepareResponse) throws InterruptedException {
+    private void assertRequestCompletionReportsManagerEvent(Runnable prepareResponse) throws InterruptedException {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
@@ -423,8 +425,8 @@ public class FetchRequestManagerTest {
         blockedOnBuffer.join(200);
         assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
         assertEquals(
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            fetcher.pollStateTransitions()
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            fetcher.pollManagerEvents()
         );
 
         fetcher.wakeupApplicationThread();
@@ -451,7 +453,7 @@ public class FetchRequestManagerTest {
         blockedOnBuffer.join(500);
         assertTrue(blockedOnBuffer.isAlive(),
                 "Empty fetch result with no fetchable partitions must not wake the thread blocked on the fetch buffer");
-        assertTrue(fetcher.lastStateTransitions().isEmpty());
+        assertTrue(fetcher.lastManagerEvents().isEmpty());
 
         // Clean up: explicitly wake so the daemon thread can exit instead of leaking as a live thread.
         fetcher.fetchBuffer.wakeup();
@@ -460,17 +462,17 @@ public class FetchRequestManagerTest {
     }
 
     @Test
-    public void testDuplicateStateTransitionsAreReturnedOnceByPoll() {
+    public void testDuplicateManagerEventsAreReturnedOnceByPoll() {
         buildFetcher();
 
         fetcher.onFetchRequestTerminated();
         fetcher.onFetchRequestTerminated();
 
         assertEquals(
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED),
-            fetcher.pollStateTransitions()
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            fetcher.pollManagerEvents()
         );
-        assertTrue(fetcher.pollStateTransitions().isEmpty());
+        assertTrue(fetcher.pollManagerEvents().isEmpty());
     }
 
     @Test
@@ -524,7 +526,7 @@ public class FetchRequestManagerTest {
         assertTrue(duplicate.isDone());
         NetworkClientDelegate.PollResult failureResult = fetcher.poll(time.milliseconds());
 
-        assertEquals(Set.of(StateTransition.FETCH_PREPARATION_FAILED), failureResult.stateTransitions());
+        assertEquals(List.of(ManagerEvent.LocalProgress.FETCH_PREPARATION_FAILED), failureResult.managerEvents());
         assertFutureThrows(AuthenticationException.class, current);
     }
 
@@ -566,7 +568,7 @@ public class FetchRequestManagerTest {
         AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
         assertTrue(result.requests().isEmpty());
         assertEquals(Set.of(AbstractFetch.FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED), result.blockers());
-        assertTrue(fetcher.pollStateTransitions().isEmpty());
+        assertTrue(fetcher.pollManagerEvents().isEmpty());
 
         assertEquals(0, sendFetches());
         assertEquals(
@@ -619,7 +621,7 @@ public class FetchRequestManagerTest {
         assertTrue(result.reconnectBackoffRemainingMs() <= 500L);
 
         assertEquals(0, sendFetches());
-        assertTrue(fetcher.lastStateTransitions().isEmpty());
+        assertTrue(fetcher.lastManagerEvents().isEmpty());
         long remainingMs = fetcher.lastPollResult.timeUntilNextPollMs;
         assertTrue(remainingMs > 0L);
         assertTrue(remainingMs <= result.reconnectBackoffRemainingMs());
@@ -3898,8 +3900,8 @@ public class FetchRequestManagerTest {
         assertDoesNotThrow(() -> sendFetches(false));
         assertFutureThrows(AuthenticationException.class, future);
         assertEquals(
-            Set.of(StateTransition.FETCH_PREPARATION_FAILED),
-            fetcher.lastStateTransitions()
+            List.of(ManagerEvent.LocalProgress.FETCH_PREPARATION_FAILED),
+            fetcher.lastManagerEvents()
         );
     }
 
@@ -4703,17 +4705,13 @@ public class FetchRequestManagerTest {
             return lastPollResult.unsentRequests;
         }
 
-        private Set<StateTransition> lastStateTransitions() {
-            return lastPollResult == null ? Set.of() : lastPollResult.stateTransitions();
-        }
-
         private List<ManagerEvent> lastManagerEvents() {
             return lastPollResult == null ? List.of() : lastPollResult.managerEvents();
         }
 
-        private Set<StateTransition> pollStateTransitions() {
+        private List<ManagerEvent> pollManagerEvents() {
             lastPollResult = poll(time.milliseconds());
-            return lastPollResult.stateTransitions();
+            return lastPollResult.managerEvents();
         }
 
         private void clearBufferedDataForUnassignedPartitions(Set<TopicPartition> partitions) {
