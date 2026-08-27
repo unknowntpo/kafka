@@ -115,42 +115,51 @@ Specifically, it defines:
 - the state-ownership boundary through which managers observe immutable snapshots but do not mutate peer state; and
 - the publish-before-action boundary for application-visible completion, publication, notification, and wakeup.
 
-The reactor model combines coordination information and execution components. The first three rows define what may
-cross a state-ownership boundary; the remaining rows define who processes, publishes, or executes it. `ManagerEvent`
-is intentionally qualified because the existing `ApplicationEvent` and `BackgroundEvent` types already describe
-cross-thread communication:
+The complete model is easiest to understand as one request lifecycle. Consider a heartbeat request which depends on
+the current coordinator:
 
-| Category | Element | Owner or producer | Role in the reactor model |
-| --- | --- | --- | --- |
-| Coordination | `ManagerEvent` | A request manager reporting an immutable fact that has already occurred | Trigger re-evaluation without allowing the producer to mutate peer state. For example, `CoordinatorUnavailableObserved(observedCoordinatorVersion, cause)` is routed to the coordinator owner. |
-| Coordination | Command (semantic rule) | Routed to exactly one mutable-state owner | Express an intent to change state. The owner validates and applies or rejects it. This rule does not require a new generic command type. |
-| State view | Snapshot | The mutable-state owner | Provide a small immutable projection of current decision-relevant truth. New work uses the current snapshot; admitted work retains only its version and bounded request context. |
-| Execution | `ConsumerReactor` | The background execution loop | Order inputs, invoke request managers, combine their results, publish the final schedule, and execute actions. |
-| Composition | `RequestManagers` | The selected regular or share consumer composition | Route typed `ManagerEvent` values, and later any explicitly modeled commands, to their single state owner without putting consumer-specific policy in the reactor. |
-| Manager result | `PollResult` | One request manager | Atomically report work available now, completed transitions, `ManagerEvent` values, and when that manager must be polled again. |
-| Publication | `ReactorSchedule` | Formed and published by `ConsumerReactor` | Provide one immutable snapshot of the retained manager deadlines and application-wait projection. It answers when processing must resume and how long network polling may block. |
-| External effect | `ReactorAction` | Collected or derived and executed by `ConsumerReactor` | Represent an application-facing effect that runs only after the corresponding state and `ReactorSchedule` are published. Equivalent actions may be deduplicated; examples include completing async poll progress, reporting an error, and waking an application wait. |
+1. **Admit work from current truth.** The heartbeat manager reads
+   `CoordinatorSnapshot(coordinator=node-1, version=7)`. It builds the request for `node-1` and captures version `7` as
+   bounded context for that attempt.
+2. **Report what happened.** The response says that the coordinator is unavailable. The heartbeat manager does not
+   mutate `CoordinatorRequestManager`. The response callback records
+   `ManagerEvent.CoordinatorUnavailableObserved(version=7, cause)`, and the post-I/O poll of the heartbeat manager
+   returns that event in its next `PollResult`. `ManagerEvent` is intentionally qualified because the existing
+   `ApplicationEvent` and `BackgroundEvent` types already describe cross-thread communication.
+3. **Route the fact to one owner.** `ConsumerReactor` defers the event. At the start of the next iteration, before
+   draining application events, it routes deferred `ManagerEvent` values through the selected `RequestManagers`
+   composition. The coordinator owner interprets the observation and alone decides whether it permits a mutation;
+   no generic command type is introduced.
+4. **Fence stale work.** `CoordinatorRequestManager` compares the observed version with its current snapshot. It
+   applies version `7` only if version `7` is still current. If rediscovery has already published version `9`, the
+   older observation is ignored and cannot invalidate the newer coordinator.
+5. **Re-evaluate all managers.** `ConsumerReactor` runs the stable manager pass. Each manager returns one `PollResult`
+   describing work available now and its next local poll requirement. The coordinator may propose a
+   `FindCoordinator` request, while heartbeat and commit may wait for its completion. Unsent requests are staged with
+   `NetworkClientDelegate`; no network I/O occurs yet, and requests are not `ReactorAction` values.
+6. **Publish the next state-reflecting wait.** `ConsumerReactor` combines the retained manager deadlines into one
+   immutable `ReactorSchedule` and publishes it. The schedule answers when processing must resume and how long the
+   next network poll may block. The response iteration may already have published a post-I/O schedule before the
+   event was deferred; this publication reflects the next iteration after owner routing and the full manager pass.
+7. **Execute phase-visible effects after publication.** `ConsumerReactor` executes any pre-I/O `ReactorAction`, then
+   calls `NetworkClientDelegate.poll()` using the published timeout. A network completion starts the post-I/O owner
+   poll, schedule-publication, and action phase. Actions include async-poll progress or completion, metadata-error
+   notification, and application wakeup; `WAKE_APPLICATION` executes last among actions in its phase. A phase which
+   only changes coordinator state may publish a new schedule without producing an application-visible action.
 
-The current POC implements one vertical slice of this model: coordinator-unavailable `ManagerEvent` values have one
-coordinator owner, and coordinator-dependent request attempts capture one immutable `CoordinatorSnapshot`.
-Additional event families, owner snapshots, and peer-mutation migrations remain Phase 2 work.
+The concepts in that lifecycle answer different questions:
 
-Their relationship is:
+| Concept | Question answered |
+| --- | --- |
+| `ManagerEvent` | What immutable fact has already occurred? |
+| Command (semantic rule) | Which single state owner may apply the requested mutation? |
+| Snapshot | What versioned truth may new work use? |
+| `PollResult` | What work did one manager make available, and when should it be polled again? |
+| `ReactorSchedule` | When must the reactor run again, and how long may network polling block? |
+| `ReactorAction` | What application-visible effect may execute after publication? |
 
-```text
-Input event
-  -> ConsumerReactor orders the input and routes typed ManagerEvent values to their state owners
-  -> a manager admitting cross-manager work captures the current owner-produced immutable snapshot
-  -> ConsumerReactor calls RequestManager.poll()
-  -> RequestManager returns PollResult { work now, completed transitions, manager events, next poll }
-  -> ConsumerReactor forms and publishes ReactorSchedule
-  -> ConsumerReactor executes ReactorAction values after publication
-```
-
-`ReactorSchedule` answers **when the reactor must run again**. `ReactorAction` answers **what application-facing
-effect must run now**. Network requests are carried by `PollResult` and handed directly to `NetworkClientDelegate`;
-they are not `ReactorAction` values. `ConsumerReactorGateway` is the proposed application-side submission boundary;
-it accepts inputs but does not own scheduling or action decisions.
+The current POC implements the coordinator lifecycle above. Additional event families, owner snapshots, and
+peer-mutation migrations remain Phase 2 work.
 
 The design relies on three invariants:
 
