@@ -89,11 +89,13 @@ final class ManagerPollCache {
         private void update(final long timeUntilNextPollMs,
                             final long applicationWaitMs,
                             final long currentTimeMs) {
-            reactorDeadlineMs = preservePendingDeadline(
-                reactorDeadlineMs,
-                deadlineAfter(currentTimeMs, timeUntilNextPollMs),
-                currentTimeMs
-            );
+            long proposedReactorDeadlineMs = deadlineAfter(currentTimeMs, timeUntilNextPollMs);
+            // A finite result polled early cannot postpone a previously published deadline. An explicit event wait,
+            // however, means the manager's state changed and time alone can no longer make it runnable, so it
+            // withdraws its prior deadline.
+            reactorDeadlineMs = proposedReactorDeadlineMs == Long.MAX_VALUE
+                ? Long.MAX_VALUE
+                : preservePendingDeadline(reactorDeadlineMs, proposedReactorDeadlineMs, currentTimeMs);
 
             long proposedApplicationDeadlineMs = deadlineAfter(currentTimeMs, applicationWaitMs);
             if (applicationDeadlineDelivered

@@ -181,6 +181,11 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
+        // Publish an observation before admitting any retry. The owner must process coordinator invalidation before
+        // a request may capture another coordinator snapshot.
+        if (pendingManagerEvents.hasPendingEvents())
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+
         // poll when the coordinator node is known and fatal error is not present
         if (coordinatorRequestManager.coordinator().isEmpty()) {
             pendingRequests.maybeFailOnCoordinatorFatalError();

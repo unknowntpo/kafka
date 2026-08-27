@@ -218,7 +218,7 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
             "The total number of reactor actions that failed during execution.");
         this.applicationWakeupSensor = cumulativeCountSensor(
             metrics, groupName, APPLICATION_WAKEUP_SENSOR_NAME,
-            "The total number of coalesced application wakeups executed by the reactor.");
+            "The total number of phase-coalesced application wakeups executed by the reactor.");
     }
 
     private static Sensor cumulativeCountSensor(final MetricsLedger metrics,

@@ -27,6 +27,10 @@ final class PendingManagerEvents {
     private final EnumMap<ManagerEvent.Type, ManagerEvent> events =
         new EnumMap<>(ManagerEvent.Type.class);
 
+    boolean hasPendingEvents() {
+        return !events.isEmpty();
+    }
+
     /**
      * Retains the greatest observed coordinator version for events of the same type, so a delayed response cannot
      * replace a newer pending observation. This only prevents this producer-local buffer from moving backwards;

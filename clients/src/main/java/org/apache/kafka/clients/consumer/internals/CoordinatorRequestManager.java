@@ -18,7 +18,6 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
-import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.message.FindCoordinatorRequestData;
@@ -61,8 +60,6 @@ public class CoordinatorRequestManager implements RequestManager {
     private Node coordinator;
     /** Monotonic version of decision-relevant coordinator truth (UNKNOWN or a concrete target). */
     private long coordinatorVersion = 0L;
-    /** Published once after successful discovery so the reactor can re-poll coordinator-dependent managers. */
-    private boolean coordinatorDiscoveredSinceLastPoll = false;
     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
     // appropriate actions. 
     // For example:
@@ -108,14 +105,6 @@ public class CoordinatorRequestManager implements RequestManager {
             return NetworkClientDelegate.PollResult.awaitEvent();
 
         if (this.coordinator != null) {
-            if (coordinatorDiscoveredSinceLastPoll) {
-                coordinatorDiscoveredSinceLastPoll = false;
-                return NetworkClientDelegate.PollResult.progress(
-                    List.of(),
-                    Set.of(StateTransition.COORDINATOR_DISCOVERED),
-                    NetworkClientDelegate.PollResult.WAIT_FOREVER
-                );
-            }
             return NetworkClientDelegate.PollResult.awaitEvent();
         }
 
@@ -158,23 +147,6 @@ public class CoordinatorRequestManager implements RequestManager {
     }
 
     /**
-     * Handles the disconnection of the current coordinator.
-     * This method checks if the given exception is an instance of {@link DisconnectException}.
-     * If so, it marks the coordinator as unknown, indicating that the client should
-     * attempt to discover a new coordinator. For any other exception type, no action is performed.
-     *
-     * @param exception     The exception to handle, which was received as part of a request response.
-     * @param currentTimeMs The current time in milliseconds.
-     * @return {@code true} if this call changed a known coordinator to unknown.
-     */
-    public boolean handleCoordinatorDisconnect(Throwable exception, long currentTimeMs) {
-        if (exception instanceof DisconnectException) {
-            return markCoordinatorUnknown(exception.getMessage(), currentTimeMs);
-        }
-        return false;
-    }
-
-    /**
      * Mark the coordinator as "unknown" (i.e. {@code null}) when a disconnect is detected. This detection can occur
      * in one of two paths:
      *
@@ -187,7 +159,7 @@ public class CoordinatorRequestManager implements RequestManager {
      * @param currentTimeMs Current time in milliseconds
      * @return {@code true} if this call changed a known coordinator to unknown.
      */
-    public boolean markCoordinatorUnknown(final String cause, final long currentTimeMs) {
+    boolean markCoordinatorUnknown(final String cause, final long currentTimeMs) {
         final boolean coordinatorWasKnown = coordinator != null;
         if (coordinator != null || timeMarkedUnknownMs == -1) {
             timeMarkedUnknownMs = currentTimeMs;
@@ -202,7 +174,6 @@ public class CoordinatorRequestManager implements RequestManager {
             );
             coordinator = null;
             coordinatorVersion++;
-            coordinatorDiscoveredSinceLastPoll = false;
         } else {
             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
             long currDisconnectMin = durationOfOngoingDisconnectMs / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
@@ -239,7 +210,6 @@ public class CoordinatorRequestManager implements RequestManager {
         this.coordinator = discoveredCoordinator;
         log.info("Discovered group coordinator {}", coordinator);
         coordinatorRequestState.onSuccessfulAttempt(currentTimeMs);
-        coordinatorDiscoveredSinceLastPoll = true;
     }
 
     private void onFailedResponse(final long currentTimeMs, final Throwable exception) {

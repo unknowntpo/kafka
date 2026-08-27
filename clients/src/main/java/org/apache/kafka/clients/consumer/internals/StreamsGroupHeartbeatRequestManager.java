@@ -453,6 +453,11 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
+        // Publish an observation before admitting any new request. In particular, a coordinator-unavailable
+        // response must not be followed by a same-phase heartbeat built from the stale coordinator snapshot.
+        if (pendingManagerEvents.hasPendingEvents())
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
             membershipManager.onHeartbeatRequestSkipped();
             maybePropagateCoordinatorFatalErrorEvent();
