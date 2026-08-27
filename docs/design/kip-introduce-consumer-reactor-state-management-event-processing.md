@@ -37,8 +37,9 @@ handling, and state-publication races.
 This KIP refactors the existing background loop into `ConsumerReactor`. Request managers continue to own their local
 state and rules. Each manager reports whether it produced work now, must be checked again after a finite delay, or
 cannot make progress until another event occurs. The reactor orders those inputs, combines the managers' timing
-requirements into one published wait decision, and only then releases application-visible completion, publication,
-notification, or wakeup effects.
+requirements into one published wait decision, and only then releases application-visible completion, notification,
+or wakeup effects that have been routed through the reactor boundary. Direct data-buffer publication remains an
+explicit migration path rather than an implicit claim of the current proof of concept.
 
 The proposal does not add a thread, replace the existing event-driven topology, change Kafka protocols or public
 consumer APIs, move user callbacks off the application thread, or move consumer-specific policy into the shared
@@ -121,7 +122,7 @@ This KIP keeps the existing application/background thread topology and refactors
 background loop into `ConsumerReactor`. A request manager is a per-domain component such as the heartbeat, commit,
 fetch, or coordinator manager. Request managers keep their mutable state and domain rules. The reactor becomes the
 single place that finalizes, from one ordered view of all managers, how long the consumer may wait and when the
-application thread may observe an effect.
+application thread may observe an effect routed through this boundary.
 
 One manager poll returns one `PollResult`. The result is a typed envelope with three independent outputs:
 
@@ -321,16 +322,18 @@ One reactor iteration is event-driven with deadline-bounded waiting:
 
 1. Apply `ManagerCommand` values derived from the previous post-I/O completion phase to their single state owners
    through the selected regular or share composition.
-2. Drain ready application commands and callback acknowledgements and apply them through the same composition.
-3. Capture the current references to any opt-in owner-published snapshots used by new cross-manager work in this
+2. Drain producer-local `ManagerEvent` values recorded by response callbacks, evaluate that input-boundary batch,
+   and apply its owner commands. This occurs before any manager can build transport work from owner state.
+3. Drain ready application commands and callback acknowledgements and apply them through the same composition.
+4. Capture the current references to any opt-in owner-published snapshots used by new cross-manager work in this
    ordered pass.
-4. Poll the stable manager set in order and collect their `PollResult` values.
-5. Evaluate that phase's ordered `ManagerEvent` batch through `ManagerCoordinationPolicy`, stage every
+5. Poll the stable manager set in order and collect their `PollResult` values.
+6. Evaluate that phase's ordered `ManagerEvent` batch through `ManagerCoordinationPolicy`, stage every
    `NetworkCommand`, and retain each manager's `NextPollCondition`.
-6. Form and publish one `ReactorSchedule`, publish staged `BackgroundEvent` values, and execute the phase's
+7. Form and publish one `ReactorSchedule`, publish staged `BackgroundEvent` values, and execute the phase's
    `ReactorAction` values.
-7. Poll network I/O no longer than the published deadline.
-8. Re-poll each completion's owning manager, evaluate the post-I/O event batch, publish the updated schedule, then
+8. Poll network I/O no longer than the published deadline.
+9. Re-poll each completion's owning manager, evaluate the post-I/O event batch, publish the updated schedule, then
    execute its actions. Any resulting cross-owner `ManagerCommand` is applied at the beginning of the next iteration,
    before the next full manager pass and before the next network poll.
 
@@ -359,6 +362,11 @@ Consider a heartbeat sent while the group coordinator becomes unavailable:
 6. **Publish the next wait.** The reactor publishes the resulting `ReactorSchedule` before releasing any
    application-visible effect. The `FindCoordinator` request is handed to the network layer before the next network
    poll.
+
+If the heartbeat manager's post-I/O `poll()` throws before it can attach the callback-recorded fact to a
+`PollResult`, the fact remains in that manager's bounded `PendingManagerEvents`. The next iteration drains it at the
+input boundary and applies the coordinator command before any manager builds the next request. The error path
+therefore changes when the fact is admitted, but does not lose it or allow a long wait before owner re-evaluation.
 
 ![Coordinator observation routed and fenced](../images/kip-1371-coordinator-observation-sequence.png)
 
@@ -467,15 +475,22 @@ model above also defines later migration work. The distinction is:
 | Cross-manager ownership | Coordinator target/version snapshot, typed event handlers, phase-batch policy evaluation, and version-fenced coordinator invalidation are present. | Other cross-owner mutation paths use the same owner/fact/command rule or are placed inside an explicit protocol driver. |
 | Snapshot retention | Only the current `CoordinatorSnapshot` is retained; there is no global registry or snapshot history. | Additional snapshots remain opt-in and latest-only when a real cross-manager decision needs them. |
 | Publish-before-effect | `ReactorAction` and staged `BackgroundEvent` paths publish the schedule first. | Generic operation completion, data publication, callback acknowledgement, and timeout paths cross the same boundary. |
+| Application wait projection | `AsyncKafkaConsumer.poll(...)` uses the published reactor decision; the former assignment/position mutable-state rescans have been removed in the POC. Assignment publication and position update/failure paths must therefore provide the corresponding wake or completion signal. | All remaining compatibility waits are derived from immutable schedule or operation results, with integration tests proving that each enabling input wakes a blocked application poll. |
 | Wake coalescing | Equivalent wakes are combined separately in the pre-I/O, post-I/O, and final-drain phases. | Equivalent reasons produce at most one primitive wake per complete reactor iteration. |
-| Pre-I/O owner commands | The full-pass path stages transport commands before evaluating its event batch and fails fast if that batch derives a cross-owner command. | Either prove cross-owner commands originate only from post-I/O completions, or admit them before building dependent transport work. The fail-fast guard is not the final contract. |
+| Cross-owner fact admission | Callback-produced facts are drained at the input boundary and their owner commands are applied before the full manager pass builds transport work. A post-I/O poll failure leaves the fact in the producer-local bounded buffer for that next input drain. An unexpected fact first produced by the pre-I/O manager pass is preserved and diagnosed, but its command is deferred because transport work may already have been built. | Require cross-owner facts to enter through the input/post-I/O paths, or add explicit dependency-aware replay/cancellation before claiming generic safety for facts first created during the pre-I/O pass. |
 | Diagnostics | Contract, manager-poll, action-failure, and application-wakeup counters are present. | TRACE adds publication generation, deadline source, action reason, and destination without hot-path collection formatting. |
+| Consumer variants | The coordinator observation slice is proven with the regular heartbeat manager; Streams coordinator snapshots use the same owner/version rule. Share consume request production still uses compatibility `PollResult` construction and lacks an equivalent reactor-level recovery test. | Regular, share, and Streams compositions each prove their typed outputs and cross-owner recovery without consumer-type branches in `ConsumerReactor`. |
 
 The following names map the model to the current POC. They are implementation evidence, not prerequisites for
 understanding the design:
 
 ```text
-producer-local PendingManagerEvents
+response callback -> producer-local PendingManagerEvents
+  -> RequestManagers.drainPendingManagerEvents() at the next input boundary
+  -> ConsumerReactor evaluates the stable ManagerEvent batch
+  -> owner commands apply before the full manager pass
+
+ordinary manager-poll output
   -> PollResult.managerEvents()
   -> ConsumerReactor.stageManagerEventBatch(...)
   -> RequestManagers.planManagerEvents(...)
@@ -484,12 +499,18 @@ producer-local PendingManagerEvents
   -> ConsumerReactor applies the owner command or executes the action at its phase boundary
 ```
 
-`pending` means retained by the producing manager before publication. `stageManagerEventBatch(...)` evaluates the
+`pending` means retained by the producing manager before publication. Callback-produced pending facts are drained at
+the input boundary so their owner commands apply before request building. `stageManagerEventBatch(...)` evaluates the
 complete ordered event set from one pre-I/O or post-I/O phase. A post-I/O owner command is retained until the next
 iteration so it is applied before application inputs, the next full manager pass, and the next network poll.
 `PendingManagerEvents` retains the greatest observed coordinator version for one event type so an older response
 cannot overwrite a newer pending observation. The coordinator owner still performs the final comparison against its
 current version.
+
+A cross-owner fact first created by the pre-I/O manager pass is not the normal path: by then other managers may have
+already built transport commands from the earlier owner snapshot. The POC retains and diagnoses that fact instead of
+losing it, but this is containment rather than generic stale-send recovery. Such a producer must move the fact to the
+input/post-I/O admission path, or provide dependency-aware cancellation/replay semantics.
 
 Other current implementation details include:
 
@@ -537,8 +558,9 @@ API change.
   the shared reactor loop.
 - Remove hard-coded coordinator dependency branches from `ConsumerReactor`; the next stable full manager pass observes
   cross-manager changes before the next network poll without a central dependency graph.
-- Replace application-side mutable-state rescans with immutable schedule or operation results after equivalent tests
-  exist.
+- Complete the liveness proof for the POC's removal of application-side assignment/position rescans: each assignment,
+  position update, and failure that can unblock `poll(...)` must publish a corresponding background event or reactor
+  action, and real consumer integration tests must cover those waits.
 
 Exit evidence: multi-manager, stale-completion, regular-consumer, and share-consumer suites pass independently.
 
