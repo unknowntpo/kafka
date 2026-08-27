@@ -105,52 +105,44 @@ configuration or overload behavior requires a separately complete compatibility 
 
 ## Proposed Changes
 
-This KIP makes one responsibility change: `ConsumerReactor` becomes the only component that finalizes
-cross-manager scheduling and orders application-facing effects. It extends the existing event-driven threading
-topology inside the background thread; it does not replace the application/background event queues or require every
-same-thread interaction to become an event. Specifically, `ConsumerReactor` defines:
+This KIP refactors the responsibilities of the existing `ConsumerNetworkThread` execution loop into
+`ConsumerReactor`. The application/background thread topology and runtime thread name remain unchanged, while
+`ConsumerReactor` becomes the final owner of cross-manager scheduling and application-facing effect ordering.
+Specifically, it defines:
 
-- the ordered phase in which application inputs and cross-manager facts are applied;
+- the ordered phase in which application inputs and cross-manager `ManagerEvent` values are applied;
 - the stable manager pass whose results form one published `ReactorSchedule`;
 - the state-ownership boundary through which managers observe immutable snapshots but do not mutate peer state; and
 - the publish-before-action boundary for application-visible completion, publication, notification, and wakeup.
 
-It does not introduce a generic internal event bus. The target design uses the following vocabulary to keep
-cross-manager coordination rules explicit:
+The reactor model combines coordination information and execution components. The first three rows define what may
+cross a state-ownership boundary; the remaining rows define who processes, publishes, or executes it. `ManagerEvent`
+is intentionally qualified because the existing `ApplicationEvent` and `BackgroundEvent` types already describe
+cross-thread communication:
 
-| Form | Meaning | Ownership rule | Example |
+| Category | Element | Owner or producer | Role in the reactor model |
 | --- | --- | --- | --- |
-| Event or fact | An immutable observation that has already occurred. | One or more components may observe it, but the producer cannot use it to mutate a peer. | A response reports `CoordinatorUnavailableObserved(observedCoordinatorVersion, cause)`. |
-| Command | An intent to change state. | It is addressed to exactly one mutable-state owner, which validates and applies or rejects it. Routing goes through the reactor composition boundary, not a peer mutator call. | The coordinator owner decides whether the observation still permits marking the coordinator unknown. |
-| Snapshot | A small immutable projection of decision-relevant current truth. | The state owner produces it. New work uses the current snapshot; admitted work retains only the version and bounded request context it observed. | `CoordinatorSnapshot(coordinator, version)` supplies one request target and its fencing version. |
+| Coordination | `ManagerEvent` | A request manager reporting an immutable fact that has already occurred | Trigger re-evaluation without allowing the producer to mutate peer state. For example, `CoordinatorUnavailableObserved(observedCoordinatorVersion, cause)` is routed to the coordinator owner. |
+| Coordination | Command (semantic rule) | Routed to exactly one mutable-state owner | Express an intent to change state. The owner validates and applies or rejects it. This rule does not require a new generic command type. |
+| State view | Snapshot | The mutable-state owner | Provide a small immutable projection of current decision-relevant truth. New work uses the current snapshot; admitted work retains only its version and bounded request context. |
+| Execution | `ConsumerReactor` | The background execution loop | Order inputs, invoke request managers, combine their results, publish the final schedule, and execute actions. |
+| Composition | `RequestManagers` | The selected regular or share consumer composition | Route typed `ManagerEvent` values, and later any explicitly modeled commands, to their single state owner without putting consumer-specific policy in the reactor. |
+| Manager result | `PollResult` | One request manager | Atomically report work available now, completed transitions, `ManagerEvent` values, and when that manager must be polled again. |
+| Publication | `ReactorSchedule` | Formed and published by `ConsumerReactor` | Provide one immutable snapshot of the retained manager deadlines and application-wait projection. It answers when processing must resume and how long network polling may block. |
+| External effect | `ReactorAction` | Collected or derived and executed by `ConsumerReactor` | Represent an application-facing effect that runs only after the corresponding state and `ReactorSchedule` are published. Equivalent actions may be deduplicated; examples include completing async poll progress, reporting an error, and waking an application wait. |
 
-Events trigger re-evaluation; snapshots supply the truth used for the next decision. A command has one target even
-when the fact that caused it is observable by several components. Request managers do not compete for a shared event
-queue and do not receive live mutable peer objects as the long-term dependency contract.
-
-The current POC implements one vertical slice of this vocabulary: coordinator-unavailable facts have one coordinator
-owner, and coordinator-dependent request attempts capture one immutable `CoordinatorSnapshot`. `Command` is an
-ownership rule in this KIP, not a new generic command type or queue. Additional fact families, owner snapshots, and
-peer-mutation migrations remain Phase 2 work.
-
-The execution boundary is defined by the following internal concepts:
-
-| Concept | Owner or producer | Responsibility |
-| --- | --- | --- |
-| `ConsumerReactor` | The existing background execution loop | Order inputs, invoke request managers, combine their results, publish the final schedule, and execute actions. |
-| `RequestManagers` composition | The selected regular or share consumer composition | Route typed cross-manager facts, and later any explicitly modeled commands, to their single state owner without putting consumer-specific policy in the reactor. |
-| `PollResult` | One request manager | Atomically report work available now, completed transitions, typed manager facts, and when that manager must be polled again. The current POC has one manager-fact family. |
-| `ReactorSchedule` | Formed and published by `ConsumerReactor` | Provide one immutable snapshot of the retained manager deadlines and application-wait projection. It answers when processing must resume and how long network polling may block. |
-| `ReactorAction` | Collected or derived, deduplicated when equivalent, and executed by `ConsumerReactor` | Represent an application-facing effect that runs only after the corresponding state and `ReactorSchedule` are published. Examples include completing async poll progress, reporting an error, and waking an application wait. |
+The current POC implements one vertical slice of this model: coordinator-unavailable `ManagerEvent` values have one
+coordinator owner, and coordinator-dependent request attempts capture one immutable `CoordinatorSnapshot`.
+Additional event families, owner snapshots, and peer-mutation migrations remain Phase 2 work.
 
 Their relationship is:
 
 ```text
 Input event
-  -> ConsumerReactor orders the input and routes typed manager facts to their state owners
+  -> ConsumerReactor orders the input and routes typed ManagerEvent values to their state owners
   -> a manager admitting cross-manager work captures the current owner-produced immutable snapshot
   -> ConsumerReactor calls RequestManager.poll()
-  -> RequestManager returns PollResult { work now, completed transitions, manager facts, next poll }
+  -> RequestManager returns PollResult { work now, completed transitions, manager events, next poll }
   -> ConsumerReactor forms and publishes ReactorSchedule
   -> ConsumerReactor executes ReactorAction values after publication
 ```
@@ -162,9 +154,9 @@ it accepts inputs but does not own scheduling or action decisions.
 
 The design relies on three invariants:
 
-1. Each mutable state has one execution-context owner. In the target design, request managers own their local state; peers may observe
-   immutable snapshots or facts but may not mutate that state. `ConsumerReactor` owns the final cross-manager
-   schedule and actions.
+1. Each mutable state has one execution-context owner. In the target design, request managers own their local state;
+   peers may observe immutable snapshots or `ManagerEvent` values but may not mutate that state. `ConsumerReactor`
+   owns the final cross-manager schedule and actions.
 2. Every synthetic wakeup or reschedule names a real state transition, positive deadline, completion, command, or
    capacity change. An empty manager result cannot request an immediate retry.
 3. State and the resulting `ReactorSchedule` are published before completing futures, publishing data or events, or
@@ -210,8 +202,8 @@ behavior.
 | Component | Target responsibility after the KIP |
 | --- | --- |
 | `ConsumerReactor` | Order inputs, invoke managers, validate the generic no-progress invariant, retain their scheduling contributions, publish the final schedule, then collect, deduplicate equivalent actions, and execute `ReactorAction` values. |
-| `RequestManagers` composition | Select the regular or share manager set and route typed facts or commands to one state owner; do not introduce a shared event bus or dynamic dependency graph. |
-| Request manager | Own one domain of mutable consumer state and the conditions required to make progress; publish a small immutable projection for readers, consume only facts or commands addressed to it, and return progress, a positive finite retry delay, or an event wait from one snapshot. |
+| `RequestManagers` composition | Select the regular or share manager set and route `ManagerEvent` values or commands to one state owner without introducing a dynamic dependency graph. |
+| Request manager | Own one domain of mutable consumer state and the conditions required to make progress; publish a small immutable projection for readers, consume only `ManagerEvent` values or commands addressed to it, and return progress, a positive finite retry delay, or an event wait from one snapshot. |
 | Proposed `RegularConsumerDriver` / `ShareConsumerDriver` | Keep assignment or acquisition, commit or acknowledgement, and callback coordination outside the shared reactor loop. These types do not yet exist in the codebase. |
 | `NetworkClientDelegate` | Own transport, connection handling, request correlation, and timeouts; do not decide whether to complete an application event or wake the application thread. |
 | Application thread | Execute user callbacks and consume published data, events, and operation results. |
@@ -243,7 +235,7 @@ applied first and the older completion can update only `tp1`. A later ordered po
 
 The target reactor iteration is:
 
-1. Route typed manager facts retained from the previous post-I/O phase to their state owners through the selected
+1. Route typed `ManagerEvent` values retained from the previous post-I/O phase to their state owners through the selected
    regular or share composition.
 2. Drain ready application commands and callback acknowledgements and apply them through the same composition.
 3. Freeze the current owner-produced snapshots used by new work in this ordered pass.
@@ -252,7 +244,7 @@ The target reactor iteration is:
 6. Execute pre-I/O actions derived from completed transitions.
 7. Poll network I/O no longer than the published deadline.
 8. Re-poll each completion's owning manager, publish the updated schedule, execute post-I/O actions, and retain any
-   typed manager facts for the next full ordered pass.
+   typed `ManagerEvent` values for the next full ordered pass.
 
 Under the target rule, managers do not call one another recursively and do not invoke peer mutation methods. A
 completion marks its owning manager and may return a typed immutable fact. The composition routes that fact to the
@@ -293,7 +285,7 @@ not a chain of historical snapshots. Optional diagnostic history is a separate f
 of the scheduling contract.
 
 The current POC proves this contract for coordinator-dependent request attempts through `CoordinatorSnapshot`,
-typed manager facts, and stale-version rejection. Freezing a general set of owner projections for every manager in
+typed `ManagerEvent` values, and stale-version rejection. Freezing a general set of owner projections for every manager in
 one ordered pass is a later migration step, not existing implementation coverage.
 
 #### Manager poll outcomes and `PollResult`
@@ -307,7 +299,7 @@ Each manager poll returns one `PollResult` containing four pieces of information
 
 - `unsentRequests`: requests ready for the reactor to hand to `NetworkClientDelegate`;
 - `stateTransitions`: completed manager changes ready for the reactor to apply;
-- typed manager facts selected for composition routing; and
+- typed `ManagerEvent` values selected for composition routing; and
 - `timeUntilNextPollMs`: how long the reactor may wait before polling that manager again.
 
 The factories give names and validation to the meaningful combinations of these existing fields; they do not
@@ -322,7 +314,7 @@ PollResult.awaitEvent();
 
 | Manager result | Immediate output | Scheduling meaning |
 | --- | --- | --- |
-| `progress(requests, transitions, managerEvents, delay)` | At least one request, transition, or typed manager fact | Consume the output now; `delay` describes the next manager poll after that state change. |
+| `progress(requests, transitions, managerEvents, delay)` | At least one request, transition, or typed `ManagerEvent` | Consume the output now; `delay` describes the next manager poll after that state change. |
 | `retryAfter(delayMs)` | None | Poll this manager again after a positive, finite manager-local delay. |
 | `awaitEvent()` | None | Do not schedule a periodic manager poll; poll it after a relevant input event. |
 
@@ -527,7 +519,7 @@ API change.
 ### Phase 2: Migrate manager and consumer-specific decisions
 
 - Move remaining manager deadlines and completed transitions into `PollResult`.
-- Replace peer mutation calls with typed immutable facts routed through the selected composition to one state owner.
+- Replace peer mutation calls with typed immutable `ManagerEvent` values routed through the selected composition to one state owner.
 - Publish small owner-local snapshots for cross-manager reads and fence delayed observations with the captured snapshot
   version.
 - Introduce the regular/share driver boundary around the existing managers and remove consumer-type decisions from
@@ -573,7 +565,7 @@ Tests assert observable event-processing behavior rather than private method cov
 - an observation captured from an older coordinator version cannot invalidate a later coordinator, while an
   observation matching the current version is applied;
 - every manager admitting new work in one ordered pass uses the snapshots frozen for that pass;
-- pending manager facts and owner snapshots remain latest-only and bounded; in-flight work retains a version and
+- pending `ManagerEvent` values and owner snapshots remain latest-only and bounded; in-flight work retains a version and
   bounded scope rather than snapshot history;
 - no request manager directly invokes another request manager's mutation API;
 - an older offset-fetch completion cannot mutate a partition outside its captured scope;
@@ -633,7 +625,7 @@ keeps each slice runnable and independently testable.
 
 A shared manager event stream would hide the producer-to-owner mapping, make consumption order and backpressure part
 of every manager, and allow multiple components to compete for commands. The selected composition instead routes a
-small closed set of typed facts to one owner in a deterministic reactor phase.
+small closed set of typed `ManagerEvent` values to one owner in a deterministic reactor phase.
 
 ### Traverse a dynamic manager dependency graph
 
