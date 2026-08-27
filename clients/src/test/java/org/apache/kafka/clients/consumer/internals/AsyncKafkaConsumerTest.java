@@ -2723,7 +2723,7 @@ public class AsyncKafkaConsumerTest {
         consumer.assign(Set.of(topicPartition));
         consumer.seek(topicPartition, 0L);
 
-        final ApplicationEventHandler handler = consumer.applicationEventHandler();
+        final ConsumerReactorGateway handler = consumer.consumerReactorGateway();
         final AsyncPollEvent retainedIntent = new AsyncPollEvent(
             time.milliseconds() + 30_000L,
             time.milliseconds()
