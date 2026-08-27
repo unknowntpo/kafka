@@ -27,6 +27,13 @@ final class PendingManagerEvents {
         new EnumMap<>(ManagerEvent.Type.class);
 
     void add(final ManagerEvent event) {
+        ManagerEvent previous = events.get(event.type());
+        if (previous instanceof ManagerEvent.CoordinatorUnavailableObserved
+                && event instanceof ManagerEvent.CoordinatorUnavailableObserved
+                && ((ManagerEvent.CoordinatorUnavailableObserved) event).observedCoordinatorVersion()
+                    < ((ManagerEvent.CoordinatorUnavailableObserved) previous).observedCoordinatorVersion()) {
+            return;
+        }
         events.put(event.type(), event);
     }
 

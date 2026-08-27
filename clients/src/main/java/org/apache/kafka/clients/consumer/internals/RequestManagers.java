@@ -152,13 +152,12 @@ public class RequestManagers implements Closeable {
     void routeManagerEvents(final Collection<ManagerEvent> events) {
         for (ManagerEvent event : events) {
             switch (event.type()) {
-                case COORDINATOR_INVALIDATION:
-                    ManagerEvent.CoordinatorInvalidation invalidation =
-                        (ManagerEvent.CoordinatorInvalidation) event;
+                case COORDINATOR_UNAVAILABLE_OBSERVED:
+                    ManagerEvent.CoordinatorUnavailableObserved observation =
+                        (ManagerEvent.CoordinatorUnavailableObserved) event;
                     log.trace("Routing manager event {} to CoordinatorRequestManager", event);
                     coordinatorRequestManager.ifPresentOrElse(
-                        manager -> manager.markCoordinatorUnknown(
-                            invalidation.cause(), invalidation.observedAtMs()),
+                        manager -> manager.handleCoordinatorUnavailableObserved(observation),
                         () -> log.debug("Ignoring {} from {} because no coordinator manager is configured",
                             event.type(), event.source())
                     );

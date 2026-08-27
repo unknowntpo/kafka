@@ -2131,6 +2131,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final StreamsGroupHeartbeatRequestManager.HeartbeatState heartbeatState = heartbeatStateMockedConstruction.constructed().get(0);
             final HeartbeatRequestState heartbeatRequestState = heartbeatRequestStateMockedConstruction.constructed().get(0);
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+            when(coordinatorRequestManager.coordinatorVersion()).thenReturn(7L);
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
@@ -2149,7 +2150,8 @@ class StreamsGroupHeartbeatRequestManagerTest {
             verify(membershipManager).onFatalHeartbeatFailure();
 
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
-            assertCoordinatorInvalidation(heartbeatRequestManager.poll(time.milliseconds()));
+            assertCoordinatorInvalidation(heartbeatRequestManager.poll(time.milliseconds()), 7L);
+            verify(coordinatorRequestManager).coordinatorVersion();
             assertTrue(heartbeatRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
                 "coordinator invalidation must be published once");
         }
@@ -3003,10 +3005,16 @@ class StreamsGroupHeartbeatRequestManagerTest {
     }
 
     private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
+        assertCoordinatorInvalidation(result, 0L);
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result,
+                                               final long expectedCoordinatorVersion) {
         assertEquals(1, result.managerEvents().size());
-        ManagerEvent.CoordinatorInvalidation invalidation = assertInstanceOf(
-            ManagerEvent.CoordinatorInvalidation.class, result.managerEvents().get(0));
+        ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
         assertEquals(StreamsGroupHeartbeatRequestManager.class.getSimpleName(), invalidation.source());
+        assertEquals(expectedCoordinatorVersion, invalidation.observedCoordinatorVersion());
     }
 
     private ClientResponse buildClientResponseWithTopologyRequired(final boolean topologyRequired) {

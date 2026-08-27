@@ -59,6 +59,8 @@ public class CoordinatorRequestManager implements RequestManager {
     private long totalDisconnectedMin = 0;
     private boolean closing = false;
     private Node coordinator;
+    /** Monotonic version of decision-relevant coordinator truth (UNKNOWN or a concrete target). */
+    private long coordinatorVersion = 0L;
     /** Published once after successful discovery so the reactor can re-poll coordinator-dependent managers. */
     private boolean coordinatorDiscoveredSinceLastPoll = false;
     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
@@ -199,6 +201,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 cause
             );
             coordinator = null;
+            coordinatorVersion++;
             coordinatorDiscoveredSinceLastPoll = false;
         } else {
             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
@@ -211,14 +214,29 @@ public class CoordinatorRequestManager implements RequestManager {
         return coordinatorWasKnown;
     }
 
+    /**
+     * Applies a request's observation only if it refers to the coordinator truth used to build that request.
+     * A delayed response from an older coordinator version cannot invalidate a newer discovery.
+     */
+    boolean handleCoordinatorUnavailableObserved(final ManagerEvent.CoordinatorUnavailableObserved event) {
+        if (event.observedCoordinatorVersion() != coordinatorVersion) {
+            log.trace("Ignoring stale {} because current coordinator version is {}", event, coordinatorVersion);
+            return false;
+        }
+        return markCoordinatorUnknown(event.cause(), event.observedAtMs());
+    }
+
     private void onSuccessfulResponse(
         final long currentTimeMs,
         final FindCoordinatorResponseData.Coordinator coordinator
     ) {
-        this.coordinator = new GroupCoordinatorNode(
+        Node discoveredCoordinator = new GroupCoordinatorNode(
                 coordinator.nodeId(),
                 coordinator.host(),
                 coordinator.port());
+        if (!Objects.equals(this.coordinator, discoveredCoordinator))
+            coordinatorVersion++;
+        this.coordinator = discoveredCoordinator;
         log.info("Discovered group coordinator {}", coordinator);
         coordinatorRequestState.onSuccessfulAttempt(currentTimeMs);
         coordinatorDiscoveredSinceLastPoll = true;
@@ -279,6 +297,11 @@ public class CoordinatorRequestManager implements RequestManager {
      */
     public Optional<Node> coordinator() {
         return Optional.ofNullable(this.coordinator);
+    }
+
+    /** Read-only request context used to fence delayed coordinator-dependent responses. */
+    long coordinatorVersion() {
+        return coordinatorVersion;
     }
     
     public Optional<Throwable> getAndClearFatalError() {

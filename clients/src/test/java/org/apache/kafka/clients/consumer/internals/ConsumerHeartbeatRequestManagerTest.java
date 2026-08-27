@@ -396,7 +396,7 @@ public class ConsumerHeartbeatRequestManagerTest
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No request should be generated before the backoff expires");
         assertEquals(1, result.managerEvents().size());
-        assertInstanceOf(ManagerEvent.CoordinatorInvalidation.class, result.managerEvents().get(0));
+        assertInstanceOf(ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
 
         time.sleep(1);
         result = heartbeatRequestManager.poll(time.milliseconds());

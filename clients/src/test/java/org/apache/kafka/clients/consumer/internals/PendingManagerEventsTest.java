@@ -27,18 +27,33 @@ public class PendingManagerEventsTest {
     @Test
     public void testRepeatedEventTypeIsBoundedAndRetainsLatestDiagnostic() {
         PendingManagerEvents pendingEvents = new PendingManagerEvents();
-        pendingEvents.add(new ManagerEvent.CoordinatorInvalidation("heartbeat", "first", 1L));
-        pendingEvents.add(new ManagerEvent.CoordinatorInvalidation("heartbeat", "latest", 2L));
+        pendingEvents.add(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "first", 1L, 7L));
+        pendingEvents.add(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "latest", 2L, 7L));
 
         NetworkClientDelegate.PollResult result = pendingEvents.publishWith(
             NetworkClientDelegate.PollResult.awaitEvent());
 
         assertEquals(1, result.managerEvents().size());
-        ManagerEvent.CoordinatorInvalidation invalidation = assertInstanceOf(
-            ManagerEvent.CoordinatorInvalidation.class, result.managerEvents().get(0));
+        ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
         assertEquals("latest", invalidation.cause());
         assertEquals(2L, invalidation.observedAtMs());
+        assertEquals(7L, invalidation.observedCoordinatorVersion());
         assertTrue(pendingEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent())
             .managerEvents().isEmpty());
+    }
+
+    @Test
+    public void testDelayedOlderVersionCannotReplaceNewerObservation() {
+        PendingManagerEvents pendingEvents = new PendingManagerEvents();
+        pendingEvents.add(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "current", 1L, 9L));
+        pendingEvents.add(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "delayed", 2L, 7L));
+
+        ManagerEvent.CoordinatorUnavailableObserved observation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class,
+            pendingEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent()).managerEvents().get(0));
+
+        assertEquals("current", observation.cause());
+        assertEquals(9L, observation.observedCoordinatorVersion());
     }
 }

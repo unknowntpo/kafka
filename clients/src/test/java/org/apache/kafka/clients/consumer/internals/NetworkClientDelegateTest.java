@@ -124,7 +124,7 @@ public class NetworkClientDelegateTest {
         NetworkClientDelegate.PollResult managerEventProgress = NetworkClientDelegate.PollResult.progress(
             List.of(),
             Set.of(),
-            List.of(new ManagerEvent.CoordinatorInvalidation("heartbeat", "not coordinator", 1L)),
+            List.of(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", 1L, 7L)),
             0L
         );
 
