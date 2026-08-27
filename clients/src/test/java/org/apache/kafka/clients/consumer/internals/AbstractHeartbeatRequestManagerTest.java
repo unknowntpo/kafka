@@ -126,6 +126,7 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
     @ParameterizedTest
     @EnumSource(value = Errors.class, names = {"NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE"})
     public void testCoordinatorInvalidationIsPublishedExactlyOnce(final Errors error) {
+        when(coordinatorRequestManager.coordinatorVersion()).thenReturn(7L);
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
         NetworkClientDelegate.PollResult heartbeat = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, heartbeat.unsentRequests.size());
@@ -137,6 +138,7 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
 
         NetworkClientDelegate.PollResult invalidated = heartbeatRequestManager.poll(time.milliseconds());
         assertCoordinatorInvalidation(invalidated);
+        verify(coordinatorRequestManager).coordinatorVersion();
         assertEquals(0, invalidated.unsentRequests.size());
         verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
 
@@ -359,9 +361,11 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
 
     private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
         assertEquals(1, result.managerEvents().size());
-        ManagerEvent.CoordinatorInvalidation invalidation = assertInstanceOf(
-            ManagerEvent.CoordinatorInvalidation.class, result.managerEvents().get(0));
+        ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
         assertEquals(heartbeatRequestManager.getClass().getSimpleName(), invalidation.source());
+        assertEquals(7L, invalidation.observedCoordinatorVersion(),
+            "the response must retain the coordinator version captured when its request was built");
     }
 
     protected void assertNextHeartbeatTiming(long expectedTimeToNextHeartbeatMs) {

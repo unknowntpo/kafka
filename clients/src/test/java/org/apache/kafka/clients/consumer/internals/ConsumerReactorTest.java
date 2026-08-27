@@ -547,10 +547,11 @@ public class ConsumerReactorTest {
             new NetworkClientDelegate.PollResult(heartbeatRequest);
         NetworkClientDelegate.PollResult coordinatorInvalidated =
             NetworkClientDelegate.PollResult.awaitEvent().withManagerEvents(List.of(
-                new ManagerEvent.CoordinatorInvalidation(
+                new ManagerEvent.CoordinatorUnavailableObserved(
                     ConsumerHeartbeatRequestManager.class.getSimpleName(),
                     "heartbeat rejected coordinator",
-                    currentTimeMs
+                    currentTimeMs,
+                    realCoordinatorRequestManager.coordinatorVersion()
                 )
             ));
         doReturn(heartbeatInFlight, coordinatorInvalidated, NetworkClientDelegate.PollResult.awaitEvent())

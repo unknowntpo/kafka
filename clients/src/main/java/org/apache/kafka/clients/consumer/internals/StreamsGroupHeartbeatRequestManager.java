@@ -627,14 +627,16 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequestAndHandleResponse(final long currentTimeMs) {
+        final long coordinatorVersion = coordinatorRequestManager.coordinatorVersion();
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs);
         return request.whenComplete((response, exception) -> {
             long completionTimeMs = request.handler().completionTimeMs();
             if (response != null) {
                 metricsManager.recordRequestLatency(response.requestLatencyMs());
-                onResponse((StreamsGroupHeartbeatResponse) response.responseBody(), completionTimeMs);
+                onResponse((StreamsGroupHeartbeatResponse) response.responseBody(), completionTimeMs,
+                    coordinatorVersion);
             } else {
-                onFailure(exception, completionTimeMs);
+                onFailure(exception, completionTimeMs, coordinatorVersion);
             }
         });
     }
@@ -651,11 +653,13 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return request;
     }
 
-    private void onResponse(final StreamsGroupHeartbeatResponse response, long currentTimeMs) {
+    private void onResponse(final StreamsGroupHeartbeatResponse response,
+                            final long currentTimeMs,
+                            final long coordinatorVersion) {
         if (Errors.forCode(response.data().errorCode()) == Errors.NONE) {
             onSuccessResponse(response, currentTimeMs);
         } else {
-            onErrorResponse(response, currentTimeMs);
+            onErrorResponse(response, currentTimeMs, coordinatorVersion);
         }
     }
 
@@ -734,7 +738,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return value < minValid ? "not provided (older broker)" : Long.toString(value);
     }
 
-    private void onErrorResponse(final StreamsGroupHeartbeatResponse response, final long currentTimeMs) {
+    private void onErrorResponse(final StreamsGroupHeartbeatResponse response,
+                                 final long currentTimeMs,
+                                 final long coordinatorVersion) {
         final Errors error = Errors.forCode(response.data().errorCode());
         final String errorMessage = response.data().errorMessage();
 
@@ -749,8 +755,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
-                    getClass().getSimpleName(), errorMessage, currentTimeMs));
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs, coordinatorVersion));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -762,8 +768,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
-                    getClass().getSimpleName(), errorMessage, currentTimeMs));
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs, coordinatorVersion));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -857,13 +863,15 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             response.data().errorMessage());
     }
 
-    private void onFailure(final Throwable exception, final long responseTimeMs) {
+    private void onFailure(final Throwable exception,
+                           final long responseTimeMs,
+                           final long coordinatorVersion) {
         heartbeatRequestState.onFailedAttempt(responseTimeMs);
         heartbeatState.reset();
         if (exception instanceof RetriableException) {
             if (exception instanceof DisconnectException) {
-                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
-                    getClass().getSimpleName(), exception.getMessage(), responseTimeMs));
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), exception.getMessage(), responseTimeMs, coordinatorVersion));
             }
             String message = String.format("StreamsGroupHeartbeatRequest failed because of a retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),

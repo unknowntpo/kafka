@@ -26,28 +26,33 @@ import java.util.Objects;
 interface ManagerEvent {
 
     enum Type {
-        COORDINATOR_INVALIDATION
+        COORDINATOR_UNAVAILABLE_OBSERVED
     }
 
     Type type();
 
     String source();
 
-    /** Reports that a response or disconnect made the currently known coordinator invalid. */
-    final class CoordinatorInvalidation implements ManagerEvent {
+    /** Reports that a request observed its coordinator unavailable; only the coordinator owner may apply it. */
+    final class CoordinatorUnavailableObserved implements ManagerEvent {
         private final String source;
         private final String cause;
         private final long observedAtMs;
+        private final long observedCoordinatorVersion;
 
-        CoordinatorInvalidation(final String source, final String cause, final long observedAtMs) {
+        CoordinatorUnavailableObserved(final String source,
+                                       final String cause,
+                                       final long observedAtMs,
+                                       final long observedCoordinatorVersion) {
             this.source = Objects.requireNonNull(source, "Source manager must be non-null");
             this.cause = Objects.toString(cause, "unknown");
             this.observedAtMs = observedAtMs;
+            this.observedCoordinatorVersion = observedCoordinatorVersion;
         }
 
         @Override
         public Type type() {
-            return Type.COORDINATOR_INVALIDATION;
+            return Type.COORDINATOR_UNAVAILABLE_OBSERVED;
         }
 
         @Override
@@ -63,11 +68,16 @@ interface ManagerEvent {
             return observedAtMs;
         }
 
+        long observedCoordinatorVersion() {
+            return observedCoordinatorVersion;
+        }
+
         @Override
         public String toString() {
-            return "CoordinatorInvalidation(source=" + source
+            return "CoordinatorUnavailableObserved(source=" + source
                 + ", cause=" + cause
-                + ", observedAtMs=" + observedAtMs + ")";
+                + ", observedAtMs=" + observedAtMs
+                + ", observedCoordinatorVersion=" + observedCoordinatorVersion + ")";
         }
     }
 }

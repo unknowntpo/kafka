@@ -866,7 +866,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          */
         @Override
         @SuppressWarnings("NPathComplexity")
-        public void onResponse(final ClientResponse response) {
+        public void onResponse(final ClientResponse response, final long coordinatorVersion) {
             metricsManager.recordRequestLatency(response.requestLatencyMs());
             long currentTimeMs = response.receivedTimeMs();
             OffsetCommitResponse commitResponse = (OffsetCommitResponse) response.responseBody();
@@ -904,8 +904,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                     } else if (error == Errors.COORDINATOR_NOT_AVAILABLE ||
                         error == Errors.NOT_COORDINATOR ||
                         error == Errors.REQUEST_TIMED_OUT) {
-                        pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
-                            CommitRequestManager.class.getSimpleName(), error.message(), currentTimeMs));
+                        pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                            CommitRequestManager.class.getSimpleName(), error.message(), currentTimeMs,
+                            coordinatorVersion));
                         future.completeExceptionally(error.exception());
                         return;
                     } else if (error == Errors.OFFSET_METADATA_TOO_LARGE ||
@@ -1027,6 +1028,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Build request with the given builder, including response handling logic.
          */
         NetworkClientDelegate.UnsentRequest buildRequestWithResponseHandling(final AbstractRequest.Builder<?> builder) {
+            final long coordinatorVersion = coordinatorRequestManager.coordinatorVersion();
             NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
                 builder,
                 coordinatorRequestManager.coordinator()
@@ -1034,23 +1036,25 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             request.whenComplete(
                 (response, throwable) -> {
                     long completionTimeMs = request.handler().completionTimeMs();
-                    handleClientResponse(response, throwable, completionTimeMs);
+                    handleClientResponse(response, throwable, completionTimeMs, coordinatorVersion);
                 });
             return request;
         }
 
         private void handleClientResponse(final ClientResponse response,
                                           final Throwable error,
-                                          final long requestCompletionTimeMs) {
+                                          final long requestCompletionTimeMs,
+                                          final long coordinatorVersion) {
             try {
                 if (error == null) {
-                    onResponse(response);
+                    onResponse(response, coordinatorVersion);
                 } else {
                     log.debug("{} completed with error", requestDescription(), error);
                     onFailedAttempt(requestCompletionTimeMs);
                     if (error instanceof DisconnectException) {
-                        pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
-                            CommitRequestManager.class.getSimpleName(), error.getMessage(), requestCompletionTimeMs));
+                        pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                            CommitRequestManager.class.getSimpleName(), error.getMessage(), requestCompletionTimeMs,
+                            coordinatorVersion));
                     }
                     future().completeExceptionally(error);
                 }
@@ -1065,7 +1069,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             return super.toStringBase() + ", " + memberInfo;
         }
 
-        abstract void onResponse(final ClientResponse response);
+        abstract void onResponse(final ClientResponse response, final long coordinatorVersion);
 
         abstract void removeRequest();
     }
@@ -1222,13 +1226,13 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Handle OffsetFetch response, including successful and failed.
          */
         @Override
-        void onResponse(final ClientResponse response) {
+        void onResponse(final ClientResponse response, final long coordinatorVersion) {
             long currentTimeMs = response.receivedTimeMs();
             var fetchResponse = (OffsetFetchResponse) response.responseBody();
             var groupResponse = fetchResponse.group(groupId);
             var error = Errors.forCode(groupResponse.errorCode());
             if (error != Errors.NONE) {
-                onFailure(currentTimeMs, error);
+                onFailure(currentTimeMs, error, coordinatorVersion);
                 return;
             }
             onSuccess(currentTimeMs, groupResponse);
@@ -1239,7 +1243,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * result future exceptionally in the case of non-recoverable or unexpected errors.
          */
         private void onFailure(final long currentTimeMs,
-                               final Errors responseError) {
+                               final Errors responseError,
+                               final long coordinatorVersion) {
             log.debug("Offset fetch failed: {}", responseError.message());
             onFailedAttempt(currentTimeMs);
             ApiException exception = responseError.exception();
@@ -1261,9 +1266,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 future.completeExceptionally(exception);
             } else if (responseError == Errors.NOT_COORDINATOR || responseError == Errors.COORDINATOR_NOT_AVAILABLE) {
                 // Re-discover the coordinator and retry
-                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
                     CommitRequestManager.class.getSimpleName(),
-                    "error response " + responseError.name(), currentTimeMs));
+                    "error response " + responseError.name(), currentTimeMs, coordinatorVersion));
                 future.completeExceptionally(exception);
             } else if (exception instanceof RetriableException) {
                 future.completeExceptionally(exception);

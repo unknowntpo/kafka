@@ -57,11 +57,12 @@ public class RequestManagersTest {
             Optional.empty()
         );
 
-        requestManagers.routeManagerEvents(List.of(
-            new ManagerEvent.CoordinatorInvalidation("ConsumerHeartbeatRequestManager", "not coordinator", 42L)
-        ));
+        ManagerEvent.CoordinatorUnavailableObserved observation =
+            new ManagerEvent.CoordinatorUnavailableObserved(
+                "ConsumerHeartbeatRequestManager", "not coordinator", 42L, 7L);
+        requestManagers.routeManagerEvents(List.of(observation));
 
-        verify(coordinatorRequestManager).markCoordinatorUnknown("not coordinator", 42L);
+        verify(coordinatorRequestManager).handleCoordinatorUnavailableObserved(observation);
     }
 
     @Test

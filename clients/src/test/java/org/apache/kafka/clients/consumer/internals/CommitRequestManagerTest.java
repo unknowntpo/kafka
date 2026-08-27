@@ -1121,13 +1121,18 @@ public class CommitRequestManagerTest {
     public void testOffsetCommitCoordinatorInvalidationIsPublishedExactlyOnce() {
         CommitRequestManager commitRequestManager = create(true, 100);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        when(coordinatorRequestManager.coordinatorVersion()).thenReturn(7L);
 
         Map<TopicPartition, OffsetAndMetadata> offsets = Collections.singletonMap(
             new TopicPartition("topic", 1), new OffsetAndMetadata(0));
         commitRequestManager.commitAsync(offsets);
-        completeOffsetCommitRequestWithError(commitRequestManager, Errors.NOT_COORDINATOR);
+        NetworkClientDelegate.PollResult requestResult = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, requestResult.unsentRequests.size());
+        requestResult.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NOT_COORDINATOR));
 
-        assertCoordinatorInvalidation(commitRequestManager.poll(time.milliseconds()));
+        assertCoordinatorInvalidation(commitRequestManager.poll(time.milliseconds()), 7L);
+        verify(coordinatorRequestManager).coordinatorVersion();
         assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
             "coordinator invalidation must be published once");
     }
@@ -1183,10 +1188,16 @@ public class CommitRequestManagerTest {
     }
 
     private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
+        assertCoordinatorInvalidation(result, 0L);
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result,
+                                               final long expectedCoordinatorVersion) {
         assertEquals(1, result.managerEvents().size());
-        ManagerEvent.CoordinatorInvalidation invalidation = assertInstanceOf(
-            ManagerEvent.CoordinatorInvalidation.class, result.managerEvents().get(0));
+        ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
         assertEquals(CommitRequestManager.class.getSimpleName(), invalidation.source());
+        assertEquals(expectedCoordinatorVersion, invalidation.observedCoordinatorVersion());
     }
 
     private void assertCoordinatorDisconnectOnCoordinatorError() {
