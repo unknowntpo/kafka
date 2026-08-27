@@ -41,6 +41,7 @@ final class ManagerCoordinationPolicy {
     static ManagerCoordinationPolicy standard() {
         return new ManagerCoordinationPolicy(List.of(
             new FetchBufferHasDataHandler(),
+            new LocalProgressHandler(),
             new CoordinatorUnavailableObservedHandler()
         ));
     }
