@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.ClientResponse;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.message.StreamsGroupTopologyDescriptionUpdateRequestData;
 import org.apache.kafka.common.protocol.Errors;
@@ -38,8 +39,8 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
     private final StreamsRebalanceData streamsRebalanceData;
     private final CoordinatorRequestManager coordinatorRequestManager;
     private final RequestState pushRequestState;
-    /** Cross-manager changes completed by topology callbacks and published atomically by the next poll. */
-    private final PendingStateTransitions pendingStateTransitions = new PendingStateTransitions();
+    /** Cross-manager facts completed by topology callbacks and published atomically by the next poll. */
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
 
     private long nextPushTimeMs = 0L;
 
@@ -64,8 +65,9 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
 
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
-        if (!shouldSendTopologyDescriptionUpdate(currentTimeMs)) {
-            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.EMPTY);
+        final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
+        if (!shouldSendTopologyDescriptionUpdate(currentTimeMs, coordinatorSnapshot)) {
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.EMPTY);
         }
 
         final StreamsGroupTopologyDescriptionUpdateRequestData data = new StreamsGroupTopologyDescriptionUpdateRequestData()
@@ -78,12 +80,13 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
 
         final NetworkClientDelegate.UnsentRequest unsent = new NetworkClientDelegate.UnsentRequest(
             new StreamsGroupTopologyDescriptionUpdateRequest.Builder(data),
-            coordinatorRequestManager.coordinator()
+            coordinatorSnapshot.coordinator()
         );
-        unsent.whenComplete((response, exception) -> onResponse(response, exception));
+        unsent.whenComplete((response, exception) ->
+            onResponse(response, exception, coordinatorSnapshot.version()));
 
         pushRequestState.onSendAttempt(currentTimeMs);
-        return pendingStateTransitions.publishWith(
+        return pendingManagerEvents.publishWith(
             new NetworkClientDelegate.PollResult(Collections.singletonList(unsent)));
     }
 
@@ -98,7 +101,9 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
         if (waitMs > 0L) {
             return waitMs;
         }
-        return shouldSendTopologyDescriptionUpdate(currentTimeMs) ? 0L : Long.MAX_VALUE;
+        return shouldSendTopologyDescriptionUpdate(currentTimeMs, coordinatorRequestManager.coordinatorSnapshot())
+            ? 0L
+            : Long.MAX_VALUE;
     }
 
     @Override
@@ -106,7 +111,8 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
         return true;
     }
 
-    private boolean shouldSendTopologyDescriptionUpdate(final long currentTimeMs) {
+    private boolean shouldSendTopologyDescriptionUpdate(final long currentTimeMs,
+                                                        final CoordinatorSnapshot coordinatorSnapshot) {
         if (!pushRequestState.canSendRequest(currentTimeMs) || currentTimeMs < nextPushTimeMs) {
             return false;
         }
@@ -117,18 +123,21 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
         if (memberId == null || memberId.isEmpty()) {
             return false;
         }
-        return coordinatorRequestManager.coordinator().isPresent();
+        return coordinatorSnapshot.coordinator().isPresent();
     }
 
-    private void onResponse(final ClientResponse response, final Throwable exception) {
+    private void onResponse(final ClientResponse response,
+                            final Throwable exception,
+                            final long coordinatorVersion) {
         final long responseTimeMs = time.milliseconds();
 
         if (exception != null) {
             if (exception instanceof RetriableException) {
                 pushRequestState.onFailedAttempt(responseTimeMs);
-                pendingStateTransitions.addIf(
-                    coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs),
-                    StateTransition.COORDINATOR_INVALIDATED);
+                if (exception instanceof DisconnectException) {
+                    pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                        getClass().getSimpleName(), exception.getMessage(), responseTimeMs, coordinatorVersion));
+                }
                 logger.warn("Topology description push failed with retriable exception; will retry on next poll", exception);
             } else {
                 // Non-retriable exceptions should clear the flag and give up.
@@ -159,9 +168,8 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
             case COORDINATOR_NOT_AVAILABLE:
                 pushRequestState.onFailedAttempt(responseTimeMs);
                 logger.info("Coordinator error {} pushing topology description. Will rediscover and retry: {}", error, errorMessage);
-                pendingStateTransitions.addIf(
-                    coordinatorRequestManager.markCoordinatorUnknown(errorMessage, responseTimeMs),
-                    StateTransition.COORDINATOR_INVALIDATED);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), errorMessage, responseTimeMs, coordinatorVersion));
                 break;
 
             case COORDINATOR_LOAD_IN_PROGRESS:

@@ -1028,15 +1028,15 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Build request with the given builder, including response handling logic.
          */
         NetworkClientDelegate.UnsentRequest buildRequestWithResponseHandling(final AbstractRequest.Builder<?> builder) {
-            final long coordinatorVersion = coordinatorRequestManager.coordinatorVersion();
+            final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
             NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
                 builder,
-                coordinatorRequestManager.coordinator()
+                coordinatorSnapshot.coordinator()
             );
             request.whenComplete(
                 (response, throwable) -> {
                     long completionTimeMs = request.handler().completionTimeMs();
-                    handleClientResponse(response, throwable, completionTimeMs, coordinatorVersion);
+                    handleClientResponse(response, throwable, completionTimeMs, coordinatorSnapshot.version());
                 });
             return request;
         }
