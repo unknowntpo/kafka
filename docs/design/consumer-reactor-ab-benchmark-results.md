@@ -17,6 +17,11 @@ limitations under the License.
 
 # Consumer Reactor A/B benchmark results
 
+> **Preliminary historical evidence.** These results cover proposal revision `032899a6ab`, not the current POC HEAD.
+> They validate only the scenarios listed below and are not Phase 3 acceptance evidence. Before migration acceptance,
+> rerun against the candidate HEAD and add the KIP-required saturated-throughput, allocation-per-record, and
+> reconnect-recovery gates.
+
 ## Summary
 
 The formal Jenkins A/B run compares the current async consumer baseline with the Consumer Reactor proposal under byte-identical benchmark inputs. Both builds and all five repetitions completed successfully.

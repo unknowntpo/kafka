@@ -98,7 +98,7 @@ digraph ConsumerReactorActionOwnership {
   ];
 
   actions [
-    label="3. Application-visible effects\nCOMPLETE_ASYNC_POLL\nNOTIFY_METADATA_ERROR\nWAKE_APPLICATION (last)",
+    label="3. Ordered phase effects\nMARK_ASYNC_POLL_RECONCILIATION_COMPLETE\nMARK_ASYNC_POLL_VALIDATE_POSITIONS_COMPLETE\nCOMPLETE_ASYNC_POLL\nNOTIFY_METADATA_ERROR\nWAKE_APPLICATION (last)",
     fillcolor="#faf5ff",
     color="#a855f7"
   ];
