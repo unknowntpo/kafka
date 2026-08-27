@@ -474,13 +474,13 @@ public class FetchRequestManagerTest {
     }
 
     @Test
-    public void testNoFetchablePartitionsUsesReactorRetryDeadline() {
+    public void testNoFetchablePartitionsAwaitsEnablingEvent() {
         buildFetcher();
 
         assertEquals(0, sendFetches());
 
-        assertTrue(fetcher.lastPollResult.timeUntilNextPollMs > 0L);
-        assertTrue(fetcher.lastPollResult.timeUntilNextPollMs <= retryBackoffMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER,
+            fetcher.lastPollResult.timeUntilNextPollMs);
     }
 
     @Test
@@ -493,7 +493,7 @@ public class FetchRequestManagerTest {
         assertTrue(duplicate.isDone());
         NetworkClientDelegate.PollResult firstResult = fetcher.poll(time.milliseconds());
         assertTrue(first.isDone());
-        assertTrue(firstResult.timeUntilNextPollMs <= retryBackoffMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, firstResult.timeUntilNextPollMs);
 
         CompletableFuture<Void> second = fetcher.createFetchRequests();
         CompletableFuture<Void> secondDuplicate = fetcher.createFetchRequests();
@@ -501,10 +501,10 @@ public class FetchRequestManagerTest {
         assertTrue(secondDuplicate.isDone());
         NetworkClientDelegate.PollResult secondResult = fetcher.poll(time.milliseconds());
         assertTrue(second.isDone());
-        assertTrue(secondResult.timeUntilNextPollMs <= retryBackoffMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, secondResult.timeUntilNextPollMs);
 
         NetworkClientDelegate.PollResult retainedIntentResult = fetcher.poll(time.milliseconds());
-        assertTrue(retainedIntentResult.timeUntilNextPollMs <= retryBackoffMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, retainedIntentResult.timeUntilNextPollMs);
     }
 
     @Test
@@ -514,7 +514,7 @@ public class FetchRequestManagerTest {
         CompletableFuture<Void> initial = fetcher.createFetchRequests();
         NetworkClientDelegate.PollResult blockerResult = fetcher.poll(time.milliseconds());
         assertTrue(initial.isDone());
-        assertTrue(blockerResult.timeUntilNextPollMs <= retryBackoffMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, blockerResult.timeUntilNextPollMs);
 
         CompletableFuture<Void> current = fetcher.createFetchRequests();
         CompletableFuture<Void> duplicate = fetcher.createFetchRequests();

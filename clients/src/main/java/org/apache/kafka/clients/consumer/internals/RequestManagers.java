@@ -20,6 +20,7 @@ import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.GroupRebalanceConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.ShareAcknowledgementEventHandler;
 import org.apache.kafka.common.internals.IdempotentCloser;
 import org.apache.kafka.common.metrics.Metrics;
@@ -66,6 +67,8 @@ public class RequestManagers implements Closeable {
     private final List<RequestManager> entries;
     /** Consumer-specific wakeup target selected once at composition time, outside the reactor action path. */
     private final Runnable applicationThreadWakeup;
+    /** Application-facing events staged by managers and published by the reactor after its schedule. */
+    private final Optional<BackgroundEventHandler> backgroundEventHandler;
     private final IdempotentCloser closer = new IdempotentCloser();
 
     public RequestManagers(LogContext logContext,
@@ -79,6 +82,24 @@ public class RequestManagers implements Closeable {
                            Optional<StreamsGroupHeartbeatRequestManager> streamsGroupHeartbeatRequestManager,
                            Optional<StreamsGroupTopologyDescriptionRequestManager> streamsGroupTopologyDescriptionRequestManager,
                            Optional<StreamsMembershipManager> streamsMembershipManager) {
+        this(logContext, offsetsRequestManager, topicMetadataRequestManager, fetchRequestManager,
+            coordinatorRequestManager, commitRequestManager, heartbeatRequestManager, membershipManager,
+            streamsGroupHeartbeatRequestManager, streamsGroupTopologyDescriptionRequestManager,
+            streamsMembershipManager, null);
+    }
+
+    RequestManagers(LogContext logContext,
+                    OffsetsRequestManager offsetsRequestManager,
+                    TopicMetadataRequestManager topicMetadataRequestManager,
+                    FetchRequestManager fetchRequestManager,
+                    Optional<CoordinatorRequestManager> coordinatorRequestManager,
+                    Optional<CommitRequestManager> commitRequestManager,
+                    Optional<ConsumerHeartbeatRequestManager> heartbeatRequestManager,
+                    Optional<ConsumerMembershipManager> membershipManager,
+                    Optional<StreamsGroupHeartbeatRequestManager> streamsGroupHeartbeatRequestManager,
+                    Optional<StreamsGroupTopologyDescriptionRequestManager> streamsGroupTopologyDescriptionRequestManager,
+                    Optional<StreamsMembershipManager> streamsMembershipManager,
+                    BackgroundEventHandler backgroundEventHandler) {
         this.log = logContext.logger(RequestManagers.class);
         this.offsetsRequestManager = requireNonNull(offsetsRequestManager, "OffsetsRequestManager cannot be null");
         this.coordinatorRequestManager = coordinatorRequestManager;
@@ -86,6 +107,7 @@ public class RequestManagers implements Closeable {
         this.topicMetadataRequestManager = topicMetadataRequestManager;
         this.fetchRequestManager = requireNonNull(fetchRequestManager, "FetchRequestManager cannot be null");
         this.applicationThreadWakeup = this.fetchRequestManager::wakeupApplicationThread;
+        this.backgroundEventHandler = Optional.ofNullable(backgroundEventHandler);
         this.shareConsumeRequestManager = Optional.empty();
         this.consumerHeartbeatRequestManager = heartbeatRequestManager;
         this.shareHeartbeatRequestManager = Optional.empty();
@@ -114,11 +136,22 @@ public class RequestManagers implements Closeable {
                            Optional<CoordinatorRequestManager> coordinatorRequestManager,
                            Optional<ShareHeartbeatRequestManager> shareHeartbeatRequestManager,
                            Optional<ShareMembershipManager> shareMembershipManager) {
+        this(logContext, shareConsumeRequestManager, coordinatorRequestManager, shareHeartbeatRequestManager,
+            shareMembershipManager, null);
+    }
+
+    RequestManagers(LogContext logContext,
+                    ShareConsumeRequestManager shareConsumeRequestManager,
+                    Optional<CoordinatorRequestManager> coordinatorRequestManager,
+                    Optional<ShareHeartbeatRequestManager> shareHeartbeatRequestManager,
+                    Optional<ShareMembershipManager> shareMembershipManager,
+                    BackgroundEventHandler backgroundEventHandler) {
         this.log = logContext.logger(RequestManagers.class);
         ShareConsumeRequestManager manager = requireNonNull(
             shareConsumeRequestManager, "ShareConsumeRequestManager cannot be null");
         this.shareConsumeRequestManager = Optional.of(manager);
         this.applicationThreadWakeup = manager::wakeupApplicationThread;
+        this.backgroundEventHandler = Optional.ofNullable(backgroundEventHandler);
         this.coordinatorRequestManager = coordinatorRequestManager;
         this.commitRequestManager = Optional.empty();
         this.consumerHeartbeatRequestManager = Optional.empty();
@@ -172,6 +205,18 @@ public class RequestManagers implements Closeable {
      */
     void wakeupApplicationThread() {
         applicationThreadWakeup.run();
+    }
+
+    boolean hasPendingBackgroundEvents() {
+        return backgroundEventHandler.map(BackgroundEventHandler::hasPendingEvents).orElse(false);
+    }
+
+    int publishPendingBackgroundEvents() {
+        return backgroundEventHandler.map(BackgroundEventHandler::publishPendingEvents).orElse(0);
+    }
+
+    void stageBackgroundError(final RuntimeException exception) {
+        backgroundEventHandler.ifPresent(handler -> handler.add(new ErrorEvent(exception)));
     }
 
     @Override
@@ -363,7 +408,8 @@ public class RequestManagers implements Closeable {
                         Optional.ofNullable(membershipManager),
                         Optional.ofNullable(streamsGroupHeartbeatRequestManager),
                         Optional.ofNullable(streamsGroupTopologyDescriptionRequestManager),
-                        Optional.ofNullable(streamsMembershipManager)
+                        Optional.ofNullable(streamsMembershipManager),
+                        backgroundEventHandler
                 );
             }
         };
@@ -442,7 +488,8 @@ public class RequestManagers implements Closeable {
                         shareConsumeRequestManager,
                         Optional.of(coordinator),
                         Optional.of(shareHeartbeatRequestManager),
-                        Optional.of(shareMembershipManager)
+                        Optional.of(shareMembershipManager),
+                        backgroundEventHandler
                 );
             }
         };

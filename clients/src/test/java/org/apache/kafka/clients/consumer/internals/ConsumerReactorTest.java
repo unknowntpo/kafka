@@ -217,14 +217,25 @@ public class ConsumerReactorTest {
         when(coordinatorRequestManager.poll(anyLong()))
             .thenReturn(new NetworkClientDelegate.PollResult(0L));
 
-        AssertionError firstError = assertThrows(AssertionError.class, consumerReactor::runOnce);
-        AssertionError secondError = assertThrows(AssertionError.class, consumerReactor::runOnce);
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
 
-        assertTrue(firstError.getMessage().contains(coordinatorRequestManager.getClass().getName()));
-        assertTrue(firstError.getMessage().contains("returned no progress with an immediate repoll"));
-        assertEquals(firstError.getMessage(), secondError.getMessage());
         verify(coordinatorRequestManager, times(2)).poll(anyLong());
-        verify(networkClientDelegate, never()).poll(anyLong(), anyLong());
+        verify(networkClientDelegate, times(2)).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, time.milliseconds());
+        verify(asyncConsumerMetrics, times(2)).recordPollResultContractViolation();
+    }
+
+    @Test
+    public void testManagerPollFailureIsPublishedWithoutSkippingNetworkIo() {
+        RuntimeException failure = new RuntimeException("manager poll failed");
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong())).thenThrow(failure);
+
+        consumerReactor.runOnce();
+
+        verify(requestManagers).stageBackgroundError(failure);
+        verify(asyncConsumerMetrics).recordManagerPollFailure();
+        verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, time.milliseconds());
     }
 
     @Test
@@ -254,6 +265,32 @@ public class ConsumerReactorTest {
         verify(requestManagers, never()).wakeupApplicationThread();
         assertEquals(startMs + 100L, consumerReactor.reactorSchedule().reactorDeadlineMs());
         assertEquals(Long.MAX_VALUE, consumerReactor.reactorSchedule().applicationDeadlineMs());
+    }
+
+    @Test
+    public void testPostIoBackgroundEventIsPublishedAfterScheduleAndWakesApplication() {
+        AtomicReference<Boolean> backgroundEventPending = new AtomicReference<>(false);
+        when(requestManagers.entries()).thenReturn(List.of());
+        when(requestManagers.hasPendingBackgroundEvents()).thenAnswer(ignored -> backgroundEventPending.get());
+        when(requestManagers.publishPendingBackgroundEvents()).thenAnswer(ignored -> {
+            if (!backgroundEventPending.compareAndSet(true, false))
+                return 0;
+            assertEquals(2L, consumerReactor.reactorSchedule().generation(),
+                "the post-I/O schedule must be published before the background event");
+            return 1;
+        });
+        doAnswer(ignored -> {
+            backgroundEventPending.set(true);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+
+        consumerReactor.runOnce();
+
+        InOrder order = inOrder(networkClientDelegate, requestManagers);
+        order.verify(networkClientDelegate).poll(anyLong(), anyLong());
+        order.verify(requestManagers).publishPendingBackgroundEvents();
+        order.verify(requestManagers).wakeupApplicationThread();
+        assertFalse(backgroundEventPending.get());
     }
 
     @Test
@@ -312,6 +349,37 @@ public class ConsumerReactorTest {
         assertTrue(completionGeneration.get() > 0L);
         assertEquals(completionGeneration.get(), generationObservedByWakeup.get());
         verify(requestManagers).wakeupApplicationThread();
+    }
+
+    @Test
+    public void testFailingReactorActionDoesNotSuppressLaterActionOrWakeup() {
+        long currentTimeMs = time.milliseconds();
+        AsyncPollEvent failingEvent = new AsyncPollEvent(currentTimeMs + 1_000L, currentTimeMs) {
+            @Override
+            public void completeSuccessfully() {
+                throw new KafkaException("action failed");
+            }
+        };
+        AsyncPollEvent succeedingEvent = new AsyncPollEvent(currentTimeMs + 1_000L, currentTimeMs);
+        NetworkClientDelegate.PollResult progress = new NetworkClientDelegate.PollResult(
+            100L, List.of(), Set.of(StateTransition.FETCH_REQUEST_TERMINATED));
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(progress);
+        when(applicationEventProcessor.drainReactorActions()).thenReturn(
+            List.of(
+                ReactorAction.completeAsyncPoll(failingEvent, null),
+                ReactorAction.completeAsyncPoll(succeedingEvent, null)
+            ),
+            List.of()
+        );
+
+        consumerReactor.runOnce();
+
+        assertTrue(succeedingEvent.isComplete());
+        verify(asyncConsumerMetrics).recordReactorActionFailure();
+        verify(asyncConsumerMetrics).recordApplicationWakeup();
+        verify(requestManagers).wakeupApplicationThread();
+        verify(networkClientDelegate).poll(anyLong(), anyLong());
     }
 
     @Test

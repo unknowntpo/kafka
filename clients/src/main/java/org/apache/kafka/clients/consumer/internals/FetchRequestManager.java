@@ -217,11 +217,10 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         boolean missingLeader = result.blockers().contains(FetchRequestPreparationBlocker.MISSING_LEADER);
         boolean reconnectBackoff = result.blockers().contains(FetchRequestPreparationBlocker.RECONNECT_BACKOFF);
         if (noFetchablePartitions || missingLeader || reconnectBackoff) {
-            // NO_FETCHABLE_PARTITIONS includes assignment and position states which are not yet represented by
-            // explicit reactor events. Preserve the legacy retry bound here while keeping the final scheduling
-            // decision in the reactor. Missing-leader retries use the same configured backoff; reconnects use the
-            // actual connection delay so exponential backoff does not degrade into fixed-period polling.
-            long delayMs = noFetchablePartitions || missingLeader ? retryBackoffMs : Long.MAX_VALUE;
+            // Paused, unassigned, or otherwise unfetchable partitions become actionable through application,
+            // assignment, position, or metadata input, all of which wake the reactor. A missing leader still needs
+            // a bounded metadata retry; reconnects use their actual connection delay.
+            long delayMs = missingLeader ? retryBackoffMs : Long.MAX_VALUE;
             if (reconnectBackoff)
                 delayMs = Math.min(delayMs, result.reconnectBackoffRemainingMs());
 
