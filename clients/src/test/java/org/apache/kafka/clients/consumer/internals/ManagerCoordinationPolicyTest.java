@@ -18,7 +18,9 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -66,8 +68,44 @@ public class ManagerCoordinationPolicyTest {
     }
 
     @Test
-    public void testUnknownManagerEventFailsFast() {
-        ManagerEvent unknown = new ManagerEvent() {
+    public void testStandardPolicyCoversEveryDeclaredSemanticType() {
+        assertEquals(EnumSet.allOf(ManagerEvent.Type.class), policy.handledTypes());
+    }
+
+    @Test
+    public void testMissingSemanticTypeFailsAtPolicyConstruction() {
+        IllegalArgumentException exception = assertThrows(IllegalArgumentException.class,
+            () -> new ManagerCoordinationPolicy(List.of(
+                new FetchBufferHasDataHandler(),
+                new LocalProgressHandler()
+            )));
+
+        assertEquals(
+            "Missing manager-event handlers for [COORDINATOR_UNAVAILABLE_OBSERVED]",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    public void testDispatchUsesSemanticTypeRatherThanConcreteEventClass() {
+        ManagerEventHandler<ManagerEvent> genericHandler = new ManagerEventHandler<>() {
+            @Override
+            public Set<ManagerEvent.Type> eventTypes() {
+                return EnumSet.allOf(ManagerEvent.Type.class);
+            }
+
+            @Override
+            public Class<ManagerEvent> eventClass() {
+                return ManagerEvent.class;
+            }
+
+            @Override
+            public CoordinationPlan handle(final ManagerEvent event) {
+                return new CoordinationPlan(List.of(), List.of());
+            }
+        };
+        ManagerCoordinationPolicy typeDispatchedPolicy = new ManagerCoordinationPolicy(List.of(genericHandler));
+        ManagerEvent eventWithUnregisteredConcreteClass = new ManagerEvent() {
             @Override
             public Type type() {
                 return Type.FETCH_BUFFER_HAS_DATA;
@@ -79,6 +117,8 @@ public class ManagerCoordinationPolicyTest {
             }
         };
 
-        assertThrows(IllegalArgumentException.class, () -> policy.evaluate(List.of(unknown)));
+        CoordinationPlan plan = typeDispatchedPolicy.evaluate(List.of(eventWithUnregisteredConcreteClass));
+        assertEquals(List.of(), plan.managerCommands());
+        assertEquals(List.of(), plan.reactorActions());
     }
 }

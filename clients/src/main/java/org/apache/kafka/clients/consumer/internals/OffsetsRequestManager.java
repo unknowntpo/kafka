@@ -177,6 +177,11 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
         ));
     }
 
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
+    }
+
     /**
      * Retrieve offsets for the given partitions and timestamp. For each partition, this will
      * retrieve the offset of the first message whose timestamp is greater than or equals to the

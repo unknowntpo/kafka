@@ -350,7 +350,7 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testPreIoCrossOwnerCommandFailsBeforeNetworkPoll() {
+    public void testUnexpectedPreIoCrossOwnerCommandIsRetainedAndEventuallyApplied() {
         long currentTimeMs = time.milliseconds();
         ManagerEvent.CoordinatorUnavailableObserved observation =
             new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", currentTimeMs, 7L);
@@ -361,13 +361,74 @@ public class ConsumerReactorTest {
             NetworkClientDelegate.PollResult.WAIT_FOREVER
         );
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
-        when(heartbeatRequestManager.poll(currentTimeMs)).thenReturn(result);
+        when(heartbeatRequestManager.poll(currentTimeMs))
+            .thenReturn(result, NetworkClientDelegate.PollResult.awaitInput());
         when(requestManagers.planManagerEvents(any())).thenReturn(CoordinationPlan.command(
             new ManagerCommand.InvalidateCoordinatorIfCurrent(observation)
         ));
 
-        assertThrows(IllegalStateException.class, consumerReactor::runOnce);
-        verify(networkClientDelegate, never()).poll(anyLong(), anyLong());
+        consumerReactor.runOnce();
+
+        verify(networkClientDelegate).poll(anyLong(), anyLong());
+        verify(requestManagers, never()).applyManagerCommands(any());
+
+        consumerReactor.runOnce();
+
+        verify(requestManagers).applyManagerCommands(argThat(commands -> commands.size() == 1));
+        verify(networkClientDelegate, times(2)).poll(anyLong(), anyLong());
+    }
+
+    @Test
+    public void testPendingEventSurvivesPostIoPollFailureAndAppliesBeforeNextFullPass() {
+        long currentTimeMs = time.milliseconds();
+        ManagerEvent.CoordinatorUnavailableObserved observation =
+            new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", currentTimeMs, 7L);
+        NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
+            mock(AbstractRequest.Builder.class),
+            Optional.empty()
+        );
+        AtomicLong pollCount = new AtomicLong();
+        AtomicLong ownerCommandApplied = new AtomicLong();
+
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(requestManagers.drainPendingManagerEvents()).thenReturn(List.of(), List.of(observation));
+        when(heartbeatRequestManager.poll(currentTimeMs)).thenAnswer(invocation -> {
+            long call = pollCount.getAndIncrement();
+            if (call == 0L)
+                return new NetworkClientDelegate.PollResult(request);
+            if (call == 1L)
+                throw new KafkaException("post-I/O poll failed before publishing pending facts");
+            assertEquals(1L, ownerCommandApplied.get(),
+                "owner command must apply before the next full manager pass");
+            return NetworkClientDelegate.PollResult.awaitInput();
+        });
+        when(requestManagers.planManagerEvents(any())).thenReturn(CoordinationPlan.command(
+            new ManagerCommand.InvalidateCoordinatorIfCurrent(observation)
+        ));
+        doAnswer(invocation -> {
+            ownerCommandApplied.incrementAndGet();
+            return null;
+        }).when(requestManagers).applyManagerCommands(any());
+        doAnswer(invocation -> {
+            request.future().complete(null);
+            return null;
+        }).doAnswer(invocation -> {
+            assertEquals(1L, ownerCommandApplied.get(), "owner command must apply before the next network poll");
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+
+        consumerReactor.runOnce();
+
+        assertEquals(0L, ownerCommandApplied.get());
+        assertEquals(2L, pollCount.get(), "post-I/O manager poll must reach the injected failure");
+        verify(asyncConsumerMetrics).recordManagerPollFailure();
+
+        consumerReactor.runOnce();
+
+        assertEquals(1L, ownerCommandApplied.get());
+        assertEquals(3L, pollCount.get());
+        verify(requestManagers).applyManagerCommands(argThat(commands -> commands.size() == 1));
+        verify(networkClientDelegate, times(2)).poll(anyLong(), anyLong());
     }
 
     @Test

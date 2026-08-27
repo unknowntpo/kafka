@@ -122,6 +122,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         );
     }
 
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
+    }
+
     /**
      * {@inheritDoc}
      */

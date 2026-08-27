@@ -17,25 +17,36 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import java.util.Collection;
-import java.util.LinkedHashMap;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Composition-owned policy that evaluates manager facts without owning manager state or reactor phase ordering.
  * Each event type has one typed handler; adding a manager fact does not add a domain switch to ConsumerReactor.
  */
 final class ManagerCoordinationPolicy {
-    private final Map<Class<? extends ManagerEvent>, ManagerEventHandler<? extends ManagerEvent>> handlers;
+    private final Map<ManagerEvent.Type, ManagerEventHandler<? extends ManagerEvent>> handlers;
 
     ManagerCoordinationPolicy(final Collection<ManagerEventHandler<? extends ManagerEvent>> handlers) {
-        Map<Class<? extends ManagerEvent>, ManagerEventHandler<? extends ManagerEvent>> byEventClass =
-            new LinkedHashMap<>();
+        Map<ManagerEvent.Type, ManagerEventHandler<? extends ManagerEvent>> byEventType =
+            new EnumMap<>(ManagerEvent.Type.class);
         for (ManagerEventHandler<? extends ManagerEvent> handler : handlers) {
-            if (byEventClass.put(handler.eventClass(), handler) != null)
-                throw new IllegalArgumentException("Duplicate handler for " + handler.eventClass().getName());
+            if (handler.eventTypes().isEmpty())
+                throw new IllegalArgumentException("Manager-event handler must declare at least one event type");
+            for (ManagerEvent.Type eventType : handler.eventTypes()) {
+                if (byEventType.put(eventType, handler) != null)
+                    throw new IllegalArgumentException("Duplicate handler for " + eventType);
+            }
         }
-        this.handlers = Map.copyOf(byEventClass);
+
+        EnumSet<ManagerEvent.Type> missingTypes = EnumSet.allOf(ManagerEvent.Type.class);
+        missingTypes.removeAll(byEventType.keySet());
+        if (!missingTypes.isEmpty())
+            throw new IllegalArgumentException("Missing manager-event handlers for " + missingTypes);
+        this.handlers = Map.copyOf(byEventType);
     }
 
     static ManagerCoordinationPolicy standard() {
@@ -54,15 +65,17 @@ final class ManagerCoordinationPolicy {
     }
 
     private <E extends ManagerEvent> CoordinationPlan handle(final E event) {
-        ManagerEventHandler<? extends ManagerEvent> candidate = handlers.get(event.getClass());
-        if (candidate == null)
-            throw new IllegalArgumentException("No manager-event handler for " + event.getClass().getName());
+        ManagerEventHandler<? extends ManagerEvent> candidate = handlers.get(event.type());
         return handle(candidate, event);
     }
 
     private <E extends ManagerEvent> CoordinationPlan handle(final ManagerEventHandler<E> handler,
                                                               final ManagerEvent event) {
         return handler.handle(handler.eventClass().cast(event));
+    }
+
+    Set<ManagerEvent.Type> handledTypes() {
+        return handlers.keySet();
     }
 
 }
