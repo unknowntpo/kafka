@@ -23,6 +23,7 @@ import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.HeartbeatMetricsManager;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
@@ -364,8 +365,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
 
     private final CoordinatorRequestManager coordinatorRequestManager;
 
-    /** Cross-manager changes completed by heartbeat callbacks and published atomically by the next poll. */
-    private final PendingStateTransitions pendingStateTransitions = new PendingStateTransitions();
+    /** Cross-manager facts completed by heartbeat callbacks and published atomically by the next poll. */
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
 
     private final HeartbeatRequestState heartbeatRequestState;
 
@@ -455,7 +456,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
             membershipManager.onHeartbeatRequestSkipped();
             maybePropagateCoordinatorFatalErrorEvent();
-            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.EMPTY);
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.EMPTY);
         }
         pollTimer.update(currentTimeMs);
         if (pollTimer.isExpired() && !membershipManager.isLeavingGroup()) {
@@ -471,7 +472,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             heartbeatState.reset();
-            return pendingStateTransitions.publishWith(new NetworkClientDelegate.PollResult(
+            return pendingManagerEvents.publishWith(new NetworkClientDelegate.PollResult(
                 heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat)));
         }
         if (membershipManager.state() == MemberState.LEAVING && shouldSkipLeaveHeartbeat()) {
@@ -479,14 +480,14 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                 "The broker will remove the member from the group via session timeout.",
                 membershipManager.memberId());
             membershipManager.onHeartbeatRequestSkipped();
-            return pendingStateTransitions.publishWith(EMPTY);
+            return pendingManagerEvents.publishWith(EMPTY);
         }
         if (shouldHeartbeatBeforeIntervalExpires() || heartbeatRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
-            return pendingStateTransitions.publishWith(new NetworkClientDelegate.PollResult(
+            return pendingManagerEvents.publishWith(new NetworkClientDelegate.PollResult(
                 heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request)));
         } else {
-            return pendingStateTransitions.publishWith(
+            return pendingManagerEvents.publishWith(
                 new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
         }
     }
@@ -748,9 +749,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                pendingStateTransitions.addIf(
-                    coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs),
-                    StateTransition.COORDINATOR_INVALIDATED);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -762,9 +762,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                pendingStateTransitions.addIf(
-                    coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs),
-                    StateTransition.COORDINATOR_INVALIDATED);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -862,9 +861,10 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         heartbeatRequestState.onFailedAttempt(responseTimeMs);
         heartbeatState.reset();
         if (exception instanceof RetriableException) {
-            pendingStateTransitions.addIf(
-                coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs),
-                StateTransition.COORDINATOR_INVALIDATED);
+            if (exception instanceof DisconnectException) {
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
+                    getClass().getSimpleName(), exception.getMessage(), responseTimeMs));
+            }
             String message = String.format("StreamsGroupHeartbeatRequest failed because of a retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),
                 exception.getMessage());

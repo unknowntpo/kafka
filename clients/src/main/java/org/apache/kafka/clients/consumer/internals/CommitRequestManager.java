@@ -26,6 +26,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.ApiException;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.StaleMemberEpochException;
@@ -90,8 +91,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     private final OptionalDouble jitter;
     private final boolean throwOnFetchStableOffsetUnsupported;
     final PendingRequests pendingRequests;
-    /** Cross-manager changes completed by commit callbacks and published atomically by the next poll. */
-    private final PendingStateTransitions pendingStateTransitions = new PendingStateTransitions();
+    /** Cross-manager facts completed by commit callbacks and published atomically by the next poll. */
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
     private boolean closing = false;
 
     /**
@@ -191,22 +192,22 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         .forEach(request -> request.future().completeExceptionally(exception));
             }
 
-            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
         }
 
         if (closing) {
-            return pendingStateTransitions.publishWith(drainPendingOffsetCommitRequests());
+            return pendingManagerEvents.publishWith(drainPendingOffsetCommitRequests());
         }
 
         if (!pendingRequests.hasUnsentRequests())
-            return pendingStateTransitions.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
 
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
         // min of the remainingBackoffMs of all the request that are still backing off
         final long timeUntilNextPoll = Math.min(
             findMinTime(unsentOffsetCommitRequests(), currentTimeMs),
             findMinTime(unsentOffsetFetchRequests(), currentTimeMs));
-        return pendingStateTransitions.publishWith(resultForRequestsOrWait(requests, timeUntilNextPoll));
+        return pendingManagerEvents.publishWith(resultForRequestsOrWait(requests, timeUntilNextPoll));
     }
 
     @Override
@@ -903,9 +904,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                     } else if (error == Errors.COORDINATOR_NOT_AVAILABLE ||
                         error == Errors.NOT_COORDINATOR ||
                         error == Errors.REQUEST_TIMED_OUT) {
-                        pendingStateTransitions.addIf(
-                            coordinatorRequestManager.markCoordinatorUnknown(error.message(), currentTimeMs),
-                            StateTransition.COORDINATOR_INVALIDATED);
+                        pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
+                            CommitRequestManager.class.getSimpleName(), error.message(), currentTimeMs));
                         future.completeExceptionally(error.exception());
                         return;
                     } else if (error == Errors.OFFSET_METADATA_TOO_LARGE ||
@@ -1048,9 +1048,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 } else {
                     log.debug("{} completed with error", requestDescription(), error);
                     onFailedAttempt(requestCompletionTimeMs);
-                    pendingStateTransitions.addIf(
-                        coordinatorRequestManager.handleCoordinatorDisconnect(error, requestCompletionTimeMs),
-                        StateTransition.COORDINATOR_INVALIDATED);
+                    if (error instanceof DisconnectException) {
+                        pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
+                            CommitRequestManager.class.getSimpleName(), error.getMessage(), requestCompletionTimeMs));
+                    }
                     future().completeExceptionally(error);
                 }
             } catch (Throwable t) {
@@ -1260,10 +1261,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 future.completeExceptionally(exception);
             } else if (responseError == Errors.NOT_COORDINATOR || responseError == Errors.COORDINATOR_NOT_AVAILABLE) {
                 // Re-discover the coordinator and retry
-                pendingStateTransitions.addIf(
-                    coordinatorRequestManager.markCoordinatorUnknown(
-                        "error response " + responseError.name(), currentTimeMs),
-                    StateTransition.COORDINATOR_INVALIDATED);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorInvalidation(
+                    CommitRequestManager.class.getSimpleName(),
+                    "error response " + responseError.name(), currentTimeMs));
                 future.completeExceptionally(exception);
             } else if (exception instanceof RetriableException) {
                 future.completeExceptionally(exception);

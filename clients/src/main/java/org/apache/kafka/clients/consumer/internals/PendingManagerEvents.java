@@ -1,0 +1,41 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.clients.consumer.internals;
+
+import java.util.EnumMap;
+
+/**
+ * Retains at most one event of each type until the manager publishes its next poll snapshot.
+ * Repeated facts of the same type are coalesced while retaining the latest diagnostic detail.
+ */
+final class PendingManagerEvents {
+    private final EnumMap<ManagerEvent.Type, ManagerEvent> events =
+        new EnumMap<>(ManagerEvent.Type.class);
+
+    void add(final ManagerEvent event) {
+        events.put(event.type(), event);
+    }
+
+    NetworkClientDelegate.PollResult publishWith(final NetworkClientDelegate.PollResult pollResult) {
+        if (events.isEmpty())
+            return pollResult;
+
+        NetworkClientDelegate.PollResult result = pollResult.withManagerEvents(events.values());
+        events.clear();
+        return result;
+    }
+}

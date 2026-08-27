@@ -382,26 +382,26 @@ public class ConsumerHeartbeatRequestManagerTest
 
     @Test
     public void testDisconnect() {
-        when(coordinatorRequestManager.handleCoordinatorDisconnect(any(), anyLong())).thenReturn(true);
         createHeartbeatRequestStateWithZeroHeartbeatInterval();
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size());
         // Mimic disconnect
         result.unsentRequests.get(0).handler().onFailure(time.milliseconds(), DisconnectException.INSTANCE);
         verify(membershipManager).onHeartbeatFailure(true);
-        // Ensure that the coordinatorManager rediscovers the coordinator
-        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong());
+        // The state owner is not mutated directly; the reactor routes the published event.
+        verify(coordinatorRequestManager, never()).handleCoordinatorDisconnect(any(), anyLong());
         verify(backgroundEventHandler, never()).add(any());
 
         time.sleep(DEFAULT_RETRY_BACKOFF_MS - 1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No request should be generated before the backoff expires");
-        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED), result.stateTransitions());
+        assertEquals(1, result.managerEvents().size());
+        assertInstanceOf(ManagerEvent.CoordinatorInvalidation.class, result.managerEvents().get(0));
 
         time.sleep(1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size(), "A new request should be generated after the backoff expires");
-        assertTrue(result.stateTransitions().isEmpty(), "coordinator invalidation must be published once");
+        assertTrue(result.managerEvents().isEmpty(), "coordinator invalidation must be published once");
     }
 
     @Test
