@@ -128,8 +128,7 @@ the current coordinator:
    `ApplicationEvent` and `BackgroundEvent` types already describe cross-thread communication.
 3. **Route the fact to one owner.** `ConsumerReactor` defers the event. At the start of the next iteration, before
    draining application events, it routes deferred `ManagerEvent` values through the selected `RequestManagers`
-   composition. The coordinator owner interprets the observation and alone decides whether it permits a mutation;
-   no generic command type is introduced.
+   composition. The coordinator owner interprets the observation and alone decides whether it permits a mutation.
 4. **Fence stale work.** `CoordinatorRequestManager` compares the observed version with its current snapshot. It
    applies version `7` only if version `7` is still current. If rediscovery has already published version `9`, the
    older observation is ignored and cannot invalidate the newer coordinator.
@@ -152,7 +151,6 @@ The concepts in that lifecycle answer different questions:
 | Concept | Question answered |
 | --- | --- |
 | `ManagerEvent` | What immutable fact has already occurred? |
-| Command (semantic rule) | Which single state owner may apply the requested mutation? |
 | Snapshot | What versioned truth may new work use? |
 | `PollResult` | What work did one manager make available, and when should it be polled again? |
 | `ReactorSchedule` | When must the reactor run again, and how long may network polling block? |
@@ -166,8 +164,8 @@ The design relies on three invariants:
 1. Each mutable state has one execution-context owner. In the target design, request managers own their local state;
    peers may observe immutable snapshots or `ManagerEvent` values but may not mutate that state. `ConsumerReactor`
    owns the final cross-manager schedule and actions.
-2. Every synthetic wakeup or reschedule names a real state transition, positive deadline, completion, command, or
-   capacity change. An empty manager result cannot request an immediate retry.
+2. Every synthetic wakeup or reschedule names a real state transition, positive deadline, completion, application
+   command, or capacity change. An empty manager result cannot request an immediate retry.
 3. State and the resulting `ReactorSchedule` are published before completing futures, publishing data or events, or
    waking the application.
 
@@ -211,8 +209,8 @@ behavior.
 | Component | Target responsibility after the KIP |
 | --- | --- |
 | `ConsumerReactor` | Order inputs, invoke managers, validate the generic no-progress invariant, retain their scheduling contributions, publish the final schedule, then collect, deduplicate equivalent actions, and execute `ReactorAction` values. |
-| `RequestManagers` composition | Select the regular or share manager set and route `ManagerEvent` values or commands to one state owner without introducing a dynamic dependency graph. |
-| Request manager | Own one domain of mutable consumer state and the conditions required to make progress; publish a small immutable projection for readers, consume only `ManagerEvent` values or commands addressed to it, and return progress, a positive finite retry delay, or an event wait from one snapshot. |
+| `RequestManagers` composition | Select the regular or share manager set and route `ManagerEvent` values to one state owner without introducing a dynamic dependency graph. |
+| Request manager | Own one domain of mutable consumer state and the conditions required to make progress; publish a small immutable projection for readers, consume only `ManagerEvent` values addressed to it, and return progress, a positive finite retry delay, or an event wait from one snapshot. |
 | Proposed `RegularConsumerDriver` / `ShareConsumerDriver` | Keep assignment or acquisition, commit or acknowledgement, and callback coordination outside the shared reactor loop. These types do not yet exist in the codebase. |
 | `NetworkClientDelegate` | Own transport, connection handling, request correlation, and timeouts; do not decide whether to complete an application event or wake the application thread. |
 | Application thread | Execute user callbacks and consume published data, events, and operation results. |
@@ -629,12 +627,6 @@ The consumers share the kernel but not their state machines.
 
 An all-at-once rewrite removes comparison seams and makes regressions difficult to localize. The phased approach
 keeps each slice runnable and independently testable.
-
-### Add a generic internal event bus
-
-A shared manager event stream would hide the producer-to-owner mapping, make consumption order and backpressure part
-of every manager, and allow multiple components to compete for commands. The selected composition instead routes a
-small closed set of typed `ManagerEvent` values to one owner in a deterministic reactor phase.
 
 ### Traverse a dynamic manager dependency graph
 
