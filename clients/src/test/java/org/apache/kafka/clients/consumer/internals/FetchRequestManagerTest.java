@@ -496,12 +496,36 @@ public class FetchRequestManagerTest {
         assertTrue(firstResult.timeUntilNextPollMs <= retryBackoffMs);
 
         CompletableFuture<Void> second = fetcher.createFetchRequests();
-        assertTrue(second.isDone());
+        CompletableFuture<Void> secondDuplicate = fetcher.createFetchRequests();
+        assertFalse(second.isDone());
+        assertTrue(secondDuplicate.isDone());
         NetworkClientDelegate.PollResult secondResult = fetcher.poll(time.milliseconds());
+        assertTrue(second.isDone());
         assertTrue(secondResult.timeUntilNextPollMs <= retryBackoffMs);
 
         NetworkClientDelegate.PollResult retainedIntentResult = fetcher.poll(time.milliseconds());
         assertTrue(retainedIntentResult.timeUntilNextPollMs <= retryBackoffMs);
+    }
+
+    @Test
+    public void testRetainedFetchIntentReportsLaterPreparationFailureToCurrentCaller() {
+        buildFetcher();
+
+        CompletableFuture<Void> initial = fetcher.createFetchRequests();
+        NetworkClientDelegate.PollResult blockerResult = fetcher.poll(time.milliseconds());
+        assertTrue(initial.isDone());
+        assertTrue(blockerResult.timeUntilNextPollMs <= retryBackoffMs);
+
+        CompletableFuture<Void> current = fetcher.createFetchRequests();
+        CompletableFuture<Void> duplicate = fetcher.createFetchRequests();
+        fetcher.setPreparationException(new AuthenticationException("one-shot preparation failure"));
+
+        assertFalse(current.isDone());
+        assertTrue(duplicate.isDone());
+        NetworkClientDelegate.PollResult failureResult = fetcher.poll(time.milliseconds());
+
+        assertEquals(Set.of(StateTransition.FETCH_PREPARATION_FAILED), failureResult.stateTransitions());
+        assertFutureThrows(AuthenticationException.class, current);
     }
 
     @Test
@@ -4599,6 +4623,7 @@ public class FetchRequestManagerTest {
 
         private final FetchCollector<K, V> fetchCollector;
         private AuthenticationException authenticationException;
+        private RuntimeException preparationException;
         private NetworkClientDelegate.PollResult lastPollResult;
 
         public TestableFetchRequestManager(LogContext logContext,
@@ -4618,6 +4643,20 @@ public class FetchRequestManagerTest {
 
         public void setAuthenticationException(AuthenticationException authenticationException) {
             this.authenticationException = authenticationException;
+        }
+
+        public void setPreparationException(final RuntimeException preparationException) {
+            this.preparationException = preparationException;
+        }
+
+        @Override
+        protected FetchRequestPreparationResult prepareFetchRequests() {
+            if (preparationException != null) {
+                RuntimeException exception = preparationException;
+                preparationException = null;
+                throw exception;
+            }
+            return super.prepareFetchRequests();
         }
 
         private FetchRequestPreparationResult prepareFetchRequestResult() {
