@@ -575,14 +575,161 @@ is more than a handler lookup. It still must not claim multi-snapshot decision-m
 it. If no such rule emerges, snapshots should stay outside the policy except as bounded context carried by the
 specific fact or command that needs fencing.
 
-## First walkthrough checkpoint
+## Unified output-algebra experiment — `codex/manager-output-algebra-poc`
 
-The first review session should decide only DR-01 through DR-04:
+This branch is a reversible experiment based on `c522a71739`. It does not approve the algebra or replace the formal
+POC. The experiment asks whether DR-01 through DR-04 can be made executable without moving manager policy into
+`ConsumerReactor` or adding manager-specific exceptions.
 
-1. Confirm one `ManagerEvent` family for all manager-produced facts.
-2. Choose between direct `UnsentRequest` output and a named `NetworkCommand` abstraction.
-3. Choose the typed next-poll names and exact semantics.
-4. Write the legal `PollResult` shapes and invalid states without referring to current constructors.
+### Hypothesis
 
-Do not modify event routing, scheduling, metrics, diagrams, or tests until that algebra is accepted; otherwise later
-changes will encode vocabulary that is still under review.
+Every manager poll can use one envelope with three orthogonal categories:
+
+```text
+PollResult
+├─ ManagerEvent[]       immutable observations requiring an external consequence
+├─ NetworkCommand[]     transport intents that have not been sent
+└─ NextPollCondition    exactly one local re-evaluation condition
+```
+
+This is one model, not one undifferentiated value type. Generic dispatch is determined by category:
+
+```text
+ManagerEvent
+  -> ManagerCoordinationPolicy
+  -> ManagerCommand or ReactorAction
+
+NetworkCommand
+  -> NetworkClientDelegate staging
+
+NextPollCondition
+  -> ManagerPollCache
+  -> ReactorSchedule aggregation
+```
+
+`RequestManager` still decides local feasibility and constructs its outputs. The policy decides only consequences
+that cross the producer's state boundary. The reactor owns ordering and publication, not fetch, heartbeat, commit,
+regular-consumer, or share-consumer domain rules.
+
+### Legal shapes to prove
+
+| Immediate output | Next condition | Valid | Example |
+| --- | --- | --- | --- |
+| one or more events or network commands | `PollImmediately` | yes | output was consumed or staged, and another pass may produce distinct work |
+| one or more events or network commands | `RetryAfter(positiveDelay)` | yes | stage heartbeat now, then check its interval later |
+| one or more events or network commands | `AwaitInput` | yes | publish buffered fetch data now, then wait for application or network input |
+| none | `RetryAfter(positiveDelay)` | yes | reconnect or metadata backoff |
+| none | `AwaitInput` | yes | request is in flight |
+| none | `PollImmediately` | no | contradictory empty immediate retry; this is the busy-loop shape |
+
+`AwaitInput` replaces the target name `awaitEvent()`: it does not subscribe to a particular `ManagerEvent`. It says
+only that this manager contributes no local timer. `awaitEvent()` may remain temporarily as a compatibility alias.
+
+### Story dry run under the unified model
+
+#### Fetch data already buffered
+
+```text
+FetchRequestManager
+  -> PollResult(events=[FetchBufferHasData], networkCommands=[], nextPoll=AwaitInput)
+  -> ManagerCoordinationPolicy derives ReactorAction.WAKE_APPLICATION
+  -> ConsumerReactor publishes state and ReactorSchedule
+  -> ConsumerReactor executes the wake last
+```
+
+This is one immutable fact plus one generic wait condition. The reactor does not know what a fetch buffer means.
+
+#### Heartbeat request ready
+
+```text
+HeartbeatRequestManager
+  -> marks the request attempt in flight
+  -> PollResult(
+       events=[],
+       networkCommands=[StageRequest(heartbeatRequest)],
+       nextPoll=RetryAfter(heartbeatIntervalMs))
+  -> ConsumerReactor stages the command with NetworkClientDelegate
+  -> ReactorSchedule bounds the network poll
+```
+
+The network command is an intent, not a `RequestCreated` event and not evidence of transmission.
+
+#### Coordinator observation after heartbeat completion
+
+```text
+heartbeat response callback
+  -> heartbeat post-I/O poll returns
+     ManagerEvent.CoordinatorUnavailableObserved(observedVersion=7)
+     + AwaitInput
+  -> policy derives ManagerCommand.InvalidateCoordinatorIfCurrent(version=7)
+  -> command is applied at the next input boundary before the next full manager pass
+  -> coordinator owner accepts version 7 or rejects it as stale
+```
+
+The fact, owner command, and stale-version check remain distinct. The experiment must not let policy mutate the
+coordinator directly.
+
+#### Two independent deadlines
+
+```text
+FetchRequestManager     -> RetryAfter(100)
+HeartbeatRequestManager -> RetryAfter(50)
+ManagerPollCache        -> retains both absolute deadlines
+ReactorSchedule         -> publishes the earlier deadline
+```
+
+This story uses no `ManagerEvent` and no coordination policy. It is still part of the same `PollResult` algebra
+because `NextPollCondition` is a first-class manager output.
+
+#### Commit operation across retries
+
+The application-visible commit operation and its future remain in the commit domain across reactor iterations and
+network attempts. Each individual manager poll still returns the same three output categories. A coordinator error
+may produce a `ManagerEvent`, a retry may produce a `NetworkCommand`, and the current blocker produces a
+`NextPollCondition`; none of those becomes the long-lived operation identity.
+
+### Failure conditions for the experiment
+
+Reject or revise the model if any of the following is required:
+
+- `ConsumerReactor` branches on a concrete manager, event, regular/share variant, or blocker reason;
+- `ManagerCoordinationPolicy` starts calculating manager-local feasibility, deadlines, or request payloads;
+- a network command is treated as already sent or takes transport correlation away from `NetworkClientDelegate`;
+- `AwaitInput` needs an arbitrary periodic timer for correctness;
+- a legal core path still requires the legacy raw delay or separate `StateTransition` category;
+- cross-owner commands can appear in a phase where applying or deferring them makes already-built work stale, without
+  a bounded ordering rule; or
+- compatibility adapters spread beyond the `PollResult`/transport boundary.
+
+### Evidence gates
+
+1. Table-driven `PollResult` tests cover all legal shapes and reject empty `PollImmediately`.
+2. `ConsumerReactor` consumes typed network commands and next-poll conditions through generic accessors.
+3. Existing fetch, offset, coordinator, heartbeat, schedule, and phase-coalescing regressions stay green.
+4. The KIP labels legacy constructors, `UnsentRequest`, `StateTransition`, raw delay, and `awaitEvent()` as current
+   migration adapters rather than target concepts.
+5. A fresh reviewer can explain the three categories, their owners, and the complete coordinator-failure story
+   without reading implementation code.
+6. Fable must explicitly choose adopt, revise, or reject and identify any hidden phase or ownership exception.
+
+### Executable evidence at `97aac9bd37`
+
+The experiment implements the canonical storage and consumption path without migrating every producer:
+
+- `NextPollCondition` is a closed Java 11-compatible hierarchy: `AwaitInput`, positive finite `RetryAfter`, and
+  output-gated `PollImmediately`;
+- `NetworkCommand` names an unsent transport intent; the current `UnsentRequest` is its only implementation;
+- canonical `PollResult.progress(networkCommands, managerEvents, nextPollCondition)` has no `StateTransition`
+  parameter;
+- `ConsumerReactor.stagePollResult(...)` consumes `networkCommands()` and `ManagerPollCache` consumes
+  `nextPollCondition()`;
+- `awaitEvent()` remains only as an alias of `awaitInput()`; and
+- raw delay, `unsentRequests`, legacy constructors/factories, and `StateTransition` remain localized adapters.
+
+Focused `NetworkClientDelegateTest`, `ManagerPollCacheTest`, and `ConsumerReactorTest` execution completed 64 tests
+with zero failures. Spotless Java, Checkstyle main/test, and SpotBugs main also passed.
+
+This proves that the three-category algebra does not require a manager-specific reactor switch. It does not yet prove
+the final pre-I/O command rule: the current full-pass path stages transport commands before policy evaluation and
+fails fast if the same phase derives a cross-owner command. That guard keeps the experiment safe but remains an
+explicit design question for review.
