@@ -16,20 +16,27 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.ClientResponse;
+import org.apache.kafka.clients.GroupRebalanceConfig;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.CheckAndUpdatePositionsEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.PausePartitionsEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.AbstractRequest;
+import org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest;
+import org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse;
 import org.apache.kafka.common.requests.FindCoordinatorRequest;
 import org.apache.kafka.common.requests.FindCoordinatorResponse;
 import org.apache.kafka.common.requests.RequestHeader;
@@ -48,10 +55,12 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -60,6 +69,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
+import static org.apache.kafka.test.TestUtils.requiredConsumerConfig;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -68,7 +78,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -499,76 +511,92 @@ public class ConsumerReactorTest {
         assertEquals(currentTimeMs + 1_000L, consumerReactor.reactorSchedule().reactorDeadlineMs());
     }
 
+    /**
+     * Component-layer proof of the exact response-to-event-to-owner ordering with real request managers.
+     */
     @Test
-    public void testCoordinatorInvalidationIsObservedByCoordinatorOnNextFullPass() {
+    public void testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll() {
         long currentTimeMs = time.milliseconds();
         String groupId = "group-id";
         Node coordinatorNode = new Node(1, "localhost", 9092);
-        CoordinatorRequestManager realCoordinatorRequestManager = spy(new CoordinatorRequestManager(
-            new LogContext(), 100L, 1_000L, groupId));
+        LogContext localLogContext = new LogContext();
+        NetworkClientDelegate localNetworkClientDelegate = mock(NetworkClientDelegate.class);
+        ConsumerMetadata localMetadata = mock(ConsumerMetadata.class);
+        SubscriptionState localSubscriptions = mock(SubscriptionState.class);
+        when(localSubscriptions.subscription()).thenReturn(Set.of("topic"));
+        when(localSubscriptions.assignedPartitions()).thenReturn(Set.of());
+        when(localSubscriptions.hasAutoAssignedPartitions()).thenReturn(true);
+
+        Properties properties = requiredConsumerConfig();
+        properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, groupId);
+        properties.setProperty(ConsumerConfig.GROUP_PROTOCOL_CONFIG, "consumer");
+        properties.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        properties.setProperty(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "10000");
+        properties.setProperty(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, "100");
+        properties.setProperty(ConsumerConfig.RETRY_BACKOFF_MAX_MS_CONFIG, "1000");
+        ConsumerConfig config = new ConsumerConfig(properties);
+        GroupRebalanceConfig groupRebalanceConfig = new GroupRebalanceConfig(
+            config,
+            GroupRebalanceConfig.ProtocolType.CONSUMER
+        );
+        Metrics localMetrics = new Metrics(time);
+        RequestManagers realRequestManagers = RequestManagers.supplier(
+            time,
+            localLogContext,
+            mock(BackgroundEventHandler.class),
+            localMetadata,
+            localSubscriptions,
+            mock(FetchBuffer.class),
+            config,
+            groupRebalanceConfig,
+            mock(ApiVersions.class),
+            mock(FetchMetricsManager.class),
+            () -> localNetworkClientDelegate,
+            Optional.empty(),
+            localMetrics,
+            mock(OffsetCommitCallbackInvoker.class),
+            (memberEpoch, memberId) -> { },
+            Optional.empty(),
+            new PositionsValidator(localLogContext, time, localSubscriptions, localMetadata)
+        ).get();
+        RecordingRequestManagers recordingRequestManagers = new RecordingRequestManagers(
+            localLogContext,
+            realRequestManagers
+        );
+        RecordingRequestManagers observedRequestManagers = spy(recordingRequestManagers);
+        CoordinatorRequestManager realCoordinatorRequestManager =
+            observedRequestManagers.coordinatorRequestManager.orElseThrow();
+        ConsumerHeartbeatRequestManager realHeartbeatRequestManager =
+            observedRequestManagers.consumerHeartbeatRequestManager.orElseThrow();
+        ConsumerMembershipManager realMembershipManager =
+            observedRequestManagers.consumerMembershipManager.orElseThrow();
+        assertTrue(observedRequestManagers.entries().contains(realHeartbeatRequestManager));
+
         NetworkClientDelegate.UnsentRequest initialDiscovery =
             realCoordinatorRequestManager.poll(currentTimeMs).unsentRequests.get(0);
         initialDiscovery.handler().onComplete(
             buildCoordinatorResponse(initialDiscovery, coordinatorNode, groupId));
         realCoordinatorRequestManager.poll(currentTimeMs);
         assertTrue(realCoordinatorRequestManager.coordinator().isPresent());
+        realMembershipManager.transitionToJoining();
 
-        ConsumerHeartbeatRequestManager localHeartbeatRequestManager =
-            mock(ConsumerHeartbeatRequestManager.class);
-        OffsetsRequestManager localOffsetsRequestManager = mock(OffsetsRequestManager.class);
-        TopicMetadataRequestManager localTopicMetadataRequestManager =
-            mock(TopicMetadataRequestManager.class);
-        FetchRequestManager localFetchRequestManager = mock(FetchRequestManager.class);
-        when(localOffsetsRequestManager.poll(anyLong()))
-            .thenReturn(NetworkClientDelegate.PollResult.awaitEvent());
-        when(localTopicMetadataRequestManager.poll(anyLong()))
-            .thenReturn(NetworkClientDelegate.PollResult.awaitEvent());
-        when(localFetchRequestManager.poll(anyLong()))
-            .thenReturn(NetworkClientDelegate.PollResult.awaitEvent());
-        RequestManagers localRequestManagers = new RequestManagers(
-            new LogContext(),
-            localOffsetsRequestManager,
-            localTopicMetadataRequestManager,
-            localFetchRequestManager,
-            Optional.of(realCoordinatorRequestManager),
-            Optional.empty(),
-            Optional.of(localHeartbeatRequestManager),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.empty()
-        );
-
-        NetworkClientDelegate.UnsentRequest heartbeatRequest = new NetworkClientDelegate.UnsentRequest(
-            mock(AbstractRequest.Builder.class),
-            Optional.empty()
-        );
-        NetworkClientDelegate.PollResult heartbeatInFlight =
-            new NetworkClientDelegate.PollResult(heartbeatRequest);
-        NetworkClientDelegate.PollResult coordinatorInvalidated =
-            NetworkClientDelegate.PollResult.awaitEvent().withManagerEvents(List.of(
-                new ManagerEvent.CoordinatorUnavailableObserved(
-                    ConsumerHeartbeatRequestManager.class.getSimpleName(),
-                    "heartbeat rejected coordinator",
-                    currentTimeMs,
-                    realCoordinatorRequestManager.coordinatorSnapshot().version()
-                )
-            ));
-        doReturn(heartbeatInFlight, coordinatorInvalidated, NetworkClientDelegate.PollResult.awaitEvent())
-            .when(localHeartbeatRequestManager).poll(anyLong());
-
-        NetworkClientDelegate localNetworkClientDelegate = mock(NetworkClientDelegate.class);
+        AtomicReference<NetworkClientDelegate.UnsentRequest> heartbeatRequest = new AtomicReference<>();
         AtomicReference<NetworkClientDelegate.UnsentRequest> findCoordinatorRequest = new AtomicReference<>();
         doAnswer(invocation -> {
             List<NetworkClientDelegate.UnsentRequest> requests = invocation.getArgument(0);
             for (NetworkClientDelegate.UnsentRequest request : requests) {
+                if (request.requestBuilder() instanceof ConsumerGroupHeartbeatRequest.Builder)
+                    heartbeatRequest.compareAndSet(null, request);
                 if (request.requestBuilder() instanceof FindCoordinatorRequest.Builder)
                     findCoordinatorRequest.set(request);
             }
             return null;
         }).when(localNetworkClientDelegate).addAll(anyList());
         doAnswer(invocation -> {
-            heartbeatRequest.future().complete(null);
+            assertTrue(heartbeatRequest.get() != null,
+                "real heartbeat request must be staged before the first network poll");
+            heartbeatRequest.get().handler().onComplete(
+                buildHeartbeatResponse(heartbeatRequest.get(), Errors.NOT_COORDINATOR));
             return null;
         }).doAnswer(invocation -> {
             assertTrue(findCoordinatorRequest.get() != null,
@@ -583,26 +611,41 @@ public class ConsumerReactorTest {
             mock(CompletableEventReaper.class),
             () -> mock(ApplicationEventProcessor.class),
             () -> localNetworkClientDelegate,
-            () -> localRequestManagers,
+            () -> observedRequestManagers,
             asyncConsumerMetrics
         );
         localReactor.initializeResources();
+        try {
+            localReactor.runOnce();
+            assertTrue(realCoordinatorRequestManager.coordinator().isPresent(),
+                "the post-I/O manager event is deferred to the next full pass");
+            assertTrue(findCoordinatorRequest.get() == null);
+            verify(observedRequestManagers, never()).routeManagerEvents(any());
 
-        localReactor.runOnce();
-        assertTrue(realCoordinatorRequestManager.coordinator().isPresent(),
-            "the post-I/O manager event is deferred to the next full pass");
-        assertTrue(findCoordinatorRequest.get() == null);
-        verify(realCoordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
+            clearInvocations(observedRequestManagers, localNetworkClientDelegate);
 
-        // The coordinator owner retains its normal retry policy; wait beyond the jittered 100 ms backoff.
-        time.sleep(200L);
-        localReactor.runOnce();
+            // The coordinator owner retains its normal retry policy; wait beyond the jittered 100 ms backoff.
+            time.sleep(200L);
+            localReactor.runOnce();
 
-        assertTrue(realCoordinatorRequestManager.coordinator().isEmpty());
-        verify(localNetworkClientDelegate, times(2)).poll(anyLong(), anyLong());
-        verify(localHeartbeatRequestManager, times(3)).poll(anyLong());
-        verify(realCoordinatorRequestManager).markCoordinatorUnknown(
-            "heartbeat rejected coordinator", currentTimeMs);
+            assertTrue(realCoordinatorRequestManager.coordinator().isEmpty());
+            verify(observedRequestManagers).routeManagerEvents(any());
+            assertEquals(1, observedRequestManagers.routedEvents().size());
+            ManagerEvent event = observedRequestManagers.routedEvents().get(0);
+            assertTrue(event instanceof ManagerEvent.CoordinatorUnavailableObserved);
+            assertEquals(ConsumerHeartbeatRequestManager.class.getSimpleName(), event.source());
+
+            InOrder secondRunOrder = inOrder(observedRequestManagers, localNetworkClientDelegate);
+            secondRunOrder.verify(observedRequestManagers).routeManagerEvents(any());
+            secondRunOrder.verify(localNetworkClientDelegate).addAll(
+                argThat((List<NetworkClientDelegate.UnsentRequest> requests) -> requests.stream()
+                    .anyMatch(request -> request.requestBuilder() instanceof FindCoordinatorRequest.Builder))
+            );
+            secondRunOrder.verify(localNetworkClientDelegate).poll(anyLong(), anyLong());
+        } finally {
+            localReactor.close();
+            localMetrics.close();
+        }
     }
 
     private ClientResponse buildCoordinatorResponse(final NetworkClientDelegate.UnsentRequest request,
@@ -625,6 +668,64 @@ public class ConsumerReactorTest {
             null,
             response
         );
+    }
+
+    private ClientResponse buildHeartbeatResponse(final NetworkClientDelegate.UnsentRequest request,
+                                                  final Errors error) {
+        ConsumerGroupHeartbeatResponse response = new ConsumerGroupHeartbeatResponse(
+            new ConsumerGroupHeartbeatResponseData()
+                .setErrorCode(error.code())
+                .setErrorMessage("heartbeat rejected coordinator")
+                .setHeartbeatIntervalMs(1_000)
+        );
+        return new ClientResponse(
+            new RequestHeader(
+                ApiKeys.CONSUMER_GROUP_HEARTBEAT,
+                ApiKeys.CONSUMER_GROUP_HEARTBEAT.latestVersion(),
+                "client-id",
+                1
+            ),
+            request.handler(),
+            "0",
+            time.milliseconds(),
+            time.milliseconds(),
+            false,
+            null,
+            null,
+            response
+        );
+    }
+
+    /** Captures a snapshot before the reactor clears its bounded deferred-event collection. */
+    private static final class RecordingRequestManagers extends RequestManagers {
+        private List<ManagerEvent> routedEvents = List.of();
+
+        private RecordingRequestManagers(final LogContext logContext,
+                                         final RequestManagers delegate) {
+            super(
+                logContext,
+                delegate.offsetsRequestManager,
+                delegate.topicMetadataRequestManager,
+                delegate.fetchRequestManager,
+                delegate.coordinatorRequestManager,
+                delegate.commitRequestManager,
+                delegate.consumerHeartbeatRequestManager,
+                delegate.consumerMembershipManager,
+                delegate.streamsGroupHeartbeatRequestManager,
+                delegate.streamsGroupTopologyDescriptionRequestManager,
+                delegate.streamsMembershipManager
+            );
+        }
+
+        @Override
+        void routeManagerEvents(final Collection<ManagerEvent> events) {
+            routedEvents = List.copyOf(events);
+            super.routeManagerEvents(events);
+        }
+
+        private List<ManagerEvent> routedEvents() {
+            return routedEvents;
+        }
     }
 
     @Test
