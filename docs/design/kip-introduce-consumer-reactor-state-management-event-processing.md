@@ -28,22 +28,22 @@ Jira: TBD
 ## Summary
 
 The regular consumer and share consumer already use a background event loop, request managers, network I/O, event
-queues, futures, and data buffers. However, cross-manager scheduling and application-visible notification decisions
-are still made on separate paths that may observe different state snapshots. This has contributed to busy loops,
-lost or duplicate wakeups, stale completion handling, and state-publication races.
+queues, futures, and data buffers. However, no single component currently owns the final answer to three related
+questions: in what order should inputs be applied, how long may the consumer wait before checking work again, and
+when may the application thread observe the resulting effects? Separate paths can answer those questions from
+different views of consumer state. This has contributed to busy loops, lost or duplicate wakeups, stale completion
+handling, and state-publication races.
 
-This proposal establishes `ConsumerReactor` as the final authority for input ordering, cross-manager timing, and
-application-visible effect ordering. It is not the owner of all consumer state or domain policy. Request managers
-retain their local state and rules and return requests, completed state
-transitions, and `timeUntilNextPollMs` from one `poll()` snapshot. Each manager also determines whether polling it now
-can make progress, must wait for a finite retry delay, or must wait for another event. The reactor combines those
-already-valid results into one published `ReactorSchedule` and executes `ReactorAction` values only after the
-corresponding state and schedule are visible.
+This KIP refactors the existing background loop into `ConsumerReactor`. Request managers continue to own their local
+state and rules. Each manager reports whether it produced work now, must be checked again after a finite delay, or
+cannot make progress until another event occurs. The reactor orders those inputs, combines the managers' timing
+requirements into one published wait decision, and only then releases application-visible completion, publication,
+notification, or wakeup effects.
 
 The proposal does not add a thread, replace the existing event-driven topology, change Kafka protocols or public
-consumer APIs, or move user callbacks off the application thread. The same thin reactor kernel is used by the regular
-and share consumers, while their rules remain in separate components. `ClassicKafkaConsumer` is not retrofitted into
-this model.
+consumer APIs, move user callbacks off the application thread, or move consumer-specific policy into the shared
+loop. Regular, share, and Streams consumers use the same execution model while retaining separate protocol rules.
+`ClassicKafkaConsumer` is not retrofitted into this model.
 
 ## Motivation
 
@@ -70,149 +70,96 @@ The application thread repeatedly observed a zero wait, while the background thr
 PR 22836 correctly added guards that check whether the affected path can make progress now by producing a request or
 completed state transition. This fixed the bug, but it also demonstrates the maintenance problem: the result type did
 not distinguish "retry now" from "nothing can change until another event." Diagnosing the failure required
-correlating manager timers, in-flight state, the cached application wait, and the network poll timeout.
+correlating manager timers, in-flight state, the previously published wait used by the application thread, and the
+network poll timeout.
 
 ### Bug evidence
 
 KAFKA-20253 is one instance of a recurring failure pattern. The affected features differ, but each case involved
 decisions made on separate paths that could observe different snapshots of consumer state.
 
-| Evidence | Observed failure | Decisions split across paths | Role in this KIP |
-| --- | --- | --- | --- |
-| [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885), [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | An older position-initialization completion could affect a partition added while its request was in flight. | Assignment changes, the captured partition scope, and completion handling. | Existing fix retained as a regression guard; motivates versioned scope rather than claiming a new fix. |
-| [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737), [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Position and consumed-state publication could race with commit or application observation. | State mutation, publication, and dependent observation. | Phase 3 migration target for completion and data-publication paths not yet represented by `ReactorAction`. |
-| [KAFKA-20426 / PR 22018](https://github.com/apache/kafka/pull/22018), [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) | Heartbeat urgency produced a zero wait while coordinator, assignment, or in-flight state made progress impossible. | Manager deadlines, progress blockers, application waiting, and network polling. | Current `PollResult` progress contract and timing-publication evidence. |
-| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. | Fetch result classification, application waiting, and synthetic wakeup. | Existing fix retained as a regression guard; the POC generalizes the result contract and removes paused-fetch periodic polling. |
-| [KAFKA-20397 / PR 21991](https://github.com/apache/kafka/pull/21991) | Metadata-error publication raced with an application thread entering its fetch-buffer wait. | Error publication, retained notification, and wait entry. | Current staged `BackgroundEvent` publish-before-wake evidence. |
-| [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) | Wakeup or interruption could skip callback acknowledgement. | Interruption, callback completion, and lifecycle handling. | Phase 3 target for callback-acknowledgement and generic future completion paths. |
-| [KAFKA-19357 / PR 19914](https://github.com/apache/kafka/pull/19914), [KAFKA-18569 / PR 18590](https://github.com/apache/kafka/pull/18590) | During close, coordinator discovery could stop while a pending commit still required it, or continue after commit and leave work no longer required it. | Pending-operation dependencies, coordinator discovery, and shutdown progress. | Cross-manager lifecycle evidence; not claimed as caused by peer calls or fully remediated in Phase 1. |
+| Evidence | Observed failure | Decisions split across paths |
+| --- | --- | --- |
+| [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885), [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | An older position-initialization completion could affect a partition added while its request was in flight. | Assignment changes, the captured partition scope, and completion handling. |
+| [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737), [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Position and consumed-state publication could race with commit or application observation. | State mutation, publication, and dependent observation. |
+| [KAFKA-20426 / PR 22018](https://github.com/apache/kafka/pull/22018), [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) | Heartbeat urgency produced a zero wait while coordinator, assignment, or in-flight state made progress impossible. | Manager deadlines, progress blockers, application waiting, and network polling. |
+| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. | Fetch result classification, application waiting, and an application wakeup that did not correspond to progress. |
+| [KAFKA-20397 / PR 21991](https://github.com/apache/kafka/pull/21991) | Metadata-error publication raced with an application thread entering its fetch-buffer wait. | Error publication, retained notification, and wait entry. |
+| [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) | Wakeup or interruption could skip callback acknowledgement. | Interruption, callback completion, and lifecycle handling. |
+| [KAFKA-19357 / PR 19914](https://github.com/apache/kafka/pull/19914), [KAFKA-18569 / PR 18590](https://github.com/apache/kafka/pull/18590) | During close, coordinator discovery could stop while a pending commit still required it, or continue after commit and leave work no longer required it. | Pending-operation dependencies, coordinator discovery, and shutdown progress. |
 
 These bugs establish the problem and the regression scenarios that the Test Plan must cover. The proposed ownership
 model and mechanisms are introduced in Proposed Changes.
 
-They do not establish synchronous request-manager invocation as the direct root cause of every failure. For example,
-KAFKA-20253 was fixed by correcting heartbeat, commit, and coordinator progress and wait calculations; it did not
-remove peer calls. The narrower claim is that cross-manager progress and lifecycle decisions were distributed, while
-peer mutation calls made those dependencies implicit and allowed state to change outside the component publishing
-the resulting schedule. This KIP makes the dependency, ordering, and state owner explicit rather than attributing
-unrelated historical failures to one call mechanism.
+These issues share one narrower failure shape: a wait, wakeup, completion, or state-publication decision was made by a
+component that could not atomically observe all state on which the decision depended. This KIP does not claim that one
+call mechanism directly caused every issue. KAFKA-20253, for example, was fixed by correcting local progress checks.
+The proposal instead defines one place where cross-manager ordering and timing are finalized, while keeping each
+manager's local policy with that manager.
 
 ## Public Interfaces
 
 The initial migration changes no Kafka protocol, public `Consumer` or `ShareConsumer` API, callback execution
 guarantee, runtime thread name, or existing metric name. `Consumer.wakeup()` retains its current user-visible
 semantics. The coordination types described in Proposed Changes are internal. The implementation adds four consumer
-diagnostic counters: `reactor-poll-result-contract-violation-total`, `reactor-manager-poll-failure-total`,
-`reactor-action-failure-total`, and `reactor-application-wakeup-total` (one count per phase-coalesced primitive wake).
-Any future public capacity configuration or
-overload behavior requires a separately complete compatibility proposal.
+diagnostic counters:
+
+| Metric | Incremented when |
+| --- | --- |
+| `reactor-poll-result-contract-violation-total` | A manager returns an empty result that requests an immediate retry. |
+| `reactor-manager-poll-failure-total` | A manager poll throws an unexpected runtime exception. |
+| `reactor-action-failure-total` | An application-visible reactor action fails. |
+| `reactor-application-wakeup-total` | The background thread invokes the primitive application-thread wakeup. |
+
+Any future public capacity configuration or overload behavior requires a separately complete compatibility
+proposal.
 
 ## Proposed Changes
 
-This KIP refactors the responsibilities of the existing `ConsumerNetworkThread` execution loop into
-`ConsumerReactor`. The application/background thread topology and runtime thread name remain unchanged, while
-`ConsumerReactor` becomes the final authority for cross-manager timing and application-facing effect ordering.
-Specifically, it defines:
+This KIP keeps the existing application/background thread topology and refactors the responsibility of the existing
+background loop into `ConsumerReactor`. A request manager is a per-domain component such as the heartbeat, commit,
+fetch, or coordinator manager. Request managers keep their mutable state and domain rules. The reactor becomes the
+single place that finalizes, from one ordered view of all managers, how long the consumer may wait and when the
+application thread may observe an effect.
 
-- the ordered phase in which application inputs and cross-manager `ManagerEvent` values are applied;
-- the stable manager pass whose results form one published `ReactorSchedule` timing snapshot;
-- the state-ownership boundary through which managers observe immutable snapshots but do not mutate state owned by a
-  different manager or driver; and
-- the publish-before-action boundary currently used by `ReactorAction` and staged `BackgroundEvent` values, with
-  remaining application-visible completion and data-publication paths migrated in Phase 3.
+Three mechanisms carry that responsibility:
 
-The complete model is easiest to understand as one request lifecycle. Consider a heartbeat request sent to the
-consumer group's coordinator node currently published by `CoordinatorRequestManager`:
+1. **Manager progress classification (`PollResult`).** Each manager poll reports one of three outcomes: it produced
+   work now; time alone may make it runnable after a finite delay; or only another input can make it runnable. An
+   empty result may not request an immediate retry.
+2. **One published wait before any application-visible effect (`ReactorSchedule` and `ReactorAction`).** The reactor
+   retains every manager's next-poll requirement and publishes the earliest deadline as one immutable timing
+   decision. It executes application-visible effects only after the state and timing decision they depend on are
+   visible.
+3. **Cross-manager facts routed to one state owner (`ManagerEvent`).** A manager that observes a change in state owned
+   by another manager reports an immutable, versioned fact instead of mutating that state. The reactor routes the fact
+   to the owner, which applies it only if the captured version is still current.
 
-1. **Admit work from current truth.** The heartbeat manager reads
-   `CoordinatorSnapshot(coordinator=node-1, version=7)`. It builds the request for `node-1` and captures version `7` as
-   bounded context for that attempt.
-2. **Report what happened.** The response says that the coordinator is unavailable. The heartbeat manager does not
-   mutate `CoordinatorRequestManager`. The response callback records
-   `ManagerEvent.CoordinatorUnavailableObserved(version=7, cause)` in its producer-local `PendingManagerEvents`.
-   The post-I/O poll publishes it as an element of `PollResult.managerEvents()`. The same `PollResult` may also carry
-   unsent requests, completed state transitions, and the manager's next-poll delay. `ManagerEvent` is intentionally
-   qualified because the existing `ApplicationEvent` and `BackgroundEvent` types already describe cross-thread
-   communication.
-3. **Route the fact to one owner.** `ConsumerReactor` defers the event. At the start of the next iteration, before
-   draining application events, it routes deferred `ManagerEvent` values through the selected `RequestManagers`
-   composition to `CoordinatorRequestManager`. The coordinator owner interprets the observation and alone decides
-   whether it permits a mutation. The concrete path is:
+These concepts answer different questions:
 
-   ```text
-   PendingManagerEvents
-     -> PollResult.managerEvents()
-     -> ConsumerReactor.stagePollResult(...)
-     -> ConsumerReactor.deferredManagerEvents
-     -> RequestManagers.routeManagerEvents(...)
-     -> CoordinatorRequestManager.handleCoordinatorUnavailableObserved(...)
-   ```
-
-   These names describe successive phases rather than synonyms: `pending` is producer-local before publication;
-   `stagePollResult(...)` accepts the complete manager result; and `deferred` means the reactor has accepted the event
-   but intentionally routes it at the beginning of the next iteration.
-4. **Fence stale work.** `CoordinatorRequestManager` compares the observed version with its current snapshot. It
-   applies version `7` only if version `7` is still current. If rediscovery has already published version `9`, the
-   older observation is ignored and cannot invalidate the newer coordinator.
-5. **Re-evaluate all managers.** `ConsumerReactor` runs the stable manager pass. Each manager returns one `PollResult`
-   describing work available now and its next local poll requirement. The coordinator may propose a
-   `FindCoordinator` request, while heartbeat and commit may wait for its completion. Unsent requests are staged with
-   `NetworkClientDelegate`; no network I/O occurs yet, and requests are not `ReactorAction` values.
-6. **Publish the next state-reflecting wait.** `ConsumerReactor` combines the retained manager deadlines into one
-   immutable `ReactorSchedule` and publishes it. This is a global timing publication: it schedules the latest time by
-   which the reactor must resume, not which manager runs. I/O, application input, cancellation, or shutdown may wake
-   the event-driven loop earlier. The response iteration may already have published a post-I/O schedule before the
-   event was deferred; this publication reflects the next iteration after owner routing and the full manager pass.
-7. **Publish and execute phase-visible effects.** After schedule publication, `ConsumerReactor` moves any staged
-   `BackgroundEvent` values to the application queue, collects `ReactorAction` values, and executes them. It then
-   calls `NetworkClientDelegate.poll()` using the published timeout. A network completion starts the post-I/O owner
-   poll, schedule-publication, background-event-publication, and action phase. Actions include async-poll progress or
-   completion, metadata-error notification, and application wakeup; `WAKE_APPLICATION` executes last among actions
-   in its phase. A failed action is recorded and isolated so it cannot suppress later independent actions, the final
-   wakeup, or network I/O. A phase which only changes coordinator state may publish a new schedule without producing
-   an application-visible action.
-
-The concepts in that lifecycle answer different questions:
-
-| Concept | Question answered |
-| --- | --- |
-| `ManagerEvent` | What immutable fact has already occurred? |
-| Snapshot | What versioned truth may new work use? |
-| `PollResult` | What work did one manager make available, and when should it be polled again? |
-| `ReactorSchedule` | By when must the reactor activate again, and how long may network polling block? |
-| `ReactorAction` | What application-visible effect may execute after publication? |
-
-The current POC implements the coordinator lifecycle above, production validation of the no-progress contract,
-schedule-before-background-event publication, exception-isolated action execution, and event waits for paused fetch
-and in-flight Streams heartbeat states. Additional event families, owner snapshots, and cross-owner mutation
-migrations remain Phase 2 work.
+| Concept | Meaning | Question answered |
+| --- | --- | --- |
+| `ManagerEvent` | An immutable fact reported by one manager for another state owner. | What happened? |
+| Owner snapshot | An optional immutable, versioned view published when another manager needs coherent state. | What current truth may new work use? |
+| `PollResult` | One manager's work and its next-poll requirement. | What can this manager do now, and when should it be checked again? |
+| `ReactorSchedule` | The immutable aggregate of retained manager deadlines. | By when must the reactor activate, and how long may network polling block? |
+| `ReactorAction` | An application-visible effect selected by the reactor. | What may execute after state and schedule publication? |
 
 The design relies on three invariants:
 
-1. Each mutable state has one execution-context owner. Request managers own their local state; another ownership
-   domain may observe immutable snapshots or emit `ManagerEvent` values but may not mutate that state directly.
-   Direct calls inside one explicitly defined protocol aggregate, such as heartbeat and membership behind a regular,
-   share, or Streams driver, remain allowed. `ConsumerReactor` owns the final cross-manager timing publication and
-   effect ordering, not the managers' domain policy.
-2. Every synthetic wakeup or reschedule names a real state transition, positive deadline, completion, application
-   command, or capacity change. An empty manager result cannot request an immediate retry.
-3. Effects represented by `ReactorAction` and staged `BackgroundEvent` values execute only after the corresponding
-   `ReactorSchedule` publication. Existing fetch-buffer signals, generic application-event futures, callback
-   invokers, acknowledgement events, and timeout reaping remain compatibility paths until their Phase 3 migration;
-   this KIP does not claim that they already cross the same boundary.
+1. **One state owner.** Each mutable state has one execution-context owner. Another ownership domain may read an
+   immutable snapshot or report a `ManagerEvent`, but it may not mutate that state directly. Components deliberately
+   grouped behind one protocol driver, such as heartbeat and membership state for one group protocol, may still call
+   one another because the driver defines them as one ownership domain.
+2. **No wakeup without a cause.** Every application wakeup or timed reschedule corresponds to produced work, a
+   positive deadline, an input, or a capacity change. An empty manager result cannot request an immediate retry.
+3. **Publish before effect.** State and the resulting `ReactorSchedule` are published before any corresponding
+   `ReactorAction` or staged application event is released.
 
-The goals are to centralize cross-manager ordering, scheduling, and synthetic notification decisions without moving
-manager-local state or regular/share consumer rules into the reactor; derive application waits and network poll
-bounds from one published schedule; preserve callback isolation and existing public behavior; and migrate
-incrementally with deterministic correctness and performance evidence.
-
-This KIP does not change the number or placement of application and background threads, combine regular and share
-consumer state machines, move user callbacks onto the reactor thread, retrofit `ClassicKafkaConsumer`, rewrite every
-request manager in one patch, or define new public queue-capacity and overload configuration.
-Behavior-equivalent refactoring of shared fetch/network timing helpers may touch classes also used by the classic
-consumer; the classic execution path is not routed through `ConsumerReactor` and gains no new reactor semantics.
-
-The following sections define how this model is applied within the existing consumer implementation.
+This KIP does not add a queue or thread, move user callbacks to the background thread, combine regular and share
+state machines, make the reactor own manager policy, introduce a dynamic dependency graph, retrofit
+`ClassicKafkaConsumer`, or migrate every compatibility path in one patch. The sections below first define ownership,
+then the manager result contract and timing publication, and finally the full iteration and cross-manager lifecycle.
 
 ### 1. Define the responsibility boundary
 
@@ -220,62 +167,147 @@ Today, `AsyncKafkaConsumer` and `ShareConsumerImpl` each create a background exe
 event-loop and network infrastructure, but state, wait, completion, publication, and wakeup decisions can still be
 made by different components along the path. The proposal changes responsibility, not topology:
 
-![Current and proposed Consumer execution flow](../images/kip-1371-consumer-reactor-before-after.png)
+![ConsumerReactor ownership and execution boundary](../images/kip-1371-reactor-architecture.png)
 
-The existing application/background thread boundary remains. The final decisions transferred to `ConsumerReactor`
-are:
-
-- the order in which input events and request managers are processed, including which managers are polled again
-  after network completion and when the next full ordered pass observes cross-manager state;
-- the earliest retained manager deadline, the resulting network poll timeout, and the application wait projection;
-- the ordering of completed state transitions and the `ReactorAction` values they require; and
-- publication of `ReactorSchedule` before executing `ReactorAction` values, publishing staged `BackgroundEvent`
-  values, or issuing their retained application wakeup. Phase 3 extends this boundary to the remaining direct
-  future-completion and data-publication paths. The target combines equivalent wake reasons once per complete
-  iteration; the current POC does so separately at each action-execution phase.
-
-Request managers continue to own their local state and rules. `NetworkClientDelegate` retains transport and
-correlation responsibilities, and user callbacks remain on the application thread.
-
-`ConsumerReactorGateway` describes the application-side submit, submit-and-wait, wake, schedule-read, and close
-boundary. It replaces the less precise `ApplicationEventHandler` name without changing runtime thread names or
-behavior.
+[Open the interactive architecture view](../images/kip-1371-reactor-architecture.html).
 
 | Component | Target responsibility after the KIP |
 | --- | --- |
-| `ConsumerReactor` | Order inputs, invoke managers, validate the generic no-progress invariant, retain their timing contributions, publish the final timing snapshot, then publish staged application events, collect actions, and execute `ReactorAction` values. |
-| `RequestManagers` composition | Select the regular or share manager set and route `ManagerEvent` values to one state owner without introducing a dynamic dependency graph. |
-| Request manager | Own one domain of mutable consumer state and the conditions required to make progress; when another manager needs a coherent cross-manager view, optionally publish a small immutable projection for that reader; consume only `ManagerEvent` values addressed to it; and return progress, a positive finite retry delay, or an event wait from its local poll state. |
-| Proposed `RegularConsumerDriver` / `ShareConsumerDriver` / `StreamsConsumerDriver` | Keep protocol-specific membership, assignment or acquisition, commit or acknowledgement, topology, and callback coordination outside the shared reactor loop. These types do not yet exist in the codebase. |
+| `ConsumerReactor` | Order inputs, invoke managers in a fixed order, retain their timing contributions, publish the final timing decision, and then execute application-visible effects. |
+| `RequestManagers` composition | Select the regular, share, or Streams manager set and route typed cross-manager facts to one state owner. |
+| Request manager | Own one domain of mutable consumer state and decide whether it can produce work now, needs a finite retry, or must wait for another input. It may publish a small immutable snapshot when another manager needs a coherent view. |
+| Regular / share / Streams protocol driver | Keep membership, assignment or acquisition, commit or acknowledgement, topology, and callback coordination outside the shared reactor loop. These are proposed internal boundaries, not current code types. |
 | `NetworkClientDelegate` | Own transport, connection handling, request correlation, and timeouts; do not decide whether to complete an application event or wake the application thread. |
 | Application thread | Execute user callbacks and consume published data, events, and operation results. |
 
-The reactor coordinates these owners; it does not absorb their local rules or transport mechanics.
+The reactor coordinates these owners; it does not absorb their local rules or transport mechanics. Network requests
+remain direct manager output handed to `NetworkClientDelegate`; they are not application-visible effects.
 
-The following diagram expands one reactor iteration. `ConsumerReactor` publishes the schedule and then executes
-application-facing actions. Network requests remain a direct handoff to `NetworkClientDelegate` and are not
-`ReactorAction` values. The strengthened manager result is summarized as `PollResult = work now + next poll`; its
-proposed factory methods and valid field combinations are defined in the next section.
+### 2. Classify manager progress with `PollResult`
 
-![ConsumerReactor action ordering and effect destinations](../images/kip-1371-reactor-action-ownership.png)
+A manager poll answers one narrow question: if the reactor polls this manager now, can it produce a request, a
+completed state transition, or a cross-manager fact? The manager owns the state needed to answer, such as coordinator
+availability, in-flight requests, retry backoff, metadata, or buffer capacity. The reactor validates the answer but
+does not reimplement those domain rules.
 
-### 2. Define the processing model
+Each `PollResult` contains the manager's immediate output and its next-poll requirement:
 
-An input event is an existing application command, network completion, deadline expiry, capacity release, or callback
-acknowledgement. It is a semantic term, not a requirement to add another queue: application commands use the existing
+- `unsentRequests`: requests ready for `NetworkClientDelegate`;
+- `stateTransitions`: completed manager-local changes;
+- `managerEvents`: immutable facts that must be routed to another state owner; and
+- `timeUntilNextPollMs`: how long the reactor may wait before polling that manager again.
+
+Factory methods name the three valid result shapes:
+
+```java
+PollResult.progress(unsentRequests, stateTransitions, managerEvents, timeUntilNextPollMs);
+PollResult.retryAfter(delayMs);
+PollResult.awaitEvent();
+```
+
+| Result | Immediate output | Meaning |
+| --- | --- | --- |
+| `progress(...)` | At least one request, transition, or `ManagerEvent`. | Consume the output now; the delay describes the next poll after that progress. |
+| `retryAfter(delayMs)` | None. | Time alone may make the manager runnable; poll again after a positive, finite delay. |
+| `awaitEvent()` | None. | Time alone cannot help; poll again after a relevant application input, network completion, cancellation, or shutdown. |
+
+The invalid shape is an empty result with a zero delay:
+
+```text
+requests=[] + transitions=[] + managerEvents=[] + timeUntilNextPollMs=0
+```
+
+The empty output says that no progress occurred, while the zero delay asks for an immediate retry. Returning the same
+shape repeatedly creates a busy loop. A manager returning `progress(...)` must also consume or mark its output in
+flight so that the next poll cannot emit the same logical progress again.
+
+`awaitEvent()` has no semantic duration. It may use `Long.MAX_VALUE` internally, but admitted application inputs,
+network completions, cancellation, and shutdown still wake the loop. The existing bounded network poll is a safety
+safeguard, not the retry interval for an event wait.
+
+Examples across managers are:
+
+| Manager state | Result | Related evidence |
+| --- | --- | --- |
+| Heartbeat is due but coordinator discovery is in flight. | `awaitEvent()`; discovery completion is the enabling input. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
+| Heartbeat is due and a request can be built. | `progress([heartbeatRequest], [], [], heartbeatIntervalMs)` and record it in flight. | Expected request-producing case for KAFKA-20253 |
+| Auto-commit is due but an earlier commit is in flight. | `awaitEvent()`; do not return an empty zero-delay result. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
+| Coordinator retry backoff has 75 ms remaining. | `retryAfter(75)` | Finite-retry case |
+| Fetch preparation finds buffered data. | `progress([], [FETCH_BUFFER_HAS_DATA], [], Long.MAX_VALUE)` | [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) |
+| Fetch request is in flight. | `awaitEvent()` | Expected in-flight wait case for KAFKA-20854 |
+| Topic-metadata request is in retry backoff. | `retryAfter(remainingBackoffMs)` | Finite-retry case |
+| Share acknowledgement request is in flight. | `awaitEvent()` | Share-consumer case |
+
+Strict factories validate only this generic shape. They do not infer why heartbeat, commit, fetch, coordinator, or
+share work can make progress. During migration, production validation also detects an empty zero-delay result created
+through a legacy constructor, records the manager and metric, and treats the result as an event wait so that it cannot
+force `NetworkClientDelegate.poll(0)`.
+
+### 3. Publish one wait decision before executing effects
+
+For every manager result, the reactor converts `timeUntilNextPollMs` into an absolute deadline and retains that
+manager's contribution. `ReactorSchedule` is the immutable publication of those retained deadlines. It selects the
+earliest deadline, so updating one manager cannot erase an earlier deadline from another manager and an unrelated
+early network return cannot postpone existing work.
+
+The deadline means that the reactor must activate by that time. It does not select which manager runs and does not
+promise that network I/O occurs exactly then. Network I/O, application input, cancellation, or shutdown may wake the
+loop earlier. The same publication supplies both the network poll bound and the application thread's current wait
+projection.
+
+The schedule has these properties:
+
+- a shorter deadline is published before a waiter using an older value is released;
+- an early finite re-poll cannot move an unexpired manager deadline later;
+- `awaitEvent()` withdraws that manager's prior finite deadline because time alone can no longer help;
+- an expired deadline is consumed by polling the manager again rather than repeatedly waking the application; and
+- an event-only wait does not create a periodic manager poll.
+
+`ReactorAction` represents an application-visible effect such as an async-poll completion or application wakeup.
+Requests remain manager output, retries remain deadlines, and manager state transitions remain internal; none of
+those are `ReactorAction` values. The ordering rule is:
+
+> Apply transitions, publish state and `ReactorSchedule`, then execute the corresponding `ReactorAction` values.
+
+Equivalent wake reasons may share one primitive application wakeup, but terminal operation completions are never
+merged. Wakeup executes last so the application thread can observe the state, schedule, data, event, or completion
+that caused it. An action failure is logged, counted, and isolated; it cannot suppress later independent actions or
+network I/O.
+
+#### Example: two managers with different deadlines
+
+Assume fetch reconnect backoff expires in 100 ms while heartbeat must be polled in 50 ms:
+
+```text
+FetchRequestManager.poll()     -> retryAfter(100)
+HeartbeatRequestManager.poll() -> retryAfter(50)
+
+ConsumerReactor
+  -> publishes ReactorSchedule(deadline=heartbeat at 50 ms)
+  -> does not wake the application
+```
+
+At 50 ms, the reactor polls heartbeat work. The retained fetch deadline remains at 100 ms even if heartbeat network
+I/O returns early. At 100 ms, fetch is polled again. Backoff and in-flight states do not wake the application because
+they are not application-visible progress.
+
+### 4. Process one reactor iteration
+
+An input event is an existing application command, network completion, deadline expiry, network send capacity
+becoming available, or callback acknowledgement. It is a semantic term, not a requirement to add another queue:
+application commands use the existing
 `ApplicationEventQueue`, while network completions occur directly during `NetworkClientDelegate.poll()` on the
 reactor thread.
 
 Input events are not merged into one state mutation. The reactor applies them in a deterministic order, then polls
-the affected managers and aggregates their scheduling results. The target model combines semantically equivalent
-external actions, such as multiple synthetic wake reasons in one complete reactor iteration. Requests, callbacks,
-and terminal operation results retain their identities and ordering. Combining wake reasons means that several
-equivalent reasons execute one primitive wakeup while all reasons remain observable.
+the manager set in its fixed composition order and aggregates the results. Requests, callbacks, and terminal
+operation results retain their identities and ordering. Equivalent application wake reasons may share one primitive
+wakeup while all reasons remain observable.
 
 For example, if an assignment adds `tp2` before an older `OffsetFetch(scope={tp1})` completes, the assignment event is
 applied first and the older completion can update only `tp1`. A later ordered position operation initializes `tp2`.
 
-The target reactor iteration is event-driven with deadline-bounded waiting:
+One reactor iteration is event-driven with deadline-bounded waiting:
 
 1. Route typed `ManagerEvent` values retained from the previous post-I/O phase to their state owners through the selected
    regular or share composition.
@@ -284,20 +316,40 @@ The target reactor iteration is event-driven with deadline-bounded waiting:
    ordered pass.
 4. Poll the stable manager set in order and collect their `PollResult` values.
 5. Retain per-manager deadlines, form one `ReactorSchedule`, and publish it.
-6. Publish staged `BackgroundEvent` values, then execute pre-I/O actions derived from completed transitions.
+6. Publish staged `BackgroundEvent` values, then execute pre-I/O actions (actions selected before network polling)
+   derived from completed transitions.
 7. Poll network I/O no longer than the published deadline.
 8. Re-poll each completion's owning manager, publish the updated schedule, publish newly staged `BackgroundEvent`
-   values, execute post-I/O actions, and retain any typed `ManagerEvent` values for the next full ordered pass.
+   values, execute post-I/O actions (actions selected after a network completion), and retain any typed `ManagerEvent`
+   values for the next full ordered pass.
 
-Under the target rule, managers do not call one another recursively and do not invoke mutation methods across
-ownership domains. A
-completion marks its owning manager and may return a typed immutable fact. The composition routes that fact to the
-single state owner before the next full ordered pass. Because network I/O has already occurred when the fact is
-produced, dependent work cannot be sent until the next reactor iteration. The reactor therefore relies on the next
-stable full manager pass rather than embedding hard-coded manager-to-manager routing, fixed-point traversal, or a
-central dependency graph. The current POC applies this rule to coordinator invalidation. Heartbeat/membership calls
-remain inside their current protocol aggregate, while offsets-to-commit delegation and other cross-owner calls remain
-explicit Phase 2 review or migration work.
+Managers do not call one another recursively and do not invoke mutation methods across ownership domains. A network
+completion updates its owning manager, which may return an immutable fact. Because I/O has already occurred, the
+fact is routed at the beginning of the next iteration and dependent work is produced by the next full ordered pass,
+before the next network poll. The reactor does not traverse a dependency graph or repeatedly poll to a fixed point.
+
+### 5. Route cross-manager observations to their state owner
+
+Consider a heartbeat sent while the group coordinator becomes unavailable:
+
+1. **Build from the current view.** The heartbeat manager reads the coordinator owner's published view:
+   `(node-1, version 7)`. It builds the request for `node-1` and records version `7` with that request attempt.
+2. **Observe, do not mutate.** The response reports that the coordinator is unavailable. The heartbeat manager does
+   not change coordinator state. Its next `PollResult` reports the fact “coordinator version 7 was observed
+   unavailable.”
+3. **Route to the owner.** The reactor retains the fact until the start of the next iteration, then routes it through
+   the selected `RequestManagers` composition to `CoordinatorRequestManager`, which owns coordinator state.
+4. **Fence stale observations.** The owner compares version `7` with its current version. If rediscovery has already
+   published version `9`, the old observation is ignored and cannot invalidate the newer coordinator.
+5. **Re-evaluate every manager.** The reactor polls all managers in fixed order. The coordinator manager may produce
+   a `FindCoordinator` request; heartbeat and commit wait for discovery rather than scheduling arbitrary retries.
+6. **Publish the next wait.** The reactor publishes the resulting `ReactorSchedule` before releasing any
+   application-visible effect. The `FindCoordinator` request is handed to the network layer before the next network
+   poll.
+
+![Coordinator observation routed and fenced](../images/kip-1371-coordinator-observation-sequence.png)
+
+[Open the interactive coordinator-observation sequence](../images/kip-1371-coordinator-observation-sequence.html).
 
 #### Owner-published snapshots and stale-observation fencing
 
@@ -309,133 +361,36 @@ snapshot. Snapshot versions are owner-local internal identities; they are not Ka
 every poll, log, or metric update.
 
 An admitted request captures the snapshot version and only the bounded target or scope required for that attempt. An
-old snapshot may therefore remain as captured context for an in-flight request, but it cannot be used to admit new
-work. The coordinator example follows the complete fencing path:
+old version may remain as captured context for an in-flight request, but an old snapshot cannot admit new work. The
+fencing path is:
 
 ```text
 read current CoordinatorSnapshot(READY, node-1, version=7)
   -> build the heartbeat request and capture target=node-1, observedVersion=7
   -> the response produces CoordinatorUnavailableObserved(observedVersion=7, cause)
-  -> PendingManagerEvents retains the greatest observedCoordinatorVersion for this event type
-  -> the event is published in PollResult and routed to CoordinatorRequestManager
+  -> a bounded pending slot retains the newest observation of that type
+  -> the observation is returned in PollResult and routed to the coordinator owner
   -> the owner compares observedVersion with its current CoordinatorSnapshot version
   -> apply only if the versions still match; otherwise ignore the stale observation
 ```
 
-If several coordinator-unavailable responses arrive before publication, `PendingManagerEvents` prevents its
-producer-local slot from moving to a lower observed coordinator version. That buffer rule does not decide whether an
-observation is current: after routing, `CoordinatorRequestManager` performs the final comparison against the
-owner's current version. Each producer retains at most one pending fact of each bounded type until its next
-`PollResult`, and the reactor retains only those bounded facts until the next routing phase.
+If several observations arrive before publication, the producer-local slot retains the greatest observed version.
+That bounded buffer does not decide whether an observation is current. The state owner always performs the final
+comparison. Each producer retains at most one pending fact of each bounded type, the reactor retains it only until the
+next routing phase, and in-flight work retains only the version and bounded request context rather than snapshot
+history. `ReactorSchedule` is a timing publication, not a registry of manager domain state.
 
-The current POC implements only `CoordinatorSnapshot`. It has no global snapshot registry and retains no snapshot
-history. `CoordinatorRequestManager` owns the current snapshot; a coordinator-dependent request retains only its
-captured target, version, and bounded request context. `ReactorSchedule` is a separate aggregate scheduling
-publication, not a registry of manager domain state. Additional opt-in owner snapshots remain later migration work.
+### 6. Preserve operation identity across retries
 
-#### Manager poll outcomes and `PollResult`
-
-A manager poll outcome answers one narrow question: if the reactor polls this manager now, can the manager produce a
-request or completed transition? This is not a second deadline and `ConsumerReactor` does not determine the answer.
-The manager already owns the required state, such as coordinator availability, request-in-flight state, retry
-backoff, metadata availability, or buffer capacity.
-
-Each manager poll returns one `PollResult` containing four pieces of information in the target model:
-
-- `unsentRequests`: requests ready for the reactor to hand to `NetworkClientDelegate`;
-- `stateTransitions`: completed manager changes ready for the reactor to apply;
-- typed `ManagerEvent` values selected for composition routing; and
-- `timeUntilNextPollMs`: how long the reactor may wait before polling that manager again.
-
-The factories give names and validation to the meaningful combinations of these existing fields; they do not
-introduce three new kinds of state. They are implemented in the current POC while legacy constructors remain for
-incremental migration:
-
-```java
-PollResult.progress(unsentRequests, stateTransitions, managerEvents, timeUntilNextPollMs);
-PollResult.retryAfter(delayMs);
-PollResult.awaitEvent();
-```
-
-| Manager result | Immediate output | Scheduling meaning |
-| --- | --- | --- |
-| `progress(requests, transitions, managerEvents, delay)` | At least one request, transition, or typed `ManagerEvent` | Consume the output now; `delay` describes the next manager poll after that state change. |
-| `retryAfter(delayMs)` | None | Poll this manager again after a positive, finite manager-local delay. |
-| `awaitEvent()` | None | Do not schedule a periodic manager poll; poll it after a relevant input event. |
-
-The factories are the target internal API and are present in the current POC. Existing constructors remain compatibility adapters while managers are
-migrated. Without this validation, a manager can return a contradictory result:
-
-```text
-PollResult
-  unsentRequests      = []   // there is no request to send
-  stateTransitions    = []   // there is no completed change to apply
-  timeUntilNextPollMs = 0    // nevertheless, poll this manager again immediately
-```
-
-The first two fields say that this iteration made no progress, while the third asks for an immediate retry. Repeating
-the same result can spin the reactor without changing any state. The generic invariant is therefore that an empty
-result cannot request an immediate retry. The reactor does not decide whether manager-specific work can make progress;
-the manager selects the correct result from its own state. A manager returning `progress(...)` must also consume or
-latch the reported request or transition so that its next poll cannot emit the same logical progress again.
-
-`awaitEvent()` has no duration. It may use `Long.MAX_VALUE` as an internal representation, but the reactor still wakes
-for admitted application events, network completions, cancellation, and shutdown. The existing bounded network poll
-remains an implementation safeguard; it is not the semantic retry interval for an event wait.
-
-Examples across managers are shown below. Related evidence names the historical issue when the state directly models
-that regression. Control and general cases demonstrate the same result invariant but are not claimed as separate
-historical bugs.
-
-| Manager state | Result | Status | Related evidence |
-| --- | --- | --- | --- |
-| Heartbeat is due but coordinator discovery is in flight | `awaitEvent()`; the discovery completion is the enabling event. | Current POC | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
-| Heartbeat is due and can be constructed | `progress([heartbeatRequest], [], heartbeatIntervalMs)` and record the request as in flight. | Current POC | Control case for KAFKA-20253 |
-| Auto-commit is due but an earlier commit is in flight | `awaitEvent()`; do not return an empty zero-delay result. | Target migration; the current application wait remains a compatibility path. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
-| Coordinator retry backoff has 75 ms remaining | `retryAfter(75)` | Current POC | General finite-retry case |
-| Fetch preparation finds data already buffered | `progress([], [FETCH_BUFFER_HAS_DATA], WAIT_FOREVER)` | Current POC | [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) |
-| Fetch request is in flight | `awaitEvent()` | Current POC | KAFKA-20854 control case |
-| Topic-metadata request is in retry backoff | `retryAfter(remainingBackoffMs)` | Target migration; current code relies on compatibility wakeups. | General finite-retry case |
-| Share acknowledgement request is in flight | `awaitEvent()` | Existing behavior retained by the POC. | General share-consumer case |
-| Membership manager is waiting for a callback acknowledgement | `awaitEvent()` | Target migration. | [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) |
-
-Strict factories validate only the generic shape. While legacy constructors remain, the reactor also enforces the
-shape in production. An empty zero-delay legacy result increments
-`reactor-poll-result-contract-violation-total`, identifies the manager once per continuous violation in the log, and
-is replaced by an event wait so it cannot force `NetworkClientDelegate.poll(0)`. The metric still counts every
-observed violation. An unexpected manager polling failure is similarly isolated,
-logged, and counted without skipping network I/O; it is not converted into a new user-visible exception. These checks do not infer why a
-heartbeat, commit, fetch, coordinator, or share acknowledgement can or cannot make progress; that decision remains
-manager-local.
-
-`FetchRequestManager.createFetchRequests()` coalesces equivalent retained fetch intent without building an unbounded
-waiter list. At most one current caller waits for the next preparation outcome. Additional callers complete once an
-equivalent intent is already retained; a later preparation failure is delivered to the single current waiter and as
-the existing fetch-preparation transition, not retroactively to already-completed duplicate calls. Tests lock this
-completion contract while the broader application-event completion migration remains Phase 3 work.
-
-### 3. Preserve operation identity and shared dependencies
-
-Input events, application-visible operations, scheduling decisions, actions, and network attempts are not
-interchangeable. The target model distinguishes the smallest identity required at each layer; some rows are existing
-objects while others state a required invariant without mandating a new type:
+One application API operation may require several network attempts and several reactor iterations. Those identities
+must not be conflated:
 
 | Identity | Purpose |
 | --- | --- |
-| Input sequence | Orders events accepted by the reactor and supports causal tracing. |
 | Operation identity | Tracks one admitted application API operation until exactly one terminal result. It lets the reactor associate later retries and completions with the correct future, and reject a late or duplicate completion after timeout, cancellation, or termination. It may be represented by the existing application event and future or by an explicit internal ID; it is not assigned once per `ReactorAction`. |
 | Request attempt identity | Distinguishes network attempts and retries within an operation; transport correlation remains in `NetworkClientDelegate`. |
 | Owner snapshot version and scope | Prevents an older completion from mutating newer owner state or partitions outside the operation's captured scope. |
-| Reactor publication generation | Identifies the immutable state-and-schedule publication observed by application-side readers. It is not a manager state version. |
 | Protocol generation or member epoch | Retains broker-defined group identity and fencing semantics; it is not reused as an internal snapshot version. |
-
-These concepts answer different questions:
-
-- operation identity preserves which admitted API operation owns later retries and completions, so the correct future is
-  completed exactly once and stale work cannot complete an operation that has already timed out, been cancelled, or
-  terminated;
-- `ReactorSchedule` answers when the reactor must run again and how long network polling may block; and
-- `ReactorAction` answers which external effect the reactor executes after publishing that schedule.
 
 One operation can span several schedule publications and network attempts before producing one terminal completion.
 Conversely, one deduplicated wake action can notify the application about several progress reasons, so an action cannot
@@ -472,51 +427,7 @@ or duplicate terminal completion. This KIP requires that stability and exactly-o
 require a new public ID or a new generic `OperationId` class when the existing event and future already provide the
 necessary identity. These identities do not change Kafka protocol correlation IDs or public Consumer APIs.
 
-### 4. Publish one schedule before executing actions
-
-For every manager result, the reactor converts `timeUntilNextPollMs` into an absolute deadline and retains that
-manager's contribution. `ReactorSchedule` selects the earliest retained deadline. Updating one manager cannot erase
-an earlier deadline from another manager, and an unrelated early network return cannot postpone existing work.
-
-This absolute value is the reactor deadline, not a promise of network I/O. It means the reactor must poll the manager
-again by that time; reconnect backoff, metadata, capacity, callback, or local-state progress may be the reason. The
-reactor derives `networkPollTimeoutMs(now)` from the remaining reactor deadline only when it calls the existing
-network client.
-
-The published schedule satisfies these properties:
-
-- the same published `ReactorSchedule` exposes the network-poll and application-wait projections;
-- a newly shorter deadline is visible before releasing a waiter using an older snapshot;
-- an early finite re-poll cannot move that manager's unexpired deadline later, while an explicit `awaitEvent()`
-  withdraws the manager's prior deadline because time alone can no longer make it runnable;
-- an expired deadline is consumed by polling its manager again, not by repeatedly waking the application;
-- an event-only wait does not create periodic wakeups.
-
-`ReactorAction` represents an application-visible effect selected after state and schedule publication. The current
-implementation covers application wakeup and async-poll progress or completion. Later migration may generalize these
-into operation completion, application publication, and application notification. Network requests remain manager
-outputs, retry remains a schedule deadline, and state transitions remain internal; they are not `ReactorAction`
-values.
-
-The target combines equivalent wake actions across one complete reactor iteration into one primitive wakeup while
-their reasons remain observable. Terminal operation completions are never merged. Wakeup executes last so the
-application thread observes the state, schedule, data, event, or completion that caused it. The current POC combines
-actions separately at each pre-I/O, post-I/O, and final-drain execution point, so one iteration may still issue more
-than one primitive wakeup. This is a migration gap, not the target behavior. Within each phase, action failure is
-isolated: later actions and the final wake still execute, and the failed action is not retained for accidental retry.
-
-The ordering invariant is:
-
-> Apply transitions, publish the resulting state and `ReactorSchedule`, then execute `ReactorAction` values.
-
-The same causal chain must also be diagnosable without formatting collections on a disabled hot-path log. The target
-diagnostic contract adds the schedule generation and deadline source to TRACE records and the action reason and
-destination to action records. The current POC counts primitive application wakes, malformed manager results,
-manager polling failures, and action failures. On diagnostic demand, the bounded `ManagerPollCache` exposes the
-current per-manager result and retained deadline snapshot; it does not retain an unbounded history. The expanded
-generation/reason TRACE records and a consecutive-zero-timeout diagnostic remain migration work.
-
-### 5. Share the reactor kernel, not consumer rules
+### 7. Share the reactor kernel, not consumer rules
 
 The regular consumer and share consumer use separate reactor instances but the same execution kernel because they
 share the same concurrency topology. Their rules remain separate. `RegularConsumerDriver`, `ShareConsumerDriver`,
@@ -531,36 +442,49 @@ and `StreamsConsumerDriver` are proposed internal boundaries; they do not yet ex
 The shared reactor must not branch on consumer type. An `isShareConsumer` switch or a regular/share union in the
 reactor loop indicates that consumer-specific behavior has leaked across the boundary.
 
-### 6. Example: reconnect backoff with another manager deadline
+## Compatibility, Deprecation, and Migration Plan
 
-Assume the fetch manager is blocked by a reconnect backoff that expires in 100 ms while the heartbeat manager must be
-polled in 50 ms:
+### Current implementation status
+
+The current proof of concept implements Phase 1 and the coordinator-focused vertical slice of Phase 2. The target
+model above also defines later migration work. The distinction is:
+
+| Area | Current POC | Target after migration |
+| --- | --- | --- |
+| Manager progress | `PollResult` factories and production validation are present; legacy constructors remain. | Every manager uses only the explicit progress, finite-retry, or event-wait contract. |
+| Cross-manager ownership | Coordinator target/version snapshot and coordinator-unavailable `ManagerEvent` routing are present. | Other cross-owner mutation paths use the same owner/fact rule or are placed inside an explicit protocol driver. |
+| Snapshot retention | Only the current `CoordinatorSnapshot` is retained; there is no global registry or snapshot history. | Additional snapshots remain opt-in and latest-only when a real cross-manager decision needs them. |
+| Publish-before-effect | `ReactorAction` and staged `BackgroundEvent` paths publish the schedule first. | Generic operation completion, data publication, callback acknowledgement, and timeout paths cross the same boundary. |
+| Wake coalescing | Equivalent wakes are combined separately in the pre-I/O, post-I/O, and final-drain phases. | Equivalent reasons produce at most one primitive wake per complete reactor iteration. |
+| Diagnostics | Contract, manager-poll, action-failure, and application-wakeup counters are present. | TRACE adds publication generation, deadline source, action reason, and destination without hot-path collection formatting. |
+
+The following names map the model to the current POC. They are implementation evidence, not prerequisites for
+understanding the design:
 
 ```text
-FetchRequestManager.poll()
-  -> requests=[]
-  -> transitions=[]
-  -> timeUntilNextPollMs=100
-
-HeartbeatRequestManager.poll()
-  -> timeUntilNextPollMs=50
-
-ConsumerReactor
-  -> publishes ReactorSchedule(deadline=heartbeat at 50 ms)
-  -> no application wakeup
+producer-local PendingManagerEvents
+  -> PollResult.managerEvents()
+  -> ConsumerReactor.stagePollResult(...)
+  -> ConsumerReactor.deferredManagerEvents
+  -> RequestManagers.routeManagerEvents(...)
+  -> CoordinatorRequestManager.handleCoordinatorUnavailableObserved(...)
 ```
 
-At 50 ms, the reactor polls heartbeat work. The retained fetch deadline remains at 100 ms even if heartbeat network
-I/O returns early. At 100 ms, the reactor polls the fetch manager again and creates the fetch request from its retained
-intent. Backoff and in-flight states do not wake the application because they do not represent application-visible
-progress.
+`pending` means retained by the producing manager before publication; `stagePollResult(...)` accepts the complete
+manager result; and `deferred` means accepted by the reactor for routing at the beginning of the next iteration.
+`PendingManagerEvents` retains the greatest observed coordinator version for one event type so an older response
+cannot overwrite a newer pending observation. The coordinator owner still performs the final comparison against its
+current version.
 
-For paths migrated to `ReactorAction` or staged `BackgroundEvent`, the reactor publishes the corresponding state and
-schedule before the effect and its phase-coalesced application wakeup. Direct fetch-buffer signals, generic future
-completion, callback invokers, acknowledgement events, and timeout reaping remain Phase 3 compatibility paths. The
-target flow ensures cross-manager deadlines cannot hide one another and only real progress selects a synthetic wake.
+Other current implementation details include:
 
-## Compatibility, Deprecation, and Migration Plan
+- `ConsumerReactorGateway` names the application-side submit, wait, wake, schedule-read, and close boundary; it
+  replaces the less precise `ApplicationEventHandler` name without changing runtime behavior.
+- `FetchRequestManager.createFetchRequests()` retains at most one current waiter for equivalent fetch intent, so a
+  later preparation failure reaches that waiter without creating an unbounded waiter list.
+- the bounded `ManagerPollCache` stores only the current manager result and retained deadline; it does not retain
+  history. The existing maximum network poll timeout remains a safety safeguard rather than the semantic retry
+  interval for `awaitEvent()`.
 
 ### Phase 1: Establish the decision boundary
 
@@ -597,8 +521,8 @@ Exit evidence: multi-manager, stale-completion, regular-consumer, and share-cons
 
 ### Phase 3: Remove remaining direct application effects
 
-- Route remaining operation completions, data/event publication, callback requirements, and synthetic wakeups through
-  the publish-before-action boundary.
+- Route remaining operation completions, data/event publication, callback requirements, and internally selected
+  application wakeups through the publish-before-action boundary.
 - Combine equivalent wake actions across the complete reactor iteration, not separately at each execution phase.
 - Remove direct application completion and wakeup decisions from `NetworkClientDelegate` while retaining transport
   correlation locally.
@@ -618,12 +542,12 @@ target are migration exit criteria rather than claims about the current POC. Req
 
 - reconnect backoff creates no request or wake before its deadline and creates the request when the deadline expires;
 - an earlier heartbeat or commit deadline cannot erase or postpone a retained fetch deadline;
-- schedule publication occurs before pre-I/O and post-I/O actions;
+- schedule publication occurs before actions selected before network polling and after network completions;
 - repeated no-progress manager results do not produce a zero-timeout loop or wakeup ping-pong;
 - an empty zero-delay legacy `PollResult` is diagnosed and converted to an event wait in production, while finite
   retries and event waits produce the intended schedule;
 - current Phase 1 behavior combines equivalent wake reasons once per execution phase; the Phase 3 target combines
-  them into at most one primitive synthetic wakeup per complete reactor iteration;
+  them into at most one primitive application wakeup per complete reactor iteration;
 - heartbeat, auto-commit, fetch, coordinator, metadata, and share-acknowledgement tests distinguish progress,
   finite retry, and event-wait states without moving their local rules into the reactor;
 - a coordinator completion makes dependent work visible in the next ordered pass, and any resulting request is sent

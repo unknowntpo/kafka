@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "ConsumerReactor responsibility boundary",
+    "locale": "en",
+    "output": "kip-1371-reactor-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1280, 720],
+    "legend": { "mode": "hidden" },
+    "views": [
+      {
+        "id": "input-and-poll",
+        "label": "Input and manager pass",
+        "focus": ["applicationInput", "gateway", "reactor", "managers"],
+        "note": "Inputs enter the existing background loop, which polls managers in one fixed order."
+      },
+      {
+        "id": "timing-publication",
+        "label": "Timing publication",
+        "focus": ["managers", "reactor", "schedule"],
+        "note": "Manager deadlines are combined into one immutable wait decision."
+      },
+      {
+        "id": "effect-ordering",
+        "label": "Effect ordering",
+        "focus": ["schedule", "actions", "applicationEffects"],
+        "note": "Application-visible effects execute only after the corresponding schedule is visible."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "applicationInput",
+      "type": "external",
+      "label": "Application input",
+      "sublabel": "commands and acks",
+      "pos": [30, 280],
+      "size": [150, 72]
+    },
+    {
+      "id": "gateway",
+      "type": "frontend",
+      "label": "ConsumerReactorGateway",
+      "sublabel": "submit, wait, wake, close",
+      "pos": [230, 280],
+      "size": [170, 72]
+    },
+    {
+      "id": "reactor",
+      "type": "backend",
+      "label": "ConsumerReactor",
+      "sublabel": "ordering and final coordination",
+      "pos": [470, 280],
+      "size": [170, 78]
+    },
+    {
+      "id": "managers",
+      "type": "backend",
+      "label": "Request managers",
+      "sublabel": "local state and progress rules",
+      "pos": [760, 280],
+      "size": [175, 78]
+    },
+    {
+      "id": "network",
+      "type": "cloud",
+      "label": "NetworkClientDelegate",
+      "sublabel": "transport and correlation",
+      "pos": [1040, 280],
+      "size": [175, 76]
+    },
+    {
+      "id": "schedule",
+      "type": "database",
+      "label": "ReactorSchedule",
+      "sublabel": "immutable aggregate deadline",
+      "pos": [470, 500],
+      "size": [175, 78]
+    },
+    {
+      "id": "actions",
+      "type": "messagebus",
+      "label": "ReactorAction",
+      "sublabel": "complete, notify, wake",
+      "pos": [760, 500],
+      "size": [175, 78]
+    },
+    {
+      "id": "applicationEffects",
+      "type": "external",
+      "label": "Application-visible state",
+      "sublabel": "results, events, wakeup",
+      "pos": [1040, 500],
+      "size": [175, 76]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Existing background thread",
+      "wraps": ["reactor", "managers", "network", "schedule", "actions"],
+      "pad": 34
+    }
+  ],
+  "connections": [
+    {
+      "id": "submit-input",
+      "from": "applicationInput",
+      "to": "gateway"
+    },
+    {
+      "id": "admit-input",
+      "from": "gateway",
+      "to": "reactor",
+      "variant": "emphasis"
+    },
+    {
+      "id": "poll-managers",
+      "from": "reactor",
+      "to": "managers",
+      "label": "poll / PollResult",
+      "labelAt": [705, 260]
+    },
+    {
+      "id": "handoff-requests",
+      "from": "managers",
+      "to": "network",
+      "label": "unsent requests",
+      "labelAt": [1000, 260],
+      "variant": "dashed"
+    },
+    {
+      "id": "network-completion",
+      "from": "network",
+      "to": "reactor",
+      "label": "network completion",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [[1127.5, 210], [555, 210]],
+      "labelAt": [840, 190]
+    },
+    {
+      "id": "publish-schedule",
+      "from": "reactor",
+      "to": "schedule",
+      "label": "publish first",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [430, 445],
+      "variant": "emphasis"
+    },
+    {
+      "id": "schedule-before-action",
+      "from": "schedule",
+      "to": "actions",
+      "label": "visible before execution",
+      "labelAt": [705, 480],
+      "variant": "emphasis"
+    },
+    {
+      "id": "publish-effects",
+      "from": "actions",
+      "to": "applicationEffects",
+      "label": "complete / notify / wake",
+      "labelAt": [1000, 480],
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "State ownership",
+      "items": [
+        "Request managers retain mutable state and domain policy",
+        "The reactor coordinates owners rather than absorbing their rules"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Timing",
+      "items": [
+        "Every manager contributes one next-poll requirement",
+        "One immutable ReactorSchedule bounds the next wait"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Effects",
+      "items": [
+        "Requests go directly to the network layer",
+        "Application-visible actions execute after schedule publication"
+      ]
+    }
+  ]
+}
