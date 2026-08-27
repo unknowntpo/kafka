@@ -27,6 +27,12 @@ final class PendingManagerEvents {
     private final EnumMap<ManagerEvent.Type, ManagerEvent> events =
         new EnumMap<>(ManagerEvent.Type.class);
 
+    /**
+     * Retains the greatest observed coordinator version for events of the same type, so a delayed response cannot
+     * replace a newer pending observation. This only prevents this producer-local buffer from moving backwards;
+     * {@link CoordinatorRequestManager} remains the final authority and compares the observation with its current
+     * {@link CoordinatorSnapshot} when the event is routed.
+     */
     void add(final ManagerEvent event) {
         ManagerEvent previous = events.get(event.type());
         if (previous instanceof ManagerEvent.CoordinatorUnavailableObserved
