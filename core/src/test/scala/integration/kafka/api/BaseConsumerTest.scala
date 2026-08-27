@@ -16,19 +16,22 @@
  */
 package kafka.api
 
+import com.yammer.metrics.core.Meter
 import kafka.utils.TestInfoUtils
-import org.apache.kafka.clients.consumer.{Consumer, ConsumerConfig, GroupProtocol}
+import org.apache.kafka.clients.consumer.{Consumer, ConsumerConfig, ConsumerRecords, GroupProtocol}
 import org.apache.kafka.clients.producer.{KafkaProducer, ProducerConfig}
 import org.apache.kafka.common.{ClusterResource, ClusterResourceListener, PartitionInfo}
 import org.apache.kafka.common.internals.Topic
+import org.apache.kafka.common.protocol.ApiKeys
 import org.apache.kafka.common.serialization.{Deserializer, Serializer}
 import org.apache.kafka.server.config.ServerConfigs
+import org.apache.kafka.server.metrics.KafkaYammerMetrics
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.{BeforeEach, TestInfo}
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.MethodSource
 
-import java.util.Properties
+import java.util.{Properties, UUID}
 import java.util.concurrent.atomic.AtomicInteger
 import scala.jdk.CollectionConverters._
 import scala.collection.Seq
@@ -49,7 +52,10 @@ abstract class BaseConsumerTest extends AbstractConsumerTest {
   override protected def brokerPropertyOverrides(properties: Properties): Unit = {
     super.brokerPropertyOverrides(properties)
 
-    if (currentTestName != null && currentTestName.equals("testCoordinatorFailover")) {
+    if (currentTestName != null && Set(
+      "testCoordinatorFailover",
+      "testConsumerProtocolCoordinatorFailoverReactorRecovery"
+    ).contains(currentTestName)) {
       // Enable controlled shutdown to allow the broker to notify the controller before shutting down.
       // This speeds up the test by triggering an immediate failover instead of waiting for the
       // broker session timeout (default: 9s) to expire.
@@ -130,6 +136,85 @@ abstract class BaseConsumerTest extends AbstractConsumerTest {
 
     // the failover should not cause a rebalance
     ensureNoRebalance(consumer, listener)
+  }
+
+  /**
+   * Broker request meters prove that the real async-consumer path rediscovers the coordinator and resumes
+   * heartbeats. Consuming a record produced only after shutdown and completing a commit prove application-level
+   * recovery without relying on consumer internals.
+   */
+  @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedGroupProtocolNames)
+  @MethodSource(Array("getTestGroupProtocolParametersConsumerGroupProtocolOnly"))
+  def testConsumerProtocolCoordinatorFailoverReactorRecovery(groupProtocol: String): Unit = {
+    val listener = new TestConsumerReassignmentListener()
+    val overrides = new Properties()
+    assertEquals(GroupProtocol.CONSUMER.name.toLowerCase, groupProtocol.toLowerCase)
+    overrides.setProperty(ConsumerConfig.GROUP_PROTOCOL_CONFIG, groupProtocol)
+    overrides.setProperty(ConsumerConfig.GROUP_ID_CONFIG, s"reactor-coordinator-failover-${UUID.randomUUID()}")
+    overrides.setProperty(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, "30000")
+    val consumer = createConsumer(configOverrides = overrides)
+    val producer = createProducer()
+
+    val initialTimestamp = System.currentTimeMillis()
+    sendRecords(producer, 1, tp, startingTimestamp = initialTimestamp)
+    consumer.subscribe(java.util.List.of(topic), listener)
+    awaitRebalance(consumer, listener)
+    consumeAndVerifyRecords(
+      consumer,
+      numRecords = 1,
+      startingOffset = 0,
+      startingTimestamp = initialTimestamp
+    )
+    assertEquals(1, listener.callsToAssigned)
+    assertEquals(0, listener.callsToRevoked)
+
+    // Observe a heartbeat after assignment so shutdown begins from a stable, active membership.
+    val heartbeatBeforeStableWait = brokerRequestCount(ApiKeys.CONSUMER_GROUP_HEARTBEAT)
+    kafka.utils.TestUtils.pollUntilTrue(
+      consumer,
+      () => brokerRequestCount(ApiKeys.CONSUMER_GROUP_HEARTBEAT) > heartbeatBeforeStableWait,
+      "Timed out waiting for a stable consumer-group heartbeat before coordinator shutdown"
+    )
+
+    val coordinatorPartition = consumer.partitionsFor(Topic.GROUP_METADATA_TOPIC_NAME).asScala
+    assertEquals(1, coordinatorPartition.size)
+    assertNotNull(coordinatorPartition.head.leader())
+    val coordinatorBrokerId = coordinatorPartition.head.leader().id()
+
+    val findCoordinatorBeforeShutdown = brokerRequestCount(ApiKeys.FIND_COORDINATOR)
+    val heartbeatBeforeShutdown = brokerRequestCount(ApiKeys.CONSUMER_GROUP_HEARTBEAT)
+    brokers(coordinatorBrokerId).shutdown()
+
+    // This record cannot have been buffered before failover, so observing it proves post-shutdown progress.
+    sendRecords(producer, 1, tp)
+    var recoveredRecordObserved = false
+    kafka.utils.TestUtils.pollRecordsUntilTrue(
+      consumer,
+      (records: ConsumerRecords[Array[Byte], Array[Byte]]) => {
+        recoveredRecordObserved = recoveredRecordObserved || records.records(tp).asScala.exists(_.offset() >= 1L)
+        recoveredRecordObserved &&
+          brokerRequestCount(ApiKeys.FIND_COORDINATOR) > findCoordinatorBeforeShutdown &&
+          brokerRequestCount(ApiKeys.CONSUMER_GROUP_HEARTBEAT) > heartbeatBeforeShutdown
+      },
+      "Timed out waiting for coordinator rediscovery, resumed heartbeat, and post-failover consumption",
+      waitTimeMs = 60000L
+    )
+
+    sendAndAwaitAsyncCommit(consumer)
+    assertEquals(1, listener.callsToAssigned, "Coordinator failover must not cause a new assignment callback")
+    assertEquals(0, listener.callsToRevoked, "Coordinator failover must not revoke the stable assignment")
+  }
+
+  private def brokerRequestCount(apiKey: ApiKeys): Long = {
+    // RequestMetrics exposes one meter per protocol version. Summing only those meters avoids counting any
+    // compatibility aggregate in addition to the same request.
+    KafkaYammerMetrics.defaultRegistry.allMetrics.asScala.collect {
+      case (metricName, meter: Meter)
+        if metricName.getMBeanName.contains("type=RequestMetrics") &&
+          metricName.getMBeanName.contains("name=RequestsPerSec") &&
+          metricName.getMBeanName.contains(s"request=${apiKey.name}") &&
+          metricName.getMBeanName.contains("version=") => meter.count
+    }.sum
   }
 }
 
