@@ -115,20 +115,36 @@ Specifically, it defines:
 - the state-ownership boundary through which managers observe immutable snapshots but do not mutate peer state; and
 - the publish-before-action boundary for application-visible completion, publication, notification, and wakeup.
 
-The complete model is easiest to understand as one request lifecycle. Consider a heartbeat request which depends on
-the current coordinator:
+The complete model is easiest to understand as one request lifecycle. Consider a heartbeat request sent to the
+consumer group's coordinator node currently published by `CoordinatorRequestManager`:
 
 1. **Admit work from current truth.** The heartbeat manager reads
    `CoordinatorSnapshot(coordinator=node-1, version=7)`. It builds the request for `node-1` and captures version `7` as
    bounded context for that attempt.
 2. **Report what happened.** The response says that the coordinator is unavailable. The heartbeat manager does not
    mutate `CoordinatorRequestManager`. The response callback records
-   `ManagerEvent.CoordinatorUnavailableObserved(version=7, cause)`, and the post-I/O poll of the heartbeat manager
-   returns that event in its next `PollResult`. `ManagerEvent` is intentionally qualified because the existing
-   `ApplicationEvent` and `BackgroundEvent` types already describe cross-thread communication.
+   `ManagerEvent.CoordinatorUnavailableObserved(version=7, cause)` in its producer-local `PendingManagerEvents`.
+   The post-I/O poll publishes it as an element of `PollResult.managerEvents()`. The same `PollResult` may also carry
+   unsent requests, completed state transitions, and the manager's next-poll delay. `ManagerEvent` is intentionally
+   qualified because the existing `ApplicationEvent` and `BackgroundEvent` types already describe cross-thread
+   communication.
 3. **Route the fact to one owner.** `ConsumerReactor` defers the event. At the start of the next iteration, before
    draining application events, it routes deferred `ManagerEvent` values through the selected `RequestManagers`
-   composition. The coordinator owner interprets the observation and alone decides whether it permits a mutation.
+   composition to `CoordinatorRequestManager`. The coordinator owner interprets the observation and alone decides
+   whether it permits a mutation. The concrete path is:
+
+   ```text
+   PendingManagerEvents
+     -> PollResult.managerEvents()
+     -> ConsumerReactor.stagePollResult(...)
+     -> ConsumerReactor.deferredManagerEvents
+     -> RequestManagers.routeManagerEvents(...)
+     -> CoordinatorRequestManager.handleCoordinatorUnavailableObserved(...)
+   ```
+
+   These names describe successive phases rather than synonyms: `pending` is producer-local before publication;
+   `stagePollResult(...)` accepts the complete manager result; and `deferred` means the reactor has accepted the event
+   but intentionally routes it at the beginning of the next iteration.
 4. **Fence stale work.** `CoordinatorRequestManager` compares the observed version with its current snapshot. It
    applies version `7` only if version `7` is still current. If rediscovery has already published version `9`, the
    older observation is ignored and cannot invalidate the newer coordinator.
