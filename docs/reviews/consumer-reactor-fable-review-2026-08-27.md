@@ -226,3 +226,114 @@ Verification after the remediation:
 - Spotless, Checkstyle main/test, and SpotBugs main passed as part of the verification runs.
 
 A second independent Fable verdict will be appended below after the remediation is committed and pushed.
+
+---
+
+## Fable re-review response
+
+### Review metadata
+
+- Reviewed branch: `codex/async-consumer-reactor-poc`
+- Reviewed HEAD: `9164c413ae`
+- Reviewer: a fresh Claude Fable instance (`claude-fable-5`, effort `max`)
+- Mode: independent PMC-style, read-only review in an isolated clean clone
+- Verdict: **APPROVE WITH NON-BLOCKING FOLLOW-UPS**
+
+The reviewer was instructed to form an independent view from the KIP, diagrams, code, and tests before reading the
+earlier review or this resolution log. The response is recorded below; repeated absolute `file://` citations are
+normalized to repository-relative file and symbol names.
+
+### Executive summary and verdict
+
+Fable concluded that the implementation at exact HEAD `9164c413ae` fulfills the core architecture, concurrency,
+state-ownership, and stale-work-fencing requirements of the proposal. It identified these strengths:
+
+1. **Single-owner state and fenced cross-manager facts.** Coordinator-dependent requests capture an immutable
+   `CoordinatorSnapshot`; response handlers publish typed `CoordinatorUnavailableObserved` facts; the coordinator
+   owner rejects observations from an older version.
+2. **Deterministic timing publication and busy-spin prevention.** `ReactorSchedule` aggregates retained manager
+   deadlines, while malformed empty zero-delay results are counted and replaced with `awaitEvent()`.
+3. **Explicit publication boundaries.** Migrated `ReactorAction` and staged `BackgroundEvent` effects run only after
+   the corresponding schedule publication, with application wakeup last in each execution phase.
+4. **Fault isolation.** Manager polling and action failures cannot skip network I/O or suppress later independent
+   actions.
+5. **Shared kernel without consumer-type branching.** Regular, share, and Streams request-manager compositions use
+   the same reactor mechanism while retaining protocol-specific rules outside the kernel.
+
+Fable summarized the reviewed iteration as:
+
+```text
+route deferred ManagerEvent facts to their owners
+  -> process application events
+  -> run the full ordered manager pass
+  -> publish ReactorSchedule
+  -> publish staged BackgroundEvents and execute pre-I/O ReactorActions
+  -> NetworkClientDelegate.poll()
+  -> poll affected owners after I/O
+  -> republish schedule, events, and post-I/O actions
+  -> reap compatibility-path application events and drain selected final actions
+```
+
+### Verification of the previous findings
+
+| Previous finding | Fable's re-review conclusion |
+| --- | --- |
+| H1 stale post-I/O request | **Resolved.** Heartbeat, Streams heartbeat, and commit publish a pending coordinator observation with `awaitEvent()` before they can admit another request. `testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll` proves that no stale heartbeat is staged before routing and rediscovery. |
+| H2 overbroad publication invariant | **Resolved.** The KIP limits the current guarantee to `ReactorAction` and staged `BackgroundEvent`; direct fetch-buffer signals, generic futures, callback invokers, acknowledgement events, and timeout reaping are Phase 3 compatibility paths. |
+| H3 stale diagrams and dead transitions | **Resolved.** The diagrams describe the next full ordered pass, and the unused coordinator transition values were removed. |
+| M1 manager-factory exception visibility | **Resolved.** Manager polling failures are logged, counted, and converted to an event wait without synthesizing a user-visible `ErrorEvent` or skipping network I/O. |
+| M2 manager deadline withdrawal | **Resolved.** `awaitEvent()` withdraws the manager's obsolete finite deadline; a finite early re-poll still cannot move an unexpired deadline later. |
+| M3 wake-count claim | **Resolved.** The KIP and metric describe current per-phase coalescing and retain per-iteration coalescing as a Phase 3 goal. |
+| M4 evidence attribution | **Resolved.** The KIP separates mechanisms introduced by the POC, existing regression guards, and future migration evidence. |
+| M5/M6 test-plan and table status | **Resolved.** Current evidence and target exit criteria are labelled separately. |
+| M7 fetch waiter disclosure | **Resolved.** The bounded single-current-waiter and already-completed duplicate behavior are documented. |
+| M8 benchmark scope | **Resolved.** The older report is labelled historical preliminary evidence; current-HEAD throughput, allocation, and reconnect gates remain required for the later phase. |
+| Low-severity findings | **Resolved.** Fable confirmed the Gateway Javadoc, schedule-generation increment, dead coordinator API cleanup, phase description, compatibility wording, log rate limiting, and action-diagram changes. |
+
+### Test and evidence assessment
+
+Fable considered the layered evidence appropriate for the current foundational slice:
+
+- `ConsumerReactorTest` covers deterministic ordering, malformed-result handling, manager-failure isolation, deadline
+  retention, affected-owner polling, and the real-manager heartbeat invalidation chain;
+- `ManagerPollCacheTest`, `ReactorScheduleTest`, and `PendingManagerEventsTest` cover timing and bounded-event
+  invariants;
+- `AsyncKafkaConsumerTest` covers application integration, schedule generations, paused-partition wake suppression,
+  and retained fetch-preparation failure delivery; and
+- `BaseConsumerTest.testConsumerProtocolCoordinatorFailoverReactorRecovery` provides real-broker coordinator-loss,
+  rediscovery, resumed-heartbeat, consume, and commit evidence for `group.protocol=consumer`.
+
+### Non-blocking follow-ups
+
+1. **Phase 2 — subscription and assignment ownership.** Continue moving cross-thread assignment reconciliation and
+   position validation behind reactor-owned application events.
+2. **Phase 3 — one synthetic wake per iteration.** Replace the current pre-I/O, post-I/O, and final-drain coalescing
+   scopes after the remaining direct futures and publications move behind `ReactorAction`.
+3. **Phase 3 — current performance evidence.** Re-run throughput, allocation-per-record, and reconnect-recovery A/B
+   gates on the accepted implementation and integrate the harness with normal Kafka performance validation.
+
+### Open questions for community discussion
+
+1. Confirm whether `MAX_POLL_TIMEOUT_MS = 5000` is only a socket-poll safety ceiling or still acts as the scheduler
+   for any unmigrated manager, especially topic metadata.
+2. Define the eventual `RegularConsumerDriver`, `ShareConsumerDriver`, and `StreamsConsumerDriver` boundaries before
+   expanding the snapshot/event families.
+
+### Final verdict
+
+> **APPROVE WITH NON-BLOCKING FOLLOW-UPS**
+>
+> The implementation at exact HEAD `9164c413ae` fulfills the core architectural, concurrency, state ownership, and
+> fencing requirements. The previous H1-H3 and M1-M8 findings are resolved with focused regressions and accurate
+> current-versus-target documentation. Remaining work is cleanly scoped to later migration phases and does not block
+> approval of the foundational reactor kernel.
+
+### Recorder's accuracy notes
+
+Two symbol-level phrases in the generated response were broader or more literal than the implementation, without
+affecting the review reasoning or verdict:
+
+- Fable wrote that `ConsumerReactor.pollManager()` catches `Throwable`; the code intentionally catches
+  `RuntimeException`.
+- Fable described a `ManagerPollCache.withdrawPendingDeadline()` operation; the behavior exists, but it is implemented
+  directly in `PollState.update(...)` rather than as a method with that name.
