@@ -106,8 +106,17 @@ configuration or overload behavior requires a separately complete compatibility 
 ## Proposed Changes
 
 This KIP makes one responsibility change: `ConsumerReactor` becomes the only component that finalizes
-cross-manager scheduling and orders application-facing effects. It does not introduce a generic internal event bus.
-The target design uses the following vocabulary to keep cross-manager coordination rules explicit:
+cross-manager scheduling and orders application-facing effects. It extends the existing event-driven threading
+topology inside the background thread; it does not replace the application/background event queues or require every
+same-thread interaction to become an event. Specifically, `ConsumerReactor` defines:
+
+- the ordered phase in which application inputs and cross-manager facts are applied;
+- the stable manager pass whose results form one published `ReactorSchedule`;
+- the state-ownership boundary through which managers observe immutable snapshots but do not mutate peer state; and
+- the publish-before-action boundary for application-visible completion, publication, notification, and wakeup.
+
+It does not introduce a generic internal event bus. The target design uses the following vocabulary to keep
+cross-manager coordination rules explicit:
 
 | Form | Meaning | Ownership rule | Example |
 | --- | --- | --- | --- |
@@ -637,9 +646,14 @@ evaluation, and a dynamic dependency DAG are non-goals.
 
 - [KAFKA-14246](https://issues.apache.org/jira/browse/KAFKA-14246) and the
   [consumer threading refactor design](https://cwiki.apache.org/confluence/spaces/KAFKA/pages/217393224/Consumer+threading+refactor+design)
-  established the current application/background event topology. This proposal completes its cross-component
-  decision boundary.
+  deliberately introduced an event-driven communication boundary between the application and network threads. That
+  design did not attempt to model all same-thread request-manager coordination as events, so cross-manager progress,
+  lifecycle, scheduling, and application-visible effect decisions could remain distributed across managers and
+  completion paths. This KIP builds on that topology by defining `ConsumerReactor` as the background-thread
+  orchestrator and by making cross-manager ordering, state ownership, schedule publication, and action ordering
+  explicit; it does not reject or replace the original refactor.
 - [KIP-945](https://cwiki.apache.org/confluence/display/KAFKA/KIP-945%3A%2BUpdate%2Bthreading%2Bmodel%2Bfor%2BConsumer)
-  documents the broader threading-model intent and remains related history, not a prerequisite.
+  is a WIP proposal documenting the broader threading-model intent. It remains related history, not this KIP's
+  baseline or a prerequisite.
 - [KAFKA-20854 / PR #23014](https://github.com/apache/kafka/pull/23014) narrows one busy-loop cause. This proposal uses
   the same problem decomposition and generalizes the scheduling and action boundary across managers.
