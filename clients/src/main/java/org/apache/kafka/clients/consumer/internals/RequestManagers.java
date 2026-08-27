@@ -32,6 +32,7 @@ import org.slf4j.Logger;
 
 import java.io.Closeable;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -141,6 +142,28 @@ public class RequestManagers implements Closeable {
 
     public List<RequestManager> entries() {
         return entries;
+    }
+
+    /**
+     * Routes typed cross-manager facts to their mutable-state owner. This composition boundary owns the
+     * dependency mapping; the reactor controls when routing occurs but does not know which producer or consumer
+     * variant emitted an event. No event is exposed for peer managers to read from a shared queue.
+     */
+    void routeManagerEvents(final Collection<ManagerEvent> events) {
+        for (ManagerEvent event : events) {
+            switch (event.type()) {
+                case COORDINATOR_UNAVAILABLE_OBSERVED:
+                    ManagerEvent.CoordinatorUnavailableObserved observation =
+                        (ManagerEvent.CoordinatorUnavailableObserved) event;
+                    log.trace("Routing manager event {} to CoordinatorRequestManager", event);
+                    coordinatorRequestManager.ifPresentOrElse(
+                        manager -> manager.handleCoordinatorUnavailableObserved(observation),
+                        () -> log.debug("Ignoring {} from {} because no coordinator manager is configured",
+                            event.type(), event.source())
+                    );
+                    break;
+            }
+        }
     }
 
     /**

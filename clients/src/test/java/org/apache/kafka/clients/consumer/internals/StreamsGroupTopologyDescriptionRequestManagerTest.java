@@ -34,17 +34,18 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -66,6 +67,8 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
     @BeforeEach
     public void setUp() {
         coordinatorRequestManager = mock(CoordinatorRequestManager.class);
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
         membershipManager = mock(StreamsMembershipManager.class);
         when(membershipManager.groupId()).thenReturn(GROUP_ID);
         when(membershipManager.memberId()).thenReturn(MEMBER_ID);
@@ -214,8 +217,9 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
      * coordinator rediscovery should be triggered and the flag should remain set for retry.
      */
     @Test
-    public void testCoordinatorErrorTriggersRediscovery() {
-        when(coordinatorRequestManager.markCoordinatorUnknown(any(), anyLong())).thenReturn(true);
+    public void testCoordinatorErrorPublishesRequestSnapshotVersion() {
+        doReturn(new CoordinatorSnapshot(Optional.of(coordinatorNode), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
         for (final Errors error : new Errors[]{Errors.NOT_COORDINATOR, Errors.COORDINATOR_NOT_AVAILABLE}) {
             streamsRebalanceData.setWireTopologyDescription(
                 new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
@@ -230,12 +234,11 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
             assertTrue(streamsRebalanceData.topologyPushRequired(),
                 "Flag should remain set after " + error);
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
-            assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
-                manager.poll(time.milliseconds()).stateTransitions());
-            assertTrue(manager.poll(time.milliseconds()).stateTransitions().isEmpty(),
-                "coordinator invalidation must be published once");
+            assertCoordinatorUnavailableObserved(manager.poll(time.milliseconds()), 7L);
+            assertTrue(manager.poll(time.milliseconds()).managerEvents().isEmpty(),
+                "coordinator observation must be published once");
         }
-        verify(coordinatorRequestManager, times(2)).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
     }
 
     @Test
@@ -244,17 +247,18 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
             new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
         streamsRebalanceData.setTopologyPushRequired(true);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
-        when(coordinatorRequestManager.handleCoordinatorDisconnect(any(), anyLong())).thenReturn(true);
+        doReturn(new CoordinatorSnapshot(Optional.of(coordinatorNode), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
 
         final NetworkClientDelegate.UnsentRequest unsent =
             manager.poll(time.milliseconds()).unsentRequests.get(0);
         unsent.handler().onFailure(time.milliseconds(), DisconnectException.INSTANCE);
 
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
-        assertEquals(Set.of(StateTransition.COORDINATOR_INVALIDATED),
-            manager.poll(time.milliseconds()).stateTransitions());
-        assertTrue(manager.poll(time.milliseconds()).stateTransitions().isEmpty(),
-            "coordinator invalidation must be published once");
+        assertCoordinatorUnavailableObserved(manager.poll(time.milliseconds()), 7L);
+        assertTrue(manager.poll(time.milliseconds()).managerEvents().isEmpty(),
+            "coordinator observation must be published once");
+        verify(coordinatorRequestManager, never()).handleCoordinatorDisconnect(any(), anyLong());
     }
 
     /**
@@ -365,5 +369,14 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
                     .setThrottleTimeMs(throttleTimeMs)
             )
         );
+    }
+
+    private void assertCoordinatorUnavailableObserved(final NetworkClientDelegate.PollResult result,
+                                                      final long expectedCoordinatorVersion) {
+        assertEquals(1, result.managerEvents().size());
+        ManagerEvent.CoordinatorUnavailableObserved observation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
+        assertEquals(StreamsGroupTopologyDescriptionRequestManager.class.getSimpleName(), observation.source());
+        assertEquals(expectedCoordinatorVersion, observation.observedCoordinatorVersion());
     }
 }

@@ -181,6 +181,38 @@ public class CoordinatorRequestManagerTest {
     }
 
     @Test
+    public void testDelayedObservationCannotInvalidateRediscoveredCoordinator() {
+        CoordinatorRequestManager coordinatorManager = setupCoordinatorManager(GROUP_ID);
+
+        expectFindCoordinatorRequest(coordinatorManager, Errors.NONE);
+        long nodeOneVersion = coordinatorManager.coordinatorSnapshot().version();
+        ManagerEvent.CoordinatorUnavailableObserved delayedNodeOneObservation =
+            new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "node one rejected", 1L, nodeOneVersion);
+
+        assertTrue(coordinatorManager.markCoordinatorUnknown("replace node one", time.milliseconds()));
+        long unknownVersion = coordinatorManager.coordinatorSnapshot().version();
+        assertTrue(unknownVersion > nodeOneVersion);
+
+        time.sleep(RETRY_BACKOFF_MS);
+        node = new Node(2, "replacement", 9093);
+        expectFindCoordinatorRequest(coordinatorManager, Errors.NONE);
+        long nodeTwoVersion = coordinatorManager.coordinatorSnapshot().version();
+        assertTrue(nodeTwoVersion > unknownVersion);
+
+        assertFalse(coordinatorManager.handleCoordinatorUnavailableObserved(delayedNodeOneObservation));
+        Node currentCoordinator = coordinatorManager.coordinator().orElseThrow();
+        assertEquals(node.id(), Integer.parseInt(currentCoordinator.idString()));
+        assertEquals(node.host(), currentCoordinator.host());
+        assertEquals(node.port(), currentCoordinator.port());
+
+        ManagerEvent.CoordinatorUnavailableObserved currentNodeTwoObservation =
+            new ManagerEvent.CoordinatorUnavailableObserved("commit", "node two rejected", 2L, nodeTwoVersion);
+        assertTrue(coordinatorManager.handleCoordinatorUnavailableObserved(currentNodeTwoObservation));
+        assertTrue(coordinatorManager.coordinator().isEmpty());
+        assertTrue(coordinatorManager.coordinatorSnapshot().version() > nodeTwoVersion);
+    }
+
+    @Test
     public void testBackoffAfterRetriableFailure() {
         CoordinatorRequestManager coordinatorManager = setupCoordinatorManager(GROUP_ID);
         expectFindCoordinatorRequest(coordinatorManager, Errors.COORDINATOR_LOAD_IN_PROGRESS);

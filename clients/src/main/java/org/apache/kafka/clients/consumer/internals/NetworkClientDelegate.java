@@ -46,6 +46,8 @@ import org.slf4j.Logger;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Iterator;
@@ -340,6 +342,7 @@ public class NetworkClientDelegate implements AutoCloseable {
         public final long timeUntilNextPollMs;
         public final List<UnsentRequest> unsentRequests;
         private final Set<StateTransition> stateTransitions;
+        private final List<ManagerEvent> managerEvents;
 
         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
             this(timeUntilNextPollMs, unsentRequests, Set.of());
@@ -348,9 +351,17 @@ public class NetworkClientDelegate implements AutoCloseable {
         PollResult(final long timeUntilNextPollMs,
                    final List<UnsentRequest> unsentRequests,
                    final Set<StateTransition> stateTransitions) {
+            this(timeUntilNextPollMs, unsentRequests, stateTransitions, List.of());
+        }
+
+        PollResult(final long timeUntilNextPollMs,
+                   final List<UnsentRequest> unsentRequests,
+                   final Set<StateTransition> stateTransitions,
+                   final List<ManagerEvent> managerEvents) {
             this.timeUntilNextPollMs = timeUntilNextPollMs;
             this.unsentRequests = Collections.unmodifiableList(unsentRequests);
             this.stateTransitions = Set.copyOf(stateTransitions);
+            this.managerEvents = List.copyOf(managerEvents);
         }
 
         /**
@@ -360,13 +371,21 @@ public class NetworkClientDelegate implements AutoCloseable {
         static PollResult progress(final List<UnsentRequest> unsentRequests,
                                    final Set<StateTransition> stateTransitions,
                                    final long timeUntilNextPollMs) {
+            return progress(unsentRequests, stateTransitions, List.of(), timeUntilNextPollMs);
+        }
+
+        static PollResult progress(final List<UnsentRequest> unsentRequests,
+                                   final Set<StateTransition> stateTransitions,
+                                   final List<ManagerEvent> managerEvents,
+                                   final long timeUntilNextPollMs) {
             Objects.requireNonNull(unsentRequests, "Unsent requests must be non-null");
             Objects.requireNonNull(stateTransitions, "State transitions must be non-null");
-            if (unsentRequests.isEmpty() && stateTransitions.isEmpty())
-                throw new IllegalArgumentException("Progress requires a request or state transition");
+            Objects.requireNonNull(managerEvents, "Manager events must be non-null");
+            if (unsentRequests.isEmpty() && stateTransitions.isEmpty() && managerEvents.isEmpty())
+                throw new IllegalArgumentException("Progress requires a request, state transition, or manager event");
             if (timeUntilNextPollMs < 0L)
                 throw new IllegalArgumentException("Progress delay must be non-negative");
-            return new PollResult(timeUntilNextPollMs, List.copyOf(unsentRequests), stateTransitions);
+            return new PollResult(timeUntilNextPollMs, List.copyOf(unsentRequests), stateTransitions, managerEvents);
         }
 
         /** Reports no progress and a finite, positive delay before the manager should be polled again. */
@@ -397,10 +416,17 @@ public class NetworkClientDelegate implements AutoCloseable {
             return stateTransitions;
         }
 
+        List<ManagerEvent> managerEvents() {
+            return managerEvents;
+        }
+
         /** Generic contract used by the reactor while legacy constructor call sites are migrated incrementally. */
         boolean satisfiesProgressContract() {
             return timeUntilNextPollMs >= 0L
-                && (!unsentRequests.isEmpty() || !stateTransitions.isEmpty() || timeUntilNextPollMs > 0L);
+                && (!unsentRequests.isEmpty()
+                    || !stateTransitions.isEmpty()
+                    || !managerEvents.isEmpty()
+                    || timeUntilNextPollMs > 0L);
         }
 
         PollResult withStateTransitions(final Set<StateTransition> additionalTransitions) {
@@ -410,7 +436,17 @@ public class NetworkClientDelegate implements AutoCloseable {
             EnumSet<StateTransition> combinedTransitions = EnumSet.noneOf(StateTransition.class);
             combinedTransitions.addAll(stateTransitions);
             combinedTransitions.addAll(additionalTransitions);
-            return progress(unsentRequests, combinedTransitions, timeUntilNextPollMs);
+            return progress(unsentRequests, combinedTransitions, managerEvents, timeUntilNextPollMs);
+        }
+
+        PollResult withManagerEvents(final Collection<ManagerEvent> additionalEvents) {
+            if (additionalEvents.isEmpty())
+                return this;
+
+            List<ManagerEvent> combinedEvents = new ArrayList<>(managerEvents.size() + additionalEvents.size());
+            combinedEvents.addAll(managerEvents);
+            combinedEvents.addAll(additionalEvents);
+            return progress(unsentRequests, stateTransitions, combinedEvents, timeUntilNextPollMs);
         }
     }
 

@@ -72,6 +72,7 @@ import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.config.ConfigException;
+import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.InvalidGroupIdException;
@@ -2648,6 +2649,118 @@ public class AsyncKafkaConsumerTest {
         assertFalse(hasRequest(client, ApiKeys.FETCH));
         assertEquals(0, fetchBufferWakeups.get(),
             "A paused partition cannot make progress, so its empty preparation must not wake the fetch buffer");
+    }
+
+    @Test
+    public void testAsyncPollEventSurfacesRetainedFetchIntentPreparationFailure() throws Exception {
+        final Properties props = requiredConsumerConfig();
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        final ConsumerConfig config = new ConsumerConfig(props);
+
+        final LogContext realLogContext = new LogContext();
+        final TopicPartition topicPartition = new TopicPartition("topic1", 0);
+        final SubscriptionState subscriptions = new SubscriptionState(
+            realLogContext,
+            AutoOffsetResetStrategy.EARLIEST
+        );
+        final ConsumerMetadata realMetadata = new ConsumerMetadata(
+            0,
+            0,
+            Long.MAX_VALUE,
+            false,
+            false,
+            subscriptions,
+            realLogContext,
+            new ClusterResourceListeners()
+        );
+        final AtomicReference<AuthenticationException> preparationFailure = new AtomicReference<>();
+        final AtomicBoolean blockReactorPoll = new AtomicBoolean(false);
+        final CountDownLatch reactorPollBlocked = new CountDownLatch(1);
+        final CountDownLatch releaseReactorPoll = new CountDownLatch(1);
+        final MockClient client = new MockClient(time, realMetadata) {
+            @Override
+            public AuthenticationException authenticationException(final Node node) {
+                AuthenticationException failure = preparationFailure.getAndSet(null);
+                return failure == null ? super.authenticationException(node) : failure;
+            }
+
+            @Override
+            public List<ClientResponse> poll(final long timeoutMs, final long now) {
+                if (blockReactorPoll.compareAndSet(true, false)) {
+                    reactorPollBlocked.countDown();
+                    try {
+                        if (!releaseReactorPoll.await(5, TimeUnit.SECONDS))
+                            throw new AssertionError("Timed out waiting to release the reactor network poll");
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError("Interrupted while holding the reactor network poll", e);
+                    }
+                }
+                return super.poll(timeoutMs, now);
+            }
+        };
+        subscriptions.assignFromUser(Set.of(topicPartition));
+        subscriptions.seek(topicPartition, 0L);
+        client.updateMetadata(RequestTestUtils.metadataUpdateWithIds(
+            1,
+            Map.of(topicPartition.topic(), 1),
+            Map.of(topicPartition.topic(), Uuid.randomUuid())
+        ));
+        final Node leader = realMetadata.fetch().leaderFor(topicPartition);
+        assertNotNull(leader);
+        client.backoff(leader, 30_000L);
+
+        consumer = new AsyncKafkaConsumer<>(
+            realLogContext,
+            time,
+            config,
+            new StringDeserializer(),
+            new StringDeserializer(),
+            client,
+            subscriptions,
+            realMetadata
+        );
+        consumer.assign(Set.of(topicPartition));
+        consumer.seek(topicPartition, 0L);
+
+        final ApplicationEventHandler handler = consumer.applicationEventHandler();
+        final AsyncPollEvent retainedIntent = new AsyncPollEvent(
+            time.milliseconds() + 30_000L,
+            time.milliseconds()
+        );
+        handler.add(retainedIntent);
+        TestUtils.waitForCondition(retainedIntent::isComplete, "Initial retained fetch intent did not complete");
+        assertTrue(retainedIntent.error().isEmpty());
+
+        blockReactorPoll.set(true);
+        handler.wakeupReactor();
+        assertTrue(reactorPollBlocked.await(5, TimeUnit.SECONDS), "The reactor did not enter the controlled network poll");
+
+        final long generationBeforeFailure = handler.reactorScheduleGeneration();
+        preparationFailure.set(new AuthenticationException("one-shot preparation failure"));
+        final AtomicLong completionScheduleGeneration = new AtomicLong(-1L);
+        final AsyncPollEvent failingPoll = new AsyncPollEvent(
+            time.milliseconds() + 30_000L,
+            time.milliseconds()
+        ) {
+            @Override
+            public void completeExceptionally(final KafkaException error) {
+                completionScheduleGeneration.set(handler.reactorScheduleGeneration());
+                super.completeExceptionally(error);
+            }
+        };
+        try {
+            handler.add(failingPoll);
+            releaseReactorPoll.countDown();
+            TestUtils.waitForCondition(failingPoll::isComplete, "Retained fetch intent failure was not published");
+        } finally {
+            releaseReactorPoll.countDown();
+        }
+
+        AuthenticationException failure = assertInstanceOf(AuthenticationException.class, failingPoll.error().orElseThrow());
+        assertEquals("one-shot preparation failure", failure.getMessage());
+        assertTrue(completionScheduleGeneration.get() > generationBeforeFailure,
+            "The ReactorSchedule must be published before the application observes the preparation failure");
     }
 
     @Test
