@@ -162,15 +162,15 @@ digraph Kafka20253BeforeAfter {
       fillcolor="#fff7ed"
     ];
 
-    after_transition [
-      label="CoordinatorRequestManager reports\nCOORDINATOR_DISCOVERED",
+    after_owner_update [
+      label="CoordinatorRequestManager publishes\nthe newly discovered target",
       color="#10b981",
       fillcolor="#ecfdf5",
       penwidth=2
     ];
 
     after_heartbeat_retry [
-      label="ConsumerReactor re-polls heartbeat in the same phase\n→ heartbeat request can be created",
+      label="Next full ordered manager pass sees the target\n→ heartbeat request is staged before the next network poll",
       color="#10b981",
       fillcolor="#ecfdf5",
       penwidth=2.3
@@ -182,8 +182,8 @@ digraph Kafka20253BeforeAfter {
     after_heartbeat -> after_reactor [color="#2563eb"];
     after_reactor -> after_schedule [color="#8b5cf6"];
     after_schedule -> after_completion [color="#f97316"];
-    after_completion -> after_transition [color="#10b981"];
-    after_transition -> after_heartbeat_retry [color="#10b981"];
+    after_completion -> after_owner_update [color="#10b981"];
+    after_owner_update -> after_heartbeat_retry [color="#10b981"];
   }
 
   { rank=same; before_state; after_state; }

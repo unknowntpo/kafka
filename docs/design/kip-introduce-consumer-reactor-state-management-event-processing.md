@@ -77,15 +77,15 @@ correlating manager timers, in-flight state, the cached application wait, and th
 KAFKA-20253 is one instance of a recurring failure pattern. The affected features differ, but each case involved
 decisions made on separate paths that could observe different snapshots of consumer state.
 
-| Evidence | Observed failure | Decisions split across paths |
-| --- | --- | --- |
-| [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885), [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | An older position-initialization completion could affect a partition added while its request was in flight. | Assignment changes, the captured partition scope, and completion handling. |
-| [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737), [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Position and consumed-state publication could race with commit or application observation. | State mutation, publication, and dependent observation. |
-| [KAFKA-20426 / PR 22018](https://github.com/apache/kafka/pull/22018), [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) | Heartbeat urgency produced a zero wait while coordinator, assignment, or in-flight state made progress impossible. | Manager deadlines, progress blockers, application waiting, and network polling. |
-| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. | Fetch result classification, application waiting, and synthetic wakeup. |
-| [KAFKA-20397 / PR 21991](https://github.com/apache/kafka/pull/21991) | Metadata-error publication raced with an application thread entering its fetch-buffer wait. | Error publication, retained notification, and wait entry. |
-| [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) | Wakeup or interruption could skip callback acknowledgement. | Interruption, callback completion, and lifecycle handling. |
-| [KAFKA-19357 / PR 19914](https://github.com/apache/kafka/pull/19914), [KAFKA-18569 / PR 18590](https://github.com/apache/kafka/pull/18590) | During close, coordinator discovery could stop while a pending commit still required it, or continue after commit and leave work no longer required it. | Pending-operation dependencies, coordinator discovery, and shutdown progress. |
+| Evidence | Observed failure | Decisions split across paths | Role in this KIP |
+| --- | --- | --- | --- |
+| [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885), [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | An older position-initialization completion could affect a partition added while its request was in flight. | Assignment changes, the captured partition scope, and completion handling. | Existing fix retained as a regression guard; motivates versioned scope rather than claiming a new fix. |
+| [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737), [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Position and consumed-state publication could race with commit or application observation. | State mutation, publication, and dependent observation. | Phase 3 migration target for completion and data-publication paths not yet represented by `ReactorAction`. |
+| [KAFKA-20426 / PR 22018](https://github.com/apache/kafka/pull/22018), [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) | Heartbeat urgency produced a zero wait while coordinator, assignment, or in-flight state made progress impossible. | Manager deadlines, progress blockers, application waiting, and network polling. | Current `PollResult` progress contract and timing-publication evidence. |
+| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. | Fetch result classification, application waiting, and synthetic wakeup. | Existing fix retained as a regression guard; the POC generalizes the result contract and removes paused-fetch periodic polling. |
+| [KAFKA-20397 / PR 21991](https://github.com/apache/kafka/pull/21991) | Metadata-error publication raced with an application thread entering its fetch-buffer wait. | Error publication, retained notification, and wait entry. | Current staged `BackgroundEvent` publish-before-wake evidence. |
+| [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) | Wakeup or interruption could skip callback acknowledgement. | Interruption, callback completion, and lifecycle handling. | Phase 3 target for callback-acknowledgement and generic future completion paths. |
+| [KAFKA-19357 / PR 19914](https://github.com/apache/kafka/pull/19914), [KAFKA-18569 / PR 18590](https://github.com/apache/kafka/pull/18590) | During close, coordinator discovery could stop while a pending commit still required it, or continue after commit and leave work no longer required it. | Pending-operation dependencies, coordinator discovery, and shutdown progress. | Cross-manager lifecycle evidence; not claimed as caused by peer calls or fully remediated in Phase 1. |
 
 These bugs establish the problem and the regression scenarios that the Test Plan must cover. The proposed ownership
 model and mechanisms are introduced in Proposed Changes.
@@ -103,7 +103,8 @@ The initial migration changes no Kafka protocol, public `Consumer` or `ShareCons
 guarantee, runtime thread name, or existing metric name. `Consumer.wakeup()` retains its current user-visible
 semantics. The coordination types described in Proposed Changes are internal. The implementation adds four consumer
 diagnostic counters: `reactor-poll-result-contract-violation-total`, `reactor-manager-poll-failure-total`,
-`reactor-action-failure-total`, and `reactor-application-wakeup-total`. Any future public capacity configuration or
+`reactor-action-failure-total`, and `reactor-application-wakeup-total` (one count per phase-coalesced primitive wake).
+Any future public capacity configuration or
 overload behavior requires a separately complete compatibility proposal.
 
 ## Proposed Changes
@@ -117,7 +118,8 @@ Specifically, it defines:
 - the stable manager pass whose results form one published `ReactorSchedule` timing snapshot;
 - the state-ownership boundary through which managers observe immutable snapshots but do not mutate state owned by a
   different manager or driver; and
-- the publish-before-action boundary for application-visible completion, publication, notification, and wakeup.
+- the publish-before-action boundary currently used by `ReactorAction` and staged `BackgroundEvent` values, with
+  remaining application-visible completion and data-publication paths migrated in Phase 3.
 
 The complete model is easiest to understand as one request lifecycle. Consider a heartbeat request sent to the
 consumer group's coordinator node currently published by `CoordinatorRequestManager`:
@@ -194,8 +196,10 @@ The design relies on three invariants:
    effect ordering, not the managers' domain policy.
 2. Every synthetic wakeup or reschedule names a real state transition, positive deadline, completion, application
    command, or capacity change. An empty manager result cannot request an immediate retry.
-3. State and the resulting `ReactorSchedule` are published before completing futures, publishing data or events, or
-   waking the application.
+3. Effects represented by `ReactorAction` and staged `BackgroundEvent` values execute only after the corresponding
+   `ReactorSchedule` publication. Existing fetch-buffer signals, generic application-event futures, callback
+   invokers, acknowledgement events, and timeout reaping remain compatibility paths until their Phase 3 migration;
+   this KIP does not claim that they already cross the same boundary.
 
 The goals are to centralize cross-manager ordering, scheduling, and synthetic notification decisions without moving
 manager-local state or regular/share consumer rules into the reactor; derive application waits and network poll
@@ -205,6 +209,8 @@ incrementally with deterministic correctness and performance evidence.
 This KIP does not change the number or placement of application and background threads, combine regular and share
 consumer state machines, move user callbacks onto the reactor thread, retrofit `ClassicKafkaConsumer`, rewrite every
 request manager in one patch, or define new public queue-capacity and overload configuration.
+Behavior-equivalent refactoring of shared fetch/network timing helpers may touch classes also used by the classic
+consumer; the classic execution path is not routed through `ConsumerReactor` and gains no new reactor semantics.
 
 The following sections define how this model is applied within the existing consumer implementation.
 
@@ -223,9 +229,10 @@ are:
   after network completion and when the next full ordered pass observes cross-manager state;
 - the earliest retained manager deadline, the resulting network poll timeout, and the application wait projection;
 - the ordering of completed state transitions and the `ReactorAction` values they require; and
-- publication of `ReactorSchedule` before completing futures, publishing data or errors, or issuing a retained
-  application wakeup. The target combines equivalent wake reasons once per complete iteration; the current POC does
-  so separately at each action-execution phase.
+- publication of `ReactorSchedule` before executing `ReactorAction` values, publishing staged `BackgroundEvent`
+  values, or issuing their retained application wakeup. Phase 3 extends this boundary to the remaining direct
+  future-completion and data-publication paths. The target combines equivalent wake reasons once per complete
+  iteration; the current POC does so separately at each action-execution phase.
 
 Request managers continue to own their local state and rules. `NetworkClientDelegate` retains transport and
 correlation responsibilities, and user callbacks remain on the application thread.
@@ -380,25 +387,32 @@ Examples across managers are shown below. Related evidence names the historical 
 that regression. Control and general cases demonstrate the same result invariant but are not claimed as separate
 historical bugs.
 
-| Manager state | Result | Related evidence |
-| --- | --- | --- |
-| Heartbeat is due but coordinator discovery is in flight | `awaitEvent()`; the discovery completion is the enabling event. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
-| Heartbeat is due and can be constructed | `progress([heartbeatRequest], [], heartbeatIntervalMs)` and record the request as in flight. | Control case for KAFKA-20253 |
-| Auto-commit is due but an earlier commit is in flight | `awaitEvent()`; do not return an empty zero-delay result. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
-| Coordinator retry backoff has 75 ms remaining | `retryAfter(75)` | General finite-retry case |
-| Fetch preparation finds data already buffered | `progress([], [FETCH_BUFFER_HAS_DATA], WAIT_FOREVER)` | [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) |
-| Fetch request is in flight | `awaitEvent()` | KAFKA-20854 control case |
-| Topic-metadata request is in retry backoff | `retryAfter(remainingBackoffMs)` | General finite-retry case |
-| Share acknowledgement request is in flight | `awaitEvent()` | General share-consumer case |
-| Membership manager is waiting for a callback acknowledgement | `awaitEvent()` | [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) |
+| Manager state | Result | Status | Related evidence |
+| --- | --- | --- | --- |
+| Heartbeat is due but coordinator discovery is in flight | `awaitEvent()`; the discovery completion is the enabling event. | Current POC | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
+| Heartbeat is due and can be constructed | `progress([heartbeatRequest], [], heartbeatIntervalMs)` and record the request as in flight. | Current POC | Control case for KAFKA-20253 |
+| Auto-commit is due but an earlier commit is in flight | `awaitEvent()`; do not return an empty zero-delay result. | Target migration; the current application wait remains a compatibility path. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
+| Coordinator retry backoff has 75 ms remaining | `retryAfter(75)` | Current POC | General finite-retry case |
+| Fetch preparation finds data already buffered | `progress([], [FETCH_BUFFER_HAS_DATA], WAIT_FOREVER)` | Current POC | [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) |
+| Fetch request is in flight | `awaitEvent()` | Current POC | KAFKA-20854 control case |
+| Topic-metadata request is in retry backoff | `retryAfter(remainingBackoffMs)` | Target migration; current code relies on compatibility wakeups. | General finite-retry case |
+| Share acknowledgement request is in flight | `awaitEvent()` | Existing behavior retained by the POC. | General share-consumer case |
+| Membership manager is waiting for a callback acknowledgement | `awaitEvent()` | Target migration. | [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) |
 
 Strict factories validate only the generic shape. While legacy constructors remain, the reactor also enforces the
 shape in production. An empty zero-delay legacy result increments
-`reactor-poll-result-contract-violation-total`, identifies the manager in the log, and is replaced by an event wait so
-it cannot force `NetworkClientDelegate.poll(0)`. An unexpected manager polling failure is similarly isolated,
-published to the application as an error, and counted without skipping network I/O. These checks do not infer why a
+`reactor-poll-result-contract-violation-total`, identifies the manager once per continuous violation in the log, and
+is replaced by an event wait so it cannot force `NetworkClientDelegate.poll(0)`. The metric still counts every
+observed violation. An unexpected manager polling failure is similarly isolated,
+logged, and counted without skipping network I/O; it is not converted into a new user-visible exception. These checks do not infer why a
 heartbeat, commit, fetch, coordinator, or share acknowledgement can or cannot make progress; that decision remains
 manager-local.
+
+`FetchRequestManager.createFetchRequests()` coalesces equivalent retained fetch intent without building an unbounded
+waiter list. At most one current caller waits for the next preparation outcome. Additional callers complete once an
+equivalent intent is already retained; a later preparation failure is delivered to the single current waiter and as
+the existing fetch-preparation transition, not retroactively to already-completed duplicate calls. Tests lock this
+completion contract while the broader application-event completion migration remains Phase 3 work.
 
 ### 3. Preserve operation identity and shared dependencies
 
@@ -473,6 +487,8 @@ The published schedule satisfies these properties:
 
 - the same published `ReactorSchedule` exposes the network-poll and application-wait projections;
 - a newly shorter deadline is visible before releasing a waiter using an older snapshot;
+- an early finite re-poll cannot move that manager's unexpired deadline later, while an explicit `awaitEvent()`
+  withdraws the manager's prior deadline because time alone can no longer make it runnable;
 - an expired deadline is consumed by polling its manager again, not by repeatedly waking the application;
 - an event-only wait does not create periodic wakeups.
 
@@ -539,9 +555,10 @@ I/O returns early. At 100 ms, the reactor polls the fetch manager again and crea
 intent. Backoff and in-flight states do not wake the application because they do not represent application-visible
 progress.
 
-When data becomes available, the reactor publishes the corresponding state and schedule before the data/completion
-action and any deduplicated application wakeup. This single flow covers the two central requirements: cross-manager
-deadlines cannot hide one another, and only real progress notifies the application.
+For paths migrated to `ReactorAction` or staged `BackgroundEvent`, the reactor publishes the corresponding state and
+schedule before the effect and its phase-coalesced application wakeup. Direct fetch-buffer signals, generic future
+completion, callback invokers, acknowledgement events, and timeout reaping remain Phase 3 compatibility paths. The
+target flow ensures cross-manager deadlines cannot hide one another and only real progress selects a synthetic wake.
 
 ## Compatibility, Deprecation, and Migration Plan
 
@@ -596,7 +613,8 @@ Each phase leaves the repository runnable and can be reverted independently.
 
 ## Test Plan
 
-Tests assert observable event-processing behavior rather than private method coverage. Required coverage includes:
+Tests assert observable event-processing behavior rather than private method coverage. Items explicitly marked
+target are migration exit criteria rather than claims about the current POC. Required coverage includes:
 
 - reconnect backoff creates no request or wake before its deadline and creates the request when the deadline expires;
 - an earlier heartbeat or commit deadline cannot erase or postpone a retained fetch deadline;
@@ -604,7 +622,8 @@ Tests assert observable event-processing behavior rather than private method cov
 - repeated no-progress manager results do not produce a zero-timeout loop or wakeup ping-pong;
 - an empty zero-delay legacy `PollResult` is diagnosed and converted to an event wait in production, while finite
   retries and event waits produce the intended schedule;
-- one complete reactor iteration combines equivalent wake reasons into at most one primitive synthetic wakeup;
+- current Phase 1 behavior combines equivalent wake reasons once per execution phase; the Phase 3 target combines
+  them into at most one primitive synthetic wakeup per complete reactor iteration;
 - heartbeat, auto-commit, fetch, coordinator, metadata, and share-acknowledgement tests distinguish progress,
   finite retry, and event-wait states without moving their local rules into the reactor;
 - a coordinator completion makes dependent work visible in the next ordered pass, and any resulting request is sent
@@ -612,15 +631,19 @@ Tests assert observable event-processing behavior rather than private method cov
 - a request target and its owner version come from one immutable snapshot;
 - an observation captured from an older coordinator version cannot invalidate a later coordinator, while an
   observation matching the current version is applied;
-- every manager consuming an opt-in owner-published view in one ordered pass uses the same captured snapshot version;
-- pending `ManagerEvent` values remain latest-only and bounded, the owner retains only its current published snapshot,
-  and in-flight work retains a version and bounded scope rather than snapshot history;
-- no request manager directly invokes a mutation API owned by a different manager or driver;
+- target: every manager consuming an opt-in owner-published view in one ordered pass uses the same captured snapshot
+  version;
+- current coordinator slice: pending `ManagerEvent` values remain latest-only and bounded, the owner retains only
+  its current `CoordinatorSnapshot`, and in-flight work retains a version rather than snapshot history; target:
+  equivalent evidence accompanies each additional snapshot family;
+- target: no request manager directly invokes a mutation API owned by a different manager or driver; explicitly
+  defined calls inside a regular, share, or Streams protocol driver remain permitted;
 - an older offset-fetch completion cannot mutate a partition outside its captured scope;
 - regular and share paths use the same kernel without consumer-type branches;
-- callback, interruption, cancellation, and close produce exactly one terminal outcome, including an async-poll
-  completion selected immediately before close;
-- broker stop/restart and coordinator loss make progress without application polling as a scheduler.
+- current: close preserves an async-poll completion selected immediately before close; target: callback,
+  interruption, cancellation, and every application-event family produce exactly one terminal outcome;
+- a real broker test proves public coordinator-loss recovery under the normal application poll loop, while a
+  deterministic component test proves the internal deferred-event routing and next-network-poll ordering.
 
 Each issue cited in Motivation requires a deterministic reproduction through the relevant production components. In
 particular, `AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion` exercises the

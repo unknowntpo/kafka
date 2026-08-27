@@ -82,13 +82,13 @@ digraph Kafka20253Progress {
     fillcolor="#fff7ed",
     color="#f97316"
   ];
-  transition [
-    label="Coordinator PollResult\nstateTransition = COORDINATOR_DISCOVERED",
+  owner_update [
+    label="Coordinator owner publishes\nthe newly discovered target",
     fillcolor="#eff6ff",
     color="#3b82f6"
   ];
-  recheck [
-    label="ConsumerReactor re-polls heartbeat\nin the same post-I/O phase",
+  next_pass [
+    label="Next full ordered manager pass\nobserves the current coordinator snapshot",
     fillcolor="#dbeafe",
     color="#2563eb"
   ];
@@ -102,7 +102,7 @@ digraph Kafka20253Progress {
   in_flight [label="in-flight fact", shape=box, style=filled, fillcolor="white", color="white", fontsize=11, margin="0.05,0.03"];
   no_action [label="publish schedule; execute no action", shape=box, style=filled, fillcolor="white", color="white", fontsize=11, margin="0.05,0.03"];
   progress [label="real progress input", shape=box, style=filled, fillcolor="white", color="white", fontsize=11, margin="0.05,0.03"];
-  typed [label="typed cross-manager change", shape=box, style=filled, fillcolor="white", color="white", fontsize=11, margin="0.05,0.03"];
+  published [label="owner-local truth published", shape=box, style=filled, fillcolor="white", color="white", fontsize=11, margin="0.05,0.03"];
 
   input -> heartbeat;
   input -> coordinator;
@@ -114,8 +114,8 @@ digraph Kafka20253Progress {
   no_action -> no_loop;
   no_loop -> progress [arrowhead=none];
   progress -> completion;
-  completion -> transition;
-  transition -> typed [arrowhead=none];
-  typed -> recheck;
-  recheck -> request;
+  completion -> owner_update;
+  owner_update -> published [arrowhead=none];
+  published -> next_pass;
+  next_pass -> request;
 }
