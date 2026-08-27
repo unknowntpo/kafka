@@ -75,6 +75,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -501,52 +502,107 @@ public class ConsumerReactorTest {
     @Test
     public void testCoordinatorInvalidationIsObservedByCoordinatorOnNextFullPass() {
         long currentTimeMs = time.milliseconds();
-        NetworkClientDelegate.UnsentRequest heartbeatRequest = new NetworkClientDelegate.UnsentRequest(
-            mock(AbstractRequest.Builder.class),
+        String groupId = "group-id";
+        Node coordinatorNode = new Node(1, "localhost", 9092);
+        CoordinatorRequestManager realCoordinatorRequestManager = spy(new CoordinatorRequestManager(
+            new LogContext(), 100L, 1_000L, groupId));
+        NetworkClientDelegate.UnsentRequest initialDiscovery =
+            realCoordinatorRequestManager.poll(currentTimeMs).unsentRequests.get(0);
+        initialDiscovery.handler().onComplete(
+            buildCoordinatorResponse(initialDiscovery, coordinatorNode, groupId));
+        realCoordinatorRequestManager.poll(currentTimeMs);
+        assertTrue(realCoordinatorRequestManager.coordinator().isPresent());
+
+        ConsumerHeartbeatRequestManager localHeartbeatRequestManager =
+            mock(ConsumerHeartbeatRequestManager.class);
+        OffsetsRequestManager localOffsetsRequestManager = mock(OffsetsRequestManager.class);
+        TopicMetadataRequestManager localTopicMetadataRequestManager =
+            mock(TopicMetadataRequestManager.class);
+        FetchRequestManager localFetchRequestManager = mock(FetchRequestManager.class);
+        when(localOffsetsRequestManager.poll(anyLong()))
+            .thenReturn(NetworkClientDelegate.PollResult.awaitEvent());
+        when(localTopicMetadataRequestManager.poll(anyLong()))
+            .thenReturn(NetworkClientDelegate.PollResult.awaitEvent());
+        when(localFetchRequestManager.poll(anyLong()))
+            .thenReturn(NetworkClientDelegate.PollResult.awaitEvent());
+        RequestManagers localRequestManagers = new RequestManagers(
+            new LogContext(),
+            localOffsetsRequestManager,
+            localTopicMetadataRequestManager,
+            localFetchRequestManager,
+            Optional.of(realCoordinatorRequestManager),
+            Optional.empty(),
+            Optional.of(localHeartbeatRequestManager),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
             Optional.empty()
         );
-        NetworkClientDelegate.UnsentRequest findCoordinatorRequest = new NetworkClientDelegate.UnsentRequest(
+
+        NetworkClientDelegate.UnsentRequest heartbeatRequest = new NetworkClientDelegate.UnsentRequest(
             mock(AbstractRequest.Builder.class),
             Optional.empty()
         );
         NetworkClientDelegate.PollResult heartbeatInFlight =
             new NetworkClientDelegate.PollResult(heartbeatRequest);
-        NetworkClientDelegate.PollResult coordinatorInvalidated = new NetworkClientDelegate.PollResult(
-            NetworkClientDelegate.PollResult.WAIT_FOREVER,
-            List.of(),
-            Set.of(StateTransition.COORDINATOR_INVALIDATED)
-        );
-        NetworkClientDelegate.PollResult rediscovery =
-            new NetworkClientDelegate.PollResult(findCoordinatorRequest);
-
-        when(requestManagers.entries()).thenReturn(
-            List.of(coordinatorRequestManager, heartbeatRequestManager)
-        );
-        doReturn(NetworkClientDelegate.PollResult.EMPTY, rediscovery)
-            .when(coordinatorRequestManager).poll(currentTimeMs);
+        NetworkClientDelegate.PollResult coordinatorInvalidated =
+            NetworkClientDelegate.PollResult.awaitEvent().withManagerEvents(List.of(
+                new ManagerEvent.CoordinatorUnavailableObserved(
+                    ConsumerHeartbeatRequestManager.class.getSimpleName(),
+                    "heartbeat rejected coordinator",
+                    currentTimeMs,
+                    realCoordinatorRequestManager.coordinatorSnapshot().version()
+                )
+            ));
         doReturn(heartbeatInFlight, coordinatorInvalidated, NetworkClientDelegate.PollResult.awaitEvent())
-            .when(heartbeatRequestManager).poll(currentTimeMs);
+            .when(localHeartbeatRequestManager).poll(anyLong());
+
+        NetworkClientDelegate localNetworkClientDelegate = mock(NetworkClientDelegate.class);
+        AtomicReference<NetworkClientDelegate.UnsentRequest> findCoordinatorRequest = new AtomicReference<>();
+        doAnswer(invocation -> {
+            List<NetworkClientDelegate.UnsentRequest> requests = invocation.getArgument(0);
+            for (NetworkClientDelegate.UnsentRequest request : requests) {
+                if (request.requestBuilder() instanceof FindCoordinatorRequest.Builder)
+                    findCoordinatorRequest.set(request);
+            }
+            return null;
+        }).when(localNetworkClientDelegate).addAll(anyList());
         doAnswer(invocation -> {
             heartbeatRequest.future().complete(null);
             return null;
-        }).doNothing().when(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
+        }).doAnswer(invocation -> {
+            assertTrue(findCoordinatorRequest.get() != null,
+                "rediscovery must be staged before the next network poll");
+            return null;
+        }).when(localNetworkClientDelegate).poll(anyLong(), anyLong());
 
-        consumerReactor.runOnce();
+        ConsumerReactor localReactor = new ConsumerReactor(
+            new LogContext(),
+            time,
+            new LinkedBlockingQueue<>(),
+            mock(CompletableEventReaper.class),
+            () -> mock(ApplicationEventProcessor.class),
+            () -> localNetworkClientDelegate,
+            () -> localRequestManagers,
+            asyncConsumerMetrics
+        );
+        localReactor.initializeResources();
 
-        verify(networkClientDelegate, never()).addAll(rediscovery.unsentRequests);
-        verify(coordinatorRequestManager).poll(currentTimeMs);
+        localReactor.runOnce();
+        assertTrue(realCoordinatorRequestManager.coordinator().isPresent(),
+            "the post-I/O manager event is deferred to the next full pass");
+        assertTrue(findCoordinatorRequest.get() == null);
+        verify(realCoordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
 
-        consumerReactor.runOnce();
+        // The coordinator owner retains its normal retry policy; wait beyond the jittered 100 ms backoff.
+        time.sleep(200L);
+        localReactor.runOnce();
 
-        InOrder networkOrder = inOrder(networkClientDelegate);
-        networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
-        networkOrder.verify(networkClientDelegate).addAll(rediscovery.unsentRequests);
-        networkOrder.verify(networkClientDelegate).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
-        verify(networkClientDelegate, times(2)).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, currentTimeMs);
-        verify(heartbeatRequestManager, times(3)).poll(currentTimeMs);
-        verify(coordinatorRequestManager, times(2)).poll(currentTimeMs);
-        verify(networkClientDelegate).addAll(rediscovery.unsentRequests);
-        verify(requestManagers, never()).wakeupApplicationThread();
+        assertTrue(realCoordinatorRequestManager.coordinator().isEmpty());
+        verify(localNetworkClientDelegate, times(2)).poll(anyLong(), anyLong());
+        verify(localHeartbeatRequestManager, times(3)).poll(anyLong());
+        verify(realCoordinatorRequestManager).markCoordinatorUnknown(
+            "heartbeat rejected coordinator", currentTimeMs);
     }
 
     private ClientResponse buildCoordinatorResponse(final NetworkClientDelegate.UnsentRequest request,
