@@ -3,7 +3,7 @@
 ## Status
 
 This is an experimental design for branch `codex/reactor-readiness-model-slice`, based on
-`codex/async-consumer-reactor-poc` commit `fd6ce3bc1d2664f35b7fe3c7b7c899e7da37eb33`.
+`codex/async-consumer-reactor-poc` commit `0f27b10e2f` and reviewed after merging that baseline at `cb8d3c7f06`.
 
 It is not part of the main KIP. Code must prove the model before the main proposal adopts it. If the proof needs more
 machinery than the failure requires, delete the experiment.
@@ -12,8 +12,8 @@ machinery than the failure requires, delete the experiment.
 | --- | --- |
 | Question and delete unnecessary mechanisms | Passed |
 | Coordinator and Commit code slice | Passed |
-| Heartbeat dry run | Passed; no framework required |
-| Independent review | Pending |
+| Heartbeat analysis | Complete; no code proof and no framework added |
+| Independent review | Merge with follow-ups; required documentation and vertical-test findings addressed below |
 
 ## Decision
 
@@ -29,15 +29,19 @@ This combines the useful parts of the two reviewed designs without combining the
 
 ### The concrete failure
 
-The same manager can encode the same eligibility rule twice:
+The same manager can encode the same eligibility rule twice. Before this slice, the auto-commit path safely avoided a
+duplicate commit, but used a finite timer fallback while the earlier commit remained in flight:
 
 ```text
 auto-commit action: cannot run because an earlier commit is in flight
-application wait: timer expired, therefore wait 0
+application wait: retry after autoCommitInterval
 ```
 
-The first answer prevents duplicate work. The second can create a zero-timeout loop. Reactor boundary validation can
-contain the invalid result, but it cannot remove the duplicated predicate that produced it.
+This is not an existing zero-timeout bug: the KAFKA-20253 guard already prevented that failure. The remaining design
+problem is duplicated feasibility logic and an arbitrary periodic recheck for work that only a completion can enable.
+This slice derives both answers from one state projection and replaces that timer fallback with
+`AwaitInput(NETWORK_COMPLETION)`. Production `PollResult` validation remains necessary for legacy and unmigrated
+manager outputs.
 
 ### What remains necessary
 
@@ -202,18 +206,21 @@ The proof covers:
 | --- | --- |
 | FindCoordinator is sent | Exactly one command; post-send condition is `AwaitInput(NETWORK_COMPLETION)`. |
 | FindCoordinator remains in flight | No duplicate command and no timer retry. |
-| Auto-commit timer expires while a commit is in flight | No duplicate commit; application wait is input-driven, not zero. |
-| Empty output requests immediate polling | Production boundary rejects it. |
-| Old coordinator response arrives after rediscovery | Current coordinator remains unchanged. |
-| Manager event creates an application effect | Schedule publication precedes the action. |
+| Auto-commit timer expires while a commit is in flight | No duplicate commit and no timer deadline; completion causes the real manager to be re-polled. Added by this slice. |
+| Auto-commit completes during network polling | A newer schedule generation is published before the application wakeup. Added vertical proof by this slice. |
+| Empty output requests immediate polling | Production boundary rejects it. Existing POC proof retained. |
+| Old coordinator response arrives after rediscovery | Current coordinator remains unchanged. Existing POC proof retained. |
+| Manager event creates an application effect | Schedule publication precedes the action. Existing POC proof retained. |
 
-Focused validation passed for `CoordinatorRequestManagerTest`, `CommitRequestManagerTest`,
-`NetworkClientDelegateTest`, and all 39 `ConsumerReactorTest` cases. The Gradle lifecycle also ran Checkstyle and
-SpotBugs successfully.
+Focused validation on the merged experiment used Java 21, Gradle 9.6.1, and `maxParallelForks=1`. It passed
+`CoordinatorRequestManagerTest`, `CommitRequestManagerTest`, `NetworkClientDelegateTest`, `ConsumerReactorTest`, and
+the real-manager `ConsumerReactorCommitReadinessTest`. The Gradle lifecycle also ran Checkstyle and SpotBugs
+successfully.
 
-## Heartbeat dry run
+## Heartbeat analysis
 
-Heartbeat fits the same vocabulary without moving membership policy into the reactor:
+The following table is a design analysis, not code proof. Heartbeat appears able to use the same vocabulary without
+moving membership policy into the reactor:
 
 | Heartbeat state | Local result |
 | --- | --- |
@@ -235,7 +242,8 @@ Keep this slice only if independent review confirms all of the following:
 - `AwaitCause` remains data, not a hidden signal mechanism;
 - `ConsumerReactor` gains no manager-specific policy;
 - no second owner version or coordination channel appears;
-- the code removes at least as much duplicated gating logic as it adds.
+- the Commit slice removes its periodic fallback without adding a second runtime coordination channel; the Coordinator
+  slice is an equivalent vocabulary rewrite rather than a claimed deletion of duplicated logic.
 
 Otherwise delete or reduce the slice. Passing this POC proves feasibility, not the need for a generic readiness
 framework.
