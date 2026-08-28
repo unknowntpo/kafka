@@ -133,7 +133,7 @@ diagnostic counters:
 | Metric name | Group | Type and scope | Incremented when | Operational use and stability |
 | --- | --- | --- | --- | --- |
 | `reactor-invalid-poll-result-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A compatibility producer returns an empty result that requests immediate retry; the reactor replaces that result with `AwaitInput`. | A non-zero value identifies an invalid manager result and a prevented busy-loop condition. Name and cumulative meaning are stable after release. |
-| `reactor-manager-poll-failure-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A request-manager poll throws an unexpected runtime exception that the reactor isolates. | Diagnoses degraded manager execution without requiring manager-name tags. Name and cumulative meaning are stable after release. |
+| `reactor-manager-poll-failure-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A request-manager poll throws an unexpected runtime exception; the reactor publishes the failure and terminates. | Diagnoses a fatal manager execution failure without requiring manager-name tags. Name and cumulative meaning are stable after release. |
 | `reactor-action-failure-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A selected application-visible `ReactorAction` fails during execution. | Distinguishes effect-delivery failure from manager or transport failure. Name and cumulative meaning are stable after release. |
 | `reactor-application-wakeup-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | The reactor invokes the primitive application-thread wakeup after phase coalescing. | Its rate helps detect wakeup ping-pong; the absolute total is not by itself an error signal. Name and cumulative meaning are stable after release. |
 
@@ -351,6 +351,24 @@ Equivalent wake reasons may share one primitive application wakeup, but terminal
 merged. Wakeup executes last so the application thread can observe the state, schedule, data, event, or completion
 that caused it. An action failure is logged, counted, and isolated; it cannot suppress later independent actions or
 network I/O.
+
+#### Error, cancellation, and close
+
+Lifecycle races use the same publication boundary rather than a separate shutdown protocol:
+
+- An unexpected request-manager poll exception is reactor-fatal because the reactor cannot prove that manager state
+  is still usable. The current phase publishes its schedule, publishes one background error, wakes the application,
+  and performs the already admitted network poll. The reactor does not begin another iteration.
+- Cancellation or timeout is an input for the operation owner. The first terminal completion wins; a later response,
+  cancellation, timeout, or close attempt cannot complete the same operation again. `ConsumerReactor` orders the
+  selected terminal action after publication but does not own the operation's long-lived state.
+- `close(Duration)` stops admission and wakes the reactor. The application thread waits no longer than the supplied
+  reactor-close budget. Already selected actions are drained before resources close, and cleanup completes tracked
+  incomplete application events exceptionally. If the budget expires, `close` returns while the daemon reactor
+  finishes cleanup; it does not report that cleanup has completed.
+
+The bounded-close and manager-failure rules are implemented in the POC. Exact-once cancellation coverage for every
+application-event family remains a Phase 3 exit criterion; the KIP does not claim that this migration is complete.
 
 #### Example: two managers with different deadlines
 
@@ -794,7 +812,7 @@ and Streams topology slices from Phase 2. The target model above also defines la
 | Application wait projection | `AsyncKafkaConsumer.poll(...)` uses the published reactor decision; the former assignment/position mutable-state rescans have been removed in the POC. Assignment publication and position update/failure paths must therefore provide the corresponding wake or completion signal. | All remaining compatibility waits are derived from immutable schedule or operation results, with integration tests proving that each enabling input wakes a blocked application poll. |
 | Wake coalescing | Equivalent wakes are combined separately in the pre-I/O, post-I/O, and final-drain phases. | Equivalent reasons produce at most one primitive wake per complete reactor iteration. |
 | Cross-owner fact admission | Callback-produced facts are drained at the input boundary and their owner commands are applied before the full manager pass builds transport work. A post-I/O poll failure leaves the fact in the producer-local bounded buffer for that next input drain. An unexpected fact first produced by the pre-I/O manager pass is preserved and diagnosed, but its command is deferred because transport work may already have been built. | Require cross-owner facts to enter through input or network-completion paths and become available no later than the post-I/O owner poll. First admission during the ordinary pre-I/O pass is invalid. Dependency-aware request cancellation/replay is not part of this KIP. |
-| Diagnostics | Contract, manager-poll, action-failure, and application-wakeup counters are present. | TRACE adds publication generation, deadline source, action reason, and destination without hot-path collection formatting. |
+| Diagnostics | Invalid-poll-result, manager-poll, action-failure, and application-wakeup counters are present. | TRACE adds publication generation, deadline source, action reason, and destination without hot-path collection formatting. |
 | Consumer variants | Regular, share, and Streams heartbeat paths use the typed progress model; Streams topology push uses the coordinator snapshot/version rule. Share fetch production still has compatibility `PollResult` construction and lacks an equivalent reactor-level recovery test. | Regular, share, and Streams compositions each prove all typed outputs and cross-owner recovery without consumer-type branches in `ConsumerReactor`. |
 
 The following names map the model to the current POC. They are implementation evidence, not prerequisites for
@@ -857,7 +875,10 @@ Other current implementation details include:
   `PollResult`.
 - Stage manager- and transport-produced `BackgroundEvent` values until the corresponding schedule is published, then
   publish them and execute the coalesced application wake last.
-- Isolate manager polling and `ReactorAction` failures so one fault cannot skip network I/O or suppress later effects.
+- Treat an unexpected manager-poll exception as terminal after publishing the current schedule, background error,
+  and wakeup; isolate a `ReactorAction` failure so it cannot suppress later independent effects or network I/O.
+- Bound the application thread's reactor-close wait by `close(Duration)` while allowing daemon cleanup to finish
+  after the caller's budget expires.
 
 Exit evidence: reconnect-backoff, schedule aggregation, publish-before-wakeup, and busy-loop tests pass with no public
 API change.
@@ -907,6 +928,10 @@ target are migration exit criteria rather than claims about the current POC. Req
 - repeated no-progress manager results do not produce a zero-timeout loop or wakeup ping-pong;
 - an adapter-created empty `PollImmediately` result is diagnosed and converted to `AwaitInput` in production, while
   finite retries and input waits produce the intended schedule;
+- an unexpected request-manager poll failure publishes a terminal error only after the current schedule, wakes the
+  application, preserves the already admitted network poll, and prevents another reactor iteration;
+- `close(Duration)` rejects new admission immediately and returns within its reactor-close budget even when daemon
+  cleanup remains blocked;
 - current Phase 1 behavior combines equivalent wake reasons once per execution phase; the Phase 3 target combines
   them into at most one primitive application wakeup per complete reactor iteration;
 - heartbeat, auto-commit, fetch, coordinator, metadata, and share-acknowledgement tests distinguish immediate output,

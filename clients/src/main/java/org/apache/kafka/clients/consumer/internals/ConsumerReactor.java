@@ -479,15 +479,20 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         }
     }
 
-    /** Keep a malformed or unexpectedly failing manager from skipping network I/O or forcing a zero-timeout loop. */
+    /** Keep a malformed manager result from forcing a zero-timeout loop and make an unexpected failure terminal. */
     private NetworkClientDelegate.PollResult pollManager(final RequestManager manager, final long currentTimeMs) {
         final NetworkClientDelegate.PollResult result;
         try {
             result = manager.poll(currentTimeMs);
         } catch (RuntimeException exception) {
-            log.error("Request manager {} failed while polling; waiting for a new input without skipping network I/O",
+            log.error("Request manager {} failed while polling; publishing a terminal background error after the "
+                    + "current schedule and stopping the reactor after this phase",
                 manager.getClass().getName(), exception);
             asyncConsumerMetrics.recordManagerPollFailure();
+            stageReactorAction(ReactorAction.publishBackgroundError(exception));
+            stageWakeApplication();
+            pendingReactorActionReasons.add(ReactorActionReason.MANAGER_POLL_FAILURE);
+            running = false;
             return NetworkClientDelegate.PollResult.awaitInput();
         }
 
@@ -713,9 +718,15 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         wakeup();
 
         try {
-            join();
+            if (timeoutMs > 0L)
+                join(timeoutMs);
+            if (isAlive()) {
+                log.warn("Consumer reactor did not finish cleanup within the close timeout of {} ms; cleanup will "
+                    + "continue on the daemon reactor thread", timeoutMs);
+            }
         } catch (InterruptedException e) {
             log.error("Interrupted while waiting for consumer reactor to complete", e);
+            Thread.currentThread().interrupt();
         }
     }
 

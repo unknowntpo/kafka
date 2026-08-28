@@ -226,7 +226,7 @@ public class ConsumerReactorTest {
     }
 
     @Test
-    public void testManagerPollFailureIsIsolatedWithoutSkippingNetworkIo() {
+    public void testManagerPollFailureDoesNotSkipNetworkIoInTerminalPhase() {
         RuntimeException failure = new RuntimeException("manager poll failed");
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
         when(coordinatorRequestManager.poll(anyLong())).thenThrow(failure);

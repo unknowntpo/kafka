@@ -37,6 +37,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Future;
 import java.util.function.Supplier;
 
+import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS;
+
 /**
  * Thread-safe application-side gateway to the {@link ConsumerReactor}. The application thread can submit input,
  * wait for a submitted operation, signal the reactor, and read the published application wait. State transitions,
@@ -168,7 +170,7 @@ public class ConsumerReactorGateway implements Closeable {
 
     @Override
     public void close() {
-        close(Duration.ZERO);
+        close(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS));
     }
 
     public void close(final Duration timeout) {
@@ -179,19 +181,18 @@ public class ConsumerReactorGateway implements Closeable {
     }
 
     /**
-     * Best-effort check that the consumer reactor is still alive. If the thread has
-     * already terminated (due to a failure or shutdown), it will never process any events from
-     * the queue. Rather than blocking indefinitely or timing out with a misleading error, this
-     * fails fast with a clear error message.
+     * Best-effort check that the consumer reactor is still admitting work. A bounded close may return while the
+     * daemon thread is still alive and finishing cleanup, so thread liveness alone is insufficient. Once shutdown
+     * begins, newly submitted events would never be processed and must fail fast.
      *
      * <p>Note: this is inherently racy — the thread could die between this check and the
      * subsequent queue admission. That narrow window is acceptable because any subsequent call to
      * {@link #submit(ApplicationEvent)} will detect the dead thread immediately.
      *
-     * @throws KafkaException if the reactor is not alive
+     * @throws KafkaException if the reactor is not admitting work
      */
     private void ensureReactorAlive() {
-        if (reactor == null || !reactor.isAlive()) {
+        if (reactor == null || !reactor.isRunning() || !reactor.isAlive()) {
             throw new KafkaException(
                 "The consumer reactor is not running and cannot process requests.");
         }
