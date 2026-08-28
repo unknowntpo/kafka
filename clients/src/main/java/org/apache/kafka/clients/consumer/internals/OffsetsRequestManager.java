@@ -44,7 +44,6 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -88,8 +87,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
 
     private final Set<ListOffsetsRequestState> requestsToRetry;
     private final List<NetworkClientDelegate.UnsentRequest> requestsToSend;
-    private final EnumSet<StateTransition> pendingStateTransitions =
-        EnumSet.noneOf(StateTransition.class);
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
     private final int requestTimeoutMs;
     private final Time time;
     private final ApiVersions apiVersions;
@@ -173,13 +171,15 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
         // Copy the outgoing request list and clear it.
         List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>(requestsToSend);
         requestsToSend.clear();
-        Set<StateTransition> stateTransitions = Set.copyOf(pendingStateTransitions);
-        pendingStateTransitions.clear();
-        return new NetworkClientDelegate.PollResult(
+        return pendingManagerEvents.publishWith(new NetworkClientDelegate.PollResult(
             NetworkClientDelegate.PollResult.WAIT_FOREVER,
-            unsentRequests,
-            stateTransitions
-        );
+            unsentRequests
+        ));
+    }
+
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
     }
 
     /**
@@ -327,7 +327,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
     }
 
     /**
-     * Updates fetch positions for an asynchronous poll and reports a failure transition to the reactor. Successful
+     * Updates fetch positions for an asynchronous poll and reports a failure fact to the reactor. Successful
      * completion continues into fetch preparation, whose data, blocker deadline, or request terminal transition
      * determines the next application-visible action. A failure must instead wake an application thread which may
      * already be blocked on the fetch buffer so it can observe the completed poll event.
@@ -336,7 +336,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
         CompletableFuture<Void> result = updateFetchPositions(deadlineMs);
         result.whenComplete((__, error) -> {
             if (error != null)
-                pendingStateTransitions.add(StateTransition.FETCH_POSITIONS_UPDATE_FAILED);
+                pendingManagerEvents.add(ManagerEvent.LocalProgress.FETCH_POSITIONS_UPDATE_FAILED);
         });
         return result;
     }

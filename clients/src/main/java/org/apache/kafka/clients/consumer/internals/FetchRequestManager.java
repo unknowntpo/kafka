@@ -28,11 +28,9 @@ import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.LogContext;
 
-import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
@@ -53,8 +51,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     /** Sole caller waiting for the next preparation outcome; null when retained intent currently has no waiter. */
     private CompletableFuture<Void> pendingFetchRequestFuture;
-    private EnumSet<StateTransition> pendingStateTransitions =
-        EnumSet.noneOf(StateTransition.class);
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
 
     FetchRequestManager(final LogContext logContext,
                         final Time time,
@@ -125,6 +122,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         );
     }
 
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
+    }
+
     /**
      * {@inheritDoc}
      */
@@ -157,7 +159,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                                     ResponseHandler<ClientResponse> successHandler,
                                     ResponseHandler<Throwable> errorHandler) {
         if (!fetchRequestPending) {
-            // Network completions can report a state transition without creating new network work.
+            // Network completions can report a manager fact without creating new network work.
             return pollResult(PollResult.WAIT_FOREVER, List.of());
         }
 
@@ -167,7 +169,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
-                reportPreparationStateTransition(result);
+                reportPreparationEvent(result);
                 fetchRequestPending = shouldRetryPreparation(result);
                 if (pendingFetchRequestFuture != null)
                     pendingFetchRequestFuture.complete(null);
@@ -199,9 +201,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             fetchRequestPending = false;
             if (pendingFetchRequestFuture != null)
                 pendingFetchRequestFuture.completeExceptionally(t);
-            pendingStateTransitions.add(
-                StateTransition.FETCH_PREPARATION_FAILED
-            );
+            pendingManagerEvents.add(ManagerEvent.LocalProgress.FETCH_PREPARATION_FAILED);
             return pollResult(PollResult.WAIT_FOREVER, List.of());
         } finally {
             pendingFetchRequestFuture = null;
@@ -240,36 +240,20 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     private PollResult pollResult(final long timeUntilNextPollMs,
                                   final List<UnsentRequest> requests) {
-        return new PollResult(timeUntilNextPollMs, requests, drainPendingStateTransitions());
+        return pendingManagerEvents.publishWith(
+            new PollResult(timeUntilNextPollMs, requests)
+        );
     }
 
-    private void reportPreparationStateTransition(final FetchRequestPreparationResult result) {
+    private void reportPreparationEvent(final FetchRequestPreparationResult result) {
         if (result.blockers().contains(FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED)) {
-            pendingStateTransitions.add(
-                StateTransition.FETCH_BUFFER_HAS_DATA
-            );
+            pendingManagerEvents.add(ManagerEvent.FetchBufferHasData.INSTANCE);
         }
     }
 
     @Override
     protected void onFetchRequestTerminated() {
-        pendingStateTransitions.add(
-            StateTransition.FETCH_REQUEST_TERMINATED
-        );
-    }
-
-    /**
-     * Transfers the bounded, coalesced set of manager-owned state transitions to the reactor. This method and all
-     * producers of the set run on the reactor thread, so no cross-thread synchronization is required.
-     */
-    private Set<StateTransition> drainPendingStateTransitions() {
-        if (pendingStateTransitions.isEmpty())
-            return Set.of();
-
-        EnumSet<StateTransition> drained = pendingStateTransitions;
-        pendingStateTransitions =
-            EnumSet.noneOf(StateTransition.class);
-        return drained;
+        pendingManagerEvents.add(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED);
     }
 
     void wakeupApplicationThread() {

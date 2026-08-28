@@ -56,4 +56,19 @@ public class PendingManagerEventsTest {
         assertEquals("current", observation.cause());
         assertEquals(9L, observation.observedCoordinatorVersion());
     }
+
+    @Test
+    public void testInputBoundaryDrainIsLatestOnlyAndClearsBuffer() {
+        PendingManagerEvents pendingEvents = new PendingManagerEvents();
+        pendingEvents.add(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "older", 1L, 7L));
+        pendingEvents.add(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "newer", 2L, 9L));
+
+        ManagerEvent.CoordinatorUnavailableObserved observation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class,
+            pendingEvents.drain().get(0)
+        );
+
+        assertEquals(9L, observation.observedCoordinatorVersion());
+        assertTrue(pendingEvents.drain().isEmpty());
+    }
 }

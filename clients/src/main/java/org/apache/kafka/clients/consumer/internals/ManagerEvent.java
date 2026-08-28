@@ -26,7 +26,11 @@ import java.util.Objects;
 interface ManagerEvent {
 
     enum Type {
-        COORDINATOR_UNAVAILABLE_OBSERVED
+        COORDINATOR_UNAVAILABLE_OBSERVED,
+        FETCH_BUFFER_HAS_DATA,
+        FETCH_PREPARATION_FAILED,
+        FETCH_REQUEST_TERMINATED,
+        FETCH_POSITIONS_UPDATE_FAILED
     }
 
     Type type();
@@ -78,6 +82,57 @@ interface ManagerEvent {
                 + ", cause=" + cause
                 + ", observedAtMs=" + observedAtMs
                 + ", observedCoordinatorVersion=" + observedCoordinatorVersion + ")";
+        }
+    }
+
+    /** Reports that the fetch domain already has records that the application may consume. */
+    final class FetchBufferHasData implements ManagerEvent {
+        static final FetchBufferHasData INSTANCE = new FetchBufferHasData();
+
+        private FetchBufferHasData() {
+        }
+
+        @Override
+        public Type type() {
+            return Type.FETCH_BUFFER_HAS_DATA;
+        }
+
+        @Override
+        public String source() {
+            return FetchRequestManager.class.getSimpleName();
+        }
+
+        @Override
+        public String toString() {
+            return type().toString();
+        }
+    }
+
+    /**
+     * Reports a manager-local outcome which requires the application-side fetch wait to be re-evaluated.
+     * The fact does not prescribe the wake effect; the composition-owned policy derives and coalesces that effect.
+     */
+    enum LocalProgress implements ManagerEvent {
+        FETCH_PREPARATION_FAILED(Type.FETCH_PREPARATION_FAILED, FetchRequestManager.class.getSimpleName()),
+        FETCH_REQUEST_TERMINATED(Type.FETCH_REQUEST_TERMINATED, FetchRequestManager.class.getSimpleName()),
+        FETCH_POSITIONS_UPDATE_FAILED(Type.FETCH_POSITIONS_UPDATE_FAILED, OffsetsRequestManager.class.getSimpleName());
+
+        private final Type type;
+        private final String source;
+
+        LocalProgress(final Type type, final String source) {
+            this.type = type;
+            this.source = source;
+        }
+
+        @Override
+        public Type type() {
+            return type;
+        }
+
+        @Override
+        public String source() {
+            return source;
         }
     }
 }

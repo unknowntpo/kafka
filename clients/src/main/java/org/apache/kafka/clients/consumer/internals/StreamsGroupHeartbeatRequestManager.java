@@ -560,6 +560,11 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return true;
     }
 
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
+    }
+
     public void resetPollTimer(final long pollMs) {
         pollTimer.update(pollMs);
         if (pollTimer.isExpired()) {

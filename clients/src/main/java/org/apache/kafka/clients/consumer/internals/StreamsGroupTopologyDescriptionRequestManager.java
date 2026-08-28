@@ -29,6 +29,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 
 public class StreamsGroupTopologyDescriptionRequestManager implements RequestManager {
@@ -109,6 +110,11 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
     @Override
     public boolean usesLegacyApplicationWait() {
         return true;
+    }
+
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
     }
 
     private boolean shouldSendTopologyDescriptionUpdate(final long currentTimeMs,
