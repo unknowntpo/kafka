@@ -168,7 +168,7 @@ The design relies on three invariants:
 This KIP does not add a queue or thread, move user callbacks to the background thread, combine regular and share
 state machines, make the reactor own manager policy, introduce a dynamic dependency graph, retrofit
 `ClassicKafkaConsumer`, or migrate every compatibility path in one patch. The sections below first define ownership,
-then the manager result contract and timing publication, and finally the full iteration and cross-manager lifecycle.
+then manager poll results and timing publication, and finally the full iteration and cross-manager lifecycle.
 
 ### 1. Define the responsibility boundary
 
@@ -191,7 +191,7 @@ The reactor coordinates these owners; it does not absorb their local rules or tr
 `NetworkCommand` is handed to `NetworkClientDelegate`; it is neither a `ManagerEvent` nor an application-visible
 `ReactorAction`.
 
-### 2. Express manager output with one `PollResult` algebra
+### 2. Define manager poll results
 
 A manager poll answers one narrow question: what did this manager produce now, and what can make another poll useful?
 The manager owns the state needed to answer, such as coordinator availability, in-flight requests, retry backoff,
@@ -205,9 +205,9 @@ migrated work source, it derives one manager-local activation projection that an
 
 This is a local calculation over state the manager already owns, not a global readiness registry. It may be a private
 method or small private value; the KIP does not require a new framework or class hierarchy. The resulting condition is
-published through the existing `PollResult` algebra.
+published through the existing `PollResult` type.
 
-The target contract is:
+`PollResult` has the following form:
 
 ```java
 record PollResult(
@@ -281,11 +281,11 @@ Examples across managers are:
 | Topic-metadata request is in retry backoff. | `retryAfter(remainingBackoffMs)` | Finite-retry case |
 | Share acknowledgement request is in flight. | `awaitInput()`; acknowledgement completion is the enabling input. | Share-consumer case |
 
-Strict factories validate only this generic algebra. They do not infer why heartbeat, commit, fetch, coordinator, or
-share work can make progress. During migration, legacy `UnsentRequest`, `StateTransition`, raw-delay fields, and
-constructors remain adapters around the typed contract. Production validation also detects an empty immediate result
-created through an adapter, records the manager, and treats it as `AwaitInput` so it cannot force
-`NetworkClientDelegate.poll(0)`.
+Strict factories validate only these generic result-shape rules. They do not infer why heartbeat, commit, fetch,
+coordinator, or share work can make progress. During migration, legacy `UnsentRequest`, `StateTransition`, raw-delay
+fields, and constructors remain adapters around the typed fields and factories. Production validation also detects an
+empty immediate result created through an adapter, records the manager, and treats it as `AwaitInput` so it cannot
+force `NetworkClientDelegate.poll(0)`.
 
 ### 3. Publish one wait decision before executing effects
 
@@ -496,14 +496,15 @@ and `StreamsConsumerDriver` are proposed internal boundaries; they do not yet ex
 The shared reactor must not branch on consumer type. An `isShareConsumer` switch or a regular/share union in the
 reactor loop indicates that consumer-specific behavior has leaked across the boundary.
 
-### 8. Apply the model to the motivating failures
+### 8. Apply the reactor model to the motivating failures
 
-The model is useful only if each motivating failure becomes a concrete assertion. The table therefore distinguishes
-the historical failure, the model rule applied to it, and the evidence currently available. **Verified** means the
-named production-component path has a deterministic test in this POC. **Partial** and **pending** are explicit
-migration work; they are not claims that the reactor already fixes the issue end to end.
+The reactor model is useful only if each motivating failure becomes a concrete assertion. The table therefore
+distinguishes the behavior before the change, the target behavior after applying the reactor model, and the evidence
+currently available. **Verified** means the named production-component path has a deterministic test in this POC.
+**Partial** and **pending** are explicit migration work; they are not claims that the reactor already fixes the issue
+end to end.
 
-| Issue | Before the model | Model application | Current proof |
+| Issue | Before | After (reactor model) | Current proof |
 | --- | --- | --- | --- |
 | [KAFKA-17066](https://issues.apache.org/jira/browse/KAFKA-17066) | Position initialization crossed application and background execution without one ordered operation boundary. | `OffsetsRequestManager` owns position initialization; the reactor orders the application input, network completion, and next manager pass. | **Partial:** `AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`; original pre-fix negative baseline still required. |
 | [KAFKA-17674](https://issues.apache.org/jira/browse/KAFKA-17674) | An older OffsetFetch completion for `tp1` could reset newly added `tp2`. | The operation retains its captured partition scope; later assignment input is handled by a later ordered operation. | **Verified component:** `OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition` and the Async consumer component test above; the latter fails at pre-fix baseline `6744a718c2`. |
@@ -527,7 +528,7 @@ model above also defines later migration work. The distinction is:
 
 | Area | Current POC | Target after migration |
 | --- | --- | --- |
-| Manager output algebra | Canonical `PollResult` storage has `NetworkCommand`, `ManagerEvent`, and `NextPollCondition`; generic reactor/cache consumers use the typed accessors. Legacy fields and constructors remain adapters. | Every manager produces only the typed contract and the adapters are removed. |
+| Manager poll result | Canonical `PollResult` storage has `NetworkCommand`, `ManagerEvent`, and `NextPollCondition`; generic reactor/cache consumers use the typed accessors. Legacy fields and constructors remain adapters. | Every manager produces only the typed result and the adapters are removed. |
 | Manager progress | `AwaitInput`, positive finite `RetryAfter`, and output-gated `PollImmediately` are present. `awaitEvent()` remains an alias. | Every manager uses the explicit conditions and the ambiguous alias is removed. |
 | Manager-local activation projection | Coordinator discovery, auto-commit, and regular/share heartbeat derive work admission and the next condition from one local state projection. Auto-commit completion is proven to re-poll the real manager and publish a newer schedule before application wakeup; heartbeat records an admitted request as input-driven until network completion. | Apply the rule only where a manager otherwise duplicates an eligibility predicate; migrate Streams heartbeat separately and do not introduce a generic readiness registry. |
 | Cross-manager ownership | Coordinator target/version snapshot, typed event handlers, phase-batch policy evaluation, and version-fenced coordinator invalidation are present. | Other cross-owner mutation paths use the same owner/fact/command rule or are placed inside an explicit protocol driver. |
