@@ -209,6 +209,11 @@ public class TopicMetadataRequestManagerTest {
         time.sleep(backoffMs - 1);
         res2 = topicMetadataRequestManager.poll(this.time.milliseconds());
         assertEquals(0, res2.unsentRequests.size());
+        NextPollCondition.RetryAfter retryAfter = assertInstanceOf(
+            NextPollCondition.RetryAfter.class,
+            res2.nextPollCondition()
+        );
+        assertEquals(1L, retryAfter.delayMs());
 
         time.sleep(1);
         res2 = topicMetadataRequestManager.poll(this.time.milliseconds());
