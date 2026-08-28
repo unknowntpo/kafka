@@ -47,6 +47,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -309,6 +310,12 @@ public class CoordinatorRequestManagerTest {
         CoordinatorRequestManager coordinatorManager = setupCoordinatorManager(GROUP_ID);
         expectFindCoordinatorRequest(coordinatorManager, Errors.GROUP_AUTHORIZATION_FAILED);
         assertTrue(coordinatorManager.fatalError().isPresent());
+        NetworkClientDelegate.PollResult fatalResult = coordinatorManager.poll(time.milliseconds());
+        ManagerEvent.CoordinatorFatalError fatalEvent = assertInstanceOf(
+            ManagerEvent.CoordinatorFatalError.class,
+            fatalResult.managerEvents().get(0)
+        );
+        assertSame(coordinatorManager.fatalError().get(), fatalEvent.error());
 
         time.sleep(RETRY_BACKOFF_MS);
         // there are no successful responses, so the fatal error should persist

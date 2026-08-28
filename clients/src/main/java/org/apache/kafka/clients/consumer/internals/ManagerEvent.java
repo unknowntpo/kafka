@@ -27,10 +27,39 @@ interface ManagerEvent {
 
     enum Type {
         COORDINATOR_UNAVAILABLE_OBSERVED,
+        COORDINATOR_FATAL_ERROR,
         FETCH_BUFFER_HAS_DATA,
         FETCH_PREPARATION_FAILED,
         FETCH_REQUEST_TERMINATED,
         FETCH_POSITIONS_UPDATE_FAILED
+    }
+
+    /** Reports a fatal coordinator-discovery error for publication to the application thread. */
+    final class CoordinatorFatalError implements ManagerEvent {
+        private final Throwable error;
+
+        CoordinatorFatalError(final Throwable error) {
+            this.error = Objects.requireNonNull(error, "Coordinator fatal error must be non-null");
+        }
+
+        @Override
+        public Type type() {
+            return Type.COORDINATOR_FATAL_ERROR;
+        }
+
+        @Override
+        public String source() {
+            return CoordinatorRequestManager.class.getSimpleName();
+        }
+
+        Throwable error() {
+            return error;
+        }
+
+        @Override
+        public String toString() {
+            return "CoordinatorFatalError(error=" + error + ")";
+        }
     }
 
     Type type();

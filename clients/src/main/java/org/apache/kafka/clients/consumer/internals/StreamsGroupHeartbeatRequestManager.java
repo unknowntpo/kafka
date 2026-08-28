@@ -460,7 +460,6 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
 
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
             membershipManager.onHeartbeatRequestSkipped();
-            maybePropagateCoordinatorFatalErrorEvent();
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.EMPTY);
         }
         pollTimer.update(currentTimeMs);
@@ -477,8 +476,10 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             heartbeatState.reset();
-            return pendingManagerEvents.publishWith(new NetworkClientDelegate.PollResult(
-                heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat)));
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(leaveHeartbeat),
+                List.of(),
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION)));
         }
         if (membershipManager.state() == MemberState.LEAVING && shouldSkipLeaveHeartbeat()) {
             logger.info("Dynamic member {} skipping leave heartbeat (operation=REMAIN_IN_GROUP). " +
@@ -497,7 +498,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
                 Collections.singletonList(request),
                 List.of(),
-                NextPollCondition.retryAfter(heartbeatRequestState.heartbeatIntervalMs())));
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION)));
         } else {
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.retryAfter(
                 heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
@@ -621,11 +622,6 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     private boolean shouldSkipLeaveHeartbeat() {
         return REMAIN_IN_GROUP == membershipManager.leaveGroupOperation()
             && membershipManager.groupInstanceId().isEmpty();
-    }
-
-    private void maybePropagateCoordinatorFatalErrorEvent() {
-        coordinatorRequestManager.getAndClearFatalError()
-            .ifPresent(fatalError -> backgroundEventHandler.add(new ErrorEvent(fatalError)));
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequestAndLogResponse(final long currentTimeMs) {

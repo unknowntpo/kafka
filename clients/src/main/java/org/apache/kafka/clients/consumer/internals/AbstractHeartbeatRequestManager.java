@@ -174,7 +174,6 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         HeartbeatActivation activation = heartbeatActivation(currentTimeMs, true);
         if (activation.blockedByCoordinatorOrMembership()) {
             membershipManager().onHeartbeatRequestSkipped();
-            maybePropagateCoordinatorFatalErrorEvent();
             return pendingManagerEvents.publishWith(
                 NetworkClientDelegate.PollResult.waitFor(activation.nextPollCondition()));
         }
@@ -194,7 +193,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
                 Collections.singletonList(leaveHeartbeat),
                 List.of(),
-                NextPollCondition.retryAfter(heartbeatRequestState.heartbeatIntervalMs())
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION)
             ));
         }
 
@@ -364,7 +363,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             return NetworkClientDelegate.PollResult.progress(
                 Collections.singletonList(request),
                 List.of(),
-                NextPollCondition.retryAfter(heartbeatRequestState.heartbeatIntervalMs()));
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION));
         }
         return NetworkClientDelegate.PollResult.awaitInput();
     }
@@ -412,11 +411,6 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             membershipManager().maybeRejoinStaleMember();
         }
         pollTimer.reset(maxPollIntervalMs);
-    }
-
-    private void maybePropagateCoordinatorFatalErrorEvent() {
-        coordinatorRequestManager.getAndClearFatalError()
-                .ifPresent(fatalError -> backgroundEventHandler.add(new ErrorEvent(fatalError)));
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final long currentTimeMs, final boolean ignoreResponse) {

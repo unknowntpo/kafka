@@ -65,6 +65,8 @@ public class CoordinatorRequestManager implements RequestManager {
     // - AbstractHeartbeatRequestManager propagates the error event to the application thread.
     // - CommitRequestManager fail pending requests.
     private Optional<Throwable> fatalError = Optional.empty();
+    /** One-shot publication fact; the durable fatal-error state remains readable by dependent managers. */
+    private Optional<ManagerEvent.CoordinatorFatalError> pendingFatalError = Optional.empty();
 
     public CoordinatorRequestManager(
         final LogContext logContext,
@@ -101,6 +103,11 @@ public class CoordinatorRequestManager implements RequestManager {
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         NextPollCondition plan = planFindCoordinator(currentTimeMs);
+        if (pendingFatalError.isPresent()) {
+            ManagerEvent.CoordinatorFatalError event = pendingFatalError.get();
+            pendingFatalError = Optional.empty();
+            return NetworkClientDelegate.PollResult.progress(List.of(), List.of(event), plan);
+        }
         if (!(plan instanceof NextPollCondition.PollImmediately))
             return NetworkClientDelegate.PollResult.waitFor(plan);
 
@@ -138,7 +145,10 @@ public class CoordinatorRequestManager implements RequestManager {
         );
 
         return unsentRequest.whenComplete((clientResponse, throwable) -> {
-            getAndClearFatalError();
+            // A completed discovery attempt supersedes a previously retained fatal result. A new fatal response
+            // below records its own durable state and one-shot publication fact.
+            fatalError = Optional.empty();
+            pendingFatalError = Optional.empty();
             if (clientResponse != null) {
                 FindCoordinatorResponse response = (FindCoordinatorResponse) clientResponse.responseBody();
                 onResponse(clientResponse.receivedTimeMs(), response);
@@ -210,6 +220,8 @@ public class CoordinatorRequestManager implements RequestManager {
         if (!Objects.equals(this.coordinator, discoveredCoordinator))
             coordinatorVersion++;
         this.coordinator = discoveredCoordinator;
+        fatalError = Optional.empty();
+        pendingFatalError = Optional.empty();
         log.info("Discovered group coordinator {}", coordinator);
         coordinatorRequestState.onSuccessfulAttempt(currentTimeMs);
     }
@@ -226,12 +238,17 @@ public class CoordinatorRequestManager implements RequestManager {
         if (exception == Errors.GROUP_AUTHORIZATION_FAILED.exception()) {
             log.debug("FindCoordinator request failed due to authorization error {}", exception.getMessage());
             KafkaException groupAuthorizationException = GroupAuthorizationException.forGroupId(this.groupId);
-            fatalError = Optional.of(groupAuthorizationException);
+            recordFatalError(groupAuthorizationException);
             return;
         }
 
         log.warn("FindCoordinator request failed due to fatal exception", exception);
-        fatalError = Optional.of(exception);
+        recordFatalError(exception);
+    }
+
+    private void recordFatalError(final Throwable error) {
+        fatalError = Optional.of(error);
+        pendingFatalError = Optional.of(new ManagerEvent.CoordinatorFatalError(error));
     }
 
     /**
@@ -275,12 +292,6 @@ public class CoordinatorRequestManager implements RequestManager {
         return new CoordinatorSnapshot(Optional.ofNullable(coordinator), coordinatorVersion);
     }
     
-    public Optional<Throwable> getAndClearFatalError() {
-        Optional<Throwable> fatalError = this.fatalError;
-        this.fatalError = Optional.empty();
-        return fatalError;
-    }
-
     public Optional<Throwable> fatalError() {
         return fatalError;
     }

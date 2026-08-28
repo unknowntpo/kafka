@@ -53,6 +53,7 @@ final class ManagerCoordinationPolicy {
         return new ManagerCoordinationPolicy(List.of(
             new FetchBufferHasDataHandler(),
             new LocalProgressHandler(),
+            new CoordinatorFatalErrorHandler(),
             new CoordinatorUnavailableObservedHandler()
         ));
     }

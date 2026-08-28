@@ -68,6 +68,17 @@ public class ManagerCoordinationPolicyTest {
     }
 
     @Test
+    public void testCoordinatorFatalErrorProducesPublicationBeforeWakeup() {
+        Throwable error = new RuntimeException("fatal coordinator error");
+
+        CoordinationPlan plan = policy.evaluate(List.of(new ManagerEvent.CoordinatorFatalError(error)));
+
+        assertEquals(List.of(), plan.managerCommands());
+        assertEquals(ReactorAction.Type.PUBLISH_BACKGROUND_ERROR, plan.reactorActions().get(0).type());
+        assertSame(ReactorAction.wakeApplication(), plan.reactorActions().get(1));
+    }
+
+    @Test
     public void testStandardPolicyCoversEveryDeclaredSemanticType() {
         assertEquals(EnumSet.allOf(ManagerEvent.Type.class), policy.handledTypes());
     }
@@ -81,7 +92,7 @@ public class ManagerCoordinationPolicyTest {
             )));
 
         assertEquals(
-            "Missing manager-event handlers for [COORDINATOR_UNAVAILABLE_OBSERVED]",
+            "Missing manager-event handlers for [COORDINATOR_UNAVAILABLE_OBSERVED, COORDINATOR_FATAL_ERROR]",
             exception.getMessage()
         );
     }

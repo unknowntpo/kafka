@@ -19,6 +19,7 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.GroupRebalanceConfig;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ShareAcknowledgementEventHandler;
 import org.apache.kafka.common.internals.IdempotentCloser;
@@ -221,6 +222,14 @@ public class RequestManagers implements Closeable {
 
     int publishPendingBackgroundEvents() {
         return backgroundEventHandler.map(BackgroundEventHandler::publishPendingEvents).orElse(0);
+    }
+
+    /** Publishes one reactor-selected background effect after the corresponding schedule is visible. */
+    void publishBackgroundEvent(final BackgroundEvent event) {
+        backgroundEventHandler.ifPresent(handler -> {
+            handler.add(event);
+            handler.publishPendingEvents();
+        });
     }
 
     @Override

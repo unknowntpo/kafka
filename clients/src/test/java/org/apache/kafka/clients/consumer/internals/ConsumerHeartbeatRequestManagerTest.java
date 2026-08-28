@@ -670,7 +670,7 @@ public class ConsumerHeartbeatRequestManagerTest
         // On poll timer expiration, the member should send a last heartbeat to leave the group
         // and notify the membership manager
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         verify(membershipManager).transitionToSendingLeaveGroup(true);
         verify(heartbeatState).reset();
         verify(heartbeatRequestState).reset();
@@ -806,7 +806,7 @@ public class ConsumerHeartbeatRequestManagerTest
         
         // heartbeat request manager resets the sentFields to null HeartbeatState.reset()
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         verify(heartbeatRequestState).reset();
         
         // following HB will include tp0 (and act as ack), tp0 != null
