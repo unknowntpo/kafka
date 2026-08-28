@@ -526,7 +526,10 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     public NetworkClientDelegate.PollResult pollOnClose(long currentTimeMs) {
         if (membershipManager.isLeavingGroup() && !shouldSkipLeaveHeartbeat()) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndLogResponse(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), List.of(request));
+            return NetworkClientDelegate.PollResult.progress(
+                List.of(request),
+                List.of(),
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION));
         }
         return EMPTY;
     }

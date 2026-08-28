@@ -68,7 +68,7 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
         if (!shouldSendTopologyDescriptionUpdate(currentTimeMs, coordinatorSnapshot)) {
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.EMPTY);
+            return pendingManagerEvents.publishWith(nextPollResult(currentTimeMs, coordinatorSnapshot));
         }
 
         final StreamsGroupTopologyDescriptionUpdateRequestData data = new StreamsGroupTopologyDescriptionUpdateRequestData()
@@ -87,8 +87,29 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
             onResponse(response, exception, coordinatorSnapshot.version()));
 
         pushRequestState.onSendAttempt(currentTimeMs);
-        return pendingManagerEvents.publishWith(
-            new NetworkClientDelegate.PollResult(Collections.singletonList(unsent)));
+        return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
+            Collections.singletonList(unsent),
+            List.of(),
+            NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION)));
+    }
+
+    private NetworkClientDelegate.PollResult nextPollResult(final long currentTimeMs,
+                                                            final CoordinatorSnapshot coordinatorSnapshot) {
+        if (pushRequestState.requestInFlight()) {
+            return NetworkClientDelegate.PollResult.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION);
+        }
+
+        final long backoffRemainingMs = pushRequestState.remainingBackoffMs(currentTimeMs);
+        final long throttleRemainingMs = Math.max(0L, nextPushTimeMs - currentTimeMs);
+        final long delayMs = Math.max(backoffRemainingMs, throttleRemainingMs);
+        if (delayMs > 0L) {
+            return NetworkClientDelegate.PollResult.retryAfter(delayMs);
+        }
+
+        if (coordinatorSnapshot.coordinator().isEmpty()) {
+            return NetworkClientDelegate.PollResult.awaitInput(NextPollCondition.AwaitCause.COORDINATOR_CHANGE);
+        }
+        return NetworkClientDelegate.PollResult.awaitInput(NextPollCondition.AwaitCause.MEMBERSHIP_CHANGE);
     }
 
     @Override

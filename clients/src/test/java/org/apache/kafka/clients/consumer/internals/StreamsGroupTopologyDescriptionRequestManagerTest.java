@@ -92,7 +92,11 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         streamsRebalanceData.setTopologyPushRequired(true);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
-        assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(0, result.unsentRequests.size());
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(NextPollCondition.AwaitCause.COORDINATOR_CHANGE, condition.cause());
     }
 
     /**
@@ -153,6 +157,9 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         final NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
 
         assertEquals(1, result.unsentRequests.size());
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, condition.cause());
         final NetworkClientDelegate.UnsentRequest unsent = result.unsentRequests.get(0);
         assertEquals(Optional.of(coordinatorNode), unsent.node());
         final StreamsGroupTopologyDescriptionUpdateRequest request =
@@ -173,7 +180,11 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
 
         manager.poll(time.milliseconds());
-        assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(0, result.unsentRequests.size());
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, condition.cause());
     }
 
     /**
@@ -325,7 +336,11 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         unsent.handler().onFailure(time.milliseconds(), Errors.NETWORK_EXCEPTION.exception());
 
         assertTrue(streamsRebalanceData.topologyPushRequired());
-        assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
+        NetworkClientDelegate.PollResult blocked = manager.poll(time.milliseconds());
+        assertEquals(0, blocked.unsentRequests.size());
+        NextPollCondition.RetryAfter retry = assertInstanceOf(
+            NextPollCondition.RetryAfter.class, blocked.nextPollCondition());
+        assertTrue(retry.delayMs() > 0L);
 
         time.sleep(RETRY_BACKOFF_MAX_MS);
         assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
