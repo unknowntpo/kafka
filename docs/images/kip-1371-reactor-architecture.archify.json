@@ -6,7 +6,7 @@
     "locale": "en",
     "output": "kip-1371-reactor-architecture.html",
     "quality_profile": "showcase",
-    "viewBox": [1280, 720],
+    "viewBox": [1280, 714],
     "legend": { "mode": "hidden" },
     "views": [
       {
@@ -24,8 +24,8 @@
       {
         "id": "effect-ordering",
         "label": "Effect ordering",
-        "focus": ["schedule", "actions", "applicationEffects"],
-        "note": "Application-visible effects execute only after the corresponding schedule is visible."
+        "focus": ["schedule", "actionPhase", "applicationEffects", "applicationInput"],
+        "note": "ConsumerReactor executes ReactorAction values after publication; the application observes the result."
       }
     ]
   },
@@ -79,12 +79,12 @@
       "size": [175, 78]
     },
     {
-      "id": "actions",
-      "type": "messagebus",
-      "label": "ReactorAction",
-      "sublabel": "complete, notify, wake",
+      "id": "actionPhase",
+      "type": "backend",
+      "label": "ConsumerReactor action phase",
+      "sublabel": "executes ReactorAction values",
       "pos": [760, 500],
-      "size": [175, 78]
+      "size": [205, 78]
     },
     {
       "id": "applicationEffects",
@@ -99,7 +99,7 @@
     {
       "kind": "region",
       "label": "Existing background thread",
-      "wraps": ["reactor", "managers", "network", "schedule", "actions"],
+      "wraps": ["reactor", "managers", "network", "schedule", "actionPhase"],
       "pad": 34
     }
   ],
@@ -154,18 +154,29 @@
     {
       "id": "schedule-before-action",
       "from": "schedule",
-      "to": "actions",
-      "label": "visible before execution",
+      "to": "actionPhase",
+      "label": "publish before execution",
       "labelAt": [705, 480],
       "variant": "emphasis"
     },
     {
       "id": "publish-effects",
-      "from": "actions",
+      "from": "actionPhase",
       "to": "applicationEffects",
       "label": "complete / notify / wake",
       "labelAt": [1000, 480],
       "variant": "emphasis"
+    },
+    {
+      "id": "application-observes-effects",
+      "from": "applicationEffects",
+      "to": "applicationInput",
+      "label": "application observes result and may submit new input",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[1127.5, 655], [105, 655]],
+      "labelAt": [620, 675]
     }
   ],
   "cards": [
@@ -190,7 +201,7 @@
       "title": "Effects",
       "items": [
         "Requests go directly to the network layer",
-        "Application-visible actions execute after schedule publication"
+        "ConsumerReactor executes ReactorAction values after schedule publication"
       ]
     }
   ]
