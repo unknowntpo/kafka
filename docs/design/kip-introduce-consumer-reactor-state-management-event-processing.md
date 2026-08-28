@@ -108,8 +108,8 @@ decisions made on separate paths that could observe different snapshots of consu
 | [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885), [KAFKA-17674 / PR 17342](https://github.com/apache/kafka/pull/17342) | An older position-initialization completion could affect a partition added while its request was in flight. | Assignment changes, the captured partition scope, and completion handling. |
 | [KAFKA-18641 / PR 18737](https://github.com/apache/kafka/pull/18737), [KAFKA-15529 / PR 21476](https://github.com/apache/kafka/pull/21476) | Position and consumed-state publication could race with commit or application observation. | State mutation, publication, and dependent observation. |
 | [KAFKA-20426 / PR 22018](https://github.com/apache/kafka/pull/22018), [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) | Heartbeat urgency produced a zero wait while coordinator, assignment, or in-flight state made progress impossible. | Manager deadlines, progress blockers, application waiting, and network polling. |
-| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. | Fetch result classification, application waiting, and an application wakeup that did not correspond to progress. |
-| [KAFKA-20970 / PR 23227](https://github.com/apache/kafka/pull/23227) | An expired auto-commit or Streams heartbeat compatibility timer could remain at zero while the coordinator was unknown and no request could be built. | Manager feasibility, legacy application-wait projection, and network poll timeout. |
+| [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) | An ambiguous empty fetch result caused application/background wakeup ping-pong. This was primarily a wake/effect-classification defect, not a deadline-model defect. | Fetch result classification, application waiting, and an application wakeup that did not correspond to progress. |
+| [KAFKA-20970 / PR 23227](https://github.com/apache/kafka/pull/23227) (proposed, not merged) | An expired auto-commit or Streams heartbeat compatibility timer could remain at zero while the coordinator was unknown and no request could be built. | Manager eligibility, legacy application-wait projection, and network poll timeout. |
 | [KAFKA-20397 / PR 21991](https://github.com/apache/kafka/pull/21991) | Metadata-error publication raced with an application thread entering its fetch-buffer wait. | Error publication, retained notification, and wait entry. |
 | [KAFKA-18160 / PR 18089](https://github.com/apache/kafka/pull/18089) | Wakeup or interruption could skip callback acknowledgement. | Interruption, callback completion, and lifecycle handling. |
 | [KAFKA-19357 / PR 19914](https://github.com/apache/kafka/pull/19914), [KAFKA-18569 / PR 18590](https://github.com/apache/kafka/pull/18590) | During close, coordinator discovery could stop while a pending commit still required it, or continue after commit and leave work no longer required it. | Pending-operation dependencies, coordinator discovery, and shutdown progress. |
@@ -228,6 +228,13 @@ A manager poll answers one narrow question: what did this manager produce now, a
 The manager owns the state needed to answer, such as coordinator availability, in-flight requests, retry backoff,
 metadata, or buffer capacity. The reactor validates and routes the typed answer but does not reimplement those rules.
 
+Current `PollResult` pairs produced requests with a numeric wait hint. Request presence identifies immediate transport
+output, but an empty result's wait value says only when another poll may occur. It does not state whether passage of
+time can change eligibility or whether progress requires an external input. Existing code represents those cases by
+convention: zero requests an immediate poll, a finite value represents a timed retry, and `WAIT_FOREVER` removes the
+timer deadline. The missing information is therefore the post-poll eligibility condition, not whether a request was
+already produced.
+
 The manager must not encode the same feasibility rule independently in work admission and wait calculation. For each
 migrated work source, it derives one manager-local activation projection that answers both:
 
@@ -282,6 +289,17 @@ the work-admission path rather than reproduce its predicate.
 | `progress(...)` | At least one `ManagerEvent` or `NetworkCommand`. | Consume the output now; the typed condition describes the next poll after that output. |
 | `retryAfter(delayMs)` | None. | Time alone may make the manager runnable; poll again after a positive, finite delay. |
 | `awaitInput()` | None. | Time alone cannot help; poll again after a relevant admitted input. |
+
+Once a feature and operating mode are fixed, timing-only configurations should control cadence, retry spacing, and
+timeout budgets. They should not be reused as proxies for whether work is currently eligible or which external input
+must occur before progress can resume. This does not imply that Kafka configuration never changes state-machine
+behavior; feature, protocol, and timeout settings intentionally do so.
+
+One compatibility case remains explicit. `retry.backoff.ms=0` is legal today, while the current POC requires a
+strictly positive `RetryAfter`. The migration must not silently reinterpret a legal zero-delay retry as
+`AwaitInput`, because that can remove a retry when no enabling input will arrive. Before removing the compatibility
+constructor, the implementation must define and test zero-delay time-driven retry semantics, including fairness and
+no-progress-loop behavior.
 
 `PollImmediately` is not a general zero-delay retry. It is valid only when the same `PollResult` contains output that
 the reactor consumes or stages. This makes the invalid shape structural rather than a convention:
@@ -626,8 +644,8 @@ This study covers [KAFKA-20426](https://issues.apache.org/jira/browse/KAFKA-2042
 [KAFKA-20970](https://issues.apache.org/jira/browse/KAFKA-20970).
 
 **Before.** Heartbeat, coordinator discovery, auto-commit, the application wait, and network polling could calculate
-urgency independently. A timer could remain at zero even though coordinator state or an in-flight request made new
-work impossible.
+urgency independently. The numeric wait did not identify why an empty result was blocked. A timer could therefore
+remain at zero even though coordinator state or an in-flight request made new work impossible.
 
 ```text
 HeartbeatRequestManager      -> heartbeat timer expired -> application wait 0
@@ -674,7 +692,8 @@ and KAFKA-20970 end-to-end evidence remain open; see [Appendix A](#appendix-a-po
 This study covers [KAFKA-20854](https://issues.apache.org/jira/browse/KAFKA-20854) and
 [KAFKA-20397](https://issues.apache.org/jira/browse/KAFKA-20397).
 
-**Before.** An empty fetch-preparation result could be interpreted as a reason to wake the application. The
+**Before.** An empty fetch-preparation result could be interpreted as a reason to wake the application. This is an
+effect-classification failure related to, but distinct from, the numeric wait limitation. The
 application would find no data, re-enter its wait, and trigger another background pass. A metadata error could also
 be published while the application was crossing into the fetch-buffer wait, losing the intended notification order.
 
@@ -1076,5 +1095,6 @@ not a second target execution model.
 - [KIP-945](https://cwiki.apache.org/confluence/display/KAFKA/KIP-945%3A%2BUpdate%2Bthreading%2Bmodel%2Bfor%2BConsumer)
   is a WIP proposal documenting the broader threading-model intent. It remains related history, not this KIP's
   baseline or a prerequisite.
-- [KAFKA-20854 / PR #23014](https://github.com/apache/kafka/pull/23014) narrows one busy-loop cause. This proposal uses
-  the same problem decomposition and generalizes the scheduling and action boundary across managers.
+- [KAFKA-20854 / PR #23014](https://github.com/apache/kafka/pull/23014) fixes a fetch wake/effect-classification bug.
+  It motivates typed manager output and effect ordering, but is not evidence that the numeric wait field caused every
+  busy loop.
