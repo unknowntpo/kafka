@@ -23,7 +23,7 @@ Current state: Draft
 
 Discussion thread: TBD
 
-Jira: TBD
+Jira: [KAFKA-20995](https://issues.apache.org/jira/browse/KAFKA-20995)
 
 ## Summary
 
