@@ -147,7 +147,7 @@ The remaining concepts describe how those outputs form one reactor iteration:
 
 | Concept | Scoped meaning | Concrete example |
 | --- | --- | --- |
-| `PollResult` | One manager's complete atomic output for this poll. | Heartbeat returns one `NetworkCommand` plus `RetryAfter(heartbeatIntervalMs)`; an in-flight discovery returns no immediate output plus `AwaitInput`. |
+| `PollResult` | One manager's complete atomic output for this poll. | Heartbeat returns one `NetworkCommand` plus `AwaitInput(network completion)` after recording the request in flight; an in-flight discovery also returns no immediate output plus `AwaitInput`. |
 | `ManagerEvent` | A fact produced by one manager that requires a consequence outside that producer's local state. | `FetchBufferHasData` derives a post-publication application wake; `CoordinatorUnavailableObserved(version=7)` derives a version-fenced command for the coordinator owner. |
 | Owner snapshot | An opt-in immutable, versioned view used only when another manager needs coherent owner state. | Heartbeat builds for `CoordinatorSnapshot(node-1, version=7)` and retains version 7 so its later observation cannot invalidate version 9. |
 | `ManagerCoordinationPolicy` | Composition-owned typed handlers that map an ordered event batch to `ManagerCommand` or `ReactorAction` values. | It maps `FetchBufferHasData` to one coalesced wake and routes a coordinator observation to the coordinator owner without adding domain branches to `ConsumerReactor`. |
@@ -197,6 +197,16 @@ A manager poll answers one narrow question: what did this manager produce now, a
 The manager owns the state needed to answer, such as coordinator availability, in-flight requests, retry backoff,
 metadata, or buffer capacity. The reactor validates and routes the typed answer but does not reimplement those rules.
 
+The manager must not encode the same feasibility rule independently in work admission and wait calculation. For each
+migrated work source, it derives one manager-local activation projection that answers both:
+
+1. whether a local step is legal now; and
+2. after that step, whether time or another input can make the next poll useful.
+
+This is a local calculation over state the manager already owns, not a global readiness registry. It may be a private
+method or small private value; the KIP does not require a new framework or class hierarchy. The resulting condition is
+published through the existing `PollResult` algebra.
+
 The target contract is:
 
 ```java
@@ -210,6 +220,31 @@ PollResult.progress(networkCommands, events, nextPollCondition);
 PollResult.retryAfter(delayMs);
 PollResult.awaitInput();
 ```
+
+Two proven examples show why the pre-step and post-step conditions must be derived from the same state projection:
+
+```text
+Coordinator discovery
+  retry elapsed, no request in flight -> PollImmediately -> build one request
+  after recording the request in flight -> AwaitInput(network completion)
+
+Auto-commit
+  timer not expired -> RetryAfter(remainingMs)
+  timer expired, no commit in flight -> PollImmediately -> enqueue one commit
+  timer expired, commit in flight -> AwaitInput(commit completion)
+
+Regular/share heartbeat
+  coordinator unknown or membership blocks heartbeat -> AwaitInput(owner state change)
+  interval/backoff pending -> RetryAfter(remainingMs)
+  request legal now -> PollImmediately -> build one heartbeat
+  after recording the heartbeat in flight -> AwaitInput(network completion)
+```
+
+Reusing the pre-step `PollImmediately` condition after creating a request would admit a duplicate or immediate loop.
+Using an arbitrary timer while a request is in flight avoids that loop but periodically rechecks work that only a
+completion can enable. The single local projection removes both forms of disagreement. During migration,
+`maximumTimeToWait(...)` may remain a compatibility projection, but it must read the same activation calculation as
+the work-admission path rather than reproduce its predicate.
 
 | Result shape | Immediate output | Meaning |
 | --- | --- | --- |
@@ -238,7 +273,7 @@ Examples across managers are:
 | Manager state | Result | Related evidence |
 | --- | --- | --- |
 | Heartbeat is due but coordinator discovery is in flight. | `awaitInput()`; the `FindCoordinator` network completion is the enabling input. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
-| Heartbeat is due and a request can be built. | `progress([heartbeatRequest], [], RetryAfter(heartbeatIntervalMs))` and record the attempt in flight. The current `UnsentRequest` implements `NetworkCommand`. | Expected request-producing case for KAFKA-20253 |
+| Heartbeat is due and a request can be built. | `progress([heartbeatRequest], [], AwaitInput(network completion))` after recording the attempt in flight. The current `UnsentRequest` implements `NetworkCommand`. | Request-producing case for KAFKA-20253 |
 | Auto-commit is due but an earlier commit is in flight. | `awaitInput()`; the earlier commit's completion is the enabling input. | [KAFKA-20253 / PR 22836](https://github.com/apache/kafka/pull/22836) |
 | Coordinator retry backoff has 75 ms remaining. | `retryAfter(75)` | Finite-retry case |
 | Fetch preparation finds buffered data. | `progress([], [FetchBufferHasData], AwaitInput)`; policy derives a post-publication wake. | [KAFKA-20854 / PR 23014](https://github.com/apache/kafka/pull/23014) |
@@ -461,6 +496,28 @@ and `StreamsConsumerDriver` are proposed internal boundaries; they do not yet ex
 The shared reactor must not branch on consumer type. An `isShareConsumer` switch or a regular/share union in the
 reactor loop indicates that consumer-specific behavior has leaked across the boundary.
 
+### 8. Apply the model to the motivating failures
+
+The model is useful only if each motivating failure becomes a concrete assertion. The table therefore distinguishes
+the historical failure, the model rule applied to it, and the evidence currently available. **Verified** means the
+named production-component path has a deterministic test in this POC. **Partial** and **pending** are explicit
+migration work; they are not claims that the reactor already fixes the issue end to end.
+
+| Issue | Before the model | Model application | Current proof |
+| --- | --- | --- | --- |
+| [KAFKA-17066](https://issues.apache.org/jira/browse/KAFKA-17066) | Position initialization crossed application and background execution without one ordered operation boundary. | `OffsetsRequestManager` owns position initialization; the reactor orders the application input, network completion, and next manager pass. | **Partial:** `AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`; original pre-fix negative baseline still required. |
+| [KAFKA-17674](https://issues.apache.org/jira/browse/KAFKA-17674) | An older OffsetFetch completion for `tp1` could reset newly added `tp2`. | The operation retains its captured partition scope; later assignment input is handled by a later ordered operation. | **Verified component:** `OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition` and the Async consumer component test above; the latter fails at pre-fix baseline `6744a718c2`. |
+| [KAFKA-18641](https://issues.apache.org/jira/browse/KAFKA-18641) | Application position advancement could race with the auto-commit snapshot. | Position input must be applied before the commit manager derives the dependent snapshot in the same ordered pass. | **Pending:** exact reactor ordering reproduction is still required. |
+| [KAFKA-15529](https://issues.apache.org/jira/browse/KAFKA-15529) | Consumed data could become visible before the matching position update. | The fetch owner applies the completed state transition before the reactor publishes the corresponding data/effect. | **Unit only:** `FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`; cross-component proof pending. |
+| [KAFKA-20426](https://issues.apache.org/jira/browse/KAFKA-20426) | Manual assignment made heartbeat progress impossible while a zero application wait remained visible. | The regular/share heartbeat activation projection treats membership-reported skip states as `AwaitInput(MEMBERSHIP_CHANGE)` and projects an unbounded compatibility application wait for `UNSUBSCRIBED`. | **Verified manager path:** `ConsumerHeartbeatRequestManagerTest.testMaximumTimeToWaitWhenHeartbeatShouldBeSkipped`; `AsyncKafkaConsumerTest.testPollWithManualAssignmentDoesNotBusyLoop` covers the public poll path. |
+| [KAFKA-20253](https://issues.apache.org/jira/browse/KAFKA-20253) | Heartbeat, coordinator, and auto-commit timers could say “now” although coordinator or in-flight state made new work impossible. | Each owner derives one activation projection: runnable work produces one command, in-flight work awaits completion, and finite backoff alone uses `RetryAfter`. The reactor retains and aggregates those conditions. | **Verified slices:** regular/share heartbeat inherited tests, coordinator/commit tests, and `ConsumerReactorTest.testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll`; exact historical high-CPU scenario remains a benchmark gate. |
+| [KAFKA-20854](https://issues.apache.org/jira/browse/KAFKA-20854) | An empty fetch-preparation result could trigger application/background wakeup ping-pong. | Fetch reports a typed blocker or `FetchBufferHasData`; only the latter derives a post-publication wake action. | **Verified component:** `AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`; the same test observes the invalid wake at pre-fix baseline `9521d77da3`. |
+| [KAFKA-20970](https://issues.apache.org/jira/browse/KAFKA-20970) | Expired auto-commit or Streams heartbeat compatibility timers could remain at zero while coordinator state blocked request creation. | Auto-commit now derives admission and wait from one projection; an in-flight commit awaits completion rather than reusing the expired timer. Streams heartbeat remains a separate migration target. | **Partial:** `ConsumerReactorCommitReadinessTest.testCompletionPublishesScheduleBeforeApplicationWakeup`; Streams heartbeat proof pending. |
+| [KAFKA-20397](https://issues.apache.org/jira/browse/KAFKA-20397) | Metadata-error publication could race with application entry into the fetch-buffer wait. | Stage the terminal publication and retained wake reason, publish the schedule/state, then execute the wake action. | **Partial:** generic publish-before-wakeup tests exist; exact metadata-error race reproduction pending. |
+| [KAFKA-18160](https://issues.apache.org/jira/browse/KAFKA-18160) | Wakeup or interruption could skip callback-completed acknowledgement. | Preserve one operation identity and route its terminal acknowledgement through the ordered action boundary exactly once. | **Pending:** historical integration coverage exists; a POC callback/interruption component assertion is required. |
+| [KAFKA-19357](https://issues.apache.org/jira/browse/KAFKA-19357) | Close could stop coordinator discovery while an admitted commit still needed it. | Shutdown must preserve dependencies of admitted operations until one terminal result, then drain staged actions before resource close. | **Pending:** exact pending-commit plus unknown-coordinator close test is required. |
+| [KAFKA-18569](https://issues.apache.org/jira/browse/KAFKA-18569) | Coordinator discovery could continue after commit and leave work no longer needed it. | The coordinator owner derives discovery activation from the current admitted-work/lifecycle state; close ordering cannot be inferred independently by peers. | **Pending:** the inverse close-liveness test must prove discovery stops without delaying terminal completion. |
+
 ## Compatibility, Deprecation, and Migration Plan
 
 ### Current implementation status
@@ -472,6 +529,7 @@ model above also defines later migration work. The distinction is:
 | --- | --- | --- |
 | Manager output algebra | Canonical `PollResult` storage has `NetworkCommand`, `ManagerEvent`, and `NextPollCondition`; generic reactor/cache consumers use the typed accessors. Legacy fields and constructors remain adapters. | Every manager produces only the typed contract and the adapters are removed. |
 | Manager progress | `AwaitInput`, positive finite `RetryAfter`, and output-gated `PollImmediately` are present. `awaitEvent()` remains an alias. | Every manager uses the explicit conditions and the ambiguous alias is removed. |
+| Manager-local activation projection | Coordinator discovery, auto-commit, and regular/share heartbeat derive work admission and the next condition from one local state projection. Auto-commit completion is proven to re-poll the real manager and publish a newer schedule before application wakeup; heartbeat records an admitted request as input-driven until network completion. | Apply the rule only where a manager otherwise duplicates an eligibility predicate; migrate Streams heartbeat separately and do not introduce a generic readiness registry. |
 | Cross-manager ownership | Coordinator target/version snapshot, typed event handlers, phase-batch policy evaluation, and version-fenced coordinator invalidation are present. | Other cross-owner mutation paths use the same owner/fact/command rule or are placed inside an explicit protocol driver. |
 | Snapshot retention | Only the current `CoordinatorSnapshot` is retained; there is no global registry or snapshot history. | Additional snapshots remain opt-in and latest-only when a real cross-manager decision needs them. |
 | Publish-before-effect | `ReactorAction` and staged `BackgroundEvent` paths publish the schedule first. | Generic operation completion, data publication, callback acknowledgement, and timeout paths cross the same boundary. |
@@ -595,6 +653,12 @@ target are migration exit criteria rather than claims about the current POC. Req
   them into at most one primitive application wakeup per complete reactor iteration;
 - heartbeat, auto-commit, fetch, coordinator, metadata, and share-acknowledgement tests distinguish immediate output,
   finite retry, and input-wait states without moving their local rules into the reactor;
+- current readiness slice: a real `CommitRequestManager` remains input-driven after its auto-commit timer expires;
+  completion during network polling re-polls that manager, publishes a newer `ReactorSchedule` generation, and only
+  then wakes the application thread;
+- current heartbeat slice: the shared regular/share manager derives coordinator, membership, timer, and in-flight
+  outcomes from one activation projection; after admitting a heartbeat, its `PollResult` names network completion
+  rather than retaining a periodic reactor deadline, while the legacy application-wait projection remains compatible;
 - a coordinator completion makes dependent work visible in the next ordered pass, and any resulting request is sent
   by the following network poll without a hard-coded same-phase manager branch;
 - a request target and its owner version come from one immutable snapshot;
@@ -645,6 +709,14 @@ A raw zero delay is ambiguous: it can mean executable work is ready, or that a l
 condition still prevents progress. Making the reactor interpret heartbeat, commit, fetch, metadata, and share
 acknowledgement state would duplicate manager rules in the shared kernel. The constrained `PollResult` shapes instead
 require each manager to classify its own result and let the reactor validate only the generic no-progress invariant.
+
+### Add a generic readiness kernel or signal registry
+
+The existing reactor already receives application inputs, network completions, cancellation, and shutdown wakeups.
+A second signal registry would duplicate those channels and add lifecycle, boundedness, and missed-signal questions.
+The minimal rule is local: a manager derives one activation projection and reports its result with
+`NextPollCondition`. New readiness infrastructure is justified only if a later manager demonstrates a dependency that
+the existing input paths and stable ordered pass cannot express.
 
 ### Put all consumer logic in one reactor class
 
