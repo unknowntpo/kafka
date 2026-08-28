@@ -283,6 +283,11 @@ public class CoordinatorRequestManagerTest {
         // First poll sends a FindCoordinator request, marking it in-flight. Do NOT complete it.
         NetworkClientDelegate.PollResult res = coordinatorManager.poll(time.milliseconds());
         assertEquals(1, res.unsentRequests.size());
+        NextPollCondition.AwaitInput initialWait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            res.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, initialWait.cause());
 
         // Advance well past the retry backoff while the request is still in flight.
         time.sleep(60_000);
@@ -291,6 +296,11 @@ public class CoordinatorRequestManagerTest {
         assertEquals(0, res2.unsentRequests.size(), "no new request should be sent while one is in flight");
         assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, res2.timeUntilNextPollMs,
             "an in-flight FindCoordinator request must await its completion event");
+        NextPollCondition.AwaitInput retainedWait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            res2.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, retainedWait.cause());
     }
 
     @ParameterizedTest

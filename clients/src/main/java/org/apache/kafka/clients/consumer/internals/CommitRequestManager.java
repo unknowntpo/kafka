@@ -233,7 +233,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
+        return autoCommitState.map(ac -> ac.nextActivation(currentTimeMs).delayMs()).orElse(Long.MAX_VALUE);
     }
 
     @Override
@@ -302,8 +302,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      * In that case, the next auto-commit request will be sent on the next call to poll, after a
      * response for the in-flight is received.
      */
-    private void maybeAutoCommitAsync() {
-        if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit()) {
+    private void maybeAutoCommitAsync(final long currentTimeMs) {
+        if (autoCommitEnabled()
+            && autoCommitState.get().nextActivation(currentTimeMs) instanceof NextPollCondition.PollImmediately) {
             OffsetCommitRequestState requestState = createOffsetCommitRequest(
                 subscriptions.allConsumed(),
                 Long.MAX_VALUE);
@@ -686,10 +687,6 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         return error instanceof StaleMemberEpochException && memberInfo.memberEpoch.isPresent();
     }
 
-    private void updateAutoCommitTimer(final long currentTimeMs) {
-        this.autoCommitState.ifPresent(t -> t.updateTimer(currentTimeMs));
-    }
-
     // Visible for testing
     Queue<OffsetCommitRequestState> unsentOffsetCommitRequests() {
         return pendingRequests.unsentOffsetCommits;
@@ -770,12 +767,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      * </ol>
      *
      * @param currentTimeMs the current timestamp in millisecond
-     * @see CommitRequestManager#updateAutoCommitTimer(long)
-     * @see CommitRequestManager#maybeAutoCommitAsync()
+     * @see CommitRequestManager#maybeAutoCommitAsync(long)
      */
     public void updateTimerAndMaybeCommit(final long currentTimeMs) {
-        updateAutoCommitTimer(currentTimeMs);
-        maybeAutoCommitAsync();
+        maybeAutoCommitAsync(currentTimeMs);
     }
 
     class OffsetCommitRequestState extends RetriableRequestState {
@@ -1564,17 +1559,6 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             this.log = logContext.logger(getClass());
         }
 
-        public boolean shouldAutoCommit() {
-            if (!this.timer.isExpired()) {
-                return false;
-            }
-            if (this.hasInflightCommit) {
-                log.trace("Skipping auto-commit on the interval because a previous one is still in-flight.");
-                return false;
-            }
-            return true;
-        }
-
         public void resetTimer() {
             this.timer.reset(autoCommitInterval);
         }
@@ -1583,22 +1567,19 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             this.timer.reset(retryBackoffMs);
         }
 
-        public long remainingMs(final long currentTimeMs) {
+        /**
+         * Derives both auto-commit eligibility and the next application activation from one state view.
+         * An in-flight commit is input-driven: elapsed time alone cannot make another commit legal.
+         */
+        public NextPollCondition nextActivation(final long currentTimeMs) {
             this.timer.update(currentTimeMs);
-            // KAFKA-20253: If the auto-commit interval has elapsed but a previous auto-commit is still
-            // in-flight (for example it cannot complete because the coordinator is unavailable after a
-            // failed re-authentication), a new auto-commit cannot be started yet. Returning 0 here would
-            // busy-spin the application thread, since this value feeds AsyncKafkaConsumer.pollForFetches()
-            // via maximumTimeToWait(). Wait for the interval instead; the network thread still wakes on the
-            // in-flight commit's response, which resets this timer.
             if (this.timer.isExpired() && this.hasInflightCommit) {
-                return autoCommitInterval;
+                log.trace("Skipping auto-commit on the interval because a previous one is still in-flight.");
+                return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION);
             }
-            return this.timer.remainingMs();
-        }
-
-        public void updateTimer(final long currentTimeMs) {
-            this.timer.update(currentTimeMs);
+            if (this.timer.isExpired())
+                return NextPollCondition.pollImmediately();
+            return NextPollCondition.retryAfter(this.timer.remainingMs());
         }
 
         public void setInflightCommitStatus(final boolean inflightCommitStatus) {

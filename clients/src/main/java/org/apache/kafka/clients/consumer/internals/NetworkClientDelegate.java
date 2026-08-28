@@ -457,6 +457,22 @@ public class NetworkClientDelegate implements AutoCloseable {
             return new PollResult(List.of(), Set.of(), List.of(), NextPollCondition.awaitInput());
         }
 
+        /**
+         * Reports no progress and names the existing input path expected to make the manager worth evaluating again.
+         * The cause is diagnostic context; it does not register a callback or introduce another wakeup channel.
+         */
+        static PollResult awaitInput(final NextPollCondition.AwaitCause cause) {
+            return new PollResult(List.of(), Set.of(), List.of(), NextPollCondition.awaitInput(cause));
+        }
+
+        /** Reports no progress using an already-derived finite or input-driven activation condition. */
+        static PollResult waitFor(final NextPollCondition condition) {
+            Objects.requireNonNull(condition, "Wait condition must be non-null");
+            if (condition instanceof NextPollCondition.PollImmediately)
+                throw new IllegalArgumentException("No-progress result cannot request an immediate poll");
+            return new PollResult(List.of(), Set.of(), List.of(), condition);
+        }
+
         /** Compatibility alias retained while manager producers migrate to the more precise {@link #awaitInput()}. */
         static PollResult awaitEvent() {
             return awaitInput();
