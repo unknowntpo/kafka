@@ -229,9 +229,9 @@ The manager owns the state needed to answer, such as coordinator availability, i
 metadata, or buffer capacity. The reactor validates and routes the typed answer but does not reimplement those rules.
 
 A deadline can express when to poll again, but not whether another poll can make progress or what must happen first.
-It compresses a request manager's distinct next-poll conditions—work ready now, time-driven retry, and external-input
-wait—into one number. Current `PollResult` pairs produced requests with that wait hint, so request presence identifies
-immediate transport output.
+It compresses a request manager's distinct next-poll conditions—manager output available now, time-driven retry, and
+external-input wait—into one number. Current `PollResult` pairs produced output with that wait hint: a
+`NetworkCommand` identifies immediate transport intent, while a `ManagerEvent` identifies an observed fact.
 For an empty result, however, the value says only when another poll may occur. It does not state whether passage of
 time can change eligibility or whether progress requires an external input. Existing code represents those cases by
 convention: zero requests immediate re-evaluation, a finite value represents a timed retry, and `WAIT_FOREVER`
