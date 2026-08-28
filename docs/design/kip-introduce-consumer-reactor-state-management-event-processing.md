@@ -282,8 +282,9 @@ Examples across managers are:
 | Share acknowledgement request is in flight. | `awaitInput()`; acknowledgement completion is the enabling input. | Share-consumer case |
 
 Strict factories validate only these generic result-shape rules. They do not infer why heartbeat, commit, fetch,
-coordinator, or share work can make progress. During migration, legacy `UnsentRequest`, `StateTransition`, raw-delay
-fields, and constructors remain adapters around the typed fields and factories. Production validation also detects an
+coordinator, or share work can make progress. During migration, `UnsentRequest`, raw-delay fields, and compatibility
+constructors remain adapters around the typed fields and factories. `StateTransition` has been removed; manager facts
+now use only `ManagerEvent`. Production validation also detects an
 empty immediate result created through an adapter, records the manager, and treats it as `AwaitInput` so it cannot
 force `NetworkClientDelegate.poll(0)`.
 
@@ -626,9 +627,12 @@ NetworkClientDelegate.poll(published timeout)
   cover coordinator, membership, timer, and in-flight states;
   [`ConsumerReactorTest.testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java)
   covers heartbeat-to-coordinator routing. The exact historical KAFKA-20253 CPU benchmark remains a performance gate.
-- **Partial:**
+- **Verified POC slices:**
   [`ConsumerReactorCommitReadinessTest.testCompletionPublishesScheduleBeforeApplicationWakeup`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorCommitReadinessTest.java)
-  proves the auto-commit slice. Streams heartbeat remains a separate KAFKA-20970 migration and proof target.
+  proves the auto-commit slice. Regular, share, and Streams heartbeat request admission now publishes
+  `AwaitInput(network completion)` after recording a request in flight. Streams topology-description push likewise
+  distinguishes coordinator input, membership input, finite retry, and network completion. The exact KAFKA-20970
+  end-to-end reproduction remains a separate proof target.
 
 ### Case study 3: fetch progress and application wakeup
 
@@ -671,7 +675,7 @@ ConsumerReactor
   -> executes the phase-coalesced WAKE_APPLICATION last
 
 Application thread
-  -> wakes only after the data, error, or completion that caused the wake is visible
+  -> target: wakes only after the data, error, or completion that caused the wake is visible
 ```
 
 **Assertions and POC evidence.**
@@ -683,8 +687,10 @@ Application thread
   [`ManagerCoordinationPolicyTest`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ManagerCoordinationPolicyTest.java)
   and reactor action-ordering tests prove `FetchBufferHasData` selects a coalesced action that executes after schedule
   publication.
-- **Partial:** generic publish-before-wakeup coverage exists, but the exact KAFKA-20397 metadata-error/wait-entry race
-  still needs a deterministic component reproduction.
+- **Compatibility limitation:** `FetchBuffer.addAll(...)` still signals its condition directly because that buffer is
+  shared with the classic consumer path. Therefore the POC proves the typed fact-to-action ordering but does not yet
+  claim that every fetch-data wake crosses the reactor boundary. Separating the async fetch-buffer notification from
+  the classic compatibility path, plus the exact KAFKA-20397 metadata-error/wait-entry reproduction, remains required.
 
 ### Case study 4: one operation through retry and close
 
@@ -747,22 +753,22 @@ Terminal success, timeout, cancellation, interruption, or close
 
 ### Current implementation status
 
-The current proof of concept implements Phase 1 and the coordinator-focused vertical slice of Phase 2. The target
-model above also defines later migration work. The distinction is:
+The current proof of concept implements Phase 1 plus coordinator ownership, heartbeat/commit readiness, finite retry,
+and Streams topology slices from Phase 2. The target model above also defines later migration work. The distinction is:
 
 | Area | Current POC | Target after migration |
 | --- | --- | --- |
-| Manager poll result | Canonical `PollResult` storage has `NetworkCommand`, `ManagerEvent`, and `NextPollCondition`; generic reactor/cache consumers use the typed accessors. Legacy fields and constructors remain adapters. | Every manager produces only the typed result and the adapters are removed. |
-| Manager progress | `AwaitInput`, positive finite `RetryAfter`, and output-gated `PollImmediately` are present. `awaitEvent()` remains an alias. | Every manager uses the explicit conditions and the ambiguous alias is removed. |
-| Manager-local activation projection | Coordinator discovery, auto-commit, and regular/share heartbeat derive work admission and the next condition from one local state projection. Auto-commit completion is proven to re-poll the real manager and publish a newer schedule before application wakeup; heartbeat records an admitted request as input-driven until network completion. | Apply the rule only where a manager otherwise duplicates an eligibility predicate; migrate Streams heartbeat separately and do not introduce a generic readiness registry. |
-| Cross-manager ownership | Coordinator target/version snapshot, typed event handlers, phase-batch policy evaluation, and version-fenced coordinator invalidation are present. | Other cross-owner mutation paths use the same owner/fact/command rule or are placed inside an explicit protocol driver. |
+| Manager poll result | Canonical `PollResult` storage has `NetworkCommand`, `ManagerEvent`, and `NextPollCondition`; generic reactor/cache consumers use the typed accessors. `StateTransition` and `awaitEvent()` have been removed. Raw-delay compatibility constructors remain for unmigrated producers. | Every manager produces only the typed result and the compatibility constructors are removed. |
+| Manager progress | `AwaitInput`, positive finite `RetryAfter`, and output-gated `PollImmediately` are present. Coordinator, commit, regular/share/Streams heartbeat, topic metadata, share acknowledgement retry, and Streams topology-description paths publish typed conditions. | Migrate the remaining raw-delay producers without introducing a global readiness registry. |
+| Manager-local activation projection | Coordinator discovery, auto-commit, and regular/share/Streams heartbeat derive work admission and the next condition from manager-owned state. Auto-commit completion is proven to re-poll the real manager and publish a newer schedule before application wakeup; an admitted heartbeat or topology request waits for network completion. | Apply the rule only where a manager otherwise duplicates an eligibility predicate. |
+| Cross-manager ownership | Coordinator target/version snapshot, typed event handlers, phase-batch policy evaluation, and version-fenced coordinator invalidation are present. Coordinator fatal errors are emitted once by the coordinator owner and converted after schedule publication into an application error plus the final wake; heartbeat managers no longer read and clear coordinator fatal state. | Other cross-owner mutation paths use the same owner/fact/command rule or are placed inside an explicit protocol driver. |
 | Snapshot retention | Only the current `CoordinatorSnapshot` is retained; there is no global registry or snapshot history. | Additional snapshots remain opt-in and latest-only when a real cross-manager decision needs them. |
-| Publish-before-effect | `ReactorAction` and staged `BackgroundEvent` paths publish the schedule first. | Generic operation completion, data publication, callback acknowledgement, and timeout paths cross the same boundary. |
+| Publish-before-effect | `ReactorAction` and staged `BackgroundEvent` paths publish the schedule first. Direct `FetchBuffer` signalling remains a documented classic-consumer compatibility side channel. | Generic operation completion, async data publication, callback acknowledgement, and timeout paths cross the same boundary. |
 | Application wait projection | `AsyncKafkaConsumer.poll(...)` uses the published reactor decision; the former assignment/position mutable-state rescans have been removed in the POC. Assignment publication and position update/failure paths must therefore provide the corresponding wake or completion signal. | All remaining compatibility waits are derived from immutable schedule or operation results, with integration tests proving that each enabling input wakes a blocked application poll. |
 | Wake coalescing | Equivalent wakes are combined separately in the pre-I/O, post-I/O, and final-drain phases. | Equivalent reasons produce at most one primitive wake per complete reactor iteration. |
 | Cross-owner fact admission | Callback-produced facts are drained at the input boundary and their owner commands are applied before the full manager pass builds transport work. A post-I/O poll failure leaves the fact in the producer-local bounded buffer for that next input drain. An unexpected fact first produced by the pre-I/O manager pass is preserved and diagnosed, but its command is deferred because transport work may already have been built. | Require cross-owner facts to enter through the input/post-I/O paths, or add explicit dependency-aware replay/cancellation before claiming generic safety for facts first created during the pre-I/O pass. |
 | Diagnostics | Contract, manager-poll, action-failure, and application-wakeup counters are present. | TRACE adds publication generation, deadline source, action reason, and destination without hot-path collection formatting. |
-| Consumer variants | The coordinator observation slice is proven with the regular heartbeat manager; Streams coordinator snapshots use the same owner/version rule. Share consume request production still uses compatibility `PollResult` construction and lacks an equivalent reactor-level recovery test. | Regular, share, and Streams compositions each prove their typed outputs and cross-owner recovery without consumer-type branches in `ConsumerReactor`. |
+| Consumer variants | Regular, share, and Streams heartbeat paths use the typed progress model; Streams topology push uses the coordinator snapshot/version rule. Share fetch production still has compatibility `PollResult` construction and lacks an equivalent reactor-level recovery test. | Regular, share, and Streams compositions each prove all typed outputs and cross-owner recovery without consumer-type branches in `ConsumerReactor`. |
 
 The following names map the model to the current POC. They are implementation evidence, not prerequisites for
 understanding the design:
@@ -815,8 +821,9 @@ Other current implementation details include:
 - Establish the existing background loop as `ConsumerReactor` without changing thread topology.
 - Publish one `ReactorSchedule` and execute actions only after publication.
 - Add canonical `PollResult.progress(...)`, `retryAfter(...)`, and `awaitInput()` factories over `ManagerEvent`,
-  `NetworkCommand`, and `NextPollCondition`. Keep `awaitEvent()`, raw delays, `UnsentRequest`, `StateTransition`, and
-  legacy constructors as isolated adapters while producers migrate. Strict factories reject contradictory shapes;
+  `NetworkCommand`, and `NextPollCondition`. Keep raw delays, `UnsentRequest`, and compatibility constructors as
+  isolated adapters while producers migrate; remove the redundant `StateTransition` family and `awaitEvent()` alias.
+  Strict factories reject contradictory shapes;
   production validation identifies and counts an adapter-created empty immediate result and replaces it with
   `AwaitInput` rather than allowing a zero-timeout loop.
 - Migrate fetch reconnect, in-flight, paused, missing-leader, and buffered-data decisions to the strengthened
@@ -830,8 +837,7 @@ API change.
 
 ### Phase 2: Migrate manager and consumer-specific decisions
 
-- Move remaining manager deadlines into `NextPollCondition` and completed manager facts from `StateTransition` into
-  `ManagerEvent`.
+- Move remaining manager deadlines into `NextPollCondition`; all completed manager facts already use `ManagerEvent`.
 - Replace mutation calls that cross ownership domains with typed immutable `ManagerEvent` values routed through the
   selected composition to one state owner. Calls inside an explicitly defined regular/share/Streams protocol driver
   are not prohibited by this rule.
