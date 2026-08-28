@@ -229,14 +229,15 @@ The manager owns the state needed to answer, such as coordinator availability, i
 metadata, or buffer capacity. The reactor validates and routes the typed answer but does not reimplement those rules.
 
 A deadline can express when to poll again, but not whether another poll can make progress or what must happen first.
-It compresses a request manager's distinct next-poll conditions—manager output available now, time-driven retry, and
-external-input wait—into one number. Current `PollResult` pairs produced output with that wait hint: a
-`NetworkCommand` identifies immediate transport intent, while a `ManagerEvent` identifies an observed fact.
-For an empty result, however, the value says only when another poll may occur. It does not state whether passage of
-time can change eligibility or whether progress requires an external input. Existing code represents those cases by
-convention: zero requests immediate re-evaluation, a finite value represents a timed retry, and `WAIT_FOREVER`
-removes the timer deadline. These conventions can produce the intended scheduling behavior, but leave the eligibility
-condition and blocking cause implicit.
+It compresses a request manager's distinct next-poll conditions—whether it can build an `UnsentRequest` now, whether
+a retry delay must elapse, or whether coordinator state, an in-flight request, or another external input must change—
+into one number. Before this proposal, `PollResult` pairs a list of `UnsentRequest` values with
+`timeUntilNextPollMs`. Request presence shows that transport work was produced. For an empty result, however, the
+number says only when another poll may occur. It does not state whether passage of time can change eligibility or
+whether progress requires an external input. Existing code represents those cases by convention: `0` means immediate
+re-evaluation, a finite value represents a timed retry, and `WAIT_FOREVER` removes the timer deadline.
+These conventions can produce the intended scheduling behavior, but leave the eligibility condition and blocking
+cause implicit.
 
 The manager must not encode the same feasibility rule independently in work admission and wait calculation. For each
 migrated work source, it derives one manager-local activation projection that answers both:
