@@ -32,8 +32,8 @@ public class ManagerPollCacheTest {
         RequestManager manager = mock(RequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
 
-        cache.update(manager, new PollResult(100L), Long.MAX_VALUE, 10L);
-        cache.update(manager, new PollResult(100L), Long.MAX_VALUE, 20L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 10L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 20L);
 
         ManagerPollCache.PollState state = cache.states().iterator().next();
         assertEquals(110L, state.reactorDeadlineMs());
@@ -44,8 +44,8 @@ public class ManagerPollCacheTest {
         RequestManager manager = mock(RequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
 
-        cache.update(manager, new PollResult(100L), Long.MAX_VALUE, 10L);
-        cache.update(manager, new PollResult(100L), Long.MAX_VALUE, 110L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 10L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 110L);
 
         ManagerPollCache.PollState state = cache.states().iterator().next();
         assertEquals(210L, state.reactorDeadlineMs());
@@ -56,8 +56,8 @@ public class ManagerPollCacheTest {
         RequestManager manager = mock(RequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
 
-        cache.update(manager, NetworkClientDelegate.PollResult.retryAfter(100L), Long.MAX_VALUE, 10L);
-        cache.update(manager, NetworkClientDelegate.PollResult.awaitInput(), Long.MAX_VALUE, 20L);
+        cache.update(manager, NetworkClientDelegate.PollResult.retryAfter(100L), ApplicationWait.unbounded(), 10L);
+        cache.update(manager, NetworkClientDelegate.PollResult.awaitInput(), ApplicationWait.unbounded(), 20L);
 
         assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
     }
@@ -68,8 +68,8 @@ public class ManagerPollCacheTest {
         RequestManager second = mock(RequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
 
-        cache.update(first, new PollResult(10L), Long.MAX_VALUE, 0L);
-        cache.update(second, new PollResult(20L), Long.MAX_VALUE, 0L);
+        cache.update(first, new PollResult(10L), ApplicationWait.unbounded(), 0L);
+        cache.update(second, new PollResult(20L), ApplicationWait.unbounded(), 0L);
         cache.retainManagers(List.of(second));
 
         assertEquals(1, cache.states().size());
@@ -80,12 +80,29 @@ public class ManagerPollCacheTest {
     public void testDeliveredApplicationDeadlineStaysInactiveUntilManagerChangesIt() {
         RequestManager manager = mock(RequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
-        cache.update(manager, PollResult.EMPTY, 0L, 10L);
+        cache.update(manager, PollResult.EMPTY, ApplicationWait.fromLegacyMaximumTimeToWait(0L), 10L);
         ReactorSchedule schedule = ReactorSchedule.from(cache.states(), 10L);
 
         cache.markApplicationDeadlineDelivered(schedule);
-        cache.update(manager, PollResult.EMPTY, 0L, 10L);
+        cache.update(manager, PollResult.EMPTY, ApplicationWait.fromLegacyMaximumTimeToWait(0L), 10L);
 
         assertEquals(Long.MAX_VALUE, cache.states().iterator().next().activeApplicationDeadlineMs());
+    }
+
+    @Test
+    public void testManagerRetryAndApplicationWaitRemainIndependent() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(
+            manager,
+            PollResult.retryAfter(100L),
+            ApplicationWait.fromLegacyMaximumTimeToWait(25L),
+            10L
+        );
+
+        ManagerPollCache.PollState state = cache.states().iterator().next();
+        assertEquals(110L, state.reactorDeadlineMs());
+        assertEquals(35L, state.activeApplicationDeadlineMs());
     }
 }

@@ -464,10 +464,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private void stagePollResult(final RequestManager manager,
                                  final NetworkClientDelegate.PollResult result,
                                  final long currentTimeMs) {
-        long applicationWaitMs = manager.usesLegacyApplicationWait()
-            ? manager.maximumTimeToWait(currentTimeMs)
-            : Long.MAX_VALUE;
-        managerPollCache.update(manager, result, applicationWaitMs, currentTimeMs);
+        ApplicationWait applicationWait = manager.usesLegacyApplicationWait()
+            ? ApplicationWait.fromLegacyMaximumTimeToWait(manager.maximumTimeToWait(currentTimeMs))
+            : ApplicationWait.unbounded();
+        managerPollCache.update(manager, result, applicationWait, currentTimeMs);
         for (NetworkCommand command : result.networkCommands())
             command.onCompletion((response, error) -> affectedManagers.add(manager));
     }

@@ -350,7 +350,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             this(
                 List.copyOf(unsentRequests),
                 List.of(),
-                conditionFromLegacyDelay(timeUntilNextPollMs)
+                NextPollCondition.fromLegacyDelay(timeUntilNextPollMs)
             );
         }
 
@@ -373,14 +373,6 @@ public class NetworkClientDelegate implements AutoCloseable {
                 requests.add(Objects.requireNonNull(request, "Transport request must be non-null"));
             }
             return List.copyOf(requests);
-        }
-
-        private static NextPollCondition conditionFromLegacyDelay(final long delayMs) {
-            if (delayMs == WAIT_FOREVER)
-                return NextPollCondition.awaitInput();
-            if (delayMs == 0L)
-                return NextPollCondition.pollImmediately();
-            return NextPollCondition.retryAfter(delayMs);
         }
 
         /**

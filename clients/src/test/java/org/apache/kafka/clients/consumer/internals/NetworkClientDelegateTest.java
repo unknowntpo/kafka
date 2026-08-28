@@ -209,6 +209,26 @@ public class NetworkClientDelegateTest {
     }
 
     @Test
+    void testLegacyPollDelayMapsToTypedNextPollCondition() {
+        assertInstanceOf(
+            NextPollCondition.PollImmediately.class,
+            new NetworkClientDelegate.PollResult(0L).nextPollCondition()
+        );
+        assertInstanceOf(
+            NextPollCondition.RetryAfter.class,
+            new NetworkClientDelegate.PollResult(25L).nextPollCondition()
+        );
+        assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            new NetworkClientDelegate.PollResult(Long.MAX_VALUE).nextPollCondition()
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new NetworkClientDelegate.PollResult(-1L)
+        );
+    }
+
+    @Test
     void testPollResultAwaitInputRetainsDiagnosticCauseWithoutCreatingAnotherSignalChannel() {
         NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.awaitInput(
             NextPollCondition.AwaitCause.NETWORK_COMPLETION

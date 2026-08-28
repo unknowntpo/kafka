@@ -108,4 +108,18 @@ abstract class NextPollCondition {
     static NextPollCondition pollImmediately() {
         return PollImmediately.INSTANCE;
     }
+
+    /**
+     * Migration adapter for managers which still expose the legacy numeric next-poll delay.
+     * New manager code should select one of the typed factories directly.
+     */
+    static NextPollCondition fromLegacyDelay(final long delayMs) {
+        if (delayMs < 0L)
+            throw new IllegalArgumentException("Legacy next-poll delay must be non-negative");
+        if (delayMs == Long.MAX_VALUE)
+            return awaitInput();
+        if (delayMs == 0L)
+            return pollImmediately();
+        return retryAfter(delayMs);
+    }
 }

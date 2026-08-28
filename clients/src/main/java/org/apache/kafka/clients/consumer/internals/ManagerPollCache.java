@@ -39,7 +39,7 @@ final class ManagerPollCache {
 
     void update(final RequestManager manager,
                 final PollResult result,
-                final long applicationWaitMs,
+                final ApplicationWait applicationWait,
                 final long currentTimeMs) {
         PollState state = states.get(manager);
         if (state == null) {
@@ -47,7 +47,7 @@ final class ManagerPollCache {
             states.put(manager, state);
             managerOrder.add(manager);
         }
-        state.update(result.nextPollCondition().delayMs(), applicationWaitMs, currentTimeMs);
+        state.update(result.nextPollCondition().delayMs(), applicationWait.delayMs(), currentTimeMs);
     }
 
     Collection<PollState> states() {

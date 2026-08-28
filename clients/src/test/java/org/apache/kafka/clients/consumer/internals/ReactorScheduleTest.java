@@ -41,8 +41,8 @@ public class ReactorScheduleTest {
         RequestManager fetch = mock(FetchRequestManager.class);
         RequestManager heartbeat = mock(ConsumerHeartbeatRequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
-        cache.update(fetch, new PollResult(100L), Long.MAX_VALUE, 42L);
-        cache.update(heartbeat, new PollResult(25L), 50L, 42L);
+        cache.update(fetch, new PollResult(100L), ApplicationWait.unbounded(), 42L);
+        cache.update(heartbeat, new PollResult(25L), ApplicationWait.fromLegacyMaximumTimeToWait(50L), 42L);
 
         ReactorSchedule schedule = ReactorSchedule.from(cache.states(), 42L);
 
@@ -55,7 +55,7 @@ public class ReactorScheduleTest {
     public void testElapsedTimeIsSubtractedFromAbsoluteDeadline() {
         RequestManager manager = mock(RequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
-        cache.update(manager, new PollResult(100L), Long.MAX_VALUE, 42L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 42L);
 
         ReactorSchedule schedule = ReactorSchedule.from(cache.states(), 52L);
 
@@ -67,19 +67,19 @@ public class ReactorScheduleTest {
         RequestManager fetch = mock(FetchRequestManager.class);
         RequestManager heartbeat = mock(ConsumerHeartbeatRequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
-        cache.update(fetch, new PollResult(100L), Long.MAX_VALUE, 0L);
-        cache.update(heartbeat, new PollResult(30L), Long.MAX_VALUE, 0L);
+        cache.update(fetch, new PollResult(100L), ApplicationWait.unbounded(), 0L);
+        cache.update(heartbeat, new PollResult(30L), ApplicationWait.unbounded(), 0L);
 
         ReactorSchedule first = ReactorSchedule.from(cache.states(), 0L);
         assertEquals(30L, first.networkPollTimeoutMs(0L));
 
         // An early heartbeat poll reports its next relative interval. The fetch manager's absolute deadline remains
         // cached, so the next global decision still reaches fetch at t=100 instead of drifting to t=130.
-        cache.update(heartbeat, new PollResult(30L), Long.MAX_VALUE, 30L);
+        cache.update(heartbeat, new PollResult(30L), ApplicationWait.unbounded(), 30L);
         ReactorSchedule second = ReactorSchedule.from(cache.states(), 30L);
         assertEquals(30L, second.networkPollTimeoutMs(30L));
 
-        cache.update(heartbeat, new PollResult(100L), Long.MAX_VALUE, 60L);
+        cache.update(heartbeat, new PollResult(100L), ApplicationWait.unbounded(), 60L);
         ReactorSchedule third = ReactorSchedule.from(cache.states(), 60L);
         assertEquals(40L, third.networkPollTimeoutMs(60L));
         assertEquals(FetchRequestManager.class.getSimpleName(), third.deadlineSource().orElseThrow());
@@ -89,7 +89,7 @@ public class ReactorScheduleTest {
     public void testDeliveringApplicationDeadlinePublishesNewGeneration() {
         RequestManager manager = mock(RequestManager.class);
         ManagerPollCache cache = new ManagerPollCache();
-        cache.update(manager, new PollResult(100L), 25L, 42L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.fromLegacyMaximumTimeToWait(25L), 42L);
         ReactorSchedule schedule = ReactorSchedule.from(cache.states(), 42L).withGeneration(7L);
 
         ReactorSchedule delivered = schedule.withApplicationDeadlineDelivered();
