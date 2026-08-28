@@ -35,7 +35,7 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
     public static final String BACKGROUND_EVENT_QUEUE_PROCESSING_TIME_SENSOR_NAME = "background-event-queue-processing-time";
     public static final String UNSENT_REQUESTS_QUEUE_SIZE_SENSOR_NAME = "unsent-requests-queue-size";
     public static final String UNSENT_REQUESTS_QUEUE_TIME_SENSOR_NAME = "unsent-requests-queue-time";
-    public static final String POLL_RESULT_CONTRACT_VIOLATION_SENSOR_NAME = "reactor-poll-result-contract-violation";
+    public static final String INVALID_POLL_RESULT_SENSOR_NAME = "reactor-invalid-poll-result";
     public static final String MANAGER_POLL_FAILURE_SENSOR_NAME = "reactor-manager-poll-failure";
     public static final String REACTOR_ACTION_FAILURE_SENSOR_NAME = "reactor-action-failure";
     public static final String APPLICATION_WAKEUP_SENSOR_NAME = "reactor-application-wakeup";
@@ -49,7 +49,7 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
     private final Sensor backgroundEventQueueProcessingTimeSensor;
     private final Sensor unsentRequestsQueueSizeSensor;
     private final Sensor unsentRequestsQueueTimeSensor;
-    private final Sensor pollResultContractViolationSensor;
+    private final Sensor invalidPollResultSensor;
     private final Sensor managerPollFailureSensor;
     private final Sensor reactorActionFailureSensor;
     private final Sensor applicationWakeupSensor;
@@ -207,8 +207,8 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
             new Max()
         );
 
-        this.pollResultContractViolationSensor = cumulativeCountSensor(
-            metrics, groupName, POLL_RESULT_CONTRACT_VIOLATION_SENSOR_NAME,
+        this.invalidPollResultSensor = cumulativeCountSensor(
+            metrics, groupName, INVALID_POLL_RESULT_SENSOR_NAME,
             "The total number of invalid request-manager poll results rejected by the reactor.");
         this.managerPollFailureSensor = cumulativeCountSensor(
             metrics, groupName, MANAGER_POLL_FAILURE_SENSOR_NAME,
@@ -270,8 +270,8 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
         this.backgroundEventQueueProcessingTimeSensor.record(processingTime);
     }
 
-    public void recordPollResultContractViolation() {
-        pollResultContractViolationSensor.record();
+    public void recordInvalidPollResult() {
+        invalidPollResultSensor.record();
     }
 
     public void recordManagerPollFailure() {

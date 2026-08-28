@@ -79,7 +79,7 @@ public class AsyncConsumerMetricsTest extends AbstractConsumerMetricsManagerTest
             metrics.metricName("background-event-queue-time-max", groupName),
             metrics.metricName("background-event-queue-processing-time-avg", groupName),
             metrics.metricName("background-event-queue-processing-time-max", groupName),
-            metrics.metricName("reactor-poll-result-contract-violation-total", groupName),
+            metrics.metricName("reactor-invalid-poll-result-total", groupName),
             metrics.metricName("reactor-manager-poll-failure-total", groupName),
             metrics.metricName("reactor-action-failure-total", groupName),
             metrics.metricName("reactor-application-wakeup-total", groupName)

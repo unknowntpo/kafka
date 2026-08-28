@@ -222,7 +222,7 @@ public class ConsumerReactorTest {
 
         verify(coordinatorRequestManager, times(2)).poll(anyLong());
         verify(networkClientDelegate, times(2)).poll(ConsumerReactor.MAX_POLL_TIMEOUT_MS, time.milliseconds());
-        verify(asyncConsumerMetrics, times(2)).recordPollResultContractViolation();
+        verify(asyncConsumerMetrics, times(2)).recordInvalidPollResult();
     }
 
     @Test

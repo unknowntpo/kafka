@@ -132,7 +132,7 @@ diagnostic counters:
 
 | Metric name | Group | Type and scope | Incremented when | Operational use and stability |
 | --- | --- | --- | --- | --- |
-| `reactor-poll-result-contract-violation-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A compatibility producer returns an empty result that requests immediate retry; the reactor replaces that result with `AwaitInput`. | A non-zero value identifies an incomplete manager migration and a prevented busy-loop condition. Name and cumulative meaning are stable after release. |
+| `reactor-invalid-poll-result-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A compatibility producer returns an empty result that requests immediate retry; the reactor replaces that result with `AwaitInput`. | A non-zero value identifies an invalid manager result and a prevented busy-loop condition. Name and cumulative meaning are stable after release. |
 | `reactor-manager-poll-failure-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A request-manager poll throws an unexpected runtime exception that the reactor isolates. | Diagnoses degraded manager execution without requiring manager-name tags. Name and cumulative meaning are stable after release. |
 | `reactor-action-failure-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | A selected application-visible `ReactorAction` fails during execution. | Distinguishes effect-delivery failure from manager or transport failure. Name and cumulative meaning are stable after release. |
 | `reactor-application-wakeup-total` | `consumer-metrics` or `consumer-share-metrics` | Monotonic cumulative counter per client instance. | The reactor invokes the primitive application-thread wakeup after phase coalescing. | Its rate helps detect wakeup ping-pong; the absolute total is not by itself an error signal. Name and cumulative meaning are stable after release. |
@@ -140,7 +140,7 @@ diagnostic counters:
 These metrics follow the existing async-consumer metric lifecycle: they inherit the client metric registry's common
 tags, introduce no manager/event/reason tag, and are removed when the consumer metrics manager closes. Recording is
 constant-time and performs no event-list formatting or dynamic metric registration on the reactor hot path. A
-diagnostic counter is not a recovery mechanism: after a contract violation the reactor must prevent the immediate
+diagnostic counter is not a recovery mechanism: after an invalid poll result the reactor must prevent the immediate
 retry, so a busy loop cannot continue merely to generate the metric. Tests cover registration, recording, and
 removal in both metric groups.
 

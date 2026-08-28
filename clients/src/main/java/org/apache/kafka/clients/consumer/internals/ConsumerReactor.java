@@ -108,7 +108,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         Collections.newSetFromMap(new IdentityHashMap<>());
 
     /** Managers currently violating the progress contract, retained only to rate-limit repeated error logs. */
-    private final Set<RequestManager> managersWithPollResultViolation =
+    private final Set<RequestManager> managersWithInvalidPollResult =
         Collections.newSetFromMap(new IdentityHashMap<>());
 
     /**
@@ -492,15 +492,15 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         }
 
         if (result.satisfiesProgressContract()) {
-            managersWithPollResultViolation.remove(manager);
+            managersWithInvalidPollResult.remove(manager);
             return result;
         }
 
-        if (managersWithPollResultViolation.add(manager)) {
+        if (managersWithInvalidPollResult.add(manager)) {
             log.error("Request manager {} returned no progress with an immediate repoll; replacing the invalid "
                 + "deadline with an event wait", manager.getClass().getName());
         }
-        asyncConsumerMetrics.recordPollResultContractViolation();
+        asyncConsumerMetrics.recordInvalidPollResult();
         return NetworkClientDelegate.PollResult.awaitInput();
     }
 
