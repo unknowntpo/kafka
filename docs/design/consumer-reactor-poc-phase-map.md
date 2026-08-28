@@ -1,13 +1,13 @@
 # Consumer Reactor POC Phase Map
 
-This file maps the proof-of-concept branch to the migration phases in KIP-1371. It is an implementation index, not
-part of the community-facing proposal. A phase is complete only when its exit evidence passes through production
-components; the existence of a class or unit test is not sufficient.
+This file is the implementation index for the KIP-1371 proof of concept. The KIP defines the target behavior; this
+index records which production paths and tests currently support each migration phase. A phase is complete only when
+its exit evidence passes through production components.
 
 ## Branch rules
 
 - Keep `codex/async-consumer-reactor-poc` runnable after every phase commit.
-- Use one commit for one phase assertion. Documentation and review records may use separate commits.
+- Use one commit for one phase assertion. Keep review transcripts and working notes outside this branch.
 - Prefix experimental work with `EXPERIMENT:` until its behavior and exit test are accepted.
 - Do not rewrite the existing branch history. Superseded experiments remain traceable through their commits.
 - Record the exact evidence commit in the KIP only after the working tree is clean and the named tests pass.
@@ -22,9 +22,9 @@ components; the existence of a class or unit test is not sufficient.
 | 3. Application-effect migration | State and schedule publication precede reactor-owned completion, notification, and wakeup effects. | Partial. Async-poll completion, metadata error, fatal coordinator error, and staged close actions cross the boundary. | `857b570e21`, `ac76b08109`, `07559ffa69`, `d9fafb212d`; publish-before-action and close regression tests. | Remove remaining direct application effects, coalesce equivalent wakes across a complete iteration, and prove exactly one terminal outcome for success, failure, timeout, cancellation, interruption, and close. |
 | Follow-up lifecycle work | Fatal cleanup, bounded close, and public timeout guarantees remain compatible with existing consumer behavior. | Separate follow-up; not a new KIP-1371 state model. | `fea1e3746d`, `42c7c423ba`. | Expand public-method timeout audit and integration coverage before any lifecycle guarantee changes. |
 
-## Current evidence split
+## Reviewer surface
 
-The branch keeps implementation and proposal records in independent commits:
+The branch keeps only the artifacts required to inspect or reproduce the proposal:
 
 1. **Phase 1A code slice (`5c587c4db4`)**
    - `ApplicationWait.java`
@@ -38,17 +38,31 @@ The branch keeps implementation and proposal records in independent commits:
    - saturates maximum and overflowing absolute deadlines;
    - preserves separate manager-retry and compatibility application-wait projections;
    - verifies diagnostic counter values in regular and share metric groups.
-3. **KIP and review documentation**
+3. **Proposal and implementation index**
    - `kip-introduce-consumer-reactor-state-management-event-processing.md`
-   - `kafka-kip-writing-and-review-standard.md`
-   - `consumer-reactor-kip-iteration-fable-2026-08-28.md`
    - this phase map
+4. **Performance evidence**
+   - `consumer-reactor-ab-benchmark-results.md`
+   - `benchmarks/consumer-reactor-ab/`
+5. **Static diagrams referenced by the KIP**
+   - `kip-1371-reactor-architecture.png`
+   - `kip-1371-coordinator-observation-sequence.png`
+
+Superseded design drafts, generated diagram sources, interactive previews, review transcripts, and comparison prompts
+remain available in Git history but are not part of the current reviewer surface.
+
+## Current review gates
 
 The next safe sequence is:
 
-1. record discussion-readiness results against the clean evidence commit;
-2. push the branch after documentation passes `git diff --check` and the relevant Java quality gates;
-3. start each remaining Phase 2 or Phase 3 gate from that clean baseline and keep it in a separate commit.
+1. prevent a leaving heartbeat with an in-flight request from producing a second heartbeat command, with a
+   deterministic regression test;
+2. align the KIP with the POC lifecycle behavior, legal `RetryAfter(0)` semantics, and partial share/Streams
+   migration status;
+3. add positive typed-event assertions where older tests only removed direct coordinator mutation checks;
+4. prove manager-event routing and deferred-command exception behavior;
+5. rerun the focused correctness gates, then repeat the A/B benchmark with accurately named measurements and its
+   workload limitations disclosed.
 
 ## Evidence naming
 
