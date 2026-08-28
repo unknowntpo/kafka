@@ -228,9 +228,10 @@ A manager poll answers one narrow question: what did this manager produce now, a
 The manager owns the state needed to answer, such as coordinator availability, in-flight requests, retry backoff,
 metadata, or buffer capacity. The reactor validates and routes the typed answer but does not reimplement those rules.
 
-A deadline can express when to poll again, but not why the manager is waiting or what can make it eligible. It
-collapses a manager's multidimensional post-poll activation condition into one number. Current `PollResult` pairs
-produced requests with that wait hint, so request presence identifies immediate transport output.
+A deadline can express when to poll again, but not whether another poll can make progress or what must happen first.
+It compresses distinct activation conditions—work ready now, time-driven retry, and external-input wait—into one
+number. Current `PollResult` pairs produced requests with that wait hint, so request presence identifies immediate
+transport output.
 For an empty result, however, the value says only when another poll may occur. It does not state whether passage of
 time can change eligibility or whether progress requires an external input. Existing code represents those cases by
 convention: zero requests immediate re-evaluation, a finite value represents a timed retry, and `WAIT_FOREVER`
