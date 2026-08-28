@@ -354,21 +354,25 @@ network I/O.
 
 #### Error, cancellation, and close
 
-Lifecycle races use the same publication boundary rather than a separate shutdown protocol:
+Lifecycle adds an ownership boundary around the normal publication phases:
 
 - An unexpected request-manager poll exception is reactor-fatal because the reactor cannot prove that manager state
   is still usable. The current phase publishes its schedule, publishes one background error, wakes the application,
   and performs the already admitted network poll. The reactor does not begin another iteration.
-- Cancellation or timeout is an input for the operation owner. The first terminal completion wins; a later response,
-  cancellation, timeout, or close attempt cannot complete the same operation again. `ConsumerReactor` orders the
-  selected terminal action after publication but does not own the operation's long-lived state.
-- `close(Duration)` stops admission and wakes the reactor. The application thread waits no longer than the supplied
-  reactor-close budget. Already selected actions are drained before resources close, and cleanup completes tracked
-  incomplete application events exceptionally. If the budget expires, `close` returns while the daemon reactor
-  finishes cleanup; it does not report that cleanup has completed.
+- An application API timeout is represented by one absolute deadline. Queueing, event processing, prerequisite work,
+  network waiting, and result waiting consume the same budget. The earliest tracked application deadline also bounds
+  the network poll, and expiration is evaluated with the clock observed after network I/O.
+- Cancellation or timeout is an input for the operation owner. A terminal future may complete only once, but this is
+  not sufficient to fence late side effects. An owner that can issue retries retains the attempt scope or owner
+  version needed to reject a response admitted before cancellation or replacement.
+- `close(Duration)` is a lifecycle command, not a `ReactorAction`. Stopping acceptance of new application events is
+  atomic with queue insertion: an event is either rejected or visible to cleanup and receives a terminal outcome.
+  Already selected actions are drained before reactor-owned resources close.
 
-The bounded-close and manager-failure rules are implemented in the POC. Exact-once cancellation coverage for every
-application-event family remains a Phase 3 exit criterion; the KIP does not claim that this migration is complete.
+The POC implements atomic event acceptance, queue-inclusive application deadlines, post-I/O expiration checks, and a
+single `commitSync` timeout budget. Two lifecycle questions remain explicit exit criteria: a bounded close must not
+close application-owned shared resources while daemon cleanup can still use them, and pending operations must retain
+the original manager-fatal cause rather than receiving a generic close timeout.
 
 #### Example: two managers with different deadlines
 

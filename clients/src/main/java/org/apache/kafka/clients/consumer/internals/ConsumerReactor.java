@@ -89,6 +89,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final IdempotentCloser closer = new IdempotentCloser();
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
+    private final Object lifecycleLock = new Object();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
 
     /**
@@ -295,6 +296,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             pollWaitTimeMs,
             proposedSchedule.networkPollTimeoutMs(currentTimeMs)
         );
+        pollWaitTimeMs = Math.min(
+            pollWaitTimeMs,
+            applicationEventReaper.timeUntilNextExpirationMs(currentTimeMs)
+        );
         collectApplicationEventActions();
         publishPendingBackgroundEvents();
         executeReactorActions();
@@ -321,7 +326,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         publishPendingBackgroundEvents();
         executeReactorActions();
 
-        reapExpiredApplicationEvents(currentTimeMs);
+        reapExpiredApplicationEvents(afterNetworkPollMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
         if (stageMetadataErrorActions(uncompletedEvents))
             executeReactorActions();
@@ -408,6 +413,31 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return running;
     }
 
+    /**
+     * Atomically accepts one application event while the reactor is running. Closing uses the same lifecycle lock,
+     * so cleanup either observes an accepted event or submission fails before the event enters the queue.
+     *
+     * @return queue size immediately after the event was accepted
+     * @throws KafkaException if the reactor is no longer accepting events or the queue is full
+     */
+    int acceptApplicationEvent(final ApplicationEvent event) {
+        synchronized (lifecycleLock) {
+            if (!running || !isAlive())
+                throw new KafkaException("The consumer reactor is not running and cannot process requests.");
+
+            int queueSizeBeforeSubmit = applicationEventQueue.size();
+            if (!applicationEventQueue.offer(event))
+                throw new KafkaException("The consumer reactor input queue is full and cannot accept " + event.type());
+            return queueSizeBeforeSubmit + 1;
+        }
+    }
+
+    private void stopAcceptingApplicationEvents() {
+        synchronized (lifecycleLock) {
+            running = false;
+        }
+    }
+
     public void wakeup() {
         // The network client can be null if the initializeResources method has not yet been called.
         if (networkClientDelegate != null)
@@ -492,7 +522,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             stageReactorAction(ReactorAction.publishBackgroundError(exception));
             stageWakeApplication();
             pendingReactorActionReasons.add(ReactorActionReason.MANAGER_POLL_FAILURE);
-            running = false;
+            stopAcceptingApplicationEvents();
             return NetworkClientDelegate.PollResult.awaitInput();
         }
 
@@ -713,7 +743,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private void closeInternal(final Duration timeout) {
         long timeoutMs = timeout.toMillis();
         log.trace("Signaling the consumer reactor to close in {}ms", timeoutMs);
-        running = false;
+        stopAcceptingApplicationEvents();
         closeTimeout = timeout;
         wakeup();
 

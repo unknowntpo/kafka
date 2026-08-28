@@ -1155,6 +1155,11 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     }
 
     private CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commit(final CommitEvent commitEvent) {
+        return commit(commitEvent, time.timer(defaultApiTimeoutMs.toMillis()));
+    }
+
+    private CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commit(final CommitEvent commitEvent,
+                                                                              final Timer timer) {
         throwIfGroupIdNotDefined();
         offsetCommitCallbackInvoker.executeCallbacks();
 
@@ -1166,7 +1171,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
         // This blocks until the reactor retrieves allConsumed positions to commit if none were explicitly specified.
         // This operation will ensure that the offsets to commit are not affected by fetches which may start after this
-        ConsumerUtils.getResult(commitEvent.offsetsReady(), defaultApiTimeoutMs.toMillis());
+        ConsumerUtils.getResult(commitEvent.offsetsReady(), timer);
         return commitEvent.future();
     }
 
@@ -1828,10 +1833,10 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         acquireAndEnsureOpen();
         long commitStart = time.nanoseconds();
         try {
-            SyncCommitEvent syncCommitEvent = new SyncCommitEvent(offsets, calculateDeadlineMs(time, timeout));
-            CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitFuture = commit(syncCommitEvent);
-
             Timer requestTimer = time.timer(timeout.toMillis());
+            SyncCommitEvent syncCommitEvent = new SyncCommitEvent(offsets, calculateDeadlineMs(time, timeout));
+            CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitFuture = commit(syncCommitEvent, requestTimer);
+
             awaitPendingAsyncCommitsAndExecuteCommitCallbacks(requestTimer, true);
 
             wakeupTrigger.setActiveTask(commitFuture);

@@ -857,6 +857,22 @@ public class AsyncKafkaConsumerTest {
     }
 
     @Test
+    public void testCommitSyncTimeoutIncludesOffsetsReadyWait() {
+        consumer = newConsumer();
+        TopicPartition tp = new TopicPartition("foo", 0);
+        long startNs = System.nanoTime();
+
+        assertThrows(TimeoutException.class, () -> consumer.commitSync(
+            Collections.singletonMap(tp, new OffsetAndMetadata(20)),
+            Duration.ofMillis(10)
+        ));
+
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+        assertTrue(elapsedMs < 500L,
+            "commitSync must not replace its caller timeout with default.api.timeout.ms while preparing offsets");
+    }
+
+    @Test
     public void testCommitSyncAwaitsCommitAsyncCompletionWithNonEmptyOffsets() {
         final TopicPartition tp = new TopicPartition("foo", 0);
         final CompletableFuture<Void> asyncCommitFuture = setUpConsumerWithIncompleteAsyncCommit(tp);

@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.CheckAndUpdatePositionsEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
@@ -107,22 +108,62 @@ public class ConsumerReactorLifecycleTest {
             "an unexpected manager exception must not be disguised as a recoverable input wait");
     }
 
+    @Test
+    public void testApplicationDeadlineBoundsNetworkPoll() {
+        MockTime time = new MockTime();
+        CompletableEventReaper reaper = new CompletableEventReaper(new LogContext());
+        ReactorFixture fixture = new ReactorFixture(time, reaper);
+        long currentTimeMs = time.milliseconds();
+        fixture.applicationEventQueue.add(new CheckAndUpdatePositionsEvent(currentTimeMs + 10L));
+        when(fixture.requestManagers.entries()).thenReturn(List.of());
+        fixture.reactor.initializeResources();
+
+        fixture.reactor.runOnce();
+
+        verify(fixture.networkClientDelegate).poll(10L, currentTimeMs);
+    }
+
+    @Test
+    public void testReaperUsesAfterNetworkPollTime() {
+        MockTime time = new MockTime();
+        CompletableEventReaper reaper = mock(CompletableEventReaper.class);
+        ReactorFixture fixture = new ReactorFixture(time, reaper);
+        long currentTimeMs = time.milliseconds();
+        when(fixture.requestManagers.entries()).thenReturn(List.of());
+        doAnswer(invocation -> {
+            time.sleep(100L);
+            return null;
+        }).when(fixture.networkClientDelegate).poll(anyLong(), anyLong());
+        fixture.reactor.initializeResources();
+
+        fixture.reactor.runOnce();
+
+        verify(reaper).reap(currentTimeMs + 100L);
+    }
+
     private static final class ReactorFixture {
         private final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
         private final ApplicationEventProcessor applicationEventProcessor = mock(ApplicationEventProcessor.class);
-        private final CompletableEventReaper applicationEventReaper = mock(CompletableEventReaper.class);
         private final NetworkClientDelegate networkClientDelegate = mock(NetworkClientDelegate.class);
         private final RequestManagers requestManagers = mock(RequestManagers.class);
         private final AsyncConsumerMetrics metrics = mock(AsyncConsumerMetrics.class);
-        private final ConsumerReactor reactor = new ConsumerReactor(
-            new LogContext(),
-            new MockTime(),
-            applicationEventQueue,
-            applicationEventReaper,
-            () -> applicationEventProcessor,
-            () -> networkClientDelegate,
-            () -> requestManagers,
-            metrics
-        );
+        private final ConsumerReactor reactor;
+
+        private ReactorFixture() {
+            this(new MockTime(), mock(CompletableEventReaper.class));
+        }
+
+        private ReactorFixture(MockTime time, CompletableEventReaper applicationEventReaper) {
+            reactor = new ConsumerReactor(
+                new LogContext(),
+                time,
+                applicationEventQueue,
+                applicationEventReaper,
+                () -> applicationEventProcessor,
+                () -> networkClientDelegate,
+                () -> requestManagers,
+                metrics
+            );
+        }
     }
 }

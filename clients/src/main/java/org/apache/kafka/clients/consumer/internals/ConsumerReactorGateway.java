@@ -34,7 +34,6 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.Future;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS;
@@ -48,13 +47,6 @@ public class ConsumerReactorGateway implements Closeable {
 
     private final Logger log;
     private final Time time;
-
-    /**
-     * Ownership-transfer queue from application callers to the single reactor thread. Admission uses
-     * {@link BlockingQueue#offer(Object)} so submission remains non-blocking. The current queue is unbounded; any
-     * future capacity or overload policy requires a separate compatibility decision.
-     */
-    private final BlockingQueue<ApplicationEvent> applicationEventQueue;
 
     /** Execution owner hidden behind this thread-safe submission and lifecycle boundary. */
     private final ConsumerReactor reactor;
@@ -72,7 +64,6 @@ public class ConsumerReactorGateway implements Closeable {
                                    final AsyncConsumerMetrics asyncConsumerMetrics) {
         this.log = logContext.logger(ConsumerReactorGateway.class);
         this.time = time;
-        this.applicationEventQueue = applicationEventQueue;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
         ConsumerReactor reactor = new ConsumerReactor(logContext,
                 time,
@@ -101,18 +92,13 @@ public class ConsumerReactorGateway implements Closeable {
      * Submit an {@link ApplicationEvent} and then signal the reactor. Admission always occurs before signaling.
      *
      * @param event An {@link ApplicationEvent} created by the application thread
-     * @throws KafkaException if the consumer reactor is no longer alive
+     * @throws KafkaException if the consumer reactor is no longer accepting events
      */
     public void submit(final ApplicationEvent event) {
         Objects.requireNonNull(event, "ApplicationEvent provided to submit must be non-null");
-        ensureReactorAlive();
         event.setEnqueuedMs(time.milliseconds());
-        int queueSizeBeforeSubmit = applicationEventQueue.size();
-        if (!applicationEventQueue.offer(event)) {
-            throw new KafkaException("The consumer reactor input queue is full and cannot accept " + event.type());
-        }
-        // Use the pre-admission snapshot because the reactor may drain the event immediately after offer succeeds.
-        asyncConsumerMetrics.recordApplicationEventQueueSize(queueSizeBeforeSubmit + 1);
+        int queueSizeAfterSubmit = reactor.acceptApplicationEvent(event);
+        asyncConsumerMetrics.recordApplicationEventQueueSize(queueSizeAfterSubmit);
         reactor.wakeup();
     }
 
@@ -120,7 +106,7 @@ public class ConsumerReactorGateway implements Closeable {
      * Wakeup the {@link ConsumerReactor reactor thread} to pull the next event(s) from the queue.
      */
     public void signalReactor() {
-        ensureReactorAlive();
+        ensureReactorAcceptingEvents();
         reactor.wakeup();
     }
 
@@ -150,7 +136,7 @@ public class ConsumerReactorGateway implements Closeable {
      *
      * <p/>
      *
-     * See {@link ConsumerUtils#getResult(Future)} for more details.
+     * The event's absolute deadline includes queueing and reactor processing time.
      *
      * @param event A {@link CompletableApplicationEvent} created by the polling thread
      * @return      Value that is the result of the event
@@ -165,7 +151,11 @@ public class ConsumerReactorGateway implements Closeable {
         if (Thread.interrupted()) {
             throw new InterruptException("Interrupted waiting for results for application event " + event);
         }
-        return ConsumerUtils.getResult(event.future());
+        long currentTimeMs = time.milliseconds();
+        long remainingMs = event.deadlineMs() == Long.MAX_VALUE
+            ? Long.MAX_VALUE
+            : Math.max(0L, event.deadlineMs() - currentTimeMs);
+        return ConsumerUtils.getResult(event.future(), remainingMs);
     }
 
     @Override
@@ -181,17 +171,12 @@ public class ConsumerReactorGateway implements Closeable {
     }
 
     /**
-     * Best-effort check that the consumer reactor is still admitting work. A bounded close may return while the
-     * daemon thread is still alive and finishing cleanup, so thread liveness alone is insufficient. Once shutdown
-     * begins, newly submitted events would never be processed and must fail fast.
+     * Ensures that the consumer reactor is accepting new application events. A reactor may remain alive while it is
+     * closing, so thread liveness alone does not imply that it can process another signal.
      *
-     * <p>Note: this is inherently racy — the thread could die between this check and the
-     * subsequent queue admission. That narrow window is acceptable because any subsequent call to
-     * {@link #submit(ApplicationEvent)} will detect the dead thread immediately.
-     *
-     * @throws KafkaException if the reactor is not admitting work
+     * @throws KafkaException if the reactor is not accepting new application events
      */
-    private void ensureReactorAlive() {
+    private void ensureReactorAcceptingEvents() {
         if (reactor == null || !reactor.isRunning() || !reactor.isAlive()) {
             throw new KafkaException(
                 "The consumer reactor is not running and cannot process requests.");

@@ -174,6 +174,22 @@ public class CompletableEventReaper {
     }
 
     /**
+     * Returns the remaining time until the earliest incomplete event expires. This allows the reactor's network
+     * wait to honor application-operation deadlines rather than relying on a later periodic safety poll.
+     *
+     * @param currentTimeMs current time in milliseconds
+     * @return remaining milliseconds, zero when already expired, or {@link Long#MAX_VALUE} when no event is pending
+     */
+    public long timeUntilNextExpirationMs(long currentTimeMs) {
+        long remainingMs = Long.MAX_VALUE;
+        for (CompletableEvent<?> event : tracked) {
+            if (!event.future().isDone())
+                remainingMs = Math.min(remainingMs, Math.max(0L, event.deadlineMs() - currentTimeMs));
+        }
+        return remainingMs;
+    }
+
+    /**
      * For all the {@link CompletableEvent}s in the collection, if they're not already complete, invoke
      * {@link CompletableFuture#completeExceptionally(Throwable)}.
      *
