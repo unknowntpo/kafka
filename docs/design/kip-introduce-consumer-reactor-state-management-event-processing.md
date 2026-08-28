@@ -749,6 +749,86 @@ Terminal success, timeout, cancellation, interruption, or close
 - **Pending:** KAFKA-18569 requires the inverse test proving coordinator discovery stops after commit and leave
   dependencies terminate, without delaying close.
 
+## Reviewer FAQ
+
+**What problem does `ConsumerReactor` solve?**
+
+It gives cross-manager timing, ordering, and application-visible effects one final authority. Request managers still
+own their mutable state and decide whether they can produce local work. The reactor combines those typed decisions,
+publishes one wait decision, and only then executes application-visible effects. This prevents one component from
+choosing a wait or wake without atomically observing the other manager results on which that choice depends.
+
+**How is this different from the existing `ConsumerNetworkThread` and request-manager model?**
+
+The application/background thread topology and the network client do not change. The difference is responsibility:
+the existing loop polls managers and transports requests, but timing, cross-manager mutation, completion, publication,
+and wake decisions can still be distributed across managers and callbacks. `ConsumerReactor` makes the loop's
+ordering and publication boundary explicit without moving heartbeat, commit, fetch, coordinator, or share-consumer
+domain rules into one class.
+
+**Why is a deadline-only result insufficient?**
+
+A number answers *when* to poll again but not *what can make another poll useful*. Once a deadline expires, a manager
+may still be blocked by an in-flight request, unknown coordinator, missing assignment, or another external input. An
+empty result with a zero delay can therefore create a busy loop, while replacing zero with an arbitrary interval can
+delay real progress. `NextPollCondition` makes the distinction explicit:
+
+- `PollImmediately` accompanies work produced now;
+- `RetryAfter(delay)` is used only when passage of time can change local eligibility; and
+- `AwaitInput(cause)` is used when a network completion, coordinator change, membership change, command, or shutdown
+  must occur first.
+
+**Are deadlines removed by this proposal?**
+
+No. Positive time-driven retries remain deadlines. `ConsumerReactor` retains each manager's current deadline and
+publishes the earliest one in `ReactorSchedule`. Input-driven waits create no semantic timer, although application
+input, network I/O, cancellation, or shutdown may activate the reactor earlier. The model is event-driven with
+deadline-bounded waiting, not timer-free.
+
+**Does the reactor decide whether heartbeat, commit, fetch, or share work is legal?**
+
+No. That decision remains manager-local because the manager owns the relevant protocol state. A manager atomically
+returns the work it produced, facts it observed, and the condition for its next useful poll. The reactor validates the
+generic result shape and combines results; it does not reproduce coordinator, membership, backoff, or fetch policy.
+
+**How do `NetworkCommand`, `ManagerEvent`, and `ReactorAction` differ?**
+
+- A `NetworkCommand` is transport work selected by a manager, such as an unsent heartbeat request.
+- A `ManagerEvent` is an immutable fact whose consequence crosses the producer's local ownership boundary, such as a
+  heartbeat response observing that coordinator version 7 is unavailable.
+- A `ReactorAction` is an application-visible effect selected from current inputs, such as publishing an error or
+  waking the application after the corresponding schedule is visible.
+
+An event is not an action and a command is not proof that network I/O has already occurred.
+
+**Must every `ManagerEvent` be created and consumed within one `runOnce()`?**
+
+No. A pre-I/O manager fact may select an action in the same iteration. A network callback may publish a fact in the
+post-I/O phase, or retain it for the next input boundary. Cross-owner commands that cannot safely apply after request
+building are retained for the next `runOnce()`, before its full manager pass and network poll. Events that cross this
+boundary are immutable and retained in bounded latest-pending storage; versioned observations are validated by the
+state owner before mutation.
+
+**Why not let one request manager directly mutate another?**
+
+Direct mutation hides the dependency and allows a delayed response to change newer peer state. The proposal instead
+routes an immutable observation to one state owner. The owner applies it only if its captured version is still
+current. Components intentionally grouped inside one regular, share, or Streams protocol driver may still interact
+directly because they form one ownership domain; the rule applies when state ownership is crossed.
+
+**Does every request manager need to publish a snapshot or define a new event?**
+
+No. Snapshots are opt-in, latest-only projections used only when another manager needs coherent owner state. Events
+are needed only when an observation requires a consequence outside the producer's local state. Purely local work and
+retry decisions remain local `PollResult` output.
+
+**Is the POC evidence equivalent to fixing every motivating issue end to end?**
+
+No. The case studies label deterministic POC mechanisms separately from pending historical reproductions. The
+[current implementation status](#current-implementation-status) records compatibility paths such as direct classic
+fetch-buffer signalling and remaining raw-delay producers. A mechanism is considered complete only when its named
+ordering, retry, stale-response, or wake assertion is exercised on the production-component path.
+
 ## Compatibility, Deprecation, and Migration Plan
 
 ### Current implementation status
