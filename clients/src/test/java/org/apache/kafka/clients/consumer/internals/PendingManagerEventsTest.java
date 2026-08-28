@@ -31,7 +31,7 @@ public class PendingManagerEventsTest {
         pendingEvents.add(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "latest", 2L, 7L));
 
         NetworkClientDelegate.PollResult result = pendingEvents.publishWith(
-            NetworkClientDelegate.PollResult.awaitEvent());
+            NetworkClientDelegate.PollResult.awaitInput());
 
         assertEquals(1, result.managerEvents().size());
         ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
@@ -39,7 +39,7 @@ public class PendingManagerEventsTest {
         assertEquals("latest", invalidation.cause());
         assertEquals(2L, invalidation.observedAtMs());
         assertEquals(7L, invalidation.observedCoordinatorVersion());
-        assertTrue(pendingEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent())
+        assertTrue(pendingEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput())
             .managerEvents().isEmpty());
     }
 
@@ -51,7 +51,7 @@ public class PendingManagerEventsTest {
 
         ManagerEvent.CoordinatorUnavailableObserved observation = assertInstanceOf(
             ManagerEvent.CoordinatorUnavailableObserved.class,
-            pendingEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent()).managerEvents().get(0));
+            pendingEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput()).managerEvents().get(0));
 
         assertEquals("current", observation.cause());
         assertEquals(9L, observation.observedCoordinatorVersion());

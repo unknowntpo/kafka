@@ -49,13 +49,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Queue;
-import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
@@ -346,39 +344,21 @@ public class NetworkClientDelegate implements AutoCloseable {
         public final List<UnsentRequest> unsentRequests;
         private final List<NetworkCommand> networkCommands;
         private final NextPollCondition nextPollCondition;
-        /** Compatibility output retained until legacy state-transition producers migrate to manager events. */
-        private final Set<StateTransition> stateTransitions;
         private final List<ManagerEvent> managerEvents;
 
         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
-            this(timeUntilNextPollMs, unsentRequests, Set.of());
-        }
-
-        PollResult(final long timeUntilNextPollMs,
-                   final List<UnsentRequest> unsentRequests,
-                   final Set<StateTransition> stateTransitions) {
-            this(timeUntilNextPollMs, unsentRequests, stateTransitions, List.of());
-        }
-
-        PollResult(final long timeUntilNextPollMs,
-                   final List<UnsentRequest> unsentRequests,
-                   final Set<StateTransition> stateTransitions,
-                   final List<ManagerEvent> managerEvents) {
             this(
                 List.copyOf(unsentRequests),
-                stateTransitions,
-                managerEvents,
+                List.of(),
                 conditionFromLegacyDelay(timeUntilNextPollMs)
             );
         }
 
         private PollResult(final List<? extends NetworkCommand> networkCommands,
-                           final Set<StateTransition> stateTransitions,
                            final List<ManagerEvent> managerEvents,
                            final NextPollCondition nextPollCondition) {
             this.networkCommands = List.copyOf(networkCommands);
             this.unsentRequests = compatibilityRequests(this.networkCommands);
-            this.stateTransitions = Set.copyOf(stateTransitions);
             this.managerEvents = List.copyOf(managerEvents);
             this.nextPollCondition = Objects.requireNonNull(nextPollCondition, "Next-poll condition must be non-null");
             this.timeUntilNextPollMs = nextPollCondition.delayMs();
@@ -405,7 +385,7 @@ public class NetworkClientDelegate implements AutoCloseable {
 
         /**
          * Target result factory: facts, transport intents, and the next local poll condition are independent,
-         * typed categories. Legacy state transitions are deliberately absent from this API.
+         * typed categories.
          */
         static PollResult progress(final List<? extends NetworkCommand> networkCommands,
                                    final List<ManagerEvent> managerEvents,
@@ -415,46 +395,17 @@ public class NetworkClientDelegate implements AutoCloseable {
             Objects.requireNonNull(nextPollCondition, "Next-poll condition must be non-null");
             if (networkCommands.isEmpty() && managerEvents.isEmpty())
                 throw new IllegalArgumentException("Progress requires a network command or manager event");
-            return new PollResult(networkCommands, Set.of(), managerEvents, nextPollCondition);
-        }
-
-        /**
-         * Reports work completed by this poll and the earliest delay before the manager must be polled again.
-         * Progress may request an immediate repoll because at least one request or state transition was produced.
-         */
-        static PollResult progress(final List<UnsentRequest> unsentRequests,
-                                   final Set<StateTransition> stateTransitions,
-                                   final long timeUntilNextPollMs) {
-            return progress(unsentRequests, stateTransitions, List.of(), timeUntilNextPollMs);
-        }
-
-        static PollResult progress(final List<UnsentRequest> unsentRequests,
-                                   final Set<StateTransition> stateTransitions,
-                                   final List<ManagerEvent> managerEvents,
-                                   final long timeUntilNextPollMs) {
-            Objects.requireNonNull(unsentRequests, "Unsent requests must be non-null");
-            Objects.requireNonNull(stateTransitions, "State transitions must be non-null");
-            Objects.requireNonNull(managerEvents, "Manager events must be non-null");
-            if (unsentRequests.isEmpty() && stateTransitions.isEmpty() && managerEvents.isEmpty())
-                throw new IllegalArgumentException("Progress requires a request, state transition, or manager event");
-            if (timeUntilNextPollMs < 0L)
-                throw new IllegalArgumentException("Progress delay must be non-negative");
-            return new PollResult(
-                List.copyOf(unsentRequests),
-                stateTransitions,
-                managerEvents,
-                conditionFromLegacyDelay(timeUntilNextPollMs)
-            );
+            return new PollResult(networkCommands, managerEvents, nextPollCondition);
         }
 
         /** Reports no progress and a finite, positive delay before the manager should be polled again. */
         static PollResult retryAfter(final long delayMs) {
-            return new PollResult(List.of(), Set.of(), List.of(), NextPollCondition.retryAfter(delayMs));
+            return new PollResult(List.of(), List.of(), NextPollCondition.retryAfter(delayMs));
         }
 
         /** Reports no progress and no timer deadline; another input must make the manager runnable again. */
         static PollResult awaitInput() {
-            return new PollResult(List.of(), Set.of(), List.of(), NextPollCondition.awaitInput());
+            return new PollResult(List.of(), List.of(), NextPollCondition.awaitInput());
         }
 
         /**
@@ -462,7 +413,7 @@ public class NetworkClientDelegate implements AutoCloseable {
          * The cause is diagnostic context; it does not register a callback or introduce another wakeup channel.
          */
         static PollResult awaitInput(final NextPollCondition.AwaitCause cause) {
-            return new PollResult(List.of(), Set.of(), List.of(), NextPollCondition.awaitInput(cause));
+            return new PollResult(List.of(), List.of(), NextPollCondition.awaitInput(cause));
         }
 
         /** Reports no progress using an already-derived finite or input-driven activation condition. */
@@ -470,12 +421,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             Objects.requireNonNull(condition, "Wait condition must be non-null");
             if (condition instanceof NextPollCondition.PollImmediately)
                 throw new IllegalArgumentException("No-progress result cannot request an immediate poll");
-            return new PollResult(List.of(), Set.of(), List.of(), condition);
-        }
-
-        /** Compatibility alias retained while manager producers migrate to the more precise {@link #awaitInput()}. */
-        static PollResult awaitEvent() {
-            return awaitInput();
+            return new PollResult(List.of(), List.of(), condition);
         }
 
         public PollResult(final List<UnsentRequest> unsentRequests) {
@@ -488,10 +434,6 @@ public class NetworkClientDelegate implements AutoCloseable {
 
         public PollResult(final long timeUntilNextPollMs) {
             this(timeUntilNextPollMs, Collections.emptyList());
-        }
-
-        Set<StateTransition> stateTransitions() {
-            return stateTransitions;
         }
 
         List<NetworkCommand> networkCommands() {
@@ -510,19 +452,8 @@ public class NetworkClientDelegate implements AutoCloseable {
         boolean satisfiesProgressContract() {
             return timeUntilNextPollMs >= 0L
                 && (!unsentRequests.isEmpty()
-                    || !stateTransitions.isEmpty()
                     || !managerEvents.isEmpty()
                     || timeUntilNextPollMs > 0L);
-        }
-
-        PollResult withStateTransitions(final Set<StateTransition> additionalTransitions) {
-            if (additionalTransitions.isEmpty())
-                return this;
-
-            EnumSet<StateTransition> combinedTransitions = EnumSet.noneOf(StateTransition.class);
-            combinedTransitions.addAll(stateTransitions);
-            combinedTransitions.addAll(additionalTransitions);
-            return progress(unsentRequests, combinedTransitions, managerEvents, timeUntilNextPollMs);
         }
 
         PollResult withManagerEvents(final Collection<ManagerEvent> additionalEvents) {
@@ -532,7 +463,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             List<ManagerEvent> combinedEvents = new ArrayList<>(managerEvents.size() + additionalEvents.size());
             combinedEvents.addAll(managerEvents);
             combinedEvents.addAll(additionalEvents);
-            return progress(unsentRequests, stateTransitions, combinedEvents, timeUntilNextPollMs);
+            return new PollResult(networkCommands, combinedEvents, nextPollCondition);
         }
     }
 

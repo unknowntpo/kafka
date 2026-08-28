@@ -184,7 +184,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         // Publish an observation before admitting any retry. The owner must process coordinator invalidation before
         // a request may capture another coordinator snapshot.
         if (pendingManagerEvents.hasPendingEvents())
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
 
         // poll when the coordinator node is known and fatal error is not present
         if (coordinatorRequestManager.coordinator().isEmpty()) {
@@ -197,7 +197,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         .forEach(request -> request.future().completeExceptionally(exception));
             }
 
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
         }
 
         if (closing) {
@@ -205,7 +205,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         }
 
         if (!pendingRequests.hasUnsentRequests())
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
 
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
         // min of the remainingBackoffMs of all the request that are still backing off
@@ -246,9 +246,17 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         final long timeUntilNextPollMs
     ) {
         if (!requests.isEmpty())
-            return NetworkClientDelegate.PollResult.progress(requests, Set.of(), timeUntilNextPollMs);
+            return NetworkClientDelegate.PollResult.progress(
+                requests,
+                List.of(),
+                timeUntilNextPollMs == 0L
+                    ? NextPollCondition.pollImmediately()
+                    : timeUntilNextPollMs == NetworkClientDelegate.PollResult.WAIT_FOREVER
+                        ? NextPollCondition.awaitInput()
+                        : NextPollCondition.retryAfter(timeUntilNextPollMs)
+            );
         if (timeUntilNextPollMs == NetworkClientDelegate.PollResult.WAIT_FOREVER)
-            return NetworkClientDelegate.PollResult.awaitEvent();
+            return NetworkClientDelegate.PollResult.awaitInput();
         return NetworkClientDelegate.PollResult.retryAfter(timeUntilNextPollMs);
     }
 
@@ -744,10 +752,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     public NetworkClientDelegate.PollResult drainPendingOffsetCommitRequests() {
         if (pendingRequests.unsentOffsetCommits.isEmpty())
-            return NetworkClientDelegate.PollResult.awaitEvent();
+            return NetworkClientDelegate.PollResult.awaitInput();
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drainPendingCommits();
         return NetworkClientDelegate.PollResult.progress(
-            requests, Set.of(), NetworkClientDelegate.PollResult.WAIT_FOREVER);
+            requests, List.of(), NextPollCondition.awaitInput());
     }
 
     private void maybeUpdateLastSeenEpochIfNewer(final Map<TopicPartition, OffsetAndMetadata> offsets) {

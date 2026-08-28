@@ -298,9 +298,8 @@ public class ConsumerReactorTest {
         AtomicLong deadlineObservedByWakeup = new AtomicLong(-1L);
         NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(),
             List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
-            100L
+            NextPollCondition.retryAfter(100L)
         );
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
         when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(result);
@@ -323,15 +322,13 @@ public class ConsumerReactorTest {
         long currentTimeMs = time.milliseconds();
         NetworkClientDelegate.PollResult fetchResult = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(),
             List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
-            NetworkClientDelegate.PollResult.WAIT_FOREVER
+            NextPollCondition.awaitInput()
         );
         NetworkClientDelegate.PollResult offsetsResult = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(),
             List.of(ManagerEvent.LocalProgress.FETCH_POSITIONS_UPDATE_FAILED),
-            NetworkClientDelegate.PollResult.WAIT_FOREVER
+            NextPollCondition.awaitInput()
         );
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager, offsetsRequestManager));
         when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(fetchResult);
@@ -356,9 +353,8 @@ public class ConsumerReactorTest {
             new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", currentTimeMs, 7L);
         NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(),
             List.of(observation),
-            NetworkClientDelegate.PollResult.WAIT_FOREVER
+            NextPollCondition.awaitInput()
         );
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.poll(currentTimeMs))
@@ -443,13 +439,15 @@ public class ConsumerReactorTest {
                 super.completeSuccessfully();
             }
         };
-        NetworkClientDelegate.PollResult result = new NetworkClientDelegate.PollResult(
-            100L,
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED)
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            NextPollCondition.retryAfter(100L)
         );
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
         when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(result);
+        when(requestManagers.planManagerEvents(any())).thenAnswer(invocation ->
+            ManagerCoordinationPolicy.standard().evaluate(invocation.getArgument(0)));
         when(applicationEventProcessor.drainReactorActions()).thenReturn(
             List.of(ReactorAction.completeAsyncPoll(event, null)),
             List.of()
@@ -477,10 +475,15 @@ public class ConsumerReactorTest {
             }
         };
         AsyncPollEvent succeedingEvent = new AsyncPollEvent(currentTimeMs + 1_000L, currentTimeMs);
-        NetworkClientDelegate.PollResult progress = new NetworkClientDelegate.PollResult(
-            100L, List.of(), Set.of(StateTransition.FETCH_REQUEST_TERMINATED));
+        NetworkClientDelegate.PollResult progress = NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            NextPollCondition.retryAfter(100L)
+        );
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
         when(coordinatorRequestManager.poll(currentTimeMs)).thenReturn(progress);
+        when(requestManagers.planManagerEvents(any())).thenAnswer(invocation ->
+            ManagerCoordinationPolicy.standard().evaluate(invocation.getArgument(0)));
         when(applicationEventProcessor.drainReactorActions()).thenReturn(
             List.of(
                 ReactorAction.completeAsyncPoll(failingEvent, null),
@@ -536,15 +539,13 @@ public class ConsumerReactorTest {
         );
         NetworkClientDelegate.PollResult preIo = NetworkClientDelegate.PollResult.progress(
             List.of(request),
-            Set.of(),
             List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
-            NetworkClientDelegate.PollResult.WAIT_FOREVER
+            NextPollCondition.awaitInput()
         );
         NetworkClientDelegate.PollResult postIo = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(),
             List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
-            NetworkClientDelegate.PollResult.WAIT_FOREVER
+            NextPollCondition.awaitInput()
         );
         CheckAndUpdatePositionsEvent metadataEvent =
             new CheckAndUpdatePositionsEvent(currentTimeMs + 1_000L);
@@ -576,10 +577,10 @@ public class ConsumerReactorTest {
         );
         NetworkClientDelegate.PollResult beforeCompletion =
             new NetworkClientDelegate.PollResult(request);
-        NetworkClientDelegate.PollResult afterCompletion = new NetworkClientDelegate.PollResult(
-            7_000L,
+        NetworkClientDelegate.PollResult afterCompletion = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(StateTransition.FETCH_REQUEST_TERMINATED)
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            NextPollCondition.retryAfter(7_000L)
         );
         NetworkClientDelegate.PollResult unaffected =
             new NetworkClientDelegate.PollResult(6_000L);
@@ -591,6 +592,8 @@ public class ConsumerReactorTest {
         doReturn(beforeCompletion, afterCompletion)
             .when(heartbeatRequestManager).poll(currentTimeMs);
         doReturn(unaffected).when(coordinatorRequestManager).poll(currentTimeMs);
+        when(requestManagers.planManagerEvents(any())).thenAnswer(invocation ->
+            ManagerCoordinationPolicy.standard().evaluate(invocation.getArgument(0)));
         doAnswer(invocation -> {
             request.future().complete(null);
             return null;
@@ -644,7 +647,8 @@ public class ConsumerReactorTest {
             Optional.empty()
         );
         NetworkClientDelegate.PollResult commitReady =
-            NetworkClientDelegate.PollResult.progress(List.of(commitRequest), Set.of(), 1_000L);
+            NetworkClientDelegate.PollResult.progress(
+                List.of(commitRequest), List.of(), NextPollCondition.retryAfter(1_000L));
         AtomicReference<NetworkClientDelegate.UnsentRequest> findCoordinatorRequest = new AtomicReference<>();
 
         when(requestManagers.entries()).thenReturn(
@@ -652,7 +656,7 @@ public class ConsumerReactorTest {
         );
         when(commitRequestManager.poll(currentTimeMs)).thenAnswer(invocation ->
             realCoordinatorRequestManager.coordinator().isEmpty()
-                ? NetworkClientDelegate.PollResult.awaitEvent()
+                ? NetworkClientDelegate.PollResult.awaitInput()
                 : commitReady
         );
         when(heartbeatRequestManager.poll(currentTimeMs)).thenAnswer(invocation ->

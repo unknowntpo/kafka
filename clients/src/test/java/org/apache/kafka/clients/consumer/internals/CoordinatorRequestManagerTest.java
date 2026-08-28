@@ -81,7 +81,7 @@ public class CoordinatorRequestManagerTest {
 
         NetworkClientDelegate.PollResult pollResult = coordinatorManager.poll(time.milliseconds());
         assertEquals(Collections.emptyList(), pollResult.unsentRequests);
-        assertTrue(pollResult.stateTransitions().isEmpty());
+        assertTrue(pollResult.managerEvents().isEmpty());
     }
 
     /**

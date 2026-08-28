@@ -57,7 +57,7 @@ public class ManagerPollCacheTest {
         ManagerPollCache cache = new ManagerPollCache();
 
         cache.update(manager, NetworkClientDelegate.PollResult.retryAfter(100L), Long.MAX_VALUE, 10L);
-        cache.update(manager, NetworkClientDelegate.PollResult.awaitEvent(), Long.MAX_VALUE, 20L);
+        cache.update(manager, NetworkClientDelegate.PollResult.awaitInput(), Long.MAX_VALUE, 20L);
 
         assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
     }

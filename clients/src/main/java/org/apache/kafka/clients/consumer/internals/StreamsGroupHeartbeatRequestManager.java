@@ -456,7 +456,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         // Publish an observation before admitting any new request. In particular, a coordinator-unavailable
         // response must not be followed by a same-phase heartbeat built from the stale coordinator snapshot.
         if (pendingManagerEvents.hasPendingEvents())
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
 
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
             membershipManager.onHeartbeatRequestSkipped();
@@ -490,12 +490,14 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         if (heartbeatRequestState.requestInFlight() && !shouldSendLeaveHeartbeat()) {
             // Once a heartbeat is in flight, time alone cannot make another heartbeat sendable. The response
             // completion marks this manager for a post-I/O poll, so retaining a zero deadline here would only spin.
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
         }
         if (shouldHeartbeatBeforeIntervalExpires() || heartbeatRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
-                Collections.singletonList(request), Set.of(), heartbeatRequestState.heartbeatIntervalMs()));
+                Collections.singletonList(request),
+                List.of(),
+                NextPollCondition.retryAfter(heartbeatRequestState.heartbeatIntervalMs())));
         } else {
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.retryAfter(
                 heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));

@@ -118,10 +118,6 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      */
     private final List<ManagerCommand> deferredManagerCommands = new ArrayList<>();
 
-    /** Application-visible state changes in the current phase, coalesced into one notification and trace entry. */
-    private final EnumSet<StateTransition> pendingStateTransitions =
-        EnumSet.noneOf(StateTransition.class);
-
     /**
      * Effects staged for the current reactor phase. They execute only after schedule publication; application
      * wakeup is de-duplicated and executed last so the released thread observes all preceding effects.
@@ -300,7 +296,6 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             proposedSchedule.networkPollTimeoutMs(currentTimeMs)
         );
         collectApplicationEventActions();
-        collectStateTransitions(pollResults);
         publishPendingBackgroundEvents();
         executeReactorActions();
 
@@ -321,7 +316,6 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
                 afterNetworkPollMs
             );
             deliverExpiredApplicationDeadline(afterNetworkPollMs);
-            collectStateTransitions(postIoResults);
         }
         collectApplicationEventActions();
         publishPendingBackgroundEvents();
@@ -494,7 +488,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             log.error("Request manager {} failed while polling; waiting for a new input without skipping network I/O",
                 manager.getClass().getName(), exception);
             asyncConsumerMetrics.recordManagerPollFailure();
-            return NetworkClientDelegate.PollResult.awaitEvent();
+            return NetworkClientDelegate.PollResult.awaitInput();
         }
 
         if (result.satisfiesProgressContract()) {
@@ -507,7 +501,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
                 + "deadline with an event wait", manager.getClass().getName());
         }
         asyncConsumerMetrics.recordPollResultContractViolation();
-        return NetworkClientDelegate.PollResult.awaitEvent();
+        return NetworkClientDelegate.PollResult.awaitInput();
     }
 
     /** Applies policy-derived commands before application events and the next full ordered manager pass. */
@@ -593,21 +587,6 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         );
     }
 
-    private void collectStateTransitions(final Collection<NetworkClientDelegate.PollResult> results) {
-        for (NetworkClientDelegate.PollResult result : results) {
-            for (StateTransition transition : result.stateTransitions()) {
-                if (transition.requiresApplicationWakeup())
-                    pendingStateTransitions.add(transition);
-            }
-        }
-        if (!pendingStateTransitions.isEmpty()) {
-            stageWakeApplication();
-            pendingReactorActionReasons.add(
-                ReactorActionReason.STATE_TRANSITION
-            );
-        }
-    }
-
     /** Publish staged application events only after the current phase schedule, then release the application. */
     private void publishPendingBackgroundEvents() {
         int published = requestManagers.publishPendingBackgroundEvents();
@@ -623,10 +602,9 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
 
         if (log.isTraceEnabled()) {
             log.trace(
-                "Executing reactor action: actions={}, reasons={}, stateTransitions={}",
+                "Executing reactor action: actions={}, reasons={}",
                 pendingReactorActions,
-                pendingReactorActionReasons,
-                pendingStateTransitions
+                pendingReactorActionReasons
             );
         }
         // Detach this phase before execution. One failed action is then never retried accidentally, cannot suppress
@@ -635,7 +613,6 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         boolean wakeApplication = actions.remove(ReactorAction.wakeApplication());
         pendingReactorActions.clear();
         pendingReactorActionReasons.clear();
-        pendingStateTransitions.clear();
 
         for (ReactorAction action : actions)
             executeReactorAction(action);

@@ -37,7 +37,6 @@ import org.slf4j.Logger;
 
 import java.util.Collections;
 import java.util.List;
-import java.util.Set;
 
 import static org.apache.kafka.clients.consumer.internals.RequestState.RETRY_BACKOFF_JITTER;
 
@@ -170,7 +169,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         // Publish an observation before admitting any new request. In particular, a coordinator-unavailable
         // response must not be followed by a same-phase heartbeat built from the stale coordinator snapshot.
         if (pendingManagerEvents.hasPendingEvents())
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
 
         HeartbeatActivation activation = heartbeatActivation(currentTimeMs, true);
         if (activation.blockedByCoordinatorOrMembership()) {
@@ -194,8 +193,8 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             resetHeartbeatState();
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
                 Collections.singletonList(leaveHeartbeat),
-                Set.of(),
-                heartbeatRequestState.heartbeatIntervalMs()
+                List.of(),
+                NextPollCondition.retryAfter(heartbeatRequestState.heartbeatIntervalMs())
             ));
         }
 
@@ -363,9 +362,11 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         if (membershipManager().isLeavingGroup()) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, true);
             return NetworkClientDelegate.PollResult.progress(
-                Collections.singletonList(request), Set.of(), heartbeatRequestState.heartbeatIntervalMs());
+                Collections.singletonList(request),
+                List.of(),
+                NextPollCondition.retryAfter(heartbeatRequestState.heartbeatIntervalMs()));
         }
-        return NetworkClientDelegate.PollResult.awaitEvent();
+        return NetworkClientDelegate.PollResult.awaitInput();
     }
 
     /**

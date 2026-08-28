@@ -20,7 +20,6 @@ package org.apache.kafka.clients.consumer.internals;
 enum ReactorActionReason {
     SCHEDULE_SHORTENED,
     WAIT_DEADLINE_EXPIRED,
-    STATE_TRANSITION,
     MANAGER_EVENT,
     BACKGROUND_EVENT_PUBLISHED,
     METADATA_ERROR,

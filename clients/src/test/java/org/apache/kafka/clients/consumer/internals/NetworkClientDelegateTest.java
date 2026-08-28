@@ -52,7 +52,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
-import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -118,25 +117,22 @@ public class NetworkClientDelegateTest {
         NetworkClientDelegate.UnsentRequest request = mock(NetworkClientDelegate.UnsentRequest.class);
 
         NetworkClientDelegate.PollResult requestProgress = NetworkClientDelegate.PollResult.progress(
-            List.of(request), Set.of(), 0L);
-        NetworkClientDelegate.PollResult transitionProgress = NetworkClientDelegate.PollResult.progress(
-            List.of(), Set.of(StateTransition.FETCH_PREPARATION_FAILED), 0L);
+            List.of(request), List.of(), NextPollCondition.pollImmediately());
         NetworkClientDelegate.PollResult managerEventProgress = NetworkClientDelegate.PollResult.progress(
             List.of(),
-            Set.of(),
             List.of(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", 1L, 7L)),
-            0L
+            NextPollCondition.pollImmediately()
         );
 
         assertTrue(requestProgress.satisfiesProgressContract());
-        assertTrue(transitionProgress.satisfiesProgressContract());
         assertTrue(managerEventProgress.satisfiesProgressContract());
         assertEquals(1L, NetworkClientDelegate.PollResult.progress(
-            List.of(request), Set.of(), 1L).timeUntilNextPollMs);
+            List.of(request), List.of(), NextPollCondition.retryAfter(1L)).timeUntilNextPollMs);
         assertEquals(Long.MAX_VALUE, NetworkClientDelegate.PollResult.progress(
-            List.of(request), Set.of(), Long.MAX_VALUE).timeUntilNextPollMs);
+            List.of(request), List.of(), NextPollCondition.awaitInput()).timeUntilNextPollMs);
         assertThrows(IllegalArgumentException.class,
-            () -> NetworkClientDelegate.PollResult.progress(List.of(), Set.of(), 0L));
+            () -> NetworkClientDelegate.PollResult.progress(
+                List.of(), List.of(), NextPollCondition.pollImmediately()));
     }
 
     @Test
@@ -202,16 +198,12 @@ public class NetworkClientDelegateTest {
     }
 
     @Test
-    void testPollResultAwaitEventHasNoTimerDeadline() {
+    void testPollResultAwaitInputHasNoTimerDeadline() {
         NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.awaitInput();
-        NetworkClientDelegate.PollResult compatibilityResult = NetworkClientDelegate.PollResult.awaitEvent();
 
         assertTrue(result.unsentRequests.isEmpty());
-        assertTrue(result.stateTransitions().isEmpty());
         assertInstanceOf(NextPollCondition.AwaitInput.class, result.nextPollCondition());
-        assertInstanceOf(NextPollCondition.AwaitInput.class, compatibilityResult.nextPollCondition());
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
-        assertEquals(result.timeUntilNextPollMs, compatibilityResult.timeUntilNextPollMs);
         assertTrue(result.satisfiesProgressContract());
         assertFalse(new NetworkClientDelegate.PollResult(0L).satisfiesProgressContract());
     }
