@@ -32,7 +32,6 @@ import org.slf4j.Logger;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 
 
 /**
@@ -101,28 +100,31 @@ public class CoordinatorRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
+        NextPollCondition plan = planFindCoordinator(currentTimeMs);
+        if (!(plan instanceof NextPollCondition.PollImmediately))
+            return NetworkClientDelegate.PollResult.waitFor(plan);
+
+        NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
+        // Building the request changes the local state from runnable to in-flight. Derive the
+        // returned wait from the same planner after that state transition.
+        return NetworkClientDelegate.PollResult.progress(
+            List.of(request), List.of(), planFindCoordinator(currentTimeMs));
+    }
+
+    /**
+     * Derives both request eligibility and the next local activation condition from one state view.
+     * Await causes are diagnostic labels for existing reactor inputs, not callback registrations.
+     */
+    private NextPollCondition planFindCoordinator(final long currentTimeMs) {
         if (closing)
-            return NetworkClientDelegate.PollResult.awaitEvent();
-
-        if (this.coordinator != null) {
-            return NetworkClientDelegate.PollResult.awaitEvent();
-        }
-
-        if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
-            NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
-            return NetworkClientDelegate.PollResult.progress(
-                List.of(request), Set.of(), NetworkClientDelegate.PollResult.WAIT_FOREVER);
-        }
-
-        // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
-        // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
-        // backoff
-        if (coordinatorRequestState.requestInFlight()) {
-            return NetworkClientDelegate.PollResult.awaitEvent();
-        }
-
-        return NetworkClientDelegate.PollResult.retryAfter(
-            coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+            return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.SHUTDOWN);
+        if (coordinator != null)
+            return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.COORDINATOR_CHANGE);
+        if (coordinatorRequestState.canSendRequest(currentTimeMs))
+            return NextPollCondition.pollImmediately();
+        if (coordinatorRequestState.requestInFlight())
+            return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION);
+        return NextPollCondition.retryAfter(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {

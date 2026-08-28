@@ -217,6 +217,22 @@ public class NetworkClientDelegateTest {
     }
 
     @Test
+    void testPollResultAwaitInputRetainsDiagnosticCauseWithoutCreatingAnotherSignalChannel() {
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.awaitInput(
+            NextPollCondition.AwaitCause.NETWORK_COMPLETION
+        );
+
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, condition.cause());
+        assertEquals(Long.MAX_VALUE, condition.delayMs());
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.waitFor(NextPollCondition.pollImmediately()));
+    }
+
+    @Test
     public void testSuccessfulResponse() throws Exception {
         try (NetworkClientDelegate ncd = newNetworkClientDelegate(false)) {
             NetworkClientDelegate.UnsentRequest unsentRequest = newUnsentFindCoordinatorRequest();
