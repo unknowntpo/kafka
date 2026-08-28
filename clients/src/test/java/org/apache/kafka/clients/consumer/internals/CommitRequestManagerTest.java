@@ -740,6 +740,8 @@ public class CommitRequestManagerTest {
         time.sleep(100);
         commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds());
         assertPoll(0, commitRequestManager);
+        assertEquals(Long.MAX_VALUE, commitRequestManager.maximumTimeToWait(time.milliseconds()),
+            "an in-flight auto-commit must await its network completion rather than schedule a timer retry");
         verify(commitRequestManager, never()).resetAutoCommitTimer();
 
         // When a response for the inflight is received, a next auto-commit should be sent when

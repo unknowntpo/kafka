@@ -16,12 +16,25 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import java.util.Objects;
+
 /**
  * Describes the local condition under which one request manager should be polled again.
  * This is neither a fact nor a command: it is the manager's contribution to the reactor's
  * aggregate timing decision.
  */
 abstract class NextPollCondition {
+
+    /**
+     * Existing input path expected to make an {@link AwaitInput} manager worth evaluating again.
+     * This is diagnostic context, not a subscription or second wakeup channel.
+     */
+    enum AwaitCause {
+        NETWORK_COMPLETION,
+        COORDINATOR_CHANGE,
+        SHUTDOWN,
+        LEGACY_UNSPECIFIED
+    }
 
     private NextPollCondition() {
     }
@@ -31,9 +44,14 @@ abstract class NextPollCondition {
 
     /** Another input, such as a network completion or application command, must make progress possible. */
     static final class AwaitInput extends NextPollCondition {
-        private static final AwaitInput INSTANCE = new AwaitInput();
+        private final AwaitCause cause;
 
-        private AwaitInput() {
+        private AwaitInput(final AwaitCause cause) {
+            this.cause = Objects.requireNonNull(cause, "Await cause must be non-null");
+        }
+
+        AwaitCause cause() {
+            return cause;
         }
 
         @Override
@@ -75,7 +93,11 @@ abstract class NextPollCondition {
     }
 
     static NextPollCondition awaitInput() {
-        return AwaitInput.INSTANCE;
+        return awaitInput(AwaitCause.LEGACY_UNSPECIFIED);
+    }
+
+    static NextPollCondition awaitInput(final AwaitCause cause) {
+        return new AwaitInput(cause);
     }
 
     static NextPollCondition retryAfter(final long delayMs) {
