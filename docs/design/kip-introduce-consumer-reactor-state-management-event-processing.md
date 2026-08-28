@@ -404,6 +404,14 @@ If the heartbeat manager's post-I/O `poll()` throws before it can attach the cal
 input boundary and applies the coordinator command before any manager builds the next request. The error path
 therefore changes when the fact is admitted, but does not lose it or allow a long wait before owner re-evaluation.
 
+Cross-owner facts have one normative admission rule: they must originate from an input or network-completion path and
+must be available no later than the post-I/O owner poll. They must not be created for the first time by the ordinary
+pre-I/O full manager pass. At that point other managers may already have built transport commands from the previous
+owner snapshot, so applying a newly derived owner command would leave those commands stale. The POC retains and logs
+such an unexpected pre-I/O fact as migration containment, then applies its command at the next input boundary. The
+target model does not add dependency-aware request cancellation or replay; adding that mechanism requires separate
+motivation and evidence.
+
 ![Coordinator observation routed and fenced](../images/kip-1371-coordinator-observation-sequence.png)
 
 #### Owner-published snapshots and stale-observation fencing
@@ -504,8 +512,8 @@ repeatable assertions. The following studies group related issues by the boundar
 the named production-component path has a deterministic test. **Partial** and **pending** identify migration work;
 they are not claims that the POC fixes the historical issue end to end.
 
-All POC references below are pinned to
-[`9f0ab41dbf`](https://github.com/unknowntpo/kafka/tree/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd)
+All POC references below are pinned to the code-complete evidence baseline
+[`d2e5ff6eb7`](https://github.com/unknowntpo/kafka/tree/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0)
 so that later branch changes cannot alter the cited evidence.
 
 ### Case study 1: position scope and publication ordering
@@ -557,12 +565,12 @@ ConsumerReactor next ordered pass
 **Assertions and POC evidence.**
 
 - **Verified component:** an older offset-fetch completion cannot mutate a partition outside its captured scope.
-  [`OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManagerTest.java)
+  [`OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManagerTest.java)
   and
-  [`AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
+  [`AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
   cover the manager and application-event/reactor paths. The latter fails at pre-fix baseline `6744a718c2`.
 - **Unit only:** position advances before an exhausted fetch is exposed by
-  [`FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/FetchCollectorTest.java);
+  [`FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/FetchCollectorTest.java);
   a cross-component publication-order assertion remains required.
 - **Pending:** the exact KAFKA-18641 position-versus-auto-commit ordering race still needs a deterministic reactor
   reproduction.
@@ -616,19 +624,19 @@ NetworkClientDelegate.poll(published timeout)
 **Assertions and POC evidence.**
 
 - **Verified manager and public paths:** manual assignment does not expose a persistent zero heartbeat wait.
-  [`ConsumerHeartbeatRequestManagerTest.testMaximumTimeToWaitWhenHeartbeatShouldBeSkipped`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java)
+  [`ConsumerHeartbeatRequestManagerTest.testMaximumTimeToWaitWhenHeartbeatShouldBeSkipped`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java)
   and
-  [`AsyncKafkaConsumerTest.testPollWithManualAssignmentDoesNotBusyLoop`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
+  [`AsyncKafkaConsumerTest.testPollWithManualAssignmentDoesNotBusyLoop`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
   cover KAFKA-20426.
 - **Verified slices:**
-  [`ConsumerHeartbeatRequestManagerTest`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java)
+  [`ConsumerHeartbeatRequestManagerTest`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java)
   and
-  [`ShareHeartbeatRequestManagerTest`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ShareHeartbeatRequestManagerTest.java)
+  [`ShareHeartbeatRequestManagerTest`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ShareHeartbeatRequestManagerTest.java)
   cover coordinator, membership, timer, and in-flight states;
-  [`ConsumerReactorTest.testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java)
+  [`ConsumerReactorTest.testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java)
   covers heartbeat-to-coordinator routing. The exact historical KAFKA-20253 CPU benchmark remains a performance gate.
 - **Verified POC slices:**
-  [`ConsumerReactorCommitReadinessTest.testCompletionPublishesScheduleBeforeApplicationWakeup`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorCommitReadinessTest.java)
+  [`ConsumerReactorCommitReadinessTest.testCompletionPublishesScheduleBeforeApplicationWakeup`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorCommitReadinessTest.java)
   proves the auto-commit slice. Regular, share, and Streams heartbeat request admission now publishes
   `AwaitInput(network completion)` after recording a request in flight. Streams topology-description push likewise
   distinguishes coordinator input, membership input, finite retry, and network completion. The exact KAFKA-20970
@@ -681,10 +689,10 @@ Application thread
 **Assertions and POC evidence.**
 
 - **Verified component:** a paused partition produces neither a no-progress wake nor a wakeup ping-pong.
-  [`AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
+  [`AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
   observes the invalid wake at pre-fix baseline `9521d77da3` and its absence in the POC.
 - **Verified mechanism:**
-  [`ManagerCoordinationPolicyTest`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ManagerCoordinationPolicyTest.java)
+  [`ManagerCoordinationPolicyTest`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ManagerCoordinationPolicyTest.java)
   and reactor action-ordering tests prove `FetchBufferHasData` selects a coalesced action that executes after schedule
   publication.
 - **Compatibility limitation:** `FetchBuffer.addAll(...)` still signals its condition directly because that buffer is
@@ -740,7 +748,7 @@ Terminal success, timeout, cancellation, interruption, or close
 **Assertions and POC evidence.**
 
 - **Verified infrastructure slice:**
-  [`ConsumerReactorTest.testCleanupExecutesStagedAsyncPollCompletion`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java)
+  [`ConsumerReactorTest.testCleanupExecutesStagedAsyncPollCompletion`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java)
   proves cleanup executes an already selected async-poll completion rather than dropping it.
 - **Pending:** KAFKA-18160 still requires a callback acknowledgement plus interruption assertion with exactly one
   terminal result.
@@ -803,11 +811,12 @@ An event is not an action and a command is not proof that network I/O has alread
 
 **Must every `ManagerEvent` be created and consumed within one `runOnce()`?**
 
-No. A pre-I/O manager fact may select an action in the same iteration. A network callback may publish a fact in the
-post-I/O phase, or retain it for the next input boundary. Cross-owner commands that cannot safely apply after request
-building are retained for the next `runOnce()`, before its full manager pass and network poll. Events that cross this
-boundary are immutable and retained in bounded latest-pending storage; versioned observations are validated by the
-state owner before mutation.
+No. A local pre-I/O manager fact may select an action in the same iteration. A cross-owner fact originates from an
+input or network-completion path: the post-I/O owner poll may publish it in that iteration, or its producer-local
+buffer may retain it for the next input boundary. Its owner command is applied before the next full manager pass and
+network poll. Events that cross this boundary are immutable and retained in bounded latest-pending storage; versioned
+observations are validated by the state owner before mutation. A cross-owner fact first created during the ordinary
+pre-I/O pass violates the target admission rule and is only retained as a migration diagnostic.
 
 **Why not let one request manager directly mutate another?**
 
@@ -846,7 +855,7 @@ and Streams topology slices from Phase 2. The target model above also defines la
 | Publish-before-effect | `ReactorAction` and staged `BackgroundEvent` paths publish the schedule first. Direct `FetchBuffer` signalling remains a documented classic-consumer compatibility side channel. | Generic operation completion, async data publication, callback acknowledgement, and timeout paths cross the same boundary. |
 | Application wait projection | `AsyncKafkaConsumer.poll(...)` uses the published reactor decision; the former assignment/position mutable-state rescans have been removed in the POC. Assignment publication and position update/failure paths must therefore provide the corresponding wake or completion signal. | All remaining compatibility waits are derived from immutable schedule or operation results, with integration tests proving that each enabling input wakes a blocked application poll. |
 | Wake coalescing | Equivalent wakes are combined separately in the pre-I/O, post-I/O, and final-drain phases. | Equivalent reasons produce at most one primitive wake per complete reactor iteration. |
-| Cross-owner fact admission | Callback-produced facts are drained at the input boundary and their owner commands are applied before the full manager pass builds transport work. A post-I/O poll failure leaves the fact in the producer-local bounded buffer for that next input drain. An unexpected fact first produced by the pre-I/O manager pass is preserved and diagnosed, but its command is deferred because transport work may already have been built. | Require cross-owner facts to enter through the input/post-I/O paths, or add explicit dependency-aware replay/cancellation before claiming generic safety for facts first created during the pre-I/O pass. |
+| Cross-owner fact admission | Callback-produced facts are drained at the input boundary and their owner commands are applied before the full manager pass builds transport work. A post-I/O poll failure leaves the fact in the producer-local bounded buffer for that next input drain. An unexpected fact first produced by the pre-I/O manager pass is preserved and diagnosed, but its command is deferred because transport work may already have been built. | Require cross-owner facts to enter through input or network-completion paths and become available no later than the post-I/O owner poll. First admission during the ordinary pre-I/O pass is invalid. Dependency-aware request cancellation/replay is not part of this KIP. |
 | Diagnostics | Contract, manager-poll, action-failure, and application-wakeup counters are present. | TRACE adds publication generation, deadline source, action reason, and destination without hot-path collection formatting. |
 | Consumer variants | Regular, share, and Streams heartbeat paths use the typed progress model; Streams topology push uses the coordinator snapshot/version rule. Share fetch production still has compatibility `PollResult` construction and lacks an equivalent reactor-level recovery test. | Regular, share, and Streams compositions each prove all typed outputs and cross-owner recovery without consumer-type branches in `ConsumerReactor`. |
 
@@ -876,10 +885,10 @@ iteration so it is applied before application inputs, the next full manager pass
 cannot overwrite a newer pending observation. The coordinator owner still performs the final comparison against its
 current version.
 
-A cross-owner fact first created by the pre-I/O manager pass is not the normal path: by then other managers may have
-already built transport commands from the earlier owner snapshot. The POC retains and diagnoses that fact instead of
-losing it, but this is containment rather than generic stale-send recovery. Such a producer must move the fact to the
-input/post-I/O admission path, or provide dependency-aware cancellation/replay semantics.
+A cross-owner fact first created by the pre-I/O manager pass violates the target admission rule: by then other managers
+may have already built transport commands from the earlier owner snapshot. The POC retains and diagnoses that fact
+instead of losing it, but this is migration containment rather than generic stale-send recovery. Such a producer must
+move the fact to an input or network-completion path. Dependency-aware cancellation/replay is outside this KIP.
 
 Other current implementation details include:
 
@@ -1050,6 +1059,14 @@ The manager set is small and fixed for one consumer instance. A stable full orde
 the correctness baseline and has `O(active managers)` cost. If measurement later justifies incremental polling, the
 composition may own a static fact-type-to-manager index and poll a stable dirty set. Recursive polling, fixed-point
 evaluation, and a dynamic dependency DAG are non-goals.
+
+### Replay transport work after a pre-I/O cross-owner fact
+
+Replaying or cancelling requests already built in the same pre-I/O pass would require dependency metadata for every
+command, a definition of which manager state may be replayed, and new duplicate-attempt semantics. The simpler
+invariant prevents that state: cross-owner facts enter through input or network-completion paths, before the next full
+manager pass builds transport work. The POC's pre-I/O containment remains diagnostic support for migration errors,
+not a second target execution model.
 
 ## Related Work
 
