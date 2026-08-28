@@ -240,8 +240,22 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     private PollResult pollResult(final long timeUntilNextPollMs,
                                   final List<UnsentRequest> requests) {
+        final PollResult pollResult;
+        if (!requests.isEmpty()) {
+            pollResult = PollResult.progress(
+                requests,
+                List.of(),
+                NextPollCondition.fromLegacyDelay(timeUntilNextPollMs)
+            );
+        } else if (timeUntilNextPollMs == PollResult.WAIT_FOREVER) {
+            pollResult = PollResult.awaitInput();
+        } else {
+            // A zero configured backoff is a legal time-driven retry. Use the typed factory so it cannot be
+            // confused with PollImmediately, which requires output in the same result.
+            pollResult = PollResult.retryAfter(timeUntilNextPollMs);
+        }
         return pendingManagerEvents.publishWith(
-            new PollResult(timeUntilNextPollMs, requests)
+            pollResult
         );
     }
 

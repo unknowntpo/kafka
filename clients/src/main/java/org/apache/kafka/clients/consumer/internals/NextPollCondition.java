@@ -61,13 +61,13 @@ abstract class NextPollCondition {
         }
     }
 
-    /** Time alone may make progress possible after this finite, positive delay. */
+    /** Time alone may make progress possible after this non-negative delay. */
     static final class RetryAfter extends NextPollCondition {
         private final long delayMs;
 
         RetryAfter(final long delayMs) {
-            if (delayMs <= 0L || delayMs == Long.MAX_VALUE)
-                throw new IllegalArgumentException("Retry delay must be finite and positive");
+            if (delayMs < 0L)
+                throw new IllegalArgumentException("Retry delay must be non-negative");
             this.delayMs = delayMs;
         }
 

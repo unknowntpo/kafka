@@ -390,7 +390,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             return new PollResult(networkCommands, managerEvents, nextPollCondition);
         }
 
-        /** Reports no progress and a finite, positive delay before the manager should be polled again. */
+        /** Reports no progress and a non-negative time-driven delay before the manager should be polled again. */
         static PollResult retryAfter(final long delayMs) {
             return new PollResult(List.of(), List.of(), NextPollCondition.retryAfter(delayMs));
         }
@@ -440,12 +440,12 @@ public class NetworkClientDelegate implements AutoCloseable {
             return nextPollCondition;
         }
 
-        /** Generic contract used by the reactor while legacy constructor call sites are migrated incrementally. */
-        boolean satisfiesProgressContract() {
+        /** Generic invariant used by the reactor while legacy constructor call sites are migrated incrementally. */
+        boolean isValidPollResult() {
             return timeUntilNextPollMs >= 0L
                 && (!unsentRequests.isEmpty()
                     || !managerEvents.isEmpty()
-                    || timeUntilNextPollMs > 0L);
+                    || !(nextPollCondition instanceof NextPollCondition.PollImmediately));
         }
 
         PollResult withManagerEvents(final Collection<ManagerEvent> additionalEvents) {

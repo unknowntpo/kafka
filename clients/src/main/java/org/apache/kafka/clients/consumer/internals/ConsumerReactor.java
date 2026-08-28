@@ -526,7 +526,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             return NetworkClientDelegate.PollResult.awaitInput();
         }
 
-        if (result.satisfiesProgressContract()) {
+        if (result.isValidPollResult()) {
             managersWithInvalidPollResult.remove(manager);
             return result;
         }

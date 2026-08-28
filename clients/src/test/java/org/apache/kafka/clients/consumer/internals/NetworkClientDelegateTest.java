@@ -124,8 +124,8 @@ public class NetworkClientDelegateTest {
             NextPollCondition.pollImmediately()
         );
 
-        assertTrue(requestProgress.satisfiesProgressContract());
-        assertTrue(managerEventProgress.satisfiesProgressContract());
+        assertTrue(requestProgress.isValidPollResult());
+        assertTrue(managerEventProgress.isValidPollResult());
         assertEquals(1L, NetworkClientDelegate.PollResult.progress(
             List.of(request), List.of(), NextPollCondition.retryAfter(1L)).timeUntilNextPollMs);
         assertEquals(Long.MAX_VALUE, NetworkClientDelegate.PollResult.progress(
@@ -149,7 +149,7 @@ public class NetworkClientDelegateTest {
         assertEquals(List.of(event), result.managerEvents());
         assertInstanceOf(NextPollCondition.AwaitInput.class, result.nextPollCondition());
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
-        assertTrue(result.satisfiesProgressContract());
+        assertTrue(result.isValidPollResult());
     }
 
     @Test
@@ -181,20 +181,20 @@ public class NetworkClientDelegateTest {
     }
 
     @Test
-    void testPollResultRetryRequiresFinitePositiveDelay() {
-        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.retryAfter(1L);
+    void testPollResultRetryAcceptsEveryNonNegativeDelay() {
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.retryAfter(0L);
 
-        assertEquals(1L, result.timeUntilNextPollMs);
+        assertEquals(0L, result.timeUntilNextPollMs);
         assertInstanceOf(NextPollCondition.RetryAfter.class, result.nextPollCondition());
         assertTrue(result.networkCommands().isEmpty());
         assertTrue(result.managerEvents().isEmpty());
-        assertTrue(result.satisfiesProgressContract());
-        assertThrows(IllegalArgumentException.class,
-            () -> NetworkClientDelegate.PollResult.retryAfter(0L));
+        assertTrue(result.isValidPollResult());
+        assertEquals(
+            Long.MAX_VALUE,
+            NetworkClientDelegate.PollResult.retryAfter(Long.MAX_VALUE).timeUntilNextPollMs
+        );
         assertThrows(IllegalArgumentException.class,
             () -> NetworkClientDelegate.PollResult.retryAfter(-1L));
-        assertThrows(IllegalArgumentException.class,
-            () -> NetworkClientDelegate.PollResult.retryAfter(Long.MAX_VALUE));
     }
 
     @Test
@@ -204,8 +204,8 @@ public class NetworkClientDelegateTest {
         assertTrue(result.unsentRequests.isEmpty());
         assertInstanceOf(NextPollCondition.AwaitInput.class, result.nextPollCondition());
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
-        assertTrue(result.satisfiesProgressContract());
-        assertFalse(new NetworkClientDelegate.PollResult(0L).satisfiesProgressContract());
+        assertTrue(result.isValidPollResult());
+        assertFalse(new NetworkClientDelegate.PollResult(0L).isValidPollResult());
     }
 
     @Test

@@ -229,6 +229,20 @@ public class ConsumerReactorTest {
     }
 
     @Test
+    public void testZeroDelayRetryIsReevaluatedOncePerRunOnce() {
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong()))
+            .thenReturn(NetworkClientDelegate.PollResult.retryAfter(0L));
+
+        consumerReactor.runOnce();
+        consumerReactor.runOnce();
+
+        verify(coordinatorRequestManager, times(2)).poll(anyLong());
+        verify(networkClientDelegate, times(2)).poll(0L, time.milliseconds());
+        verify(asyncConsumerMetrics, never()).recordInvalidPollResult();
+    }
+
+    @Test
     public void testManagerPollFailureDoesNotSkipNetworkIoInTerminalPhase() {
         RuntimeException failure = new RuntimeException("manager poll failed");
         when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
@@ -967,6 +981,22 @@ public class ConsumerReactorTest {
         consumerReactor.runOnce();
 
         verify(networkClientDelegate).poll(100L, startMs);
+    }
+
+    @Test
+    public void testManagerRetryAndCompatibilityApplicationWaitRemainSeparateThroughReactor() {
+        long startMs = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(startMs))
+            .thenReturn(NetworkClientDelegate.PollResult.retryAfter(100L));
+        when(heartbeatRequestManager.maximumTimeToWait(startMs)).thenReturn(25L);
+
+        consumerReactor.runOnce();
+
+        assertEquals(startMs + 100L, consumerReactor.reactorSchedule().reactorDeadlineMs());
+        assertEquals(startMs + 25L, consumerReactor.reactorSchedule().applicationDeadlineMs());
+        assertEquals(25L, consumerReactor.maximumTimeToWait());
+        verify(networkClientDelegate).poll(25L, startMs);
     }
 
     @Test

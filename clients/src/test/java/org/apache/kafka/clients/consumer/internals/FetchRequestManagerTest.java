@@ -147,6 +147,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -483,6 +484,28 @@ public class FetchRequestManagerTest {
 
         assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER,
             fetcher.lastPollResult.timeUntilNextPollMs);
+    }
+
+    @Test
+    public void testZeroRetryBackoffMissingLeaderRetainsTimeDrivenRetry() {
+        buildFetcherWithRetryBackoff(0L);
+        subscriptions.assignFromUser(Set.of(tp0));
+        subscriptions.seek(tp0, 0L);
+
+        AbstractFetch.FetchRequestPreparationResult preparation = fetcher.prepareFetchRequestResult();
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationBlocker.MISSING_LEADER), preparation.blockers());
+
+        CompletableFuture<Void> future = fetcher.createFetchRequests();
+        NetworkClientDelegate.PollResult result = fetcher.poll(time.milliseconds());
+
+        assertTrue(future.isDone());
+        assertTrue(result.networkCommands().isEmpty());
+        NextPollCondition.RetryAfter retry = assertInstanceOf(
+            NextPollCondition.RetryAfter.class,
+            result.nextPollCondition()
+        );
+        assertEquals(0L, retry.delayMs());
+        assertTrue(result.isValidPollResult());
     }
 
     @Test
@@ -4499,6 +4522,19 @@ public class FetchRequestManagerTest {
         buildFetcher(Integer.MAX_VALUE);
     }
 
+    private void buildFetcherWithRetryBackoff(final long configuredRetryBackoffMs) {
+        buildFetcher(
+            new MetricConfig(),
+            AutoOffsetResetStrategy.EARLIEST,
+            new ByteArrayDeserializer(),
+            new ByteArrayDeserializer(),
+            Integer.MAX_VALUE,
+            IsolationLevel.READ_UNCOMMITTED,
+            Long.MAX_VALUE,
+            configuredRetryBackoffMs
+        );
+    }
+
     private void buildFetcher(Deserializer<?> keyDeserializer,
                               Deserializer<?> valueDeserializer) {
         buildFetcher(AutoOffsetResetStrategy.EARLIEST, keyDeserializer, valueDeserializer,
@@ -4530,10 +4566,30 @@ public class FetchRequestManagerTest {
                                      int maxPollRecords,
                                      IsolationLevel isolationLevel,
                                      long metadataExpireMs) {
+        buildFetcher(
+            metricConfig,
+            offsetResetStrategy,
+            keyDeserializer,
+            valueDeserializer,
+            maxPollRecords,
+            isolationLevel,
+            metadataExpireMs,
+            retryBackoffMs
+        );
+    }
+
+    private <K, V> void buildFetcher(MetricConfig metricConfig,
+                                     AutoOffsetResetStrategy offsetResetStrategy,
+                                     Deserializer<K> keyDeserializer,
+                                     Deserializer<V> valueDeserializer,
+                                     int maxPollRecords,
+                                     IsolationLevel isolationLevel,
+                                     long metadataExpireMs,
+                                     long configuredRetryBackoffMs) {
         LogContext logContext = new LogContext();
         SubscriptionState subscriptionState = new SubscriptionState(logContext, offsetResetStrategy);
         buildFetcher(metricConfig, keyDeserializer, valueDeserializer, maxPollRecords, isolationLevel, metadataExpireMs,
-                subscriptionState, logContext);
+                subscriptionState, logContext, configuredRetryBackoffMs);
     }
 
     private <K, V> void buildFetcher(MetricConfig metricConfig,
@@ -4544,7 +4600,29 @@ public class FetchRequestManagerTest {
                                      long metadataExpireMs,
                                      SubscriptionState subscriptionState,
                                      LogContext logContext) {
-        buildDependencies(metricConfig, metadataExpireMs, subscriptionState, logContext);
+        buildFetcher(
+            metricConfig,
+            keyDeserializer,
+            valueDeserializer,
+            maxPollRecords,
+            isolationLevel,
+            metadataExpireMs,
+            subscriptionState,
+            logContext,
+            retryBackoffMs
+        );
+    }
+
+    private <K, V> void buildFetcher(MetricConfig metricConfig,
+                                     Deserializer<K> keyDeserializer,
+                                     Deserializer<V> valueDeserializer,
+                                     int maxPollRecords,
+                                     IsolationLevel isolationLevel,
+                                     long metadataExpireMs,
+                                     SubscriptionState subscriptionState,
+                                     LogContext logContext,
+                                     long configuredRetryBackoffMs) {
+        buildDependencies(metricConfig, metadataExpireMs, subscriptionState, logContext, configuredRetryBackoffMs);
         Deserializers<K, V> deserializers = new Deserializers<>(keyDeserializer, valueDeserializer, metrics);
         FetchConfig fetchConfig = new FetchConfig(
                 minBytes,
@@ -4573,13 +4651,13 @@ public class FetchRequestManagerTest {
                 networkClientDelegate,
                 fetchCollector,
                 apiVersions,
-                retryBackoffMs));
+                configuredRetryBackoffMs));
         ConsumerNetworkClient consumerNetworkClient = new ConsumerNetworkClient(
                 logContext,
                 client,
                 metadata,
                 time,
-                retryBackoffMs,
+                configuredRetryBackoffMs,
                 requestTimeoutMs,
                 Integer.MAX_VALUE);
         offsetFetcher = new OffsetFetcher(logContext,
@@ -4587,7 +4665,7 @@ public class FetchRequestManagerTest {
                 metadata,
                 subscriptions,
                 time,
-                retryBackoffMs,
+                configuredRetryBackoffMs,
                 requestTimeoutMs,
                 isolationLevel,
                 apiVersions);
@@ -4596,7 +4674,8 @@ public class FetchRequestManagerTest {
     private void buildDependencies(MetricConfig metricConfig,
                                    long metadataExpireMs,
                                    SubscriptionState subscriptionState,
-                                   LogContext logContext) {
+                                   LogContext logContext,
+                                   long configuredRetryBackoffMs) {
         time = new MockTime(1, 0, 0);
         subscriptions = subscriptionState;
         metadata = new ConsumerMetadata(0, 0, metadataExpireMs, false, false,
@@ -4611,7 +4690,7 @@ public class FetchRequestManagerTest {
         properties.put(KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.setProperty(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, String.valueOf(requestTimeoutMs));
-        properties.setProperty(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, String.valueOf(retryBackoffMs));
+        properties.setProperty(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, String.valueOf(configuredRetryBackoffMs));
         properties.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
         ConsumerConfig config = new ConsumerConfig(properties);
         networkClientDelegate = spy(new TestableNetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler, true));

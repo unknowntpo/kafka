@@ -23,6 +23,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 
 public class ManagerPollCacheTest {
@@ -58,6 +59,36 @@ public class ManagerPollCacheTest {
 
         cache.update(manager, NetworkClientDelegate.PollResult.retryAfter(100L), ApplicationWait.unbounded(), 10L);
         cache.update(manager, NetworkClientDelegate.PollResult.awaitInput(), ApplicationWait.unbounded(), 20L);
+
+        assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testZeroDelayRetryRetainsCurrentTimeDeadline() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, PollResult.retryAfter(0L), ApplicationWait.unbounded(), 10L);
+
+        assertEquals(10L, cache.states().iterator().next().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testMaximumRetryDelaySaturatesAtMaximumDeadline() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, PollResult.retryAfter(Long.MAX_VALUE), ApplicationWait.unbounded(), 10L);
+
+        assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testRetryDeadlineAdditionSaturatesOnOverflow() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, PollResult.retryAfter(10L), ApplicationWait.unbounded(), Long.MAX_VALUE - 5L);
 
         assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
     }
@@ -104,5 +135,15 @@ public class ManagerPollCacheTest {
         ManagerPollCache.PollState state = cache.states().iterator().next();
         assertEquals(110L, state.reactorDeadlineMs());
         assertEquals(35L, state.activeApplicationDeadlineMs());
+    }
+
+    @Test
+    public void testApplicationWaitAcceptsZeroAndMaximumButRejectsNegativeDelay() {
+        assertEquals(0L, ApplicationWait.fromLegacyMaximumTimeToWait(0L).delayMs());
+        assertEquals(Long.MAX_VALUE, ApplicationWait.unbounded().delayMs());
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> ApplicationWait.fromLegacyMaximumTimeToWait(-1L)
+        );
     }
 }

@@ -444,7 +444,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
             assertEquals(0, result.unsentRequests.size());
             assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
-            assertTrue(result.satisfiesProgressContract());
+            assertTrue(result.isValidPollResult());
             verify(pollTimer).update(time.milliseconds());
             verify(heartbeatRequestStateMockedConstruction.constructed().get(0), never())
                 .timeToNextHeartbeatMs(anyLong());
