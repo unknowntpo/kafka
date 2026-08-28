@@ -496,28 +496,252 @@ and `StreamsConsumerDriver` are proposed internal boundaries; they do not yet ex
 The shared reactor must not branch on consumer type. An `isShareConsumer` switch or a regular/share union in the
 reactor loop indicates that consumer-specific behavior has leaked across the boundary.
 
-### 8. Apply the reactor model to the motivating failures
+## Case Studies
 
-The reactor model is useful only if each motivating failure becomes a concrete assertion. The table therefore
-distinguishes the behavior before the change, the target behavior after applying the reactor model, and the evidence
-currently available. **Verified** means the named production-component path has a deterministic test in this POC.
-**Partial** and **pending** are explicit migration work; they are not claims that the reactor already fixes the issue
-end to end.
+The reactor model is useful only if the motivating failures can be replayed as component interactions and reduced to
+repeatable assertions. The following studies group related issues by the boundary they exercise. **Verified** means
+the named production-component path has a deterministic test. **Partial** and **pending** identify migration work;
+they are not claims that the POC fixes the historical issue end to end.
 
-| Issue | Before | After (reactor model) | Current proof |
-| --- | --- | --- | --- |
-| [KAFKA-17066](https://issues.apache.org/jira/browse/KAFKA-17066) | Position initialization crossed application and background execution without one ordered operation boundary. | `OffsetsRequestManager` owns position initialization; the reactor orders the application input, network completion, and next manager pass. | **Partial:** `AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`; original pre-fix negative baseline still required. |
-| [KAFKA-17674](https://issues.apache.org/jira/browse/KAFKA-17674) | An older OffsetFetch completion for `tp1` could reset newly added `tp2`. | The operation retains its captured partition scope; later assignment input is handled by a later ordered operation. | **Verified component:** `OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition` and the Async consumer component test above; the latter fails at pre-fix baseline `6744a718c2`. |
-| [KAFKA-18641](https://issues.apache.org/jira/browse/KAFKA-18641) | Application position advancement could race with the auto-commit snapshot. | Position input must be applied before the commit manager derives the dependent snapshot in the same ordered pass. | **Pending:** exact reactor ordering reproduction is still required. |
-| [KAFKA-15529](https://issues.apache.org/jira/browse/KAFKA-15529) | Consumed data could become visible before the matching position update. | The fetch owner applies the completed state transition before the reactor publishes the corresponding data/effect. | **Unit only:** `FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`; cross-component proof pending. |
-| [KAFKA-20426](https://issues.apache.org/jira/browse/KAFKA-20426) | Manual assignment made heartbeat progress impossible while a zero application wait remained visible. | The regular/share heartbeat activation projection treats membership-reported skip states as `AwaitInput(MEMBERSHIP_CHANGE)` and projects an unbounded compatibility application wait for `UNSUBSCRIBED`. | **Verified manager path:** `ConsumerHeartbeatRequestManagerTest.testMaximumTimeToWaitWhenHeartbeatShouldBeSkipped`; `AsyncKafkaConsumerTest.testPollWithManualAssignmentDoesNotBusyLoop` covers the public poll path. |
-| [KAFKA-20253](https://issues.apache.org/jira/browse/KAFKA-20253) | Heartbeat, coordinator, and auto-commit timers could say “now” although coordinator or in-flight state made new work impossible. | Each owner derives one activation projection: runnable work produces one command, in-flight work awaits completion, and finite backoff alone uses `RetryAfter`. The reactor retains and aggregates those conditions. | **Verified slices:** regular/share heartbeat inherited tests, coordinator/commit tests, and `ConsumerReactorTest.testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll`; exact historical high-CPU scenario remains a benchmark gate. |
-| [KAFKA-20854](https://issues.apache.org/jira/browse/KAFKA-20854) | An empty fetch-preparation result could trigger application/background wakeup ping-pong. | Fetch reports a typed blocker or `FetchBufferHasData`; only the latter derives a post-publication wake action. | **Verified component:** `AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`; the same test observes the invalid wake at pre-fix baseline `9521d77da3`. |
-| [KAFKA-20970](https://issues.apache.org/jira/browse/KAFKA-20970) | Expired auto-commit or Streams heartbeat compatibility timers could remain at zero while coordinator state blocked request creation. | Auto-commit now derives admission and wait from one projection; an in-flight commit awaits completion rather than reusing the expired timer. Streams heartbeat remains a separate migration target. | **Partial:** `ConsumerReactorCommitReadinessTest.testCompletionPublishesScheduleBeforeApplicationWakeup`; Streams heartbeat proof pending. |
-| [KAFKA-20397](https://issues.apache.org/jira/browse/KAFKA-20397) | Metadata-error publication could race with application entry into the fetch-buffer wait. | Stage the terminal publication and retained wake reason, publish the schedule/state, then execute the wake action. | **Partial:** generic publish-before-wakeup tests exist; exact metadata-error race reproduction pending. |
-| [KAFKA-18160](https://issues.apache.org/jira/browse/KAFKA-18160) | Wakeup or interruption could skip callback-completed acknowledgement. | Preserve one operation identity and route its terminal acknowledgement through the ordered action boundary exactly once. | **Pending:** historical integration coverage exists; a POC callback/interruption component assertion is required. |
-| [KAFKA-19357](https://issues.apache.org/jira/browse/KAFKA-19357) | Close could stop coordinator discovery while an admitted commit still needed it. | Shutdown must preserve dependencies of admitted operations until one terminal result, then drain staged actions before resource close. | **Pending:** exact pending-commit plus unknown-coordinator close test is required. |
-| [KAFKA-18569](https://issues.apache.org/jira/browse/KAFKA-18569) | Coordinator discovery could continue after commit and leave work no longer needed it. | The coordinator owner derives discovery activation from the current admitted-work/lifecycle state; close ordering cannot be inferred independently by peers. | **Pending:** the inverse close-liveness test must prove discovery stops without delaying terminal completion. |
+All POC references below are pinned to
+[`9f0ab41dbf`](https://github.com/unknowntpo/kafka/tree/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd)
+so that later branch changes cannot alter the cited evidence.
+
+### Case study 1: position scope and publication ordering
+
+This study covers [KAFKA-17066](https://issues.apache.org/jira/browse/KAFKA-17066),
+[KAFKA-17674](https://issues.apache.org/jira/browse/KAFKA-17674),
+[KAFKA-18641](https://issues.apache.org/jira/browse/KAFKA-18641), and
+[KAFKA-15529](https://issues.apache.org/jira/browse/KAFKA-15529).
+
+**Before.** Assignment, an in-flight offset operation, position mutation, auto-commit snapshot creation, and fetch
+publication could proceed on different paths. An older completion could therefore act on state admitted after its
+request was created, or the application could observe data before the matching position mutation.
+
+```text
+ApplicationEventProcessor assigns tp1
+  -> OffsetsRequestManager starts OffsetFetch(scope={tp1})
+
+ApplicationEventProcessor later assigns tp2
+  -> the older OffsetFetch completes
+  -> completion code observes the current assignment rather than only scope={tp1}
+  -> tp2 may be reset or initialized by the wrong operation
+
+Fetch or auto-commit concurrently reads position state
+  -> application-visible data or a commit snapshot may observe a different ordering
+```
+
+**After applying the reactor model.** The application input and network completion are separate ordered operations.
+The offset operation retains its admitted partition scope, and the state owner applies only that scope. The next full
+manager pass observes the resulting current state. Any migrated data publication or completion is released only after
+the corresponding state and schedule publication.
+
+```text
+ConsumerReactor input phase
+  -> applies assignment(tp2)
+  -> preserves OffsetFetch attempt context(scope={tp1})
+
+NetworkClientDelegate.poll()
+  -> returns the older OffsetFetch completion
+  -> OffsetsRequestManager applies results only to tp1
+  -> tp2 remains owned by the later assignment/position operation
+
+ConsumerReactor next ordered pass
+  -> CommitRequestManager derives its snapshot from the updated positions
+  -> fetch owner applies the matching position mutation
+  -> ConsumerReactor publishes state and ReactorSchedule
+  -> only then releases the corresponding application-visible effect
+```
+
+**Assertions and POC evidence.**
+
+- **Verified component:** an older offset-fetch completion cannot mutate a partition outside its captured scope.
+  [`OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManagerTest.java)
+  and
+  [`AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
+  cover the manager and application-event/reactor paths. The latter fails at pre-fix baseline `6744a718c2`.
+- **Unit only:** position advances before an exhausted fetch is exposed by
+  [`FetchCollectorTest.testPositionUpdatedBeforeDrainOnExhaustedFetch`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/FetchCollectorTest.java);
+  a cross-component publication-order assertion remains required.
+- **Pending:** the exact KAFKA-18641 position-versus-auto-commit ordering race still needs a deterministic reactor
+  reproduction.
+
+### Case study 2: heartbeat and commit cannot progress yet
+
+This study covers [KAFKA-20426](https://issues.apache.org/jira/browse/KAFKA-20426),
+[KAFKA-20253](https://issues.apache.org/jira/browse/KAFKA-20253), and
+[KAFKA-20970](https://issues.apache.org/jira/browse/KAFKA-20970).
+
+**Before.** Heartbeat, coordinator discovery, auto-commit, the application wait, and network polling could calculate
+urgency independently. A timer could remain at zero even though coordinator state or an in-flight request made new
+work impossible.
+
+```text
+HeartbeatRequestManager      -> heartbeat timer expired -> application wait 0
+CoordinatorRequestManager    -> retry timer expired     -> network wait 0
+CommitRequestManager         -> auto-commit expired     -> application wait 0
+
+but coordinator is unknown, FindCoordinator is in flight, or commit is in flight
+  -> no manager can create distinct work
+  -> application poll and NetworkClient.poll(0) repeat
+```
+
+**After applying the reactor model.** Each manager derives request admission and its next useful poll from one local
+activation view. The reactor does not reproduce heartbeat or commit rules; it retains and combines only their typed
+conditions.
+
+```text
+HeartbeatRequestManager
+  -> coordinator or membership blocks request -> AwaitInput(owner change)
+  -> heartbeat interval/backoff remains        -> RetryAfter(remainingMs)
+  -> request is legal                          -> NetworkCommand(heartbeat)
+                                                  + AwaitInput(network completion)
+
+CommitRequestManager
+  -> auto-commit not due                       -> RetryAfter(remainingMs)
+  -> commit request already in flight          -> AwaitInput(network completion)
+  -> commit is due and legal                   -> NetworkCommand(offset commit)
+
+ConsumerReactor stable manager pass
+  -> retains every manager condition in ManagerPollCache
+  -> publishes the earliest finite deadline as ReactorSchedule
+  -> produces no application wake for coordinator, backoff, or in-flight blockers
+
+NetworkClientDelegate.poll(published timeout)
+  -> completion re-polls its owning manager
+  -> ConsumerReactor publishes the updated schedule before any wake action
+```
+
+**Assertions and POC evidence.**
+
+- **Verified manager and public paths:** manual assignment does not expose a persistent zero heartbeat wait.
+  [`ConsumerHeartbeatRequestManagerTest.testMaximumTimeToWaitWhenHeartbeatShouldBeSkipped`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java)
+  and
+  [`AsyncKafkaConsumerTest.testPollWithManualAssignmentDoesNotBusyLoop`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
+  cover KAFKA-20426.
+- **Verified slices:**
+  [`ConsumerHeartbeatRequestManagerTest`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java)
+  and
+  [`ShareHeartbeatRequestManagerTest`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ShareHeartbeatRequestManagerTest.java)
+  cover coordinator, membership, timer, and in-flight states;
+  [`ConsumerReactorTest.testRealHeartbeatInvalidationIsRoutedBeforeNextNetworkPoll`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java)
+  covers heartbeat-to-coordinator routing. The exact historical KAFKA-20253 CPU benchmark remains a performance gate.
+- **Partial:**
+  [`ConsumerReactorCommitReadinessTest.testCompletionPublishesScheduleBeforeApplicationWakeup`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorCommitReadinessTest.java)
+  proves the auto-commit slice. Streams heartbeat remains a separate KAFKA-20970 migration and proof target.
+
+### Case study 3: fetch progress and application wakeup
+
+This study covers [KAFKA-20854](https://issues.apache.org/jira/browse/KAFKA-20854) and
+[KAFKA-20397](https://issues.apache.org/jira/browse/KAFKA-20397).
+
+**Before.** An empty fetch-preparation result could be interpreted as a reason to wake the application. The
+application would find no data, re-enter its wait, and trigger another background pass. A metadata error could also
+be published while the application was crossing into the fetch-buffer wait, losing the intended notification order.
+
+```text
+FetchRequestManager produces no request and no buffered data
+  -> generic fetch path wakes the application
+  -> application poll observes no data and waits again
+  -> background fetch preparation repeats the same wake
+
+Metadata error publication races with FetchBuffer.awaitNotEmpty()
+  -> the application may enter the wait after the notification decision
+```
+
+**After applying the reactor model.** Fetch reports the fact it actually observed. A composition-owned typed handler
+derives an application action only for facts that represent application-visible progress. `ConsumerReactor` controls
+when that action executes.
+
+```text
+FetchRequestManager.poll()
+  -> buffered records available
+       -> PollResult(events=[FetchBufferHasData], nextPoll=AwaitInput)
+  -> paused/no fetchable partition or request in flight
+       -> PollResult(events=[], nextPoll=AwaitInput)
+  -> metadata or reconnect backoff
+       -> PollResult(events=[], nextPoll=RetryAfter(remainingMs))
+
+ManagerCoordinationPolicy
+  -> maps FetchBufferHasData to ReactorAction.WAKE_APPLICATION
+  -> maps no-progress blockers to no application action
+
+ConsumerReactor
+  -> publishes fetch state, BackgroundEvent values, and ReactorSchedule
+  -> executes the phase-coalesced WAKE_APPLICATION last
+
+Application thread
+  -> wakes only after the data, error, or completion that caused the wake is visible
+```
+
+**Assertions and POC evidence.**
+
+- **Verified component:** a paused partition produces neither a no-progress wake nor a wakeup ping-pong.
+  [`AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java)
+  observes the invalid wake at pre-fix baseline `9521d77da3` and its absence in the POC.
+- **Verified mechanism:**
+  [`ManagerCoordinationPolicyTest`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ManagerCoordinationPolicyTest.java)
+  and reactor action-ordering tests prove `FetchBufferHasData` selects a coalesced action that executes after schedule
+  publication.
+- **Partial:** generic publish-before-wakeup coverage exists, but the exact KAFKA-20397 metadata-error/wait-entry race
+  still needs a deterministic component reproduction.
+
+### Case study 4: one operation through retry and close
+
+This study covers [KAFKA-18160](https://issues.apache.org/jira/browse/KAFKA-18160),
+[KAFKA-19357](https://issues.apache.org/jira/browse/KAFKA-19357), and
+[KAFKA-18569](https://issues.apache.org/jira/browse/KAFKA-18569).
+
+**Before.** Callback acknowledgement, commit retry, coordinator discovery, wakeup/interruption, and close could each
+make lifecycle decisions from different state. Close could stop discovery while an admitted commit still depended on
+it, or keep discovery alive after commit and leave work no longer needed it. An interruption could also bypass a
+selected acknowledgement or completion.
+
+```text
+Application operation is admitted
+  -> commit or callback work remains pending
+
+Coordinator becomes unknown
+  -> one close path stops discovery too early
+  -> another path continues discovery after the dependency is gone
+
+Wakeup, interruption, or cleanup begins
+  -> a selected acknowledgement/completion may not reach the original operation
+```
+
+**After applying the reactor model.** The application event and its future retain one operation identity across
+reactor iterations and network attempts. Request managers retain their local operation state. Coordinator
+observations cross the ownership boundary as versioned facts, and terminal application effects cross the
+publish-before-action boundary once.
+
+```text
+Application submits one operation + future
+  -> owning manager retains the pending operation
+
+Network attempt reports coordinator unavailable
+  -> manager emits CoordinatorUnavailableObserved(observedVersion)
+  -> policy derives InvalidateCoordinatorIfCurrent(observedVersion)
+  -> coordinator owner accepts it only if the version is current
+  -> next full pass may stage FindCoordinator and then retry the original operation
+
+Terminal success, timeout, cancellation, interruption, or close
+  -> one terminal ReactorAction is selected for the original operation
+  -> ConsumerReactor publishes state and ReactorSchedule
+  -> executes the completion/acknowledgement once
+  -> cleanup drains already selected actions before closing their destinations
+```
+
+**Assertions and POC evidence.**
+
+- **Verified infrastructure slice:**
+  [`ConsumerReactorTest.testCleanupExecutesStagedAsyncPollCompletion`](https://github.com/unknowntpo/kafka/blob/9f0ab41dbf5b747b6cd10d36408ebe5fe28eb4dd/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java)
+  proves cleanup executes an already selected async-poll completion rather than dropping it.
+- **Pending:** KAFKA-18160 still requires a callback acknowledgement plus interruption assertion with exactly one
+  terminal result.
+- **Pending:** KAFKA-19357 requires close with an admitted commit and unknown coordinator to prove discovery remains
+  active until the operation terminates.
+- **Pending:** KAFKA-18569 requires the inverse test proving coordinator discovery stops after commit and leave
+  dependencies terminate, without delaying close.
 
 ## Compatibility, Deprecation, and Migration Plan
 
