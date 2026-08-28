@@ -16,13 +16,27 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
-/** Reasons coalesced by the reactor before it executes an application-visible action. */
-enum ReactorActionReason {
-    SCHEDULE_SHORTENED,
-    WAIT_DEADLINE_EXPIRED,
-    STATE_TRANSITION,
-    MANAGER_EVENT,
-    BACKGROUND_EVENT_PUBLISHED,
-    METADATA_ERROR,
-    APPLICATION_EVENT_PROGRESS
+import java.util.EnumSet;
+import java.util.Set;
+
+/** Maps manager-local progress facts to the application wake effect owned by the reactor phase. */
+final class LocalProgressHandler implements ManagerEventHandler<ManagerEvent.LocalProgress> {
+    @Override
+    public Set<ManagerEvent.Type> eventTypes() {
+        return EnumSet.of(
+            ManagerEvent.Type.FETCH_PREPARATION_FAILED,
+            ManagerEvent.Type.FETCH_REQUEST_TERMINATED,
+            ManagerEvent.Type.FETCH_POSITIONS_UPDATE_FAILED
+        );
+    }
+
+    @Override
+    public Class<ManagerEvent.LocalProgress> eventClass() {
+        return ManagerEvent.LocalProgress.class;
+    }
+
+    @Override
+    public CoordinationPlan handle(final ManagerEvent.LocalProgress event) {
+        return CoordinationPlan.action(ReactorAction.wakeApplication());
+    }
 }

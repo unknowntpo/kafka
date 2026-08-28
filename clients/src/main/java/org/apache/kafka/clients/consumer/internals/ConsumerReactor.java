@@ -112,12 +112,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         Collections.newSetFromMap(new IdentityHashMap<>());
 
     /**
-     * Manager events already published in a {@link NetworkClientDelegate.PollResult} and accepted while the reactor
-     * stages that result. This bounded phase buffer retains them until the next deterministic routing phase, before
-     * application events and the next full manager pass; it is not a second event queue. Producer-local pending facts
-     * are coalesced before publication by {@link PendingManagerEvents}.
+     * Commands derived from post-I/O manager facts and retained until the next deterministic input phase. Facts are
+     * evaluated by the composition-owned policy when their PollResult is staged; only the resulting targeted command
+     * crosses an iteration boundary.
      */
-    private final List<ManagerEvent> deferredManagerEvents = new ArrayList<>();
+    private final List<ManagerCommand> deferredManagerCommands = new ArrayList<>();
 
     /** Application-visible state changes in the current phase, coalesced into one notification and trace entry. */
     private final EnumSet<StateTransition> pendingStateTransitions =
@@ -262,7 +261,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      */
     void runOnce() {
         // The following code avoids use of the Java Collections Streams API to reduce overhead in this loop.
-        routeDeferredManagerEvents();
+        applyDeferredManagerCommands();
+        stageManagerEvents(requestManagers.drainPendingManagerEvents(), PollPhase.INPUT);
         processApplicationEvents();
 
         final long currentTimeMs = time.milliseconds();
@@ -284,8 +284,10 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             managers.add(rm);
             pollResults.add(result);
             stagePollResult(rm, result, currentTimeMs);
+            // The network delegate still accepts its concrete UnsentRequest implementation during migration.
             networkClientDelegate.addAll(result.unsentRequests);
         }
+        stageManagerEventBatch(pollResults, PollPhase.PRE_IO);
         managerPollCache.retainManagers(managers);
 
         ReactorSchedule proposedSchedule = ReactorSchedule.from(
@@ -312,6 +314,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         // Request completion callbacks mark their owning manager. Poll only that stable snapshot here; marks produced
         // by this pass are intentionally deferred to the next full pre-I/O pass.
         List<NetworkClientDelegate.PollResult> postIoResults = pollAffectedManagers(afterNetworkPollMs);
+        stageManagerEventBatch(postIoResults, PollPhase.POST_IO);
         if (!postIoResults.isEmpty() || requestManagers.hasPendingBackgroundEvents()) {
             publishReactorSchedule(
                 ReactorSchedule.from(managerPollCache.states(), afterNetworkPollMs),
@@ -433,10 +436,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return reactorSchedule.remainingMsForApplication(time.milliseconds());
     }
 
-    /**
-     * Stages all parts of one published poll result: its deadlines, manager events, and request-completion ownership.
-     * This is distinct from retaining producer-local pending events or routing reactor-deferred events.
-     */
+    /** Stages one manager's deadlines and request-completion ownership before phase-level event evaluation. */
     private void stagePollResult(final RequestManager manager,
                                  final NetworkClientDelegate.PollResult result,
                                  final long currentTimeMs) {
@@ -444,9 +444,44 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             ? manager.maximumTimeToWait(currentTimeMs)
             : Long.MAX_VALUE;
         managerPollCache.update(manager, result, applicationWaitMs, currentTimeMs);
-        deferredManagerEvents.addAll(result.managerEvents());
-        for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
-            request.whenComplete((response, error) -> affectedManagers.add(manager));
+        for (NetworkCommand command : result.networkCommands())
+            command.onCompletion((response, error) -> affectedManagers.add(manager));
+    }
+
+    /** Evaluates one ordered phase of manager facts as a batch, then stages its derived commands and effects. */
+    private void stageManagerEventBatch(final Collection<NetworkClientDelegate.PollResult> results,
+                                        final PollPhase phase) {
+        List<ManagerEvent> events = new ArrayList<>();
+        for (NetworkClientDelegate.PollResult result : results)
+            events.addAll(result.managerEvents());
+        stageManagerEvents(events, phase);
+    }
+
+    /** Evaluates one stable batch of facts and applies the phase-specific command ordering rule. */
+    private void stageManagerEvents(final Collection<ManagerEvent> events, final PollPhase phase) {
+        if (events.isEmpty())
+            return;
+
+        CoordinationPlan coordinationPlan = requestManagers.planManagerEvents(events);
+        for (ReactorAction action : coordinationPlan.reactorActions())
+            stageReactorAction(action);
+        if (!coordinationPlan.reactorActions().isEmpty())
+            pendingReactorActionReasons.add(ReactorActionReason.MANAGER_EVENT);
+        if (!coordinationPlan.managerCommands().isEmpty()) {
+            if (phase == PollPhase.INPUT) {
+                // Callback-produced facts are drained before the full manager pass, so owner mutation is visible to
+                // every request builder and to the ReactorSchedule published for this iteration.
+                requestManagers.applyManagerCommands(coordinationPlan.managerCommands());
+            } else {
+                if (phase == PollPhase.PRE_IO) {
+                    // This is diagnostic containment, not a generic stale-request solution: managers may already
+                    // have built transport work in this pass. Normal callback-produced cross-owner facts use the
+                    // INPUT path above. Preserve an unexpected fact and apply it at the next input boundary.
+                    log.error("Cross-owner manager command was produced after the input boundary; deferring it "
+                        + "without loss, but transport work from this pass cannot be generically replayed");
+                }
+                deferredManagerCommands.addAll(coordinationPlan.managerCommands());
+            }
         }
     }
 
@@ -475,17 +510,13 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return NetworkClientDelegate.PollResult.awaitEvent();
     }
 
-    /**
-     * Applies cross-manager facts before the next full ordered manager pass. The composition owns destination
-     * routing, while this method owns the deterministic phase. Therefore the state owner and every dependent
-     * manager observe the event before the next {@link NetworkClientDelegate#poll(long, long)}.
-     */
-    private void routeDeferredManagerEvents() {
-        if (deferredManagerEvents.isEmpty())
+    /** Applies policy-derived commands before application events and the next full ordered manager pass. */
+    private void applyDeferredManagerCommands() {
+        if (deferredManagerCommands.isEmpty())
             return;
 
-        requestManagers.routeManagerEvents(deferredManagerEvents);
-        deferredManagerEvents.clear();
+        requestManagers.applyManagerCommands(List.copyOf(deferredManagerCommands));
+        deferredManagerCommands.clear();
     }
 
     private List<NetworkClientDelegate.PollResult> pollAffectedManagers(final long currentTimeMs) {
@@ -505,6 +536,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             NetworkClientDelegate.PollResult result = pollManager(manager, currentTimeMs);
             results.add(result);
             stagePollResult(manager, result, currentTimeMs);
+            // The network delegate still accepts its concrete UnsentRequest implementation during migration.
             networkClientDelegate.addAll(result.unsentRequests);
         }
         return results;
@@ -642,6 +674,19 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             pendingReactorActions.add(wakeApplication);
     }
 
+    private void stageReactorAction(final ReactorAction action) {
+        if (action == ReactorAction.wakeApplication())
+            stageWakeApplication();
+        else
+            pendingReactorActions.add(action);
+    }
+
+    private enum PollPhase {
+        INPUT,
+        PRE_IO,
+        POST_IO
+    }
+
     // Visible for testing. The immutable snapshot is safe to inspect without exposing request-manager state.
     ReactorSchedule reactorSchedule() {
         return reactorSchedule;
@@ -724,7 +769,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             // is null, so check before using. If the request manager list is null, there wasn't any real work
             // performed, so not being able to close the request managers isn't so bad.
             if (requestManagers != null && networkClientDelegate != null) {
-                routeDeferredManagerEvents();
+                applyDeferredManagerCommands();
                 runAtClose(requestManagers.entries(), networkClientDelegate, time.milliseconds());
             }
         } catch (Exception e) {

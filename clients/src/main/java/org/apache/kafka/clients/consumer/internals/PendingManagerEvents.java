@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import java.util.EnumMap;
+import java.util.List;
 
 /**
  * Producer-local buffer for facts observed by one request manager but not yet published. It retains at most one
@@ -29,6 +30,19 @@ final class PendingManagerEvents {
 
     boolean hasPendingEvents() {
         return !events.isEmpty();
+    }
+
+    /**
+     * Publishes and clears the bounded latest-only snapshot at the reactor input boundary. This lets owner commands
+     * derived from response facts apply before any manager builds transport work for the next network poll.
+     */
+    List<ManagerEvent> drain() {
+        if (events.isEmpty())
+            return List.of();
+
+        List<ManagerEvent> drained = List.copyOf(events.values());
+        events.clear();
+        return drained;
     }
 
     /**

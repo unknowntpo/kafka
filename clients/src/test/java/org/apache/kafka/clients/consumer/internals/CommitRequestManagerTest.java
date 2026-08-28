@@ -1755,7 +1755,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Group authorization exception")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(200));
+        assertAwaitInputWithoutOutput(commitRequestManager.poll(200));
 
         assertEmptyPendingRequests(commitRequestManager);
     }
@@ -1780,7 +1780,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Fatal error")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertAwaitInputWithoutOutput(commitRequestManager.poll(time.milliseconds()));
 
         assertTrue(commitFuture.isCompletedExceptionally());
 
@@ -1799,7 +1799,7 @@ public class CommitRequestManagerTest {
         commitRequestManager.signalClose();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertAwaitInputWithoutOutput(commitRequestManager.poll(time.milliseconds()));
 
         assertTrue(commitFuture.isCompletedExceptionally());
 
@@ -1815,6 +1815,12 @@ public class CommitRequestManagerTest {
             Arguments.of(Errors.UNKNOWN_TOPIC_ID, true),
             Arguments.of(Errors.TOPIC_AUTHORIZATION_FAILED, false),
             Arguments.of(Errors.UNKNOWN_SERVER_ERROR, false));
+    }
+
+    private static void assertAwaitInputWithoutOutput(final NetworkClientDelegate.PollResult result) {
+        assertTrue(result.networkCommands().isEmpty());
+        assertTrue(result.managerEvents().isEmpty());
+        assertInstanceOf(NextPollCondition.AwaitInput.class, result.nextPollCondition());
     }
 
     private List<CompletableFuture<CommitRequestManager.OffsetFetchResult>> sendAndVerifyDuplicatedOffsetFetchRequests(

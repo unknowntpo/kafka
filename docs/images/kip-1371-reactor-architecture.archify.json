@@ -2,207 +2,44 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "ConsumerReactor responsibility boundary",
+    "title": "ConsumerReactor manager-output lifecycle",
     "locale": "en",
     "output": "kip-1371-reactor-architecture.html",
     "quality_profile": "showcase",
-    "viewBox": [1280, 714],
-    "legend": { "mode": "hidden" },
-    "views": [
-      {
-        "id": "input-and-poll",
-        "label": "Input and manager pass",
-        "focus": ["applicationInput", "gateway", "reactor", "managers"],
-        "note": "Inputs enter the existing background loop, which polls managers in one fixed order."
-      },
-      {
-        "id": "timing-publication",
-        "label": "Timing publication",
-        "focus": ["managers", "reactor", "schedule"],
-        "note": "Manager deadlines are combined into one immutable wait decision."
-      },
-      {
-        "id": "effect-ordering",
-        "label": "Effect ordering",
-        "focus": ["schedule", "actionPhase", "applicationEffects", "applicationInput"],
-        "note": "ConsumerReactor executes ReactorAction values after publication; the application observes the result."
-      }
-    ]
+    "viewBox": [1330, 900],
+    "legend": { "mode": "hidden" }
   },
   "components": [
-    {
-      "id": "applicationInput",
-      "type": "external",
-      "label": "Application input",
-      "sublabel": "commands and acks",
-      "pos": [30, 280],
-      "size": [150, 72]
-    },
-    {
-      "id": "gateway",
-      "type": "frontend",
-      "label": "ConsumerReactorGateway",
-      "sublabel": "submit, wait, wake, close",
-      "pos": [230, 280],
-      "size": [170, 72]
-    },
-    {
-      "id": "reactor",
-      "type": "backend",
-      "label": "ConsumerReactor",
-      "sublabel": "ordering and final coordination",
-      "pos": [470, 280],
-      "size": [170, 78]
-    },
-    {
-      "id": "managers",
-      "type": "backend",
-      "label": "Request managers",
-      "sublabel": "local state and progress rules",
-      "pos": [760, 280],
-      "size": [175, 78]
-    },
-    {
-      "id": "network",
-      "type": "cloud",
-      "label": "NetworkClientDelegate",
-      "sublabel": "transport and correlation",
-      "pos": [1040, 280],
-      "size": [175, 76]
-    },
-    {
-      "id": "schedule",
-      "type": "database",
-      "label": "ReactorSchedule",
-      "sublabel": "immutable aggregate deadline",
-      "pos": [470, 500],
-      "size": [175, 78]
-    },
-    {
-      "id": "actionPhase",
-      "type": "backend",
-      "label": "ConsumerReactor action phase",
-      "sublabel": "executes ReactorAction values",
-      "pos": [760, 500],
-      "size": [205, 78]
-    },
-    {
-      "id": "applicationEffects",
-      "type": "external",
-      "label": "Application-visible state",
-      "sublabel": "results, events, wakeup",
-      "pos": [1040, 500],
-      "size": [175, 76]
-    }
+    { "id": "applicationInput", "type": "external", "label": "Application input", "sublabel": "commands and acks", "pos": [30, 300], "size": [140, 76] },
+    { "id": "gateway", "type": "frontend", "label": "ConsumerReactorGateway", "sublabel": "submit, wait, wake, close", "pos": [210, 300], "size": [160, 76] },
+    { "id": "reactor", "type": "backend", "label": "ConsumerReactor", "sublabel": "ordering and publication", "pos": [410, 300], "size": [170, 82] },
+    { "id": "managers", "type": "backend", "label": "Request managers", "sublabel": "local state and feasibility", "pos": [620, 300], "size": [170, 82] },
+    { "id": "pollResult", "type": "database", "label": "PollResult", "sublabel": "event · command · next poll", "pos": [830, 300], "size": [190, 82] },
+    { "id": "network", "type": "cloud", "label": "NetworkClientDelegate", "sublabel": "transport and correlation", "pos": [1090, 300], "size": [170, 80] },
+    { "id": "policy", "type": "messagebus", "label": "ManagerCoordinationPolicy", "sublabel": "facts → commands or actions", "pos": [620, 455], "size": [190, 82] },
+    { "id": "schedule", "type": "database", "label": "ReactorSchedule", "sublabel": "aggregate deadline", "pos": [410, 625], "size": [170, 82] },
+    { "id": "actions", "type": "messagebus", "label": "ReactorAction", "sublabel": "executed by ConsumerReactor", "pos": [830, 625], "size": [190, 82] },
+    { "id": "applicationEffects", "type": "external", "label": "Application-visible state", "sublabel": "results, events, wakeup", "pos": [1090, 625], "size": [170, 80] }
   ],
   "boundaries": [
-    {
-      "kind": "region",
-      "label": "Existing background thread",
-      "wraps": ["reactor", "managers", "network", "schedule", "actionPhase"],
-      "pad": 34
-    }
+    { "kind": "region", "label": "Existing background thread", "wraps": ["reactor", "managers", "pollResult", "network", "policy", "schedule", "actions"], "pad": 34 }
   ],
   "connections": [
-    {
-      "id": "submit-input",
-      "from": "applicationInput",
-      "to": "gateway"
-    },
-    {
-      "id": "admit-input",
-      "from": "gateway",
-      "to": "reactor",
-      "variant": "emphasis"
-    },
-    {
-      "id": "poll-managers",
-      "from": "reactor",
-      "to": "managers",
-      "label": "poll / PollResult",
-      "labelAt": [705, 260]
-    },
-    {
-      "id": "handoff-requests",
-      "from": "managers",
-      "to": "network",
-      "label": "unsent requests",
-      "labelAt": [1000, 260],
-      "variant": "dashed"
-    },
-    {
-      "id": "network-completion",
-      "from": "network",
-      "to": "reactor",
-      "label": "network completion",
-      "variant": "dashed",
-      "fromSide": "top",
-      "toSide": "top",
-      "via": [[1127.5, 210], [555, 210]],
-      "labelAt": [840, 190]
-    },
-    {
-      "id": "publish-schedule",
-      "from": "reactor",
-      "to": "schedule",
-      "label": "publish first",
-      "fromSide": "bottom",
-      "toSide": "top",
-      "labelAt": [430, 445],
-      "variant": "emphasis"
-    },
-    {
-      "id": "schedule-before-action",
-      "from": "schedule",
-      "to": "actionPhase",
-      "label": "publish before execution",
-      "labelAt": [705, 480],
-      "variant": "emphasis"
-    },
-    {
-      "id": "publish-effects",
-      "from": "actionPhase",
-      "to": "applicationEffects",
-      "label": "complete / notify / wake",
-      "labelAt": [1000, 480],
-      "variant": "emphasis"
-    },
-    {
-      "id": "application-observes-effects",
-      "from": "applicationEffects",
-      "to": "applicationInput",
-      "label": "application observes result and may submit new input",
-      "variant": "dashed",
-      "fromSide": "bottom",
-      "toSide": "bottom",
-      "via": [[1127.5, 655], [105, 655]],
-      "labelAt": [620, 675]
-    }
+    { "id": "submit-input", "from": "applicationInput", "to": "gateway" },
+    { "id": "admit-input", "from": "gateway", "to": "reactor", "variant": "emphasis" },
+    { "id": "poll-managers", "from": "reactor", "to": "managers", "label": "fixed-order poll", "labelAt": [600, 405] },
+    { "id": "return-output", "from": "managers", "to": "pollResult", "label": "one atomic output", "labelAt": [810, 405] },
+    { "id": "stage-network-command", "from": "pollResult", "to": "network", "label": "NetworkCommand", "labelAt": [1040, 405], "variant": "dashed" },
+    { "id": "evaluate-manager-event", "from": "pollResult", "to": "policy", "label": "ManagerEvent", "fromSide": "bottom", "toSide": "top" },
+    { "id": "derive-action", "from": "policy", "to": "actions", "label": "ReactorAction", "variant": "dashed", "fromSide": "bottom", "toSide": "top" },
+    { "id": "network-completion", "from": "network", "to": "reactor", "label": "network completion", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[1175, 220], [495, 220]] },
+    { "id": "publish-schedule", "from": "reactor", "to": "schedule", "label": "aggregate NextPollCondition · publish first", "labelAt": [495, 505], "fromSide": "bottom", "toSide": "top", "variant": "emphasis" },
+    { "id": "schedule-before-action", "from": "schedule", "to": "actions", "label": "ConsumerReactor executes after publication", "variant": "emphasis", "labelAt": [705, 735] },
+    { "id": "publish-effects", "from": "actions", "to": "applicationEffects", "label": "complete / notify / wake", "labelAt": [1040, 720], "variant": "emphasis" }
   ],
   "cards": [
-    {
-      "dot": "cyan",
-      "title": "State ownership",
-      "items": [
-        "Request managers retain mutable state and domain policy",
-        "The reactor coordinates owners rather than absorbing their rules"
-      ]
-    },
-    {
-      "dot": "emerald",
-      "title": "Timing",
-      "items": [
-        "Every manager contributes one next-poll requirement",
-        "One immutable ReactorSchedule bounds the next wait"
-      ]
-    },
-    {
-      "dot": "violet",
-      "title": "Effects",
-      "items": [
-        "Requests go directly to the network layer",
-        "ConsumerReactor executes ReactorAction values after schedule publication"
-      ]
-    }
+    { "dot": "cyan", "title": "One manager output model", "items": ["ManagerEvent is an immutable fact", "NetworkCommand is an unsent transport intent", "NextPollCondition contributes timing"] },
+    { "dot": "emerald", "title": "Policy stays outside the kernel", "items": ["Request managers retain local state and feasibility rules", "Typed handlers derive owner commands or application effects"] },
+    { "dot": "violet", "title": "The loop closes in ConsumerReactor", "items": ["Publish ReactorSchedule before any corresponding effect", "ConsumerReactor executes ReactorAction values last"] }
   ]
 }
