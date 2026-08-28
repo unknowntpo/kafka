@@ -228,12 +228,13 @@ A manager poll answers one narrow question: what did this manager produce now, a
 The manager owns the state needed to answer, such as coordinator availability, in-flight requests, retry backoff,
 metadata, or buffer capacity. The reactor validates and routes the typed answer but does not reimplement those rules.
 
-Current `PollResult` pairs produced requests with a numeric wait hint. Request presence identifies immediate transport
-output, but an empty result's wait value says only when another poll may occur. It does not state whether passage of
+A numeric wait value collapses the manager's post-poll eligibility state into a single time dimension. Current
+`PollResult` pairs produced requests with that wait hint, so request presence identifies immediate transport output.
+For an empty result, however, the value says only when another poll may occur. It does not state whether passage of
 time can change eligibility or whether progress requires an external input. Existing code represents those cases by
-convention: zero requests an immediate poll, a finite value represents a timed retry, and `WAIT_FOREVER` removes the
-timer deadline. The missing information is therefore the post-poll eligibility condition, not whether a request was
-already produced.
+convention: zero requests immediate re-evaluation, a finite value represents a timed retry, and `WAIT_FOREVER`
+removes the timer deadline. These conventions can produce the intended scheduling behavior, but leave the eligibility
+condition and blocking cause implicit.
 
 The manager must not encode the same feasibility rule independently in work admission and wait calculation. For each
 migrated work source, it derives one manager-local activation projection that answers both:
@@ -771,6 +772,20 @@ No. Positive time-driven retries remain deadlines. `ConsumerReactor` retains eac
 publishes the earliest one in `ReactorSchedule`. Input-driven waits create no semantic timer, although application
 input, network I/O, cancellation, or shutdown may activate the reactor earlier. The model is event-driven with
 deadline-bounded waiting, not timer-free.
+
+**Why not keep `WAIT_FOREVER` and add local guards where bugs occur?**
+
+`WAIT_FOREVER` already expresses one useful partial convention: this manager contributes no timer deadline. It does
+not say why the manager is blocked, identify the input that can enable progress, or prevent the work-admission path
+and wait-calculation path from evaluating different predicates. Local guards can fix each known defect, and the typed
+result does not eliminate the need for correct manager-local predicates. The proposal instead makes their outcome a
+single explicit result that generic code can validate, retain, aggregate, and diagnose.
+
+That change alone does not justify every part of `ConsumerReactor`. The larger KIP addresses two additional problems
+that a sentinel cannot solve: combining all manager timing contributions into one published wait decision, and
+publishing the state and schedule before reactor-owned application-visible effects. Cross-owner event routing and
+version fencing address delayed observations mutating newer state. Each part therefore requires its own case-study
+and test evidence; `WAIT_FOREVER` is not presented as evidence for the entire architecture.
 
 **Does the reactor decide whether heartbeat, commit, fetch, or share work is legal?**
 
