@@ -100,6 +100,11 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(true);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.MEMBERSHIP_CHANGE, wait.cause());
     }
 
     @Test
@@ -109,7 +114,13 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
         assertEquals(1, result.unsentRequests.size());
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, result.timeUntilNextPollMs);
+        assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs,
+            "an admitted heartbeat must wait for its network completion, not another timer");
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, wait.cause());
         assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
         verify(membershipManager).onHeartbeatRequestGenerated();
     }
@@ -120,6 +131,11 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.COORDINATOR_CHANGE, wait.cause());
         assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
         assertEquals(0, result.unsentRequests.size());
     }
@@ -171,6 +187,12 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
 
         assertEquals(1, result.unsentRequests.size(), "A heartbeat request should be generated to" +
             " complete the ongoing leaving operation that was triggered before the poll timer expired.");
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, wait.cause(),
+            "after admitting the leave heartbeat, elapsed poll time must not admit a duplicate request");
     }
 
     @Test

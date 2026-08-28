@@ -32,6 +32,7 @@ abstract class NextPollCondition {
     enum AwaitCause {
         NETWORK_COMPLETION,
         COORDINATOR_CHANGE,
+        MEMBERSHIP_CHANGE,
         SHUTDOWN,
         LEGACY_UNSPECIFIED
     }

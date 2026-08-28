@@ -172,13 +172,14 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         if (pendingManagerEvents.hasPendingEvents())
             return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
 
-        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
+        HeartbeatActivation activation = heartbeatActivation(currentTimeMs, true);
+        if (activation.blockedByCoordinatorOrMembership()) {
             membershipManager().onHeartbeatRequestSkipped();
             maybePropagateCoordinatorFatalErrorEvent();
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
+            return pendingManagerEvents.publishWith(
+                NetworkClientDelegate.PollResult.waitFor(activation.nextPollCondition()));
         }
-        pollTimer.update(currentTimeMs);
-        if (pollTimer.isExpired() && !membershipManager().isLeavingGroup()) {
+        if (activation.pollTimerExpired() && !membershipManager().isLeavingGroup()) {
             logger.warn("Consumer poll timeout has expired. This means the time between " +
                 "subsequent calls to poll() was longer than the configured max.poll.interval.ms, " +
                 "which typically implies that the poll loop is spending too much time processing " +
@@ -198,30 +199,135 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             ));
         }
 
-        // Case 1: The member state is LEAVING - if the member is a share consumer, we should immediately send leave;
-        // if the member is an async consumer, this will also depend on leavingGroupOperation.
-        boolean heartbeatNow = shouldSendLeaveHeartbeatNow() ||
-            // Case 2: The member state indicates it should send a heartbeat without waiting for the interval,
-            // and there is no heartbeat request currently in-flight
-            (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
-
-        if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
-            if (heartbeatRequestState.requestInFlight())
-                return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitEvent());
-
-            long delayMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
-            NetworkClientDelegate.PollResult result = delayMs == NetworkClientDelegate.PollResult.WAIT_FOREVER
-                ? NetworkClientDelegate.PollResult.awaitEvent()
-                : NetworkClientDelegate.PollResult.retryAfter(delayMs);
-            return pendingManagerEvents.publishWith(result);
-        }
+        if (!(activation.nextPollCondition() instanceof NextPollCondition.PollImmediately))
+            return pendingManagerEvents.publishWith(
+                NetworkClientDelegate.PollResult.waitFor(activation.nextPollCondition()));
 
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
+        // Request admission changes the same local projection from runnable to in-flight. Publish the
+        // post-transition condition so time alone cannot admit a duplicate heartbeat.
+        HeartbeatActivation afterAdmission = heartbeatActivation(currentTimeMs, false);
         return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
             Collections.singletonList(request),
-            Set.of(),
-            heartbeatRequestState.heartbeatIntervalMs()
+            List.of(),
+            afterAdmission.nextPollCondition()
         ));
+    }
+
+    /**
+     * Derives request eligibility, the next useful manager poll, and the legacy application wait from one
+     * manager-local state view. The reactor aggregates the result but does not reproduce heartbeat policy.
+     */
+    private HeartbeatActivation heartbeatActivation(final long currentTimeMs,
+                                                    final boolean allowLeaveToSupersedeInflight) {
+        pollTimer.update(currentTimeMs);
+
+        if (coordinatorRequestManager.coordinator().isEmpty()) {
+            return HeartbeatActivation.blocked(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.COORDINATOR_CHANGE),
+                legacyBlockedApplicationWait()
+            );
+        }
+        if (membershipManager().shouldSkipHeartbeat()) {
+            return HeartbeatActivation.blocked(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.MEMBERSHIP_CHANGE),
+                legacyBlockedApplicationWait()
+            );
+        }
+        if (!allowLeaveToSupersedeInflight && heartbeatRequestState.requestInFlight()) {
+            return HeartbeatActivation.waiting(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION),
+                legacyApplicationWait(Math.min(
+                    pollTimer.remainingMs() / 2,
+                    heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)
+                ))
+            );
+        }
+        if (pollTimer.isExpired())
+            return HeartbeatActivation.expiredPollTimer(legacyApplicationWait(0L));
+
+        // A leave heartbeat may deliberately supersede an ordinary in-flight heartbeat. Other immediate
+        // membership transitions must still wait until the current request completes.
+        boolean heartbeatNow = (allowLeaveToSupersedeInflight && shouldSendLeaveHeartbeatNow())
+            || (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
+        if (heartbeatNow || heartbeatRequestState.canSendRequest(currentTimeMs))
+            return HeartbeatActivation.runnable(legacyApplicationWait(0L));
+
+        long applicationWaitMs = legacyApplicationWait(Math.min(
+            pollTimer.remainingMs() / 2,
+            heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)
+        ));
+        if (heartbeatRequestState.requestInFlight()) {
+            return HeartbeatActivation.waiting(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION),
+                applicationWaitMs
+            );
+        }
+
+        long delayMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
+        NextPollCondition nextPollCondition = delayMs == NetworkClientDelegate.PollResult.WAIT_FOREVER
+            ? NextPollCondition.awaitInput()
+            : NextPollCondition.retryAfter(delayMs);
+        return HeartbeatActivation.waiting(nextPollCondition, applicationWaitMs);
+    }
+
+    private long legacyBlockedApplicationWait() {
+        return legacyApplicationWait(heartbeatRequestState.heartbeatIntervalMs());
+    }
+
+    private long legacyApplicationWait(final long proposedWaitMs) {
+        return membershipManager().state() == MemberState.UNSUBSCRIBED ? Long.MAX_VALUE : proposedWaitMs;
+    }
+
+    private static final class HeartbeatActivation {
+        private final NextPollCondition nextPollCondition;
+        private final long applicationWaitMs;
+        private final boolean blockedByCoordinatorOrMembership;
+        private final boolean pollTimerExpired;
+
+        private HeartbeatActivation(final NextPollCondition nextPollCondition,
+                                    final long applicationWaitMs,
+                                    final boolean blockedByCoordinatorOrMembership,
+                                    final boolean pollTimerExpired) {
+            this.nextPollCondition = nextPollCondition;
+            this.applicationWaitMs = applicationWaitMs;
+            this.blockedByCoordinatorOrMembership = blockedByCoordinatorOrMembership;
+            this.pollTimerExpired = pollTimerExpired;
+        }
+
+        private static HeartbeatActivation blocked(final NextPollCondition nextPollCondition,
+                                                    final long applicationWaitMs) {
+            return new HeartbeatActivation(nextPollCondition, applicationWaitMs, true, false);
+        }
+
+        private static HeartbeatActivation waiting(final NextPollCondition nextPollCondition,
+                                                    final long applicationWaitMs) {
+            return new HeartbeatActivation(nextPollCondition, applicationWaitMs, false, false);
+        }
+
+        private static HeartbeatActivation runnable(final long applicationWaitMs) {
+            return new HeartbeatActivation(NextPollCondition.pollImmediately(), applicationWaitMs, false, false);
+        }
+
+        private static HeartbeatActivation expiredPollTimer(final long applicationWaitMs) {
+            return new HeartbeatActivation(NextPollCondition.pollImmediately(), applicationWaitMs, false, true);
+        }
+
+        private NextPollCondition nextPollCondition() {
+            return nextPollCondition;
+        }
+
+        private long applicationWaitMs() {
+            return applicationWaitMs;
+        }
+
+        private boolean blockedByCoordinatorOrMembership() {
+            return blockedByCoordinatorOrMembership;
+        }
+
+        private boolean pollTimerExpired() {
+            return pollTimerExpired;
+        }
     }
 
     /**
@@ -278,25 +384,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        pollTimer.update(currentTimeMs);
-        if (membershipManager().state() == MemberState.UNSUBSCRIBED) {
-            return Long.MAX_VALUE;
-        }
-        if (pollTimer.isExpired()) {
-            return 0L;
-        }
-        // KAFKA-20253: mirror the guard in poll(). A heartbeat is only sent when the coordinator is known
-        // and the member is in a state that heartbeats. When the coordinator is unavailable (e.g. after a
-        // re-authentication failure) or the member should skip heartbeats (FATAL/FENCED/STALE/UNSUBSCRIBED),
-        // poll() returns EMPTY, so falling through to the timer-based branches below would return 0 (the
-        // heartbeat timer is left permanently expired) and busy-spin both the application and network threads.
-        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
-            return heartbeatRequestState.heartbeatIntervalMs();
-        }
-        if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
-            return 0L;
-        }
-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+        return heartbeatActivation(currentTimeMs, true).applicationWaitMs();
     }
 
     @Override

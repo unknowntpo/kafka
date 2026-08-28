@@ -275,7 +275,7 @@ public class ConsumerHeartbeatRequestManagerTest
 
         if (!shouldSkipHeartbeat) {
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(0, result.timeUntilNextPollMs);
+            assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
         } else {
             assertEquals(0, result.unsentRequests.size());
             assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
@@ -682,7 +682,7 @@ public class ConsumerHeartbeatRequestManagerTest
         assertTrue(pollTimer.notExpired());
         verify(membershipManager).maybeRejoinStaleMember();
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
     }
 
     @ParameterizedTest
@@ -702,7 +702,7 @@ public class ConsumerHeartbeatRequestManagerTest
             assertNoHeartbeat(heartbeatRequestManager);
             verify(membershipManager, never()).onHeartbeatRequestGenerated();
         } else {
-            assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+            assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
             verify(membershipManager).onHeartbeatRequestGenerated();
         }
 
@@ -928,7 +928,7 @@ public class ConsumerHeartbeatRequestManagerTest
         assertNull(data.rackId());
     }
 
-    private void assertHeartbeat(AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> hrm, int nextPollMs) {
+    private void assertHeartbeat(AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> hrm, long nextPollMs) {
         NetworkClientDelegate.PollResult pollResult = hrm.poll(time.milliseconds());
         assertEquals(1, pollResult.unsentRequests.size());
         assertEquals(nextPollMs, pollResult.timeUntilNextPollMs);
