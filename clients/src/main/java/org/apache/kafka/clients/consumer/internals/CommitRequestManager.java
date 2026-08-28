@@ -184,7 +184,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         // Publish an observation before admitting any retry. The owner must process coordinator invalidation before
         // a request may capture another coordinator snapshot.
         if (pendingManagerEvents.hasPendingEvents())
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput(
+                NextPollCondition.AwaitCause.COORDINATOR_CHANGE
+            ));
 
         // poll when the coordinator node is known and fatal error is not present
         if (coordinatorRequestManager.coordinator().isEmpty()) {
@@ -197,7 +199,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         .forEach(request -> request.future().completeExceptionally(exception));
             }
 
-            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput(
+                NextPollCondition.AwaitCause.COORDINATOR_CHANGE
+            ));
         }
 
         if (closing) {
@@ -233,6 +237,11 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
+        // A due auto-commit cannot make transport progress until coordinator discovery completes. Keep the legacy
+        // application-wait projection consistent with poll(), which reports AwaitInput(COORDINATOR_CHANGE) for the
+        // same state, instead of translating the expired auto-commit timer into an immediate retry.
+        if (coordinatorRequestManager.coordinator().isEmpty())
+            return Long.MAX_VALUE;
         return autoCommitState.map(ac -> ac.nextActivation(currentTimeMs).delayMs()).orElse(Long.MAX_VALUE);
     }
 

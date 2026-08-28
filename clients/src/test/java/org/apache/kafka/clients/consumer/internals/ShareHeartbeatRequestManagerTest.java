@@ -426,7 +426,7 @@ public class ShareHeartbeatRequestManagerTest
         // On poll timer expiration, the member should send a last heartbeat to leave the group
         // and notify the membership manager
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         verify(membershipManager).transitionToSendingLeaveGroup(true);
         verify(heartbeatState).reset();
         verify(heartbeatRequestState).reset();

@@ -139,6 +139,9 @@ public class ConsumerReactorTest {
         when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         when(coordinatorRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         when(heartbeatRequestManager.usesLegacyApplicationWait()).thenReturn(true);
+        // Tests that exercise application-event expiration override this explicitly. The shared fixture otherwise
+        // represents an empty reaper and must not inject an unrelated zero timeout into every reactor schedule.
+        when(applicationEventReaper.timeUntilNextExpirationMs(anyLong())).thenReturn(Long.MAX_VALUE);
         consumerReactor.initializeResources();
     }
 

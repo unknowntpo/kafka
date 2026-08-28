@@ -60,13 +60,16 @@ public class ConsumerReactorCommitReadinessTest {
         LogContext logContext = new LogContext();
         NetworkClientDelegate networkClientDelegate = mock(NetworkClientDelegate.class);
         RequestManagers requestManagers = mock(RequestManagers.class);
+        CompletableEventReaper reaper = mock(CompletableEventReaper.class);
+
+        when(reaper.timeUntilNextExpirationMs(anyLong())).thenReturn(Long.MAX_VALUE);
 
         try (Metrics metrics = new Metrics();
              ConsumerReactor reactor = new ConsumerReactor(
                  logContext,
                  time,
                  new LinkedBlockingQueue<>(),
-                 mock(CompletableEventReaper.class),
+                 reaper,
                  () -> mock(ApplicationEventProcessor.class),
                  () -> networkClientDelegate,
                  () -> requestManagers,
@@ -119,10 +122,72 @@ public class ConsumerReactorCommitReadinessTest {
         }
     }
 
+    /**
+     * KAFKA-20970 vertical proof: an expired auto-commit interval with an unknown coordinator must not collapse
+     * into a zero-timeout network poll. The real commit manager contributes an input-driven wait and the reactor
+     * publishes that wait before entering the network client.
+     */
+    @Test
+    public void testExpiredAutoCommitWithUnknownCoordinatorDoesNotZeroPoll() {
+        MockTime time = new MockTime();
+        LogContext logContext = new LogContext();
+        NetworkClientDelegate networkClientDelegate = mock(NetworkClientDelegate.class);
+        RequestManagers requestManagers = mock(RequestManagers.class);
+        CompletableEventReaper reaper = mock(CompletableEventReaper.class);
+        AtomicLong observedPollTimeout = new AtomicLong(-1L);
+
+        when(reaper.timeUntilNextExpirationMs(anyLong())).thenReturn(Long.MAX_VALUE);
+        doAnswer(invocation -> {
+            observedPollTimeout.set(invocation.getArgument(0));
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+
+        try (Metrics metrics = new Metrics();
+             ConsumerReactor reactor = new ConsumerReactor(
+                 logContext,
+                 time,
+                 new LinkedBlockingQueue<>(),
+                 reaper,
+                 () -> mock(ApplicationEventProcessor.class),
+                 () -> networkClientDelegate,
+                 () -> requestManagers,
+                 mock(AsyncConsumerMetrics.class)
+             )) {
+            reactor.initializeResources();
+            CommitRequestManager commitRequestManager = newCommitRequestManager(
+                time,
+                logContext,
+                metrics,
+                Optional.empty()
+            );
+            when(requestManagers.entries()).thenReturn(List.of(commitRequestManager));
+
+            time.sleep(100L);
+            reactor.runOnce();
+
+            assertEquals(ConsumerReactor.MAX_POLL_TIMEOUT_MS, observedPollTimeout.get());
+            assertEquals(Long.MAX_VALUE, reactor.maximumTimeToWait());
+        }
+    }
+
     private static CommitRequestManager newCommitRequestManager(
         final MockTime time,
         final LogContext logContext,
         final Metrics metrics
+    ) {
+        return newCommitRequestManager(
+            time,
+            logContext,
+            metrics,
+            Optional.of(new Node(1, "localhost", 9092))
+        );
+    }
+
+    private static CommitRequestManager newCommitRequestManager(
+        final MockTime time,
+        final LogContext logContext,
+        final Metrics metrics,
+        final Optional<Node> coordinatorNode
     ) {
         TopicPartition partition = new TopicPartition("topic", 0);
         SubscriptionState subscriptions = new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST);
@@ -135,10 +200,9 @@ public class ConsumerReactorCommitReadinessTest {
         properties.setProperty(ConsumerConfig.GROUP_ID_CONFIG, "group-id");
 
         CoordinatorRequestManager coordinator = mock(CoordinatorRequestManager.class);
-        Node coordinatorNode = new Node(1, "localhost", 9092);
-        when(coordinator.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        when(coordinator.coordinator()).thenReturn(coordinatorNode);
         when(coordinator.coordinatorSnapshot()).thenReturn(
-            new CoordinatorSnapshot(Optional.of(coordinatorNode), 1L)
+            new CoordinatorSnapshot(coordinatorNode, 1L)
         );
 
         return new CommitRequestManager(

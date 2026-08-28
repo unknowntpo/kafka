@@ -752,6 +752,28 @@ public class CommitRequestManagerTest {
         assertPoll(1, commitRequestManager);
     }
 
+    /**
+     * KAFKA-20970: an expired auto-commit interval is not sufficient to make a commit request sendable while
+     * coordinator discovery is incomplete. The typed manager result and the legacy application-wait projection
+     * must therefore both wait for the coordinator change instead of requesting an immediate retry.
+     */
+    @Test
+    public void testExpiredAutoCommitAwaitsUnknownCoordinator() {
+        CommitRequestManager commitRequestManager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+
+        time.sleep(100L);
+        NetworkClientDelegate.PollResult result = commitRequestManager.poll(time.milliseconds());
+
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.COORDINATOR_CHANGE, wait.cause());
+        assertEquals(Long.MAX_VALUE, commitRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertTrue(result.unsentRequests.isEmpty());
+    }
+
     @Test
     public void testOffsetFetchRequestEnsureDuplicatedRequestSucceed() {
         CommitRequestManager commitRequestManager = create(true, 100);
