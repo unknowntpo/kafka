@@ -898,7 +898,7 @@ the tested revision performed less unnecessary idle polling without a demonstrat
 This is preliminary historical evidence, not acceptance evidence for the current POC. The candidate revision still
 requires saturated-throughput, allocation-per-record, reconnect-recovery, rebalance, and share-consumer workloads.
 Run configuration, statistics, limitations, and artifacts are retained in
-[Consumer Reactor A/B benchmark results](consumer-reactor-ab-benchmark-results.md).
+[Consumer Reactor A/B benchmark results](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/docs/design/consumer-reactor-ab-benchmark-results.md).
 
 ## Documentation Plan
 
