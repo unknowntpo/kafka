@@ -97,13 +97,26 @@ public class TopicMetadataRequestManager implements RequestManager {
         }
 
         List<NetworkClientDelegate.UnsentRequest> requests = new ArrayList<>();
+        long nextRetryMs = Long.MAX_VALUE;
 
         for (TopicMetadataRequestState request : inflightRequests) {
             Optional<NetworkClientDelegate.UnsentRequest> unsentRequest = request.send(currentTimeMs);
             unsentRequest.ifPresent(requests::add);
+            if (unsentRequest.isEmpty() && !request.requestInFlight()) {
+                long remainingBackoffMs = request.remainingBackoffMs(currentTimeMs);
+                if (remainingBackoffMs > 0L)
+                    nextRetryMs = Math.min(nextRetryMs, remainingBackoffMs);
+            }
         }
 
-        return requests.isEmpty() ? EMPTY : new NetworkClientDelegate.PollResult(0, requests);
+        NextPollCondition nextPollCondition = nextRetryMs == Long.MAX_VALUE
+            ? NextPollCondition.awaitInput()
+            : NextPollCondition.retryAfter(nextRetryMs);
+        if (!requests.isEmpty())
+            return NetworkClientDelegate.PollResult.progress(requests, List.of(), nextPollCondition);
+        if (nextRetryMs != Long.MAX_VALUE)
+            return NetworkClientDelegate.PollResult.retryAfter(nextRetryMs);
+        return EMPTY;
     }
 
     /**

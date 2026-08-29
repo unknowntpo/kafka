@@ -46,6 +46,8 @@ public class BackgroundEventHandlerTest {
                 asyncConsumerMetrics);
             // add event
             backgroundEventHandler.add(new ErrorEvent(new Throwable()));
+            assertEquals(0, backgroundEventsQueue.size());
+            assertEquals(1, backgroundEventHandler.publishPendingEvents());
             assertEquals(
                 1,
                 (double) metrics.metric(

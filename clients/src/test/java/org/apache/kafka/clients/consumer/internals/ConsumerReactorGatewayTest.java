@@ -17,7 +17,6 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
-import org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
@@ -35,18 +34,23 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.Duration;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 
-public class ApplicationEventHandlerTest {
+public class ConsumerReactorGatewayTest {
     private final Time time = new MockTime();
     private final int initializationTimeoutMs = 50;
     private final BlockingQueue<ApplicationEvent> applicationEventsQueue =  new LinkedBlockingQueue<>();
@@ -60,7 +64,7 @@ public class ApplicationEventHandlerTest {
     public void testRecordApplicationEventQueueSize(String groupName) {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = spy(new AsyncConsumerMetrics(metrics, groupName));
-             ApplicationEventHandler applicationEventHandler = new ApplicationEventHandler(
+             ConsumerReactorGateway consumerReactorGateway = new ConsumerReactorGateway(
                      new LogContext(),
                      time,
                      initializationTimeoutMs,
@@ -71,9 +75,46 @@ public class ApplicationEventHandlerTest {
                      () -> requestManagers,
                      asyncConsumerMetrics
              )) {
-            // add event
-            applicationEventHandler.add(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds()));
+            // Submit event.
+            consumerReactorGateway.submit(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds()));
             verify(asyncConsumerMetrics).recordApplicationEventQueueSize(1);
+        }
+    }
+
+    @Test
+    public void testSubmitFailsFastWhenInputQueueIsFull() throws Exception {
+        BlockingQueue<ApplicationEvent> boundedQueue = new ArrayBlockingQueue<>(1);
+        ApplicationEventProcessor blockingProcessor = mock(ApplicationEventProcessor.class);
+        CountDownLatch processingFirstEvent = new CountDownLatch(1);
+        CountDownLatch releaseFirstEvent = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            processingFirstEvent.countDown();
+            assertTrue(releaseFirstEvent.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(blockingProcessor).process(any(ApplicationEvent.class));
+
+        try (Metrics metrics = new Metrics();
+             AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, "test-group");
+             ConsumerReactorGateway gateway = new ConsumerReactorGateway(
+                 new LogContext(),
+                 time,
+                 initializationTimeoutMs,
+                 boundedQueue,
+                 applicationEventReaper,
+                 () -> blockingProcessor,
+                 () -> networkClientDelegate,
+                 () -> requestManagers,
+                 asyncConsumerMetrics
+             )) {
+            gateway.submit(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds()));
+            assertTrue(processingFirstEvent.await(5, TimeUnit.SECONDS));
+            gateway.submit(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds()));
+
+            KafkaException error = assertThrows(KafkaException.class,
+                () -> gateway.submit(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds())));
+            assertTrue(error.getMessage().contains("input queue is full"));
+        } finally {
+            releaseFirstEvent.countDown();
         }
     }
 
@@ -108,10 +149,10 @@ public class ApplicationEventHandlerTest {
     }
 
     @Test
-    public void testAddThrowsWhenBackgroundThreadDead() {
+    public void testSubmitThrowsWhenReactorDead() {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = spy(new AsyncConsumerMetrics(metrics, "test-group"));
-             ApplicationEventHandler handler = new ApplicationEventHandler(
+             ConsumerReactorGateway gateway = new ConsumerReactorGateway(
                      new LogContext(),
                      time,
                      initializationTimeoutMs,
@@ -122,11 +163,11 @@ public class ApplicationEventHandlerTest {
                      () -> requestManagers,
                      asyncConsumerMetrics
              )) {
-            handler.close(Duration.ZERO);
+            gateway.close(Duration.ZERO);
 
             KafkaException error = assertThrows(KafkaException.class,
-                () -> handler.add(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds())));
-            assertTrue(error.getMessage().contains("background thread is not running"));
+                () -> gateway.submit(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds())));
+            assertTrue(error.getMessage().contains("consumer reactor is not running"));
         }
     }
 
@@ -134,7 +175,7 @@ public class ApplicationEventHandlerTest {
                                                                    Supplier<NetworkClientDelegate> networkClientDelegateSupplier) {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = spy(new AsyncConsumerMetrics(metrics, "test-group"))) {
-            return assertThrows(exceptionClass, () -> new ApplicationEventHandler(
+            return assertThrows(exceptionClass, () -> new ConsumerReactorGateway(
                 new LogContext(),
                 time,
                 initializationTimeoutMs,

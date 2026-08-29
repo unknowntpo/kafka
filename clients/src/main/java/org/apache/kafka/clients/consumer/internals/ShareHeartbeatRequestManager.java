@@ -140,10 +140,10 @@ public class ShareHeartbeatRequestManager extends AbstractHeartbeatRequestManage
      * {@inheritDoc}
      */
     @Override
-    public NetworkClientDelegate.UnsentRequest buildHeartbeatRequest() {
+    NetworkClientDelegate.UnsentRequest buildHeartbeatRequest(final CoordinatorSnapshot coordinatorSnapshot) {
         return new NetworkClientDelegate.UnsentRequest(
             new ShareGroupHeartbeatRequest.Builder(this.heartbeatState.buildRequestData()),
-            coordinatorRequestManager.coordinator());
+            coordinatorSnapshot.coordinator());
     }
 
     /**

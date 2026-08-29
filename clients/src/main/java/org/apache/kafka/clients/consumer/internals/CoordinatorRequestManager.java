@@ -18,7 +18,6 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
-import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.message.FindCoordinatorRequestData;
@@ -30,10 +29,10 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.slf4j.Logger;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
  * This is responsible for timing to send the next {@link FindCoordinatorRequest} based on the following criteria:
@@ -58,12 +57,16 @@ public class CoordinatorRequestManager implements RequestManager {
     private long totalDisconnectedMin = 0;
     private boolean closing = false;
     private Node coordinator;
+    /** Monotonic version of decision-relevant coordinator truth (UNKNOWN or a concrete target). */
+    private long coordinatorVersion = 0L;
     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
     // appropriate actions. 
     // For example:
     // - AbstractHeartbeatRequestManager propagates the error event to the application thread.
     // - CommitRequestManager fail pending requests.
     private Optional<Throwable> fatalError = Optional.empty();
+    /** One-shot publication fact; the durable fatal-error state remains readable by dependent managers. */
+    private Optional<ManagerEvent.CoordinatorFatalError> pendingFatalError = Optional.empty();
 
     public CoordinatorRequestManager(
         final LogContext logContext,
@@ -99,22 +102,36 @@ public class CoordinatorRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
-        if (closing || this.coordinator != null)
-            return EMPTY;
-
-        if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
-            NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(request);
+        NextPollCondition plan = planFindCoordinator(currentTimeMs);
+        if (pendingFatalError.isPresent()) {
+            ManagerEvent.CoordinatorFatalError event = pendingFatalError.get();
+            pendingFatalError = Optional.empty();
+            return NetworkClientDelegate.PollResult.progress(List.of(), List.of(event), plan);
         }
+        if (!(plan instanceof NextPollCondition.PollImmediately))
+            return NetworkClientDelegate.PollResult.waitFor(plan);
 
-        // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
-        // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
-        // backoff
-        if (coordinatorRequestState.requestInFlight()) {
-            return EMPTY;
-        }
+        NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
+        // Building the request changes the local state from runnable to in-flight. Derive the
+        // returned wait from the same planner after that state transition.
+        return NetworkClientDelegate.PollResult.progress(
+            List.of(request), List.of(), planFindCoordinator(currentTimeMs));
+    }
 
-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+    /**
+     * Derives both request eligibility and the next local activation condition from one state view.
+     * Await causes are diagnostic labels for existing reactor inputs, not callback registrations.
+     */
+    private NextPollCondition planFindCoordinator(final long currentTimeMs) {
+        if (closing)
+            return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.SHUTDOWN);
+        if (coordinator != null)
+            return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.COORDINATOR_CHANGE);
+        if (coordinatorRequestState.canSendRequest(currentTimeMs))
+            return NextPollCondition.pollImmediately();
+        if (coordinatorRequestState.requestInFlight())
+            return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION);
+        return NextPollCondition.retryAfter(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {
@@ -128,7 +145,10 @@ public class CoordinatorRequestManager implements RequestManager {
         );
 
         return unsentRequest.whenComplete((clientResponse, throwable) -> {
-            getAndClearFatalError();
+            // A completed discovery attempt supersedes a previously retained fatal result. A new fatal response
+            // below records its own durable state and one-shot publication fact.
+            fatalError = Optional.empty();
+            pendingFatalError = Optional.empty();
             if (clientResponse != null) {
                 FindCoordinatorResponse response = (FindCoordinatorResponse) clientResponse.responseBody();
                 onResponse(clientResponse.receivedTimeMs(), response);
@@ -136,21 +156,6 @@ public class CoordinatorRequestManager implements RequestManager {
                 onFailedResponse(unsentRequest.handler().completionTimeMs(), throwable);
             }
         });
-    }
-
-    /**
-     * Handles the disconnection of the current coordinator.
-     * This method checks if the given exception is an instance of {@link DisconnectException}.
-     * If so, it marks the coordinator as unknown, indicating that the client should
-     * attempt to discover a new coordinator. For any other exception type, no action is performed.
-     *
-     * @param exception     The exception to handle, which was received as part of a request response.
-     * @param currentTimeMs The current time in milliseconds.
-     */
-    public void handleCoordinatorDisconnect(Throwable exception, long currentTimeMs) {
-        if (exception instanceof DisconnectException) {
-            markCoordinatorUnknown(exception.getMessage(), currentTimeMs);
-        }
     }
 
     /**
@@ -164,8 +169,10 @@ public class CoordinatorRequestManager implements RequestManager {
      *
      * @param cause         String explanation of why the coordinator is marked unknown
      * @param currentTimeMs Current time in milliseconds
+     * @return {@code true} if this call changed a known coordinator to unknown.
      */
-    public void markCoordinatorUnknown(final String cause, final long currentTimeMs) {
+    boolean markCoordinatorUnknown(final String cause, final long currentTimeMs) {
+        final boolean coordinatorWasKnown = coordinator != null;
         if (coordinator != null || timeMarkedUnknownMs == -1) {
             timeMarkedUnknownMs = currentTimeMs;
             totalDisconnectedMin = 0;
@@ -178,6 +185,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 cause
             );
             coordinator = null;
+            coordinatorVersion++;
         } else {
             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
             long currDisconnectMin = durationOfOngoingDisconnectMs / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
@@ -186,16 +194,34 @@ public class CoordinatorRequestManager implements RequestManager {
                 totalDisconnectedMin = currDisconnectMin;
             }
         }
+        return coordinatorWasKnown;
+    }
+
+    /**
+     * Applies a request's observation only if it refers to the coordinator truth used to build that request.
+     * A delayed response from an older coordinator version cannot invalidate a newer discovery.
+     */
+    boolean handleCoordinatorUnavailableObserved(final ManagerEvent.CoordinatorUnavailableObserved event) {
+        if (event.observedCoordinatorVersion() != coordinatorVersion) {
+            log.trace("Ignoring stale {} because current coordinator version is {}", event, coordinatorVersion);
+            return false;
+        }
+        return markCoordinatorUnknown(event.cause(), event.observedAtMs());
     }
 
     private void onSuccessfulResponse(
         final long currentTimeMs,
         final FindCoordinatorResponseData.Coordinator coordinator
     ) {
-        this.coordinator = new GroupCoordinatorNode(
+        Node discoveredCoordinator = new GroupCoordinatorNode(
                 coordinator.nodeId(),
                 coordinator.host(),
                 coordinator.port());
+        if (!Objects.equals(this.coordinator, discoveredCoordinator))
+            coordinatorVersion++;
+        this.coordinator = discoveredCoordinator;
+        fatalError = Optional.empty();
+        pendingFatalError = Optional.empty();
         log.info("Discovered group coordinator {}", coordinator);
         coordinatorRequestState.onSuccessfulAttempt(currentTimeMs);
     }
@@ -212,12 +238,17 @@ public class CoordinatorRequestManager implements RequestManager {
         if (exception == Errors.GROUP_AUTHORIZATION_FAILED.exception()) {
             log.debug("FindCoordinator request failed due to authorization error {}", exception.getMessage());
             KafkaException groupAuthorizationException = GroupAuthorizationException.forGroupId(this.groupId);
-            fatalError = Optional.of(groupAuthorizationException);
+            recordFatalError(groupAuthorizationException);
             return;
         }
 
         log.warn("FindCoordinator request failed due to fatal exception", exception);
-        fatalError = Optional.of(exception);
+        recordFatalError(exception);
+    }
+
+    private void recordFatalError(final Throwable error) {
+        fatalError = Optional.of(error);
+        pendingFatalError = Optional.of(new ManagerEvent.CoordinatorFatalError(error));
     }
 
     /**
@@ -256,13 +287,11 @@ public class CoordinatorRequestManager implements RequestManager {
     public Optional<Node> coordinator() {
         return Optional.ofNullable(this.coordinator);
     }
-    
-    public Optional<Throwable> getAndClearFatalError() {
-        Optional<Throwable> fatalError = this.fatalError;
-        this.fatalError = Optional.empty();
-        return fatalError;
-    }
 
+    CoordinatorSnapshot coordinatorSnapshot() {
+        return new CoordinatorSnapshot(Optional.ofNullable(coordinator), coordinatorVersion);
+    }
+    
     public Optional<Throwable> fatalError() {
         return fatalError;
     }
