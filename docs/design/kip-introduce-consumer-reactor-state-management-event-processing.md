@@ -239,7 +239,7 @@ consumer execution contexts.
 | `ConsumerReactor` | Order inputs, invoke managers in a fixed order, retain their timing contributions, publish the final timing decision, and then execute application-visible effects. |
 | `RequestManagers` composition | Select the regular, share, or Streams manager set, own its typed event handlers, and apply derived `ManagerCommand` values to one state owner. |
 | Request manager | Own one domain of mutable consumer state and decide whether it can produce work now, needs a finite retry, or must wait for another input. It may publish a small immutable snapshot when another manager needs a coherent view. |
-| Regular / share / Streams protocol driver | Keep membership, assignment or acquisition, commit or acknowledgement, topology, and callback coordination outside the shared reactor loop. These are proposed internal boundaries, not current code types. |
+| Regular / share / Streams protocol driver | Keep membership, assignment or acquisition, commit or acknowledgement, topology, and callback coordination outside the shared reactor loop. The POC begins this boundary with concrete driver types and typed application-event routing. |
 | `NetworkClientDelegate` | Own transport, connection handling, request correlation, and timeouts; do not decide whether to complete an application event or wake the application thread. |
 | Application thread | Execute user callbacks and consume published data, events, and operation results. |
 
@@ -599,14 +599,16 @@ terminal-completion semantics. Those behaviors remain with the existing operatio
 ### 7. Share the reactor kernel, not consumer rules
 
 The regular consumer and share consumer use separate reactor instances but the same execution kernel because they
-share the same concurrency topology. Their rules remain separate. `RegularConsumerDriver`, `ShareConsumerDriver`,
-and `StreamsConsumerDriver` are proposed internal boundaries; they do not yet exist in the codebase:
+share the same concurrency topology. Their rules remain separate. The POC selects one `RegularConsumerDriver`,
+`ShareConsumerDriver`, or `StreamsConsumerDriver` when the manager composition is created. The first slice moves
+consumer-specific application-event routing into that driver; `RequestManagers` still constructs the selected manager
+stack while the remaining protocol behavior is migrated incrementally:
 
 | Component | State and behavior retained outside the reactor |
 | --- | --- |
-| Proposed `RegularConsumerDriver` | assignment, positions, offset fetch/commit, membership, rebalance transitions, and regular fetch behavior |
-| Proposed `ShareConsumerDriver` | share membership, acquisition, lock renewal/release, acknowledgement, and share fetch behavior |
-| Proposed `StreamsConsumerDriver` | Streams membership, topology description, task assignment, heartbeat, and Streams group configuration behavior |
+| `RegularConsumerDriver` | assignment, positions, offset fetch/commit, membership, rebalance transitions, and regular fetch behavior |
+| `ShareConsumerDriver` | share membership, acquisition, lock renewal/release, acknowledgement, and share fetch behavior |
+| `StreamsConsumerDriver` | Streams membership, topology description, task assignment, heartbeat, and Streams group configuration behavior |
 
 The shared reactor must not branch on consumer type. An `isShareConsumer` switch or a regular/share union in the
 reactor loop indicates that consumer-specific behavior has leaked across the boundary.
@@ -822,8 +824,8 @@ API change.
   are not prohibited by this rule.
 - Where a manager needs a coherent cross-manager view, publish a small opt-in owner-local snapshot and fence delayed
   observations with the captured snapshot version.
-- Introduce the regular/share driver boundary around the existing managers and remove consumer-type decisions from
-  the shared reactor loop.
+- Complete the regular/share/Streams driver boundary around the existing managers and remove the remaining
+  consumer-type decisions from the shared reactor event processor.
 - Remove hard-coded coordinator dependency branches from `ConsumerReactor`; the next stable full manager pass observes
   cross-manager changes before the next network poll without a central dependency graph.
 - Complete the liveness proof for the POC's removal of application-side assignment/position rescans: each assignment,

@@ -51,6 +51,7 @@ import static org.apache.kafka.common.utils.Utils.closeQuietly;
 public class RequestManagers implements Closeable {
 
     private final Logger log;
+    private final ConsumerDriver.Type consumerDriverType;
     private final ManagerCoordinationPolicy coordinationPolicy = ManagerCoordinationPolicy.standard();
     public final Optional<CoordinatorRequestManager> coordinatorRequestManager;
     public final Optional<CommitRequestManager> commitRequestManager;
@@ -86,7 +87,25 @@ public class RequestManagers implements Closeable {
         this(logContext, offsetsRequestManager, topicMetadataRequestManager, fetchRequestManager,
             coordinatorRequestManager, commitRequestManager, heartbeatRequestManager, membershipManager,
             streamsGroupHeartbeatRequestManager, streamsGroupTopologyDescriptionRequestManager,
-            streamsMembershipManager, null);
+            streamsMembershipManager, (BackgroundEventHandler) null);
+    }
+
+    public RequestManagers(LogContext logContext,
+                           OffsetsRequestManager offsetsRequestManager,
+                           TopicMetadataRequestManager topicMetadataRequestManager,
+                           FetchRequestManager fetchRequestManager,
+                           Optional<CoordinatorRequestManager> coordinatorRequestManager,
+                           Optional<CommitRequestManager> commitRequestManager,
+                           Optional<ConsumerHeartbeatRequestManager> heartbeatRequestManager,
+                           Optional<ConsumerMembershipManager> membershipManager,
+                           Optional<StreamsGroupHeartbeatRequestManager> streamsGroupHeartbeatRequestManager,
+                           Optional<StreamsGroupTopologyDescriptionRequestManager> streamsGroupTopologyDescriptionRequestManager,
+                           Optional<StreamsMembershipManager> streamsMembershipManager,
+                           ConsumerDriver.Type consumerDriverType) {
+        this(logContext, offsetsRequestManager, topicMetadataRequestManager, fetchRequestManager,
+            coordinatorRequestManager, commitRequestManager, heartbeatRequestManager, membershipManager,
+            streamsGroupHeartbeatRequestManager, streamsGroupTopologyDescriptionRequestManager,
+            streamsMembershipManager, null, consumerDriverType);
     }
 
     RequestManagers(LogContext logContext,
@@ -101,7 +120,29 @@ public class RequestManagers implements Closeable {
                     Optional<StreamsGroupTopologyDescriptionRequestManager> streamsGroupTopologyDescriptionRequestManager,
                     Optional<StreamsMembershipManager> streamsMembershipManager,
                     BackgroundEventHandler backgroundEventHandler) {
+        this(logContext, offsetsRequestManager, topicMetadataRequestManager, fetchRequestManager,
+            coordinatorRequestManager, commitRequestManager, heartbeatRequestManager, membershipManager,
+            streamsGroupHeartbeatRequestManager, streamsGroupTopologyDescriptionRequestManager,
+            streamsMembershipManager, backgroundEventHandler,
+            streamsGroupHeartbeatRequestManager.isPresent() || streamsMembershipManager.isPresent() ?
+                ConsumerDriver.Type.STREAMS : ConsumerDriver.Type.REGULAR);
+    }
+
+    RequestManagers(LogContext logContext,
+                    OffsetsRequestManager offsetsRequestManager,
+                    TopicMetadataRequestManager topicMetadataRequestManager,
+                    FetchRequestManager fetchRequestManager,
+                    Optional<CoordinatorRequestManager> coordinatorRequestManager,
+                    Optional<CommitRequestManager> commitRequestManager,
+                    Optional<ConsumerHeartbeatRequestManager> heartbeatRequestManager,
+                    Optional<ConsumerMembershipManager> membershipManager,
+                    Optional<StreamsGroupHeartbeatRequestManager> streamsGroupHeartbeatRequestManager,
+                    Optional<StreamsGroupTopologyDescriptionRequestManager> streamsGroupTopologyDescriptionRequestManager,
+                    Optional<StreamsMembershipManager> streamsMembershipManager,
+                    BackgroundEventHandler backgroundEventHandler,
+                    ConsumerDriver.Type consumerDriverType) {
         this.log = logContext.logger(RequestManagers.class);
+        this.consumerDriverType = requireNonNull(consumerDriverType, "Consumer driver type cannot be null");
         this.offsetsRequestManager = requireNonNull(offsetsRequestManager, "OffsetsRequestManager cannot be null");
         this.coordinatorRequestManager = coordinatorRequestManager;
         this.commitRequestManager = commitRequestManager;
@@ -148,6 +189,7 @@ public class RequestManagers implements Closeable {
                     Optional<ShareMembershipManager> shareMembershipManager,
                     BackgroundEventHandler backgroundEventHandler) {
         this.log = logContext.logger(RequestManagers.class);
+        this.consumerDriverType = ConsumerDriver.Type.SHARE;
         ShareConsumeRequestManager manager = requireNonNull(
             shareConsumeRequestManager, "ShareConsumeRequestManager cannot be null");
         this.shareConsumeRequestManager = Optional.of(manager);
@@ -176,6 +218,10 @@ public class RequestManagers implements Closeable {
 
     public List<RequestManager> entries() {
         return entries;
+    }
+
+    ConsumerDriver.Type consumerDriverType() {
+        return consumerDriverType;
     }
 
     /** Evaluates immutable manager facts without exposing live request-manager objects to the reactor. */
@@ -422,7 +468,8 @@ public class RequestManagers implements Closeable {
                         Optional.ofNullable(streamsGroupHeartbeatRequestManager),
                         Optional.ofNullable(streamsGroupTopologyDescriptionRequestManager),
                         Optional.ofNullable(streamsMembershipManager),
-                        backgroundEventHandler
+                        backgroundEventHandler,
+                        streamsRebalanceData.isPresent() ? ConsumerDriver.Type.STREAMS : ConsumerDriver.Type.REGULAR
                 );
             }
         };
