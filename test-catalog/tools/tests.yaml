@@ -54,6 +54,7 @@ org.apache.kafka.tools.ClusterToolTest:
 - testCommandConfigAndDeprecatedConfigPresent
 - testDeprecatedConfig
 - testLegacyModeClusterCannotUnregisterBroker
+- testLegacyModeClusterCannotUnregisterController
 - testListEndpointsArgumentWithBootstrapController
 - testListEndpointsArgumentWithBootstrapServer
 - testListEndpointsWithBootstrapController
@@ -61,6 +62,7 @@ org.apache.kafka.tools.ClusterToolTest:
 - testPrintClusterId
 - testUnregister
 - testUnregisterBroker
+- testUnregisterController
 - testUnregisterWithBootstrapController
 org.apache.kafka.tools.ConfigCommandIntegrationTest:
 - testAddConfigKeyValuesUsingCommand
@@ -155,6 +157,15 @@ org.apache.kafka.tools.ConfigCommandTest:
 - testNoSpecifiedEntityOptionWithDescribeBrokersInBootstrapServerIsAllowed
 - testOptionEntityTypeNames
 - testParseConfigsToBeAddedForAddConfigFile
+org.apache.kafka.tools.ConnectInternalTopicsTest:
+- testCreateInternalTopicsWithDefaultValues
+- testCreateMissingTopics
+- testEmptyTopicNamesInWorkerConfig
+- testNoTopicNamesInWorkerConfig
+- testNoWorkerConfig
+- testTopicConfigOverrides
+- testWorkerConfigBlank
+- testWorkerConfigFileDoesNotExist
 org.apache.kafka.tools.ConnectPluginPathTest:
 - testListEmptyPluginPathArg
 - testListEmptyPluginPathElementArg
@@ -226,8 +237,12 @@ org.apache.kafka.tools.DelegationTokenCommandTest:
 org.apache.kafka.tools.DeleteRecordsCommandTest:
 - testCommand
 - testCommandConfigNotExists
+- testExecuteDuplicatePartitionsWithoutCluster
+- testExecutePartitionErrorWithMockAdmin
+- testExecuteSuccessOutputWithMockAdmin
 - testOffsetFileNotExists
 - testParse
+- testParseInvalidJsonThrows
 - testWrongPartitions
 - testWrongVersion
 org.apache.kafka.tools.DumpLogSegmentsTest:
@@ -265,6 +280,8 @@ org.apache.kafka.tools.DumpLogSegmentsTest:
 - testTimeIndexVerifyOnly
 - testTransactionLogMessageParser
 org.apache.kafka.tools.EndToEndLatencyTest:
+- shouldAcceptMinusOneForRecordHeaderValueSize
+- shouldAcceptValidNamedArgs
 - shouldFailWhenConsumerRecordsIsEmpty
 - shouldFailWhenReceivedMoreThanOneRecord
 - shouldFailWhenSentHeaderKeyIsNotEqualToReceived
@@ -272,7 +289,6 @@ org.apache.kafka.tools.EndToEndLatencyTest:
 - shouldFailWhenSentRecordIsNotEqualToReceived
 - shouldFailWhenSentRecordKeyIsNotEqualToReceived
 - shouldPassInValidation
-- shouldPassWithNamedArgs
 - testConvertLegacyArgs
 - testInvalidArgs
 org.apache.kafka.tools.FeatureCommandTest:
@@ -476,6 +492,11 @@ org.apache.kafka.tools.MetadataQuorumCommandUnitTest:
 - testGetMetadataDirectoryIdWhenThereIsNoId
 - testGetNegativeControllerId
 - testRemoveControllerDryRun
+- testRemoveControllerDryRunWithUnregister
+- testRemoveControllerFailsWithUnsupportedVersion
+- testRemoveControllerFailsWithVoterNotFound
+- testRemoveControllerSucceedsButUnregisterFails
+- testRemoveControllerWithUnregisterSuccess
 org.apache.kafka.tools.ProducerPerformanceTest:
 - testBootstrapServer
 - testClientIdOverride
@@ -494,12 +515,20 @@ org.apache.kafka.tools.ProducerPerformanceTest:
 - testGenerateRandomPayloadByRecordSize
 - testGenerateRandomPayloadException
 - testInvalidConfigPostProcessor
+- testInvalidRecordKeyRange
+- testKeyDistributionNoneByDefault
+- testKeyDistributionRandom
+- testKeyDistributionRange
+- testKeyDistributionRequiresKeyRange
+- testKeyRangeRequiresKeyDistribution
 - testMultipleProducerProperty
 - testMutuallyExclusiveGroup
 - testNoTransactionRelatedConfigs
+- testNullKeyWhenDistributionNone
 - testNumberOfCallsForSendAndClose
 - testNumberOfFailedSendAndClose
 - testNumberOfSuccessfulSendAndClose
+- testRandomSeedCustomValue
 - testReadPayloadFile
 - testReadPayloadFileWithAlternateDelimiters
 - testReadProps
@@ -540,11 +569,6 @@ org.apache.kafka.tools.ResetIntegrationTest:
 - testReprocessingFromScratchAfterResetWithoutIntermediateUserTopic
 - testResetWhenInternalTopicsAreSpecified
 - testResetWhenLongSessionTimeoutConfiguredWithForceOption
-org.apache.kafka.tools.ResetIntegrationWithSslTest:
-- testReprocessingFromScratchAfterResetWithIntermediateInternalTopic
-- testReprocessingFromScratchAfterResetWithIntermediateUserTopic
-- testReprocessingFromScratchAfterResetWithoutIntermediateUserTopic
-- testResetWhenInternalTopicsAreSpecified
 org.apache.kafka.tools.ShareConsumerPerformanceTest:
 - testBootstrapServerNotPresent
 - testClientIdOverride

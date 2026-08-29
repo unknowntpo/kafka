@@ -144,6 +144,7 @@ org.apache.kafka.connect.integration.ConnectorTopicsIntegrationTest:
 - testTopicTrackingIsDisabled
 - testTopicTrackingResetIsDisabled
 org.apache.kafka.connect.integration.ConnectorValidationIntegrationTest:
+- testConnectorDeclaredConfigProviderDoesNotContainResolvedValue
 - testConnectorHasAbstractConverter
 - testConnectorHasAbstractHeaderConverter
 - testConnectorHasConverterThatThrowsExceptionOnInstantiation
@@ -165,6 +166,7 @@ org.apache.kafka.connect.integration.ConnectorValidationIntegrationTest:
 - testConnectorHasMissingPredicateClass
 - testConnectorHasMissingTransformClass
 - testConnectorHasNegationForUndefinedPredicate
+- testMissingConnectorClassErrorDoesNotContainResolvedValue
 - testSinkConnectorDeadLetterQueueTopicInTopicsList
 - testSinkConnectorDeadLetterQueueTopicMatchesTopicsRegex
 - testSinkConnectorDefaultGroupIdConflictsWithWorkerGroupId
@@ -172,6 +174,9 @@ org.apache.kafka.connect.integration.ConnectorValidationIntegrationTest:
 - testSinkConnectorHasNeitherTopicsListNorTopicsRegex
 - testSinkConnectorOverriddenGroupIdConflictsWithWorkerGroupId
 - testSourceConnectorHasDuplicateTopicCreationGroups
+- testValidationErrorMessagesDoNotContainResolvedValueOnTypeMismatch
+- testValidationErrorMessagesDoNotContainResolvedValueOnValidatorRejection
+- testValidationResponseDoesNotContainResolvedValue
 org.apache.kafka.connect.integration.ErrorHandlingIntegrationTest:
 - testErrantRecordReporter
 - testSkipRetryAndDLQWithHeaders
@@ -192,6 +197,7 @@ org.apache.kafka.connect.integration.InternalTopicsIntegrationTest:
 - testCreateInternalTopicsWithDefaultSettings
 - testCreateInternalTopicsWithFewerReplicasThanBrokers
 - testFailToCreateInternalTopicsWithMoreReplicasThanBrokers
+- testFailToStartWhenInternalTopicsAreMissingWithDisabledInternalTopicCreation
 - testFailToStartWhenInternalTopicsAreNotCompacted
 - testStartWhenInternalTopicsCreatedManuallyWithCompactForBrokersDefaultCleanupPolicy
 org.apache.kafka.connect.integration.MonitorableSinkIntegrationTest:
@@ -297,6 +303,7 @@ org.apache.kafka.connect.runtime.AbstractHerderTest:
 - testConnectorStatusMissingPlugin
 - testConnectors
 - testConverterPluginConfig
+- testDifferenceInConfigDefAndValidation
 - testGenerateResultWithConfigValuesAllUsingConfigKeysAndWithNoErrors
 - testGenerateResultWithConfigValuesAllUsingConfigKeysAndWithSomeErrors
 - testGenerateResultWithConfigValuesMoreThanConfigKeysAndWithSomeErrors
@@ -309,6 +316,12 @@ org.apache.kafka.connect.runtime.AbstractHerderTest:
 - testHeaderConverterPluginConfig
 - testPauseConnector
 - testPredicatePluginConfig
+- testRedactResolvedValuesLeavesUnsubstitutedKeysUnchanged
+- testRedactResolvedValuesNoSubstitutions
+- testRedactResolvedValuesReplacesErrorMessages
+- testRedactResolvedValuesReplacesValueWithPlaceholder
+- testRemoveCustomConfigProviders
+- testRemoveCustomConfigProvidersNoProviders
 - testRepeatedConfigValidationOfInvalidVersionSurfacesAvailableVersions
 - testResumeConnector
 - testReverseTransformConfigs
@@ -1056,6 +1069,9 @@ org.apache.kafka.connect.runtime.rest.ConnectRestServerTest:
 - testMonitorableConnectRestExtension
 - testOptionsDoesNotIncludeWadlOutput
 - testRequestLogs
+- testRestExtensionsRegisteredWithAdminListener
+- testRestExtensionsWithDisabledAdminListener
+- testRestExtensionsWithoutAdminListener
 - testStandaloneConfig
 - testValidCustomizedHttpResponseHeaders
 org.apache.kafka.connect.runtime.rest.InternalRequestSignatureTest:
@@ -1291,6 +1307,10 @@ org.apache.kafka.connect.storage.KafkaConfigBackingStoreTest:
 - testStartStop
 - testTaskCountRecordsAndGenerations
 - testWritePrivileges
+org.apache.kafka.connect.storage.KafkaOffsetBackingStoreGetTopicConfigTest:
+- testConnectorSpecificReadOnlyStoreReturnsCorrectTopicConfig
+- testConnectorSpecificReadWriteStoreReturnsCorrectTopicConfig
+- testWorkerLevelStoreReturnsCorrectTopicConfig
 org.apache.kafka.connect.storage.KafkaOffsetBackingStoreTest:
 - testClientIds
 - testConnectorPartitions

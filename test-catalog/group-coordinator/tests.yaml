@@ -30,6 +30,10 @@ org.apache.kafka.coordinator.group.GroupConfigTest:
 - testInvalidConfigName
 - testInvalidProps
 - testNotValidatedWhenNotConfigured
+- testStreamsAssignorNameEvaluateIsLenient
+- testStreamsAssignorNameSelectsCustomAssignor
+- testStreamsAssignorNameValidation
+- testStreamsRackAwareAssignmentTagsValidation
 - testValidShareAutoOffsetResetValues
 - testValidShareIsolationLevelValues
 - testValidateWithAllGroupTypeConfigs
@@ -40,6 +44,9 @@ org.apache.kafka.coordinator.group.GroupCoordinatorConfigTest:
 - testConfigs
 - testConsumerGroupAssignorFullClassNames
 - testConsumerGroupAssignors
+- testConsumerGroupAssignorsBuiltinByClassName
+- testConsumerGroupAssignorsWithDuplicateNamesFails
+- testConsumerGroupAssignorsWithReservedBuiltinNameFails
 - testDLQAutoCreateTopicsEnableCustomValue
 - testDLQAutoCreateTopicsEnableDefaultValue
 - testDLQTopicNamePrefixCustomValue
@@ -48,6 +55,12 @@ org.apache.kafka.coordinator.group.GroupCoordinatorConfigTest:
 - testInvalidStreamsConfigs
 - testShareGroupAssignorFullClassNames
 - testShareGroupAssignors
+- testStreamsGroupAssignorFullClassNames
+- testStreamsGroupAssignors
+- testStreamsGroupAssignorsBuiltinByClassName
+- testStreamsGroupAssignorsWithDuplicateNamesFails
+- testStreamsGroupAssignorsWithInvalidClassFails
+- testStreamsGroupAssignorsWithReservedBuiltinNameFails
 - testStreamsGroupInitialRebalanceDelayCustomValue
 - testStreamsGroupInitialRebalanceDelayDefaultValue
 - testStreamsGroupMaxWarmupReplicasCustomValue
@@ -384,6 +397,8 @@ org.apache.kafka.coordinator.group.GroupCoordinatorShardTest:
 - testStreamsGroupHeartbeat
 - testValidateStreamsGroupMemberDelegates
 org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
+- testAlterShareGroupOffsetsBumpsGroupEpoch
+- testAlterShareGroupOffsetsErroneousCallDoesNotBumpGroupEpoch
 - testCanComputeNextTargetAssignment
 - testCanComputeNextTargetAssignmentWithNoPreviousAssignmentTimestamp
 - testCanComputeNextTargetAssignmentWithZeroAssignmentIntervalMs
@@ -498,6 +513,7 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testGenerateRecordsOnNewClassicGroupFailureTransformsError
 - testGenerationIdIncrementsOnRebalance
 - testGetDifferentStaticMemberIdAfterEachRejoin
+- testGroupConfigOverridesBrokerRackAwareAssignmentTags
 - testGroupEpochBumpWhenNewStaticMemberJoins
 - testGroupIdsByTopics
 - testGroupStuckInRebalanceTimeoutDueToNonjoinedStaticMember
@@ -577,6 +593,9 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testMemberIdGeneration
 - testMemberJoinsEmptyConsumerGroup
 - testMemberJoinsEmptyStreamsGroup
+- testMissingClientTagsStatusNotReturnedToVersion0Clients
+- testMissingClientTagsStatusReportsOnlyMissingTags
+- testMissingClientTagsStatusWhenRackAwareTagsConfigured
 - testNewJoiningMemberTriggersNewTargetAssignment
 - testNewMemberFailureAfterJoinGroupCompletion
 - testNewMemberIsRejectedWithMaximumMembersIsReached
@@ -587,6 +606,8 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testNewStaticMemberIsRejectedWhenConsumerGroupIsFull
 - testNoConversionWhenSizeExceedsClassicMaxGroupSize
 - testNoGroupEpochBumpWhenStaticMemberTemporarilyLeaves
+- testNoMissingClientTagsStatusWhenAllTagsPresent
+- testNoMissingClientTagsStatusWhenRackAwareTagsNotConfigured
 - testOnLoaded
 - testOnLoadedExceedGroupMaxSizeTriggersRebalance
 - testOnLoadedSchedulesClassicGroupMemberHeartbeats
@@ -599,6 +620,7 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testPartitionAssignorExceptionOnRegularHeartbeat
 - testPendingMemberBatchLeaveGroup
 - testPendingMembersLeaveGroup
+- testRackAwareAssignmentTagsRejectsEmptyTags
 - testRebalanceCompletesBeforeMemberJoins
 - testRebalanceDoesNotTimeOutWhenAllSyncAreReceived
 - testRebalanceTimeoutExpiration
@@ -752,12 +774,16 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testStaticMembersUnknownInstanceBatchLeaveGroup
 - testStaticMembersValidBatchLeaveGroup
 - testStreamsGroupAssignmentInterval
+- testStreamsGroupAssignorFallsBackToDefaultWhenUnavailable
+- testStreamsGroupAssignorSelectedByGroupConfig
+- testStreamsGroupDefaultsToFirstAssignorWhenNoStickyConfigured
 - testStreamsGroupDeleteCancelsInitialRebalanceTimer
 - testStreamsGroupDescribeBeforeAndAfterCommittingOffset
 - testStreamsGroupDescribeNoErrors
 - testStreamsGroupDescribeOnConsumerGroup
 - testStreamsGroupDescribeOnShareGroup
 - testStreamsGroupDescribeReadsStoredDescriptionTopologyEpochAtCommittedOffset
+- testStreamsGroupDescribeReportsAssignorSelectedByGroupConfig
 - testStreamsGroupDescribeReturnsPerMemberTaskOffsets
 - testStreamsGroupDescribeSurfacesStoredDescriptionTopologyEpoch
 - testStreamsGroupDescribeWithErrors
@@ -772,12 +798,14 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testStreamsGroupHeartbeatOnConsumerGroup
 - testStreamsGroupHeartbeatOnShareGroup
 - testStreamsGroupHeartbeatPartialResponseWhenNothingChanges
+- testStreamsGroupHeartbeatRefinementStepBumpsEpochWithoutRunningAssignor
 - testStreamsGroupHeartbeatRejectsDuplicateTaskOffsets
 - testStreamsGroupHeartbeatResponseVersion0
 - testStreamsGroupHeartbeatResponseVersion1
 - testStreamsGroupHeartbeatStoresTaskOffsetsWithoutPersisting
 - testStreamsGroupHeartbeatWithEmptyClassicGroup
 - testStreamsGroupHeartbeatWithNonEmptyClassicGroup
+- testStreamsGroupKeepsNoRefinedAssignmentWhenWarmupsAreDisabled
 - testStreamsGroupMemberCanRejoinWithEpochZero
 - testStreamsGroupMemberEpochValidation
 - testStreamsGroupMemberJoiningWithIncorrectlyPartitionedTopic
@@ -787,6 +815,7 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testStreamsGroupMemberRequestingShutdownApplication
 - testStreamsGroupMemberRequestingShutdownApplicationUponLeaving
 - testStreamsGroupMetadataReplayRoundTripsTopologyDescriptionEpochs
+- testStreamsGroupUsesBrokerDefaultAssignorWhenGroupUnset
 - testStreamsInitialRebalanceDelayEmptyDuringDelayAssignsAfterTimer
 - testStreamsLeavingMemberRemovesMemberAndBumpsGroupEpoch
 - testStreamsNewJoiningMemberTriggersNewTargetAssignment
@@ -968,6 +997,7 @@ org.apache.kafka.coordinator.group.StreamsGroupStaticMemberGroupMetadataManagerT
 - testStaticMemberRejoinsAfterTemporaryLeave
 - testStaticMemberRejoinsAfterTemporaryLeaveFromUnreleasedState
 - testStaticMemberRejoinsWithSameMemberIdAndDifferentInstanceId
+- testStaticMemberReplacementRelabelsCachedRefinedAssignment
 - testStaticMemberSendHeartbeatWithVariousEpochThenThrowError
 - testStreamsStaticJoinWithNewInstanceAtMaxSizeThrowsGroupMaxSizeReached
 - testStreamsStaticJoinWithUnreleasedInstanceThrowsUnreleasedInstanceIdAtMaxSize
@@ -1330,7 +1360,22 @@ org.apache.kafka.coordinator.group.modern.share.ShareGroupTest:
 - testValidateOffsetCommit
 - testValidateOffsetDelete
 - testValidateOffsetFetch
+org.apache.kafka.coordinator.group.streams.AssignmentRefinerTest:
+- shouldNotDetectADropAndADuplicateCancellingEachOtherOut
+- shouldNotPreserveActiveTaskCountWhenASubtopologyWasDroppedEntirely
+- shouldNotPreserveActiveTaskCountWhenATaskWasDropped
+- shouldNotPreserveActiveTaskCountWhenATaskWasHandedToTwoMembers
+- shouldNotPreserveActiveTaskCountWhenATaskWasInvented
+- shouldPreserveActiveTaskCountOfUnchangedAssignment
+- shouldPreserveActiveTaskCountWhenATaskIsHeldBackWithItsCurrentOwner
+- shouldPreserveActiveTaskCountWhenStandbysAreDeferred
+- shouldPreserveActiveTaskCountWhenTheTargetAssignmentItselfDuplicatesATask
 org.apache.kafka.coordinator.group.streams.CurrentAssignmentBuilderTest:
+- testActiveDemotedToStandbyInPlace
+- testActiveDemotionCompletesWhenRevocationIsAcknowledged
+- testActiveNotDemotedInPlaceWhileAnotherMemberOnSameProcessHoldsStandby
+- testActiveNotGrantedWhileAnotherMemberOnSameProcessHoldsStandby
+- testActiveNotGrantedWhileAnotherMemberOnSameProcessHoldsWarmup
 - testAssignmentEpochsShouldBePreservedFromPreviousAssignment
 - testMixedPreservedAndNewAssignmentEpochs
 - testNewlyAssignedTasksGetTargetAssignmentEpoch
@@ -1342,6 +1387,10 @@ org.apache.kafka.coordinator.group.streams.CurrentAssignmentBuilderTest:
 - testStableToUnreleasedTasksWithOwnedTasksNotHavingRevokedTasks
 - testStableToUnrevokedTasks
 - testStableToUnrevokedWithEmptyAssignment
+- testStandbyConvertedToWarmupInPlace
+- testStandbyPromotedToActiveWhenActiveIsReleased
+- testStandbyPromotionHoldsStandbyWhileActiveOwnedByAnotherMember
+- testStandbyRevokedNormallyWhenConversionIsBlockedByAnotherMemberOnSameProcess
 - testUnknownState
 - testUnreleasedTasksToStable
 - testUnreleasedTasksToStableWithNewTasks
@@ -1352,6 +1401,11 @@ org.apache.kafka.coordinator.group.streams.CurrentAssignmentBuilderTest:
 - testUnrevokedTasksToStable
 - testUnrevokedTasksToUnreleasedTasks
 - testUnrevokedTasksToUnrevokedTasks
+- testWarmupConvertedToStandbyInPlace
+- testWarmupNotDroppedWhilePromotionIsBlockedByAnotherRevocation
+- testWarmupPromotedToActiveFromUnreleasedState
+- testWarmupPromotedToActiveWhenActiveIsReleased
+- testWarmupPromotionHoldsWarmupWhileActiveOwnedByAnotherMember
 org.apache.kafka.coordinator.group.streams.MemberTaskOffsetsTest:
 - shouldConvertHeartbeatRequestTaskOffsets
 - shouldRejectDuplicateTaskEntries
@@ -1433,7 +1487,9 @@ org.apache.kafka.coordinator.group.streams.StreamsGroupTest:
 - testAsDescribedGroupPrefersConfiguredTopologyOverStreamsTopology
 - testAsDescribedGroupWithStreamsTopologyHavingSubtopologies
 - testAsListedGroup
+- testCacheAndRetrieveRefinedAssignment
 - testCacheEndpointToPartitionsAndRetrieve
+- testCachedRefinedAssignmentDoesNotTrackTheCallersMap
 - testCancelTimers
 - testComputeMetadataHash
 - testCreateGroupTombstoneRecords
@@ -1450,6 +1506,9 @@ org.apache.kafka.coordinator.group.streams.StreamsGroupTest:
 - testMetadataRefreshDeadline
 - testNoStaticMember
 - testOffsetExpirationCondition
+- testRefinedAssignmentCacheHoldsOnlyTheLatestEpoch
+- testRelabelRefinedAssignment
+- testRelabelRefinedAssignmentOfUnknownMemberIsANoOp
 - testRemoveMember
 - testRemoveMemberClearsTaskOffsets
 - testRemoveMemberRemovesCacheEntry
@@ -1524,6 +1583,7 @@ org.apache.kafka.coordinator.group.streams.TasksTupleTest:
 - testFromTargetAssignmentRecord
 - testIsEmpty
 - testReturnUnmodifiableTaskAssignments
+- testSameTasks
 - testTasksCannotBeNull
 org.apache.kafka.coordinator.group.streams.TasksTupleWithEpochsTest:
 - testFromCurrentAssignmentRecord
@@ -1551,12 +1611,23 @@ org.apache.kafka.coordinator.group.streams.TopologyMetadataTest:
 - testMetadataImage
 - testSubtopologies
 - testTopology
+org.apache.kafka.coordinator.group.streams.assignor.AssignmentConfigsImplTest:
+- testDefault
+- testFromEmptyMap
+- testFromMap
+- testFromMapWithoutRackAwareAssignmentTags
+- testRackAwareAssignmentTagsAreUnmodifiable
+- testWithers
 org.apache.kafka.coordinator.group.streams.assignor.GroupSpecImplTest:
 - testConfigs
 - testMemberAssignmentState
 - testMemberIds
 - testMemberMetadata
 - testMemberNotFound
+- testMembersAndConfigsAreUnmodifiable
+org.apache.kafka.coordinator.group.streams.assignor.MemberMetadataAndStateImplTest:
+- testCollectionsAreDeeplyUnmodifiable
+- testTaskOffsetsAreDeeplyUnmodifiable
 org.apache.kafka.coordinator.group.streams.assignor.MockAssignorTest:
 - testBasicScenario
 - testDoubleAssignment
@@ -1587,13 +1658,17 @@ org.apache.kafka.coordinator.group.streams.assignor.StickyTaskAssignorTest:
 - shouldAssignOneActiveTaskToEachProcessWhenTaskCountSameAsProcessCount
 - shouldAssignStandbyTaskToPreviousOwnerBasedOnBelowQuotaCondition
 - shouldAssignStandbyTasksToDifferentClientThanCorrespondingActiveTaskIsAssignedTo
+- shouldAssignStandbyToPreviousStandbyThatDoesNotHoldTheActiveTask
+- shouldAssignStandbysAwayFromProcessHoldingStateOnColdStart
 - shouldAssignTasksEvenlyWithUnequalTopicGroupSizes
 - shouldAssignTasksNotPreviouslyActiveToMultipleNewClients
 - shouldAssignTasksNotPreviouslyActiveToNewClient
 - shouldAssignTasksToClientWithPreviousStandbyTasks
+- shouldAssignTasksToMembersReportingTaskOffsetsOnColdStart
 - shouldAssignTasksToNewClient
 - shouldAssignTasksToNewClientWithoutFlippingAssignmentBetweenExistingAndBouncedClients
 - shouldAssignTasksToNewClientWithoutFlippingAssignmentBetweenExistingClients
+- shouldAssignTasksToProcessesReportingTaskOffsetsOnColdStartWithMultipleMembersPerProcess
 - shouldAssignTopicGroupIdEvenlyAcrossClientsWithNoStandByTasks
 - shouldAssignTopicGroupIdEvenlyAcrossClientsWithStandByTasks
 - shouldBalanceActiveAndStandbyTasksAcrossAvailableClients
@@ -1612,6 +1687,7 @@ org.apache.kafka.coordinator.group.streams.assignor.StickyTaskAssignorTest:
 - shouldNotMoveAnyTasksWhenNewTasksAdded
 - shouldRangeAssignTasksWhenScalingUp
 - shouldRangeAssignTasksWhenStartingEmpty
+- shouldRankCurrentOwnersAheadOfReportedTaskOffsetsAndMostCaughtUpFirst
 - shouldReBalanceTasksAcrossAllClientsWhenCapacityAndTaskCountTheSame
 - shouldReBalanceTasksAcrossClientsWhenCapacityLessThanTaskCount
 - shouldReassignTasksWhenNewNodeJoinsWithExistingActiveAndStandbyAssignments
@@ -1658,6 +1734,8 @@ org.apache.kafka.coordinator.group.streams.topics.CopartitionedTopicsEnforcerTes
 - shouldThrowTopicConfigurationExceptionIfPartitionCountsForCoPartitionedTopicsDontMatch
 org.apache.kafka.coordinator.group.streams.topics.EndpointToPartitionsManagerTest:
 - Should
+- testEndpointToPartitionsExcludesPartitionsMissingFromSmallerSourceTopic
+- testEndpointToPartitionsWithStandbyAndWarmupTasksInSameSubtopology
 - testEndpointToPartitionsWithStandbyTaskAssignments
 org.apache.kafka.coordinator.group.streams.topics.InternalTopicManagerTest:
 - testConfigureTopics
