@@ -17,14 +17,14 @@
 package org.apache.kafka.clients.consumer.internals.events;
 
 import org.apache.kafka.clients.consumer.internals.Acknowledgements;
-import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
+import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
 import org.apache.kafka.common.TopicIdPartition;
 
 import java.util.Map;
 import java.util.Optional;
 
 /**
- * This is the class of events created by the {@link ConsumerNetworkThread network thread} to indicate completion
+ * This is the class of events created by the {@link ConsumerReactor network thread} to indicate completion
  * of acknowledgements.
  */
 public class ShareAcknowledgementEvent {

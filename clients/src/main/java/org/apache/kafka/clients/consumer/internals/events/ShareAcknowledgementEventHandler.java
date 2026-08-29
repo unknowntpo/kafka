@@ -16,7 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals.events;
 
-import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
+import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -25,7 +25,7 @@ import java.util.concurrent.BlockingQueue;
 
 /**
  * An event handler that receives {@link BackgroundEvent background events} from the
- * {@link ConsumerNetworkThread network thread} which are then made available to the application thread
+ * {@link ConsumerReactor network thread} which are then made available to the application thread
  * via an {@link EventProcessor}.
  */
 
@@ -40,7 +40,7 @@ public class ShareAcknowledgementEventHandler {
     /**
      * Add a {@link ShareAcknowledgementEvent} to the handler.
      *
-     * @param event A {@link ShareAcknowledgementEvent} created by the {@link ConsumerNetworkThread network thread}
+     * @param event A {@link ShareAcknowledgementEvent} created by the {@link ConsumerReactor network thread}
      */
     public void add(ShareAcknowledgementEvent event) {
         Objects.requireNonNull(event, "ShareAcknowledgementCompleteEvent provided to add must be non-null");

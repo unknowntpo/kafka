@@ -576,8 +576,8 @@ public class FetchRequestManagerTest {
 
         // NOTE: by design the FetchRequestManager doesn't perform network I/O internally. That means that calling
         // the close() method with a Timer will NOT send out the close session requests on close. The network
-        // I/O logic is handled inside ConsumerNetworkThread.runAtClose, so we need to run that logic here.
-        ConsumerNetworkThread.runAtClose(List.of(fetcher), networkClientDelegate, time.milliseconds());
+        // I/O logic is handled inside ConsumerReactor.runAtClose, so we need to run that logic here.
+        ConsumerReactor.runAtClose(List.of(fetcher), networkClientDelegate, time.milliseconds());
         // the network is polled during the last state of clean up.
         networkClientDelegate.poll(time.timer(1));
         // validate that closing the fetcher has sent a request with final epoch. 2 requests are sent, one for the

@@ -189,7 +189,7 @@ class ClientOAuthIntegrationTest extends IntegrationTestHarness with SaslSetup {
     assertDoesNotThrow(() => createAdminClient(configOverrides = configs))
   }
 
-  @Disabled("KAFKA-19394: Failure in ConsumerNetworkThread.initializeResources() can cause hangs on AsyncKafkaConsumer.close()")
+  @Disabled("KAFKA-19394: Failure in ConsumerReactor.initializeResources() can cause hangs on AsyncKafkaConsumer.close()")
   @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedGroupProtocolNames)
   @MethodSource(Array("getTestGroupProtocolParametersAll"))
   def testJwtBearerWithMalformedAssertionFile(groupProtocol: String): Unit = {
@@ -205,7 +205,7 @@ class ClientOAuthIntegrationTest extends IntegrationTestHarness with SaslSetup {
     assertThrows(classOf[KafkaException], () => createAdminClient(configOverrides = configs))
   }
 
-  @Disabled("KAFKA-19394: Failure in ConsumerNetworkThread.initializeResources() can cause hangs on AsyncKafkaConsumer.close()")
+  @Disabled("KAFKA-19394: Failure in ConsumerReactor.initializeResources() can cause hangs on AsyncKafkaConsumer.close()")
   @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedGroupProtocolNames)
   @MethodSource(Array("getTestGroupProtocolParametersAll"))
   def testJwtBearerWithEmptyAssertionFile(groupProtocol: String): Unit = {
@@ -221,7 +221,7 @@ class ClientOAuthIntegrationTest extends IntegrationTestHarness with SaslSetup {
     assertThrows(classOf[KafkaException], () => createAdminClient(configOverrides = configs))
   }
 
-  @Disabled("KAFKA-19394: Failure in ConsumerNetworkThread.initializeResources() can cause hangs on AsyncKafkaConsumer.close()")
+  @Disabled("KAFKA-19394: Failure in ConsumerReactor.initializeResources() can cause hangs on AsyncKafkaConsumer.close()")
   @ParameterizedTest(name = TestInfoUtils.TestWithParameterizedGroupProtocolNames)
   @MethodSource(Array("getTestGroupProtocolParametersAll"))
   def testJwtBearerWithMissingAssertionFile(groupProtocol: String): Unit = {

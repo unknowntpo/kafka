@@ -16,7 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals.events;
 
-import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
+import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.utils.Time;
 
@@ -27,7 +27,7 @@ import java.util.concurrent.BlockingQueue;
 
 /**
  * An event handler that receives {@link BackgroundEvent background events} from the
- * {@link ConsumerNetworkThread network thread} which are then made available to the application thread
+ * {@link ConsumerReactor network thread} which are then made available to the application thread
  * via an {@link EventProcessor}.
  */
 
@@ -48,7 +48,7 @@ public class BackgroundEventHandler {
     /**
      * Add a {@link BackgroundEvent} to the handler.
      *
-     * @param event A {@link BackgroundEvent} created by the {@link ConsumerNetworkThread network thread}
+     * @param event A {@link BackgroundEvent} created by the {@link ConsumerReactor network thread}
      */
     public void add(BackgroundEvent event) {
         Objects.requireNonNull(event, "BackgroundEvent provided to add must be non-null");

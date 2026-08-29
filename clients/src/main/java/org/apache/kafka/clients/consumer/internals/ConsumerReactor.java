@@ -61,7 +61,7 @@ import static org.apache.kafka.common.utils.Utils.closeQuietly;
  * Background thread runnable that consumes {@link ApplicationEvent} and produces {@link BackgroundEvent}. It
  * uses an event loop to consume and produce events, and poll the network client to handle network IO.
  */
-public class ConsumerNetworkThread extends KafkaThread implements Closeable {
+public class ConsumerReactor extends KafkaThread implements Closeable {
 
     // visible for testing
     static final long MAX_POLL_TIMEOUT_MS = 5000;
@@ -85,7 +85,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private volatile long cachedMaximumTimeToWait = MAX_POLL_TIMEOUT_MS;
     private long lastPollTimeMs = 0L;
 
-    public ConsumerNetworkThread(LogContext logContext,
+    public ConsumerReactor(LogContext logContext,
                                  Time time,
                                  BlockingQueue<ApplicationEvent> applicationEventQueue,
                                  CompletableEventReaper applicationEventReaper,
