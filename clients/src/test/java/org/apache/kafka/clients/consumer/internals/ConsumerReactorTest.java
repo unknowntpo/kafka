@@ -60,20 +60,20 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-public class ConsumerNetworkThreadTest {
+public class ConsumerReactorTest {
     private final Time time;
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
     private final ApplicationEventProcessor applicationEventProcessor;
     private final OffsetsRequestManager offsetsRequestManager;
     private final ConsumerHeartbeatRequestManager heartbeatRequestManager;
     private final CoordinatorRequestManager coordinatorRequestManager;
-    private final ConsumerNetworkThread consumerNetworkThread;
+    private final ConsumerReactor consumerNetworkThread;
     private final NetworkClientDelegate networkClientDelegate;
     private final RequestManagers requestManagers;
     private final CompletableEventReaper applicationEventReaper;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
-    ConsumerNetworkThreadTest() {
+    ConsumerReactorTest() {
         this.networkClientDelegate = mock(NetworkClientDelegate.class);
         this.requestManagers = mock(RequestManagers.class);
         this.offsetsRequestManager = mock(OffsetsRequestManager.class);
@@ -86,7 +86,7 @@ public class ConsumerNetworkThreadTest {
         this.asyncConsumerMetrics = mock(AsyncConsumerMetrics.class);
         LogContext logContext = new LogContext();
 
-        this.consumerNetworkThread = new ConsumerNetworkThread(
+        this.consumerNetworkThread = new ConsumerReactor(
                 logContext,
                 time,
                 applicationEventQueue,
@@ -112,7 +112,7 @@ public class ConsumerNetworkThreadTest {
     @Test
     public void testEnsureCloseStopsRunningThread() {
         assertTrue(consumerNetworkThread.isRunning(),
-            "ConsumerNetworkThread should start running when created");
+            "ConsumerReactor should start running when created");
 
         consumerNetworkThread.close();
         assertFalse(consumerNetworkThread.isRunning(),
@@ -120,8 +120,8 @@ public class ConsumerNetworkThreadTest {
     }
 
     @ParameterizedTest
-    @ValueSource(longs = {ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS - 1, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS + 1})
-    public void testConsumerNetworkThreadPollTimeComputations(long exampleTime) {
+    @ValueSource(longs = {ConsumerReactor.MAX_POLL_TIMEOUT_MS - 1, ConsumerReactor.MAX_POLL_TIMEOUT_MS, ConsumerReactor.MAX_POLL_TIMEOUT_MS + 1})
+    public void testConsumerReactorPollTimeComputations(long exampleTime) {
         List<RequestManager> list = List.of(coordinatorRequestManager, heartbeatRequestManager);
         when(requestManagers.entries()).thenReturn(list);
 
@@ -137,7 +137,7 @@ public class ConsumerNetworkThreadTest {
         when(networkClientDelegate.addAll(pollResult1)).thenReturn(pollResult1.timeUntilNextPollMs);
         consumerNetworkThread.runOnce();
 
-        verify(networkClientDelegate).poll(Math.min(exampleTime, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS), time.milliseconds());
+        verify(networkClientDelegate).poll(Math.min(exampleTime, ConsumerReactor.MAX_POLL_TIMEOUT_MS), time.milliseconds());
         assertEquals(consumerNetworkThread.maximumTimeToWait(), exampleTime);
     }
 
@@ -175,7 +175,7 @@ public class ConsumerNetworkThreadTest {
     public void testMaximumTimeToWait() {
         final int defaultHeartbeatIntervalMs = 1000;
         // Initial value before runOnce has been called
-        assertEquals(ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, consumerNetworkThread.maximumTimeToWait());
+        assertEquals(ConsumerReactor.MAX_POLL_TIMEOUT_MS, consumerNetworkThread.maximumTimeToWait());
 
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
         when(heartbeatRequestManager.maximumTimeToWait(time.milliseconds())).thenReturn((long) defaultHeartbeatIntervalMs);
@@ -215,7 +215,7 @@ public class ConsumerNetworkThreadTest {
     public void testRunOnceRecordTimeBetweenNetworkThreadPoll(String groupName) {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, groupName);
-             ConsumerNetworkThread consumerNetworkThread = new ConsumerNetworkThread(
+             ConsumerReactor consumerNetworkThread = new ConsumerReactor(
                      new LogContext(),
                      time,
                      applicationEventQueue,
@@ -250,7 +250,7 @@ public class ConsumerNetworkThreadTest {
     public void testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime(String groupName) {
         try (Metrics metrics = new Metrics();
              AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, groupName);
-             ConsumerNetworkThread consumerNetworkThread = new ConsumerNetworkThread(
+             ConsumerReactor consumerNetworkThread = new ConsumerReactor(
                      new LogContext(),
                      time,
                      applicationEventQueue,
@@ -338,15 +338,15 @@ public class ConsumerNetworkThreadTest {
     }
 
     /**
-     * Tests that when an error occurs during {@link ConsumerNetworkThread#initializeResources()} that the
-     * logic in {@link ConsumerNetworkThread#cleanup()} will not throw errors when closing.
+     * Tests that when an error occurs during {@link ConsumerReactor#initializeResources()} that the
+     * logic in {@link ConsumerReactor#cleanup()} will not throw errors when closing.
      */
     private void testInitializeResourcesError(Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
                                               Supplier<RequestManagers> requestManagersSupplier) {
-        // A new ConsumerNetworkThread is created because the shared one doesn't have any issues initializing its
+        // A new ConsumerReactor is created because the shared one doesn't have any issues initializing its
         // resources. However, most of the mocks can be reused, so this is mostly boilerplate except for the error
         // when a supplier is invoked.
-        try (ConsumerNetworkThread thread = new ConsumerNetworkThread(
+        try (ConsumerReactor thread = new ConsumerReactor(
             new LogContext(),
             time,
             applicationEventQueue,

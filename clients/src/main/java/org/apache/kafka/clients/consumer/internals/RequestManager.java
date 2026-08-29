@@ -31,7 +31,7 @@ public interface RequestManager {
      * During normal operation of the {@link Consumer}, a request manager may need to send out network requests.
      * Implementations can return {@link PollResult their need for network I/O} by returning the requests here.
      * This method is called within a single-threaded context from
-     * {@link ConsumerNetworkThread the consumer's network I/O thread}. As such, there should be no need for
+     * {@link ConsumerReactor the consumer's network I/O thread}. As such, there should be no need for
      * synchronization protection in this method's implementation.
      *
      * <p/>
@@ -48,7 +48,7 @@ public interface RequestManager {
     /**
      * On shutdown of the {@link Consumer}, a request manager may need to send out network requests. Implementations
      * can signal that by returning the {@link PollResult close} requests here. Like {@link #poll(long)}, this method
-     * is called within a single-threaded context from {@link ConsumerNetworkThread the consumer's network I/O thread}.
+     * is called within a single-threaded context from {@link ConsumerReactor the consumer's network I/O thread}.
      * As such, there should be no need for synchronization protection in this method's implementation.
      *
      * <p/>

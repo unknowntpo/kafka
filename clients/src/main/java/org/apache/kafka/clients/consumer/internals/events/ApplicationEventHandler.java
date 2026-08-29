@@ -16,7 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals.events;
 
-import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
+import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
@@ -39,14 +39,14 @@ import java.util.function.Supplier;
 
 /**
  * An event handler that receives {@link ApplicationEvent application events} from the application thread which
- * are then readable from the {@link ApplicationEventProcessor} in the {@link ConsumerNetworkThread network thread}.
+ * are then readable from the {@link ApplicationEventProcessor} in the {@link ConsumerReactor network thread}.
  */
 public class ApplicationEventHandler implements Closeable {
 
     private final Logger log;
     private final Time time;
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
-    private final ConsumerNetworkThread networkThread;
+    private final ConsumerReactor networkThread;
     private final IdempotentCloser closer = new IdempotentCloser();
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
@@ -63,7 +63,7 @@ public class ApplicationEventHandler implements Closeable {
         this.time = time;
         this.applicationEventQueue = applicationEventQueue;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
-        ConsumerNetworkThread networkThread = new ConsumerNetworkThread(logContext,
+        ConsumerReactor networkThread = new ConsumerReactor(logContext,
                 time,
                 applicationEventQueue,
                 applicationEventReaper,
@@ -105,7 +105,7 @@ public class ApplicationEventHandler implements Closeable {
     }
 
     /**
-     * Wakeup the {@link ConsumerNetworkThread network I/O thread} to pull the next event(s) from the queue.
+     * Wakeup the {@link ConsumerReactor network I/O thread} to pull the next event(s) from the queue.
      */
     public void wakeupNetworkThread() {
         networkThread.wakeup();
