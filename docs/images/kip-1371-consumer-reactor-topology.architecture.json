@@ -5,7 +5,7 @@
     "title": "KIP-1371 Consumer Reactor Execution Topology",
     "locale": "en",
     "quality_profile": "showcase",
-    "viewBox": [1540, 860],
+    "viewBox": [1680, 1020],
     "repository": {
       "url": "https://github.com/unknowntpo/kafka",
       "revision": "65469ad73b8b10d0f479f7a527558cb6d1c2543a"
@@ -20,7 +20,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java", "line": 2012, "label": "regular poll wait"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumerImpl.java", "line": 710, "label": "share poll wait"}
       ],
-      "pos": [40, 280],
+      "pos": [40, 330],
       "size": [220, 90]
     },
     {
@@ -31,7 +31,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorGateway.java", "line": 97, "label": "submit event"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 340, "label": "drain events"}
       ],
-      "pos": [310, 100],
+      "pos": [290, 120],
       "size": [220, 78]
     },
     {
@@ -42,7 +42,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 259, "label": "runOnce phases"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 634, "label": "execute actions"}
       ],
-      "pos": [590, 280],
+      "pos": [570, 330],
       "size": [240, 105],
       "tag": "background thread"
     },
@@ -54,18 +54,52 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 95, "label": "regular composition"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 145, "label": "share composition"}
       ],
-      "pos": [900, 80],
-      "size": [220, 84]
+      "pos": [870, 70],
+      "size": [240, 84]
     },
     {
-      "id": "managers",
+      "id": "coordinator_manager",
       "type": "backend",
-      "label": "Request Managers",
+      "label": "CoordinatorRequestManager",
       "sources": [
-        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 177, "label": "ordered entries"}
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CoordinatorRequestManager.java", "line": 50, "label": "coordinator owner"}
       ],
-      "pos": [900, 280],
-      "size": [220, 100]
+      "pos": [870, 210],
+      "size": [240, 68]
+    },
+    {
+      "id": "heartbeat_managers",
+      "type": "backend",
+      "label": "Heartbeat / Membership",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManager.java", "line": 50, "label": "regular heartbeat"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareHeartbeatRequestManager.java", "line": 42, "label": "share heartbeat"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/StreamsGroupHeartbeatRequestManager.java", "line": 69, "label": "Streams heartbeat"}
+      ],
+      "pos": [870, 305],
+      "size": [240, 68]
+    },
+    {
+      "id": "fetch_managers",
+      "type": "backend",
+      "label": "Fetch / Share Consume",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java", "line": 44, "label": "regular fetch"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumeRequestManager.java", "line": 86, "label": "share consume"}
+      ],
+      "pos": [870, 400],
+      "size": [240, 68]
+    },
+    {
+      "id": "commit_managers",
+      "type": "backend",
+      "label": "Commit / Acknowledge",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java", "line": 76, "label": "regular commit"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumeRequestManager.java", "line": 1391, "label": "share acknowledge"}
+      ],
+      "pos": [870, 495],
+      "size": [240, 68]
     },
     {
       "id": "network",
@@ -75,15 +109,15 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 158, "label": "network poll"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 317, "label": "stage output"}
       ],
-      "pos": [1150, 285],
+      "pos": [1220, 330],
       "size": [210, 90]
     },
     {
       "id": "brokers",
       "type": "external",
       "label": "Kafka Brokers",
-      "pos": [1390, 285],
-      "size": [140, 90]
+      "pos": [1510, 330],
+      "size": [150, 90]
     },
     {
       "id": "schedule",
@@ -92,18 +126,29 @@
       "sources": [
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 574, "label": "publish schedule"}
       ],
-      "pos": [590, 485],
+      "pos": [570, 620],
       "size": [240, 78]
     },
     {
-      "id": "background_events",
+      "id": "background_event_handler",
       "type": "messagebus",
-      "label": "BackgroundEventHandler + Queue",
+      "label": "BackgroundEventHandler",
       "sources": [
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 35, "label": "pending buffer"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 64, "label": "publish queue"}
       ],
-      "pos": [310, 485],
+      "pos": [290, 580],
+      "size": [220, 80]
+    },
+    {
+      "id": "background_event_queue",
+      "type": "messagebus",
+      "label": "BackgroundEventQueue",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java", "line": 373, "label": "regular event queue"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumerImpl.java", "line": 180, "label": "share event queue"}
+      ],
+      "pos": [290, 715],
       "size": [220, 80]
     },
     {
@@ -114,7 +159,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java", "line": 50, "label": "regular buffer"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareFetchBuffer.java", "line": 45, "label": "share buffer"}
       ],
-      "pos": [310, 650],
+      "pos": [290, 850],
       "size": [220, 80]
     },
     {
@@ -125,7 +170,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ReactorAction.java", "line": 35, "label": "action types"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 634, "label": "reactor executes actions"}
       ],
-      "pos": [1150, 630],
+      "pos": [1220, 735],
       "size": [220, 90]
     }
   ],
@@ -138,12 +183,18 @@
     {
       "kind": "region",
       "label": "Cross-thread handoff",
-      "wraps": ["application_events", "background_events", "fetch_buffer"]
+      "wraps": ["application_events", "background_event_queue", "fetch_buffer"]
     },
     {
       "kind": "region",
       "label": "Consumer background execution context",
-      "wraps": ["reactor", "composition", "managers", "network", "schedule", "actions"]
+      "wraps": ["reactor", "composition", "coordinator_manager", "heartbeat_managers", "fetch_managers", "commit_managers", "network", "schedule", "actions", "background_event_handler"]
+    },
+    {
+      "kind": "region",
+      "label": "Selected manager stack (composition-dependent)",
+      "wraps": ["coordinator_manager", "heartbeat_managers", "fetch_managers", "commit_managers"],
+      "pad": 18
     }
   ],
   "connections": [
@@ -154,8 +205,8 @@
       "label": "submit ApplicationEvent",
       "fromSide": "top",
       "toSide": "left",
-      "via": [[150, 220], [285, 220], [285, 139]],
-      "labelAt": [220, 208],
+      "via": [[150, 255], [255, 255], [255, 159]],
+      "labelAt": [205, 243],
       "variant": "emphasis"
     },
     {
@@ -165,47 +216,52 @@
       "label": "drain ordered inputs",
       "fromSide": "right",
       "toSide": "left",
-      "via": [[550, 139], [550, 332.5]],
-      "labelAt": [570, 220],
+      "via": [[550, 159], [550, 382.5]],
+      "labelAt": [570, 245],
       "variant": "emphasis"
     },
     {
       "id": "select_composition",
       "from": "composition",
       "to": "reactor",
-      "label": "select regular, Streams, or share composition",
+      "label": "entries(): selected regular, Streams, or share manager set",
       "fromSide": "left",
       "toSide": "top",
-      "via": [[860, 122], [710, 122], [710, 240]],
-      "labelAt": [785, 178]
+      "via": [[830, 112], [690, 112], [690, 290]],
+      "labelAt": [760, 175]
     },
     {
-      "id": "poll_managers",
+      "id": "poll_coordinator_manager",
       "from": "reactor",
-      "to": "managers",
-      "label": "stable ordered poll",
+      "to": "coordinator_manager",
+      "label": "poll() → PollResult",
       "fromSide": "right",
       "toSide": "left",
-      "labelAt": [865, 272],
+      "labelAt": [830, 292],
       "variant": "emphasis"
     },
     {
-      "id": "compose_managers",
-      "from": "composition",
-      "to": "managers",
-      "label": "manager set and typed handlers",
-      "fromSide": "bottom",
-      "toSide": "top",
-      "labelAt": [1010, 220]
+      "id": "poll_heartbeat_managers",
+      "from": "reactor",
+      "to": "heartbeat_managers",
+      "fromSide": "right",
+      "toSide": "left",
+      "variant": "emphasis"
     },
     {
-      "id": "return_poll_result",
-      "from": "managers",
-      "to": "reactor",
-      "label": "PollResult: commands · events · next condition",
-      "fromSide": "left",
-      "toSide": "right",
-      "labelAt": [865, 398],
+      "id": "poll_fetch_managers",
+      "from": "reactor",
+      "to": "fetch_managers",
+      "fromSide": "right",
+      "toSide": "left",
+      "variant": "emphasis"
+    },
+    {
+      "id": "poll_commit_managers",
+      "from": "reactor",
+      "to": "commit_managers",
+      "fromSide": "right",
+      "toSide": "left",
       "variant": "emphasis"
     },
     {
@@ -215,8 +271,8 @@
       "label": "stage commands, then poll",
       "fromSide": "bottom",
       "toSide": "bottom",
-      "via": [[710, 430], [1255, 430]],
-      "labelAt": [1030, 418]
+      "via": [[690, 595], [1325, 595]],
+      "labelAt": [1010, 610]
     },
     {
       "id": "network_round_trip",
@@ -225,17 +281,18 @@
       "label": "request / response",
       "fromSide": "right",
       "toSide": "left",
-      "labelAt": [1375, 265],
+      "labelAt": [1470, 310],
       "variant": "emphasis"
     },
     {
       "id": "network_completion",
       "from": "network",
-      "to": "managers",
-      "label": "completion updates owner state",
-      "fromSide": "left",
-      "toSide": "right",
-      "labelAt": [1135, 397]
+      "to": "reactor",
+      "label": "completion activates owning manager",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [[1325, 190], [690, 190]],
+      "labelAt": [1000, 178]
     },
     {
       "id": "publish_schedule",
@@ -244,7 +301,7 @@
       "label": "publish before effects",
       "fromSide": "bottom",
       "toSide": "top",
-      "labelAt": [630, 435],
+      "labelAt": [615, 555],
       "variant": "emphasis"
     },
     {
@@ -252,21 +309,31 @@
       "from": "reactor",
       "to": "actions",
       "label": "execute after schedule publication",
-      "fromSide": "bottom",
-      "toSide": "left",
-      "via": [[710, 460], [1140, 460], [1140, 675]],
-      "labelAt": [1000, 448],
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [[1130, 382.5], [1130, 690], [1330, 690]],
+      "labelAt": [1150, 678],
       "variant": "emphasis"
     },
     {
       "id": "publish_background_event",
       "from": "actions",
-      "to": "background_events",
-      "label": "publish BackgroundEvent",
+      "to": "background_event_handler",
+      "label": "stage BackgroundEvent",
       "fromSide": "left",
       "toSide": "right",
-      "via": [[1110, 675], [850, 675], [850, 600], [570, 600], [570, 525]],
-      "labelAt": [745, 663]
+      "via": [[1180, 780], [810, 780], [810, 710], [550, 710], [550, 620]],
+      "labelAt": [1000, 768]
+    },
+    {
+      "id": "publish_background_queue",
+      "from": "background_event_handler",
+      "to": "background_event_queue",
+      "label": "publish after schedule",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [440, 688],
+      "variant": "emphasis"
     },
     {
       "id": "fill_fetch_buffer",
@@ -275,27 +342,28 @@
       "label": "completed fetch stores records",
       "fromSide": "right",
       "toSide": "right",
-      "via": [[1375, 330], [1375, 810], [570, 810], [570, 690]],
-      "labelAt": [970, 798]
+      "via": [[1450, 375], [1450, 960], [550, 960], [550, 890]],
+      "labelAt": [1000, 948]
     },
     {
       "id": "drain_background_event",
-      "from": "background_events",
+      "from": "background_event_queue",
       "to": "application",
       "label": "application drains BackgroundEvent",
       "fromSide": "left",
       "toSide": "bottom",
-      "via": [[280, 525], [150, 525]],
-      "labelAt": [205, 513]
+      "via": [[250, 755], [150, 755]],
+      "labelAt": [195, 743]
     },
     {
       "id": "application_wakeup",
       "from": "actions",
       "to": "fetch_buffer",
       "label": "WAKE_APPLICATION executes last",
-      "fromSide": "left",
+      "fromSide": "bottom",
       "toSide": "right",
-      "labelAt": [710, 708],
+      "via": [[1330, 870], [810, 870], [810, 890], [550, 890]],
+      "labelAt": [1010, 858],
       "variant": "emphasis"
     },
     {
@@ -305,8 +373,8 @@
       "label": "Consumer.poll() drains records",
       "fromSide": "left",
       "toSide": "bottom",
-      "via": [[270, 690], [95, 690], [95, 420], [150, 420]],
-      "labelAt": [195, 678]
+      "via": [[250, 890], [95, 890], [95, 470], [150, 470]],
+      "labelAt": [185, 878]
     }
   ],
   "cards": [

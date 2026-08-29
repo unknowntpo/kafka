@@ -199,10 +199,14 @@ made by different components along the path. The proposal changes responsibility
 
 The following topology expands that boundary into the full runtime path. `AsyncKafkaConsumer`, the Streams-enabled
 regular consumer, and `ShareConsumerImpl` select different `RequestManagers` compositions while using the same
-reactor phases. Application commands enter through `ApplicationEventQueue`. Network completions update the owning
-manager; completed fetches enter `FetchBuffer` or `ShareFetchBuffer`; and application-visible `ReactorAction` values
-are executed by `ConsumerReactor` only after `ReactorSchedule` publication. The background-event and fetch-buffer
-paths then return data, notifications, and wakeups to the application thread.
+reactor phases. The manager stack in the diagram is representative: each composition supplies only its applicable
+coordinator, heartbeat or membership, fetch or share-consume, and commit or acknowledgement managers. Application
+commands enter through `ApplicationEventQueue`. Network completions activate the owning manager; completed fetches
+enter `FetchBuffer` or `ShareFetchBuffer`; and application-visible `ReactorAction` values are executed by
+`ConsumerReactor` only after `ReactorSchedule` publication. `BackgroundEventHandler` stages and publishes events to
+the cross-thread `BackgroundEventQueue`, which the application thread drains. The background-event and fetch-buffer
+paths therefore return data, notifications, and wakeups to the application thread. Kafka brokers remain outside the
+consumer execution contexts.
 
 ![ConsumerReactor complete execution topology](../images/kip-1371-consumer-reactor-topology.png)
 
