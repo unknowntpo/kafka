@@ -15,7 +15,7 @@
  limitations under the License.
 -->
 
-# KIP-1371: Introduce a Consumer Reactor for State Management and Event Processing
+# KIP-1371: Formalize Consumer Reactor Coordination and Publication
 
 ## Status
 
@@ -35,7 +35,9 @@ The async regular and share consumers already use a background loop and request 
 completion, and publication decisions remain distributed across paths that may observe different state. This has
 contributed to busy loops, wakeup defects, stale completion handling, and state-publication races.
 
-This KIP refactors that background loop into `ConsumerReactor`. Managers retain local state and policy while reporting
+`ConsumerNetworkThread` already behaves as a reactor-like background loop: it drains application inputs, polls
+request managers, drives network I/O, and processes completions. This KIP formalizes that loop as `ConsumerReactor`,
+the final cross-manager coordination and publication boundary. Managers retain local state and policy while reporting
 produced work and one typed next-poll condition. The reactor orders inputs, combines manager timing into one immutable
 scheduling publication, and then releases the corresponding application-visible effects. During migration, the
 publication carries separate reactor and application-wait projections.
@@ -127,6 +129,10 @@ proposal.
 ## Proposed Changes
 
 ### Reactor model in a nutshell
+
+`ConsumerReactor` is a consumer-specific orchestration event loop. It is not a global consumer-state owner: each
+request manager or protocol driver retains its mutable domain state and eligibility rules. The reactor supplies the
+ordered boundary at which those local decisions are combined and published.
 
 A request manager owns one domain of mutable state and policy, such as heartbeat, commit, fetch, or coordinator
 state. `ConsumerReactor` owns the ordered iteration that combines manager outputs. In each iteration it:
