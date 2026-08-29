@@ -212,12 +212,14 @@ existing coordination shape; it does not imply that every path is independently 
 
 ![Async consumer coordination before KIP-1371](../images/kip-1371-before-consumer-network-thread.png)
 
-Both diagrams trace the same representative case: a heartbeat or commit response observes that the coordinator it
-used is unavailable. Before the KIP, that response callback can directly call `markCoordinatorUnknown()` on the
-coordinator manager. After the KIP, the producing manager reports a versioned fact; the selected composition derives
-one command; and only `CoordinatorRequestManager` validates the observed version and changes coordinator state. The
-fetch-buffer and background-event paths remain visible in both diagrams to show how that coordination case fits into
-the complete application/background data flow.
+The Before diagram above and the complete-topology diagram below trace the same representative case: a heartbeat or
+commit response observes that the coordinator it used is unavailable. Before the KIP, that response callback can
+directly call `markCoordinatorUnknown()` on the coordinator manager. After the KIP, the producing manager reports a
+versioned fact; the selected composition derives `InvalidateCoordinatorIfCurrent(observedVersion)`; and only
+`CoordinatorRequestManager` validates that version and changes coordinator state. The fetch-buffer and
+background-event paths remain visible in both diagrams to show how that coordination case fits into the complete
+application/background data flow. Source links in the Before diagram are pinned to the pre-KIP baseline commit
+`04c326d9d5bfb43127157e72d00d2d8d3395e1ac`; source links in the complete topology use the POC evidence revision.
 
 The following topology expands that boundary into the full runtime path. `AsyncKafkaConsumer`, the Streams-enabled
 regular consumer, and `ShareConsumerImpl` select different `RequestManagers` compositions while using the same
@@ -981,7 +983,7 @@ the existing input paths and stable ordered pass cannot express.
 ### Put all consumer logic in one reactor class
 
 This centralizes code rather than decisions and would mix regular/share behavior into the execution kernel. Managers
-and drivers keep their rules local while the reactor remains the final coordination owner.
+and drivers keep their rules local while the reactor remains the final coordination boundary.
 
 ### Implement separate regular and share reactor stacks
 

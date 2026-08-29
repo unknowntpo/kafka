@@ -111,14 +111,14 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 158, "label": "network poll"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 317, "label": "stage output"}
       ],
-      "pos": [1220, 330],
+      "pos": [1220, 337.5],
       "size": [210, 90]
     },
     {
       "id": "brokers",
       "type": "external",
       "label": "Kafka Brokers",
-      "pos": [1510, 330],
+      "pos": [1510, 337.5],
       "size": [150, 90]
     },
     {
@@ -172,7 +172,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ReactorAction.java", "line": 35, "label": "action types"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 634, "label": "reactor executes actions"}
       ],
-      "pos": [1220, 735],
+      "pos": [870, 735],
       "size": [220, 90]
     }
   ],
@@ -239,8 +239,18 @@
       "label": "versioned fact",
       "fromSide": "right",
       "toSide": "top",
-      "via": [[1150, 339], [1150, 165], [690, 165], [690, 300]],
-      "labelAt": [760, 153],
+      "via": [[1150, 339], [1150, 35], [650, 35], [650, 300], [690, 300]],
+      "labelAt": [790, 23],
+      "variant": "emphasis"
+    },
+    {
+      "id": "coordinator_command",
+      "from": "composition",
+      "to": "coordinator_manager",
+      "label": "InvalidateCoordinatorIfCurrent(v7)",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [1040, 182],
       "variant": "emphasis"
     },
     {
@@ -291,11 +301,9 @@
       "id": "stage_network_commands",
       "from": "reactor",
       "to": "network",
-      "label": "stage commands, then poll",
-      "fromSide": "bottom",
-      "toSide": "bottom",
-      "via": [[690, 595], [1325, 595]],
-      "labelAt": [1010, 610]
+      "fromSide": "right",
+      "toSide": "left",
+      "variant": "emphasis"
     },
     {
       "id": "network_round_trip",
@@ -306,15 +314,6 @@
       "toSide": "left",
       "labelAt": [1470, 310],
       "variant": "emphasis"
-    },
-    {
-      "id": "network_completion",
-      "from": "network",
-      "to": "reactor",
-      "fromSide": "top",
-      "toSide": "top",
-      "via": [[1325, 190], [690, 190]],
-      "variant": "dashed"
     },
     {
       "id": "publish_schedule",
@@ -332,9 +331,9 @@
       "to": "actions",
       "label": "execute after schedule publication",
       "fromSide": "right",
-      "toSide": "top",
-      "via": [[1130, 382.5], [1130, 690], [1330, 690]],
-      "labelAt": [1150, 678],
+      "toSide": "left",
+      "via": [[840, 382.5], [840, 780]],
+      "labelAt": [960, 690],
       "variant": "emphasis"
     },
     {
@@ -344,8 +343,8 @@
       "label": "stage BackgroundEvent",
       "fromSide": "left",
       "toSide": "right",
-      "via": [[1180, 780], [810, 780], [810, 710], [550, 710], [550, 620]],
-      "labelAt": [1000, 768]
+      "via": [[550, 780], [550, 620]],
+      "labelAt": [690, 768]
     },
     {
       "id": "publish_background_queue",
@@ -359,13 +358,13 @@
     },
     {
       "id": "fill_fetch_buffer",
-      "from": "network",
+      "from": "fetch_managers",
       "to": "fetch_buffer",
-      "label": "completed fetch stores records",
+      "label": "response handler stores CompletedFetch",
       "fromSide": "right",
       "toSide": "right",
-      "via": [[1450, 375], [1450, 960], [550, 960], [550, 890]],
-      "labelAt": [1000, 948]
+      "via": [[1140, 434], [1140, 840], [525, 840], [525, 930], [550, 930], [550, 890]],
+      "labelAt": [1010, 918]
     },
     {
       "id": "drain_background_event",
@@ -384,7 +383,7 @@
       "label": "WAKE_APPLICATION executes last",
       "fromSide": "bottom",
       "toSide": "right",
-      "via": [[1330, 870], [810, 870], [810, 890], [550, 890]],
+      "via": [[980, 870], [810, 870], [810, 890], [550, 890]],
       "labelAt": [1010, 858],
       "variant": "emphasis"
     },
