@@ -206,6 +206,13 @@ existing coordination shape; it does not imply that every path is independently 
 
 ![Async consumer coordination before KIP-1371](../images/kip-1371-before-consumer-network-thread.png)
 
+Both diagrams trace the same representative case: a heartbeat or commit response observes that the coordinator it
+used is unavailable. Before the KIP, that response callback can directly call `markCoordinatorUnknown()` on the
+coordinator manager. After the KIP, the producing manager reports a versioned fact; the selected composition derives
+one command; and only `CoordinatorRequestManager` validates the observed version and changes coordinator state. The
+fetch-buffer and background-event paths remain visible in both diagrams to show how that coordination case fits into
+the complete application/background data flow.
+
 The following topology expands that boundary into the full runtime path. `AsyncKafkaConsumer`, the Streams-enabled
 regular consumer, and `ShareConsumerImpl` select different `RequestManagers` compositions while using the same
 reactor phases. The manager stack in the diagram is representative: each composition supplies only its applicable

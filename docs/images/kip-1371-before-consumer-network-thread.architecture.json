@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "Before KIP-1371: Async Consumer Coordination",
+    "title": "Before KIP-1371 — Coordinator Failure and Application Data Paths",
     "locale": "en",
     "quality_profile": "showcase",
     "viewBox": [1680, 980],
@@ -39,7 +39,7 @@
     {"id": "stage_requests", "from": "network_thread", "to": "network", "label": "stage requests; poll with minimum wait", "fromSide": "top", "toSide": "top", "via": [[740, 190], [1365, 190]], "labelAt": [1080, 178], "variant": "emphasis"},
     {"id": "broker_roundtrip", "from": "network", "to": "brokers", "label": "request / response", "fromSide": "right", "toSide": "left", "labelAt": [1490, 315], "variant": "emphasis"},
     {"id": "group_response", "from": "network", "to": "group_managers", "label": "response callbacks", "fromSide": "top", "toSide": "right", "via": [[1365, 310], [1180, 310], [1180, 371]], "labelAt": [1265, 298]},
-    {"id": "peer_mutation", "from": "group_managers", "to": "coordinator_manager", "label": "directly invalidate coordinator", "fromSide": "top", "toSide": "bottom", "labelAt": [1090, 326], "variant": "dashed"},
+    {"id": "peer_state_write", "from": "group_managers", "to": "coordinator_manager", "label": "response callback calls markCoordinatorUnknown()", "fromSide": "top", "toSide": "bottom", "labelAt": [1035, 326], "variant": "dashed"},
     {"id": "fetch_records", "from": "fetch_managers", "to": "fetch_buffer", "label": "add records or wake buffer", "fromSide": "left", "toSide": "top", "via": [[880, 491]], "labelAt": [870, 610]},
     {"id": "background_notification", "from": "group_managers", "to": "background_events", "label": "add ErrorEvent / callback event", "fromSide": "bottom", "toSide": "top", "via": [[1035, 420], [1220, 420], [1220, 600], [1500, 600]], "labelAt": [1350, 588]},
     {"id": "application_wait", "from": "network_thread", "to": "application", "label": "cached maximumTimeToWait", "fromSide": "left", "toSide": "bottom", "via": [[570, 371], [570, 500], [150, 500]], "labelAt": [380, 488]},
@@ -47,7 +47,7 @@
     {"id": "drain_fetch", "from": "fetch_buffer", "to": "application", "label": "Consumer.poll() drains records", "fromSide": "bottom", "toSide": "bottom", "via": [[880, 870], [95, 870], [95, 470], [150, 470]], "labelAt": [430, 858]}
   ],
   "cards": [
-    {"dot": "cyan", "title": "Existing topology", "items": ["Application and background threads already communicate through event queues", "ConsumerNetworkThread polls a selected RequestManager set and delegates network I/O"]},
-    {"dot": "amber", "title": "Distributed outputs", "items": ["Managers and completion callbacks update their local state and produce records, events, or future completion", "Numeric waits contribute timing without one published application-visible effect boundary"]}
+    {"dot": "cyan", "title": "Existing execution shape", "items": ["ConsumerNetworkThread polls a selected RequestManager set and delegates network I/O", "Fetch completion, BackgroundEvent publication, future completion, and numeric waits follow component-specific paths"]},
+    {"dot": "amber", "title": "Case study: coordinator unavailable", "items": ["Coordinator discovery and heartbeat or commit callbacks can write the same coordinator state", "The peer callback does not carry the coordinator version used to build its request"]}
   ]
 }

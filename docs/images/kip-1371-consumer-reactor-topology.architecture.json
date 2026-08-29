@@ -2,7 +2,7 @@
   "schema_version": 1,
   "diagram_type": "architecture",
   "meta": {
-    "title": "KIP-1371 Consumer Reactor Execution Topology",
+    "title": "KIP-1371 — Ordered Coordinator Failure and Application Data Paths",
     "locale": "en",
     "quality_profile": "showcase",
     "viewBox": [1680, 1020],
@@ -49,7 +49,7 @@
     {
       "id": "composition",
       "type": "backend",
-      "label": "RequestManagers Composition",
+      "label": "RequestManagers / Policy",
       "sources": [
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 95, "label": "regular composition"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 145, "label": "share composition"}
@@ -71,6 +71,7 @@
       "id": "heartbeat_managers",
       "type": "backend",
       "label": "Heartbeat / Membership",
+      "tag": "emits ManagerEvent(v7)",
       "sources": [
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManager.java", "line": 50, "label": "regular heartbeat"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareHeartbeatRequestManager.java", "line": 42, "label": "share heartbeat"},
@@ -105,6 +106,7 @@
       "id": "network",
       "type": "backend",
       "label": "NetworkClientDelegate",
+      "tag": "completion reactivates owner",
       "sources": [
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 158, "label": "network poll"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 317, "label": "stage output"}
@@ -222,13 +224,34 @@
     },
     {
       "id": "select_composition",
-      "from": "composition",
+      "from": "reactor",
+      "to": "composition",
+      "label": "select managers; evaluate event batch",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [[690, 190], [830, 190], [830, 112]],
+      "labelAt": [450, 225]
+    },
+    {
+      "id": "heartbeat_observation",
+      "from": "heartbeat_managers",
       "to": "reactor",
-      "label": "entries(): selected regular, Streams, or share manager set",
-      "fromSide": "left",
+      "label": "versioned fact",
+      "fromSide": "right",
       "toSide": "top",
-      "via": [[830, 112], [690, 112], [690, 290]],
-      "labelAt": [760, 175]
+      "via": [[1150, 339], [1150, 165], [690, 165], [690, 300]],
+      "labelAt": [760, 153],
+      "variant": "emphasis"
+    },
+    {
+      "id": "coordinator_snapshot",
+      "from": "coordinator_manager",
+      "to": "heartbeat_managers",
+      "label": "snapshot v7",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [1100, 291],
+      "variant": "dashed"
     },
     {
       "id": "poll_coordinator_manager",
@@ -288,11 +311,10 @@
       "id": "network_completion",
       "from": "network",
       "to": "reactor",
-      "label": "completion activates owning manager",
       "fromSide": "top",
       "toSide": "top",
       "via": [[1325, 190], [690, 190]],
-      "labelAt": [1000, 178]
+      "variant": "dashed"
     },
     {
       "id": "publish_schedule",
@@ -379,19 +401,11 @@
   ],
   "cards": [
     {
-      "dot": "cyan",
-      "title": "Shared execution model",
-      "items": [
-        "Regular, share, and Streams consumers reuse the same reactor phases",
-        "The selected composition retains consumer-specific protocol rules"
-      ]
-    },
-    {
       "dot": "emerald",
-      "title": "Manager ownership",
+      "title": "Case study: coordinator unavailable",
       "items": [
-        "Request managers own local mutable state and progress decisions",
-        "PollResult carries transport intents, facts, and the next useful poll condition"
+        "Heartbeat reports a versioned observation instead of mutating coordinator state",
+        "The coordination policy derives one command; only CoordinatorRequestManager validates and writes"
       ]
     },
     {
