@@ -21,6 +21,7 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.SubscriptionPattern;
 import org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy;
 import org.apache.kafka.clients.consumer.internals.CommitRequestManager;
+import org.apache.kafka.clients.consumer.internals.ConsumerDriver;
 import org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerMetadata;
@@ -35,6 +36,7 @@ import org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManager;
 import org.apache.kafka.clients.consumer.internals.ShareMembershipManager;
 import org.apache.kafka.clients.consumer.internals.StreamsGroupHeartbeatRequestManager;
 import org.apache.kafka.clients.consumer.internals.StreamsGroupTopologyDescriptionRequestManager;
+import org.apache.kafka.clients.consumer.internals.StreamsConsumerDriver;
 import org.apache.kafka.clients.consumer.internals.StreamsMembershipManager;
 import org.apache.kafka.clients.consumer.internals.SubscriptionState;
 import org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager;
@@ -138,7 +140,8 @@ public class ApplicationEventProcessorTest {
             Optional.empty(),
             withGroupId ? Optional.of(streamsGroupHeartbeatRequestManager) : Optional.empty(),
             withGroupId ? Optional.of(streamsGroupTopologyDescriptionRequestManager) : Optional.empty(),
-            withGroupId ? Optional.of(streamsMembershipManager) : Optional.empty()
+            withGroupId ? Optional.of(streamsMembershipManager) : Optional.empty(),
+            ConsumerDriver.Type.STREAMS
         );
         processor = new ApplicationEventProcessor(
             new LogContext(),
@@ -648,7 +651,7 @@ public class ApplicationEventProcessorTest {
         StreamsOnTasksRevokedCallbackCompletedEvent event =
             new StreamsOnTasksRevokedCallbackCompletedEvent(new CompletableFuture<>(), Optional.empty());
         try (final LogCaptureAppender logAppender = LogCaptureAppender.createAndRegister()) {
-            logAppender.setClassLogger(ApplicationEventProcessor.class, Level.WARN);
+            logAppender.setClassLogger(StreamsConsumerDriver.class, Level.WARN);
             processor.process(event);
             assertTrue(logAppender.getMessages().stream().anyMatch(e ->
                 e.contains("An internal error occurred; the Streams membership manager was not present, so the notification " +
@@ -672,7 +675,7 @@ public class ApplicationEventProcessorTest {
         StreamsOnTasksAssignedCallbackCompletedEvent event =
             new StreamsOnTasksAssignedCallbackCompletedEvent(new CompletableFuture<>(), Optional.empty());
         try (final LogCaptureAppender logAppender = LogCaptureAppender.createAndRegister()) {
-            logAppender.setClassLogger(ApplicationEventProcessor.class, Level.WARN);
+            logAppender.setClassLogger(StreamsConsumerDriver.class, Level.WARN);
             processor.process(event);
             assertTrue(logAppender.getMessages().stream().anyMatch(e ->
                 e.contains("An internal error occurred; the Streams membership manager was not present, so the notification " +
@@ -696,7 +699,7 @@ public class ApplicationEventProcessorTest {
         StreamsOnAllTasksLostCallbackCompletedEvent event =
             new StreamsOnAllTasksLostCallbackCompletedEvent(new CompletableFuture<>(), Optional.empty());
         try (final LogCaptureAppender logAppender = LogCaptureAppender.createAndRegister()) {
-            logAppender.setClassLogger(ApplicationEventProcessor.class, Level.WARN);
+            logAppender.setClassLogger(StreamsConsumerDriver.class, Level.WARN);
             processor.process(event);
             assertTrue(logAppender.getMessages().stream().anyMatch(e ->
                 e.contains("An internal error occurred; the Streams membership manager was not present, so the notification " +

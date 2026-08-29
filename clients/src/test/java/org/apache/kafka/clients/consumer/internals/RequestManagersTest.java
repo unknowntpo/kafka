@@ -85,6 +85,7 @@ public class RequestManagersTest {
             Optional.empty()
         );
 
+        assertEquals(ConsumerDriver.Type.REGULAR, requestManagers.consumerDriverType());
         requestManagers.wakeupApplicationThread();
 
         verify(fetchRequestManager).wakeupApplicationThread();
@@ -101,6 +102,7 @@ public class RequestManagersTest {
             Optional.empty()
         );
 
+        assertEquals(ConsumerDriver.Type.SHARE, requestManagers.consumerDriverType());
         requestManagers.wakeupApplicationThread();
 
         verify(shareConsumeRequestManager).wakeupApplicationThread();
@@ -189,6 +191,7 @@ public class RequestManagersTest {
             Optional.of(new StreamsRebalanceData(UUID.randomUUID(), Optional.empty(), Optional.empty(), Map.of(), Map.of(), Map::of, Map::of)),
             new PositionsValidator(logContext, time, subscriptions, metadata)
         ).get();
+        assertEquals(ConsumerDriver.Type.STREAMS, requestManagers.consumerDriverType());
         assertTrue(requestManagers.streamsMembershipManager.isPresent());
         assertTrue(requestManagers.streamsGroupHeartbeatRequestManager.isPresent());
         assertTrue(requestManagers.streamsGroupTopologyDescriptionRequestManager.isPresent());
