@@ -197,6 +197,15 @@ made by different components along the path. The proposal changes responsibility
 
 ![ConsumerReactor ownership and execution boundary](../images/kip-1371-reactor-architecture.png)
 
+The following topology expands that boundary into the full runtime path. `AsyncKafkaConsumer`, the Streams-enabled
+regular consumer, and `ShareConsumerImpl` select different `RequestManagers` compositions while using the same
+reactor phases. Application commands enter through `ApplicationEventQueue`. Network completions update the owning
+manager; completed fetches enter `FetchBuffer` or `ShareFetchBuffer`; and application-visible `ReactorAction` values
+are executed by `ConsumerReactor` only after `ReactorSchedule` publication. The background-event and fetch-buffer
+paths then return data, notifications, and wakeups to the application thread.
+
+![ConsumerReactor complete execution topology](../images/kip-1371-consumer-reactor-topology.png)
+
 | Component | Target responsibility after the KIP |
 | --- | --- |
 | `ConsumerReactor` | Order inputs, invoke managers in a fixed order, retain their timing contributions, publish the final timing decision, and then execute application-visible effects. |

@@ -1,0 +1,338 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "KIP-1371 Consumer Reactor Execution Topology",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1540, 860],
+    "repository": {
+      "url": "https://github.com/unknowntpo/kafka",
+      "revision": "65469ad73b8b10d0f479f7a527558cb6d1c2543a"
+    }
+  },
+  "components": [
+    {
+      "id": "application",
+      "type": "frontend",
+      "label": "Application Thread",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java", "line": 2012, "label": "regular poll wait"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumerImpl.java", "line": 710, "label": "share poll wait"}
+      ],
+      "pos": [40, 280],
+      "size": [220, 90]
+    },
+    {
+      "id": "application_events",
+      "type": "messagebus",
+      "label": "ApplicationEventQueue",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorGateway.java", "line": 97, "label": "submit event"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 340, "label": "drain events"}
+      ],
+      "pos": [310, 100],
+      "size": [220, 78]
+    },
+    {
+      "id": "reactor",
+      "type": "backend",
+      "label": "ConsumerReactor",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 259, "label": "runOnce phases"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 634, "label": "execute actions"}
+      ],
+      "pos": [590, 280],
+      "size": [240, 105],
+      "tag": "background thread"
+    },
+    {
+      "id": "composition",
+      "type": "backend",
+      "label": "RequestManagers Composition",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 95, "label": "regular composition"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 145, "label": "share composition"}
+      ],
+      "pos": [900, 80],
+      "size": [220, 84]
+    },
+    {
+      "id": "managers",
+      "type": "backend",
+      "label": "Request Managers",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 177, "label": "ordered entries"}
+      ],
+      "pos": [900, 280],
+      "size": [220, 100]
+    },
+    {
+      "id": "network",
+      "type": "backend",
+      "label": "NetworkClientDelegate",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 158, "label": "network poll"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 317, "label": "stage output"}
+      ],
+      "pos": [1150, 285],
+      "size": [210, 90]
+    },
+    {
+      "id": "brokers",
+      "type": "external",
+      "label": "Kafka Brokers",
+      "pos": [1390, 285],
+      "size": [140, 90]
+    },
+    {
+      "id": "schedule",
+      "type": "database",
+      "label": "ReactorSchedule",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 574, "label": "publish schedule"}
+      ],
+      "pos": [590, 485],
+      "size": [240, 78]
+    },
+    {
+      "id": "background_events",
+      "type": "messagebus",
+      "label": "BackgroundEventHandler + Queue",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 35, "label": "pending buffer"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 64, "label": "publish queue"}
+      ],
+      "pos": [310, 485],
+      "size": [220, 80]
+    },
+    {
+      "id": "fetch_buffer",
+      "type": "database",
+      "label": "FetchBuffer",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java", "line": 50, "label": "regular buffer"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareFetchBuffer.java", "line": 45, "label": "share buffer"}
+      ],
+      "pos": [310, 650],
+      "size": [220, 80]
+    },
+    {
+      "id": "actions",
+      "type": "backend",
+      "label": "ReactorAction",
+      "sources": [
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ReactorAction.java", "line": 35, "label": "action types"},
+        {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 634, "label": "reactor executes actions"}
+      ],
+      "pos": [1150, 630],
+      "size": [220, 90]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Application execution context",
+      "wraps": ["application"]
+    },
+    {
+      "kind": "region",
+      "label": "Cross-thread handoff",
+      "wraps": ["application_events", "background_events", "fetch_buffer"]
+    },
+    {
+      "kind": "region",
+      "label": "Consumer background execution context",
+      "wraps": ["reactor", "composition", "managers", "network", "schedule", "actions"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "submit_application_event",
+      "from": "application",
+      "to": "application_events",
+      "label": "submit ApplicationEvent",
+      "fromSide": "top",
+      "toSide": "left",
+      "via": [[150, 220], [285, 220], [285, 139]],
+      "labelAt": [220, 208],
+      "variant": "emphasis"
+    },
+    {
+      "id": "drain_application_event",
+      "from": "application_events",
+      "to": "reactor",
+      "label": "drain ordered inputs",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [[550, 139], [550, 332.5]],
+      "labelAt": [570, 220],
+      "variant": "emphasis"
+    },
+    {
+      "id": "select_composition",
+      "from": "composition",
+      "to": "reactor",
+      "label": "select regular, Streams, or share composition",
+      "fromSide": "left",
+      "toSide": "top",
+      "via": [[860, 122], [710, 122], [710, 240]],
+      "labelAt": [785, 178]
+    },
+    {
+      "id": "poll_managers",
+      "from": "reactor",
+      "to": "managers",
+      "label": "stable ordered poll",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [865, 272],
+      "variant": "emphasis"
+    },
+    {
+      "id": "compose_managers",
+      "from": "composition",
+      "to": "managers",
+      "label": "manager set and typed handlers",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [1010, 220]
+    },
+    {
+      "id": "return_poll_result",
+      "from": "managers",
+      "to": "reactor",
+      "label": "PollResult: commands · events · next condition",
+      "fromSide": "left",
+      "toSide": "right",
+      "labelAt": [865, 398],
+      "variant": "emphasis"
+    },
+    {
+      "id": "stage_network_commands",
+      "from": "reactor",
+      "to": "network",
+      "label": "stage commands, then poll",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[710, 430], [1255, 430]],
+      "labelAt": [1030, 418]
+    },
+    {
+      "id": "network_round_trip",
+      "from": "network",
+      "to": "brokers",
+      "label": "request / response",
+      "fromSide": "right",
+      "toSide": "left",
+      "labelAt": [1375, 265],
+      "variant": "emphasis"
+    },
+    {
+      "id": "network_completion",
+      "from": "network",
+      "to": "managers",
+      "label": "completion updates owner state",
+      "fromSide": "left",
+      "toSide": "right",
+      "labelAt": [1135, 397]
+    },
+    {
+      "id": "publish_schedule",
+      "from": "reactor",
+      "to": "schedule",
+      "label": "publish before effects",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [630, 435],
+      "variant": "emphasis"
+    },
+    {
+      "id": "select_reactor_action",
+      "from": "reactor",
+      "to": "actions",
+      "label": "execute after schedule publication",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "via": [[710, 460], [1140, 460], [1140, 675]],
+      "labelAt": [1000, 448],
+      "variant": "emphasis"
+    },
+    {
+      "id": "publish_background_event",
+      "from": "actions",
+      "to": "background_events",
+      "label": "publish BackgroundEvent",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [[1110, 675], [850, 675], [850, 600], [570, 600], [570, 525]],
+      "labelAt": [745, 663]
+    },
+    {
+      "id": "fill_fetch_buffer",
+      "from": "network",
+      "to": "fetch_buffer",
+      "label": "completed fetch stores records",
+      "fromSide": "right",
+      "toSide": "right",
+      "via": [[1375, 330], [1375, 810], [570, 810], [570, 690]],
+      "labelAt": [970, 798]
+    },
+    {
+      "id": "drain_background_event",
+      "from": "background_events",
+      "to": "application",
+      "label": "application drains BackgroundEvent",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [[280, 525], [150, 525]],
+      "labelAt": [205, 513]
+    },
+    {
+      "id": "application_wakeup",
+      "from": "actions",
+      "to": "fetch_buffer",
+      "label": "WAKE_APPLICATION executes last",
+      "fromSide": "left",
+      "toSide": "right",
+      "labelAt": [710, 708],
+      "variant": "emphasis"
+    },
+    {
+      "id": "drain_fetch_buffer",
+      "from": "fetch_buffer",
+      "to": "application",
+      "label": "Consumer.poll() drains records",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "via": [[270, 690], [95, 690], [95, 420], [150, 420]],
+      "labelAt": [195, 678]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Shared execution model",
+      "items": [
+        "Regular, share, and Streams consumers reuse the same reactor phases",
+        "The selected composition retains consumer-specific protocol rules"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Manager ownership",
+      "items": [
+        "Request managers own local mutable state and progress decisions",
+        "PollResult carries transport intents, facts, and the next useful poll condition"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Closed publication loop",
+      "items": [
+        "ConsumerReactor publishes ReactorSchedule before application-visible effects",
+        "Background events, fetch data, and wakeup return control to the application thread"
+      ]
+    }
+  ]
+}
