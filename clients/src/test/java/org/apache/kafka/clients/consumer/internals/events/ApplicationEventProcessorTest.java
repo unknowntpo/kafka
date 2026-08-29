@@ -28,6 +28,7 @@ import org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager;
 import org.apache.kafka.clients.consumer.internals.FetchRequestManager;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
 import org.apache.kafka.clients.consumer.internals.OffsetsRequestManager;
+import org.apache.kafka.clients.consumer.internals.ReactorAction;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
 import org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager;
 import org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManager;
@@ -62,6 +63,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.apache.kafka.clients.consumer.internals.events.CompletableEvent.calculateDeadlineMs;
@@ -295,14 +297,23 @@ public class ApplicationEventProcessorTest {
 
         setupProcessor(true);
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
-        when(offsetsRequestManager.updateFetchPositions(event.deadlineMs())).thenReturn(CompletableFuture.completedFuture(null));
+        when(offsetsRequestManager.updateFetchPositionsForAsyncPoll(event.deadlineMs()))
+            .thenReturn(CompletableFuture.completedFuture(null));
         when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
         processor.process(event);
+        assertFalse(event.isComplete());
+        List<ReactorAction> actions = processor.drainReactorActions();
+        assertEquals(List.of(
+            ReactorAction.Type.MARK_ASYNC_POLL_RECONCILIATION_COMPLETE,
+            ReactorAction.Type.MARK_ASYNC_POLL_VALIDATE_POSITIONS_COMPLETE,
+            ReactorAction.Type.COMPLETE_ASYNC_POLL
+        ), actions.stream().map(ReactorAction::type).collect(Collectors.toList()));
+        actions.forEach(action -> action.execute(null));
         assertTrue(event.isComplete());
         verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());
         verify(membershipManager).onConsumerPoll();
         verify(heartbeatRequestManager).resetPollTimer(event.pollTimeMs());
-        verify(offsetsRequestManager).updateFetchPositions(event.deadlineMs());
+        verify(offsetsRequestManager).updateFetchPositionsForAsyncPoll(event.deadlineMs());
         verify(fetchRequestManager).createFetchRequests();
     }
 
@@ -725,7 +736,8 @@ public class ApplicationEventProcessorTest {
         when(cluster.topics()).thenReturn(Set.of(topic));
 
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
-        when(offsetsRequestManager.updateFetchPositions(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+        when(offsetsRequestManager.updateFetchPositionsForAsyncPoll(anyLong()))
+            .thenReturn(CompletableFuture.completedFuture(null));
 
         setupProcessor(true);
         processor.process(new AsyncPollEvent(110, 100));
@@ -747,7 +759,7 @@ public class ApplicationEventProcessorTest {
     }
 
     private void testUpdateFetchPositionsWithFetchCommittedOffsetsTimeout() {
-        when(offsetsRequestManager.updateFetchPositions(anyLong())).thenReturn(
+        when(offsetsRequestManager.updateFetchPositionsForAsyncPoll(anyLong())).thenReturn(
             CompletableFuture.failedFuture(new Throwable("Intentional failure"))
         );
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
@@ -755,7 +767,9 @@ public class ApplicationEventProcessorTest {
         // Verify that the poll completes even when the update fetch positions throws an error.
         AsyncPollEvent event = new AsyncPollEvent(110, 100);
         processor.process(event);
-        verify(offsetsRequestManager).updateFetchPositions(anyLong());
+        verify(offsetsRequestManager).updateFetchPositionsForAsyncPoll(anyLong());
+        assertFalse(event.isComplete());
+        processor.drainReactorActions().forEach(action -> action.execute(null));
         assertTrue(event.isComplete());
         assertFalse(event.error().isEmpty());
     }

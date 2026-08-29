@@ -26,6 +26,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.ApiException;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.StaleMemberEpochException;
@@ -70,7 +71,6 @@ import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.THROW_ON_FETCH_STABLE_OFFSET_UNSUPPORTED;
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 import static org.apache.kafka.common.protocol.Errors.COORDINATOR_LOAD_IN_PROGRESS;
 
 public class CommitRequestManager implements RequestManager, MemberStateListener {
@@ -91,6 +91,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     private final OptionalDouble jitter;
     private final boolean throwOnFetchStableOffsetUnsupported;
     final PendingRequests pendingRequests;
+    /** Cross-manager facts completed by commit callbacks and published atomically by the next poll. */
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
     private boolean closing = false;
 
     /**
@@ -179,6 +181,13 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
+        // Publish an observation before admitting any retry. The owner must process coordinator invalidation before
+        // a request may capture another coordinator snapshot.
+        if (pendingManagerEvents.hasPendingEvents())
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput(
+                NextPollCondition.AwaitCause.COORDINATOR_CHANGE
+            ));
+
         // poll when the coordinator node is known and fatal error is not present
         if (coordinatorRequestManager.coordinator().isEmpty()) {
             pendingRequests.maybeFailOnCoordinatorFatalError();
@@ -190,22 +199,29 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         .forEach(request -> request.future().completeExceptionally(exception));
             }
 
-            return EMPTY;
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput(
+                NextPollCondition.AwaitCause.COORDINATOR_CHANGE
+            ));
         }
 
         if (closing) {
-            return drainPendingOffsetCommitRequests();
+            return pendingManagerEvents.publishWith(drainPendingOffsetCommitRequests());
         }
 
         if (!pendingRequests.hasUnsentRequests())
-            return EMPTY;
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
 
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
         // min of the remainingBackoffMs of all the request that are still backing off
         final long timeUntilNextPoll = Math.min(
             findMinTime(unsentOffsetCommitRequests(), currentTimeMs),
             findMinTime(unsentOffsetFetchRequests(), currentTimeMs));
-        return new NetworkClientDelegate.PollResult(timeUntilNextPoll, requests);
+        return pendingManagerEvents.publishWith(resultForRequestsOrWait(requests, timeUntilNextPoll));
+    }
+
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
     }
 
     @Override
@@ -221,7 +237,36 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
+        // A due auto-commit cannot make transport progress until coordinator discovery completes. Keep the legacy
+        // application-wait projection consistent with poll(), which reports AwaitInput(COORDINATOR_CHANGE) for the
+        // same state, instead of translating the expired auto-commit timer into an immediate retry.
+        if (coordinatorRequestManager.coordinator().isEmpty())
+            return Long.MAX_VALUE;
+        return autoCommitState.map(ac -> ac.nextActivation(currentTimeMs).delayMs()).orElse(Long.MAX_VALUE);
+    }
+
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
+    }
+
+    private static NetworkClientDelegate.PollResult resultForRequestsOrWait(
+        final List<NetworkClientDelegate.UnsentRequest> requests,
+        final long timeUntilNextPollMs
+    ) {
+        if (!requests.isEmpty())
+            return NetworkClientDelegate.PollResult.progress(
+                requests,
+                List.of(),
+                timeUntilNextPollMs == 0L
+                    ? NextPollCondition.pollImmediately()
+                    : timeUntilNextPollMs == NetworkClientDelegate.PollResult.WAIT_FOREVER
+                        ? NextPollCondition.awaitInput()
+                        : NextPollCondition.retryAfter(timeUntilNextPollMs)
+            );
+        if (timeUntilNextPollMs == NetworkClientDelegate.PollResult.WAIT_FOREVER)
+            return NetworkClientDelegate.PollResult.awaitInput();
+        return NetworkClientDelegate.PollResult.retryAfter(timeUntilNextPollMs);
     }
 
     private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
@@ -274,8 +319,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      * In that case, the next auto-commit request will be sent on the next call to poll, after a
      * response for the in-flight is received.
      */
-    private void maybeAutoCommitAsync() {
-        if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit()) {
+    private void maybeAutoCommitAsync(final long currentTimeMs) {
+        if (autoCommitEnabled()
+            && autoCommitState.get().nextActivation(currentTimeMs) instanceof NextPollCondition.PollImmediately) {
             OffsetCommitRequestState requestState = createOffsetCommitRequest(
                 subscriptions.allConsumed(),
                 Long.MAX_VALUE);
@@ -658,10 +704,6 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         return error instanceof StaleMemberEpochException && memberInfo.memberEpoch.isPresent();
     }
 
-    private void updateAutoCommitTimer(final long currentTimeMs) {
-        this.autoCommitState.ifPresent(t -> t.updateTimer(currentTimeMs));
-    }
-
     // Visible for testing
     Queue<OffsetCommitRequestState> unsentOffsetCommitRequests() {
         return pendingRequests.unsentOffsetCommits;
@@ -719,9 +761,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     public NetworkClientDelegate.PollResult drainPendingOffsetCommitRequests() {
         if (pendingRequests.unsentOffsetCommits.isEmpty())
-            return EMPTY;
+            return NetworkClientDelegate.PollResult.awaitInput();
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drainPendingCommits();
-        return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, requests);
+        return NetworkClientDelegate.PollResult.progress(
+            requests, List.of(), NextPollCondition.awaitInput());
     }
 
     private void maybeUpdateLastSeenEpochIfNewer(final Map<TopicPartition, OffsetAndMetadata> offsets) {
@@ -741,12 +784,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      * </ol>
      *
      * @param currentTimeMs the current timestamp in millisecond
-     * @see CommitRequestManager#updateAutoCommitTimer(long)
-     * @see CommitRequestManager#maybeAutoCommitAsync()
+     * @see CommitRequestManager#maybeAutoCommitAsync(long)
      */
     public void updateTimerAndMaybeCommit(final long currentTimeMs) {
-        updateAutoCommitTimer(currentTimeMs);
-        maybeAutoCommitAsync();
+        maybeAutoCommitAsync(currentTimeMs);
     }
 
     class OffsetCommitRequestState extends RetriableRequestState {
@@ -847,7 +888,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          */
         @Override
         @SuppressWarnings("NPathComplexity")
-        public void onResponse(final ClientResponse response) {
+        public void onResponse(final ClientResponse response, final long coordinatorVersion) {
             metricsManager.recordRequestLatency(response.requestLatencyMs());
             long currentTimeMs = response.receivedTimeMs();
             OffsetCommitResponse commitResponse = (OffsetCommitResponse) response.responseBody();
@@ -885,7 +926,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                     } else if (error == Errors.COORDINATOR_NOT_AVAILABLE ||
                         error == Errors.NOT_COORDINATOR ||
                         error == Errors.REQUEST_TIMED_OUT) {
-                        coordinatorRequestManager.markCoordinatorUnknown(error.message(), currentTimeMs);
+                        pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                            CommitRequestManager.class.getSimpleName(), error.message(), currentTimeMs,
+                            coordinatorVersion));
                         future.completeExceptionally(error.exception());
                         return;
                     } else if (error == Errors.OFFSET_METADATA_TOO_LARGE ||
@@ -1007,28 +1050,34 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Build request with the given builder, including response handling logic.
          */
         NetworkClientDelegate.UnsentRequest buildRequestWithResponseHandling(final AbstractRequest.Builder<?> builder) {
+            final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
             NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
                 builder,
-                coordinatorRequestManager.coordinator()
+                coordinatorSnapshot.coordinator()
             );
             request.whenComplete(
                 (response, throwable) -> {
                     long completionTimeMs = request.handler().completionTimeMs();
-                    handleClientResponse(response, throwable, completionTimeMs);
+                    handleClientResponse(response, throwable, completionTimeMs, coordinatorSnapshot.version());
                 });
             return request;
         }
 
         private void handleClientResponse(final ClientResponse response,
                                           final Throwable error,
-                                          final long requestCompletionTimeMs) {
+                                          final long requestCompletionTimeMs,
+                                          final long coordinatorVersion) {
             try {
                 if (error == null) {
-                    onResponse(response);
+                    onResponse(response, coordinatorVersion);
                 } else {
                     log.debug("{} completed with error", requestDescription(), error);
                     onFailedAttempt(requestCompletionTimeMs);
-                    coordinatorRequestManager.handleCoordinatorDisconnect(error, requestCompletionTimeMs);
+                    if (error instanceof DisconnectException) {
+                        pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                            CommitRequestManager.class.getSimpleName(), error.getMessage(), requestCompletionTimeMs,
+                            coordinatorVersion));
+                    }
                     future().completeExceptionally(error);
                 }
             } catch (Throwable t) {
@@ -1042,7 +1091,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             return super.toStringBase() + ", " + memberInfo;
         }
 
-        abstract void onResponse(final ClientResponse response);
+        abstract void onResponse(final ClientResponse response, final long coordinatorVersion);
 
         abstract void removeRequest();
     }
@@ -1199,13 +1248,13 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Handle OffsetFetch response, including successful and failed.
          */
         @Override
-        void onResponse(final ClientResponse response) {
+        void onResponse(final ClientResponse response, final long coordinatorVersion) {
             long currentTimeMs = response.receivedTimeMs();
             var fetchResponse = (OffsetFetchResponse) response.responseBody();
             var groupResponse = fetchResponse.group(groupId);
             var error = Errors.forCode(groupResponse.errorCode());
             if (error != Errors.NONE) {
-                onFailure(currentTimeMs, error);
+                onFailure(currentTimeMs, error, coordinatorVersion);
                 return;
             }
             onSuccess(currentTimeMs, groupResponse);
@@ -1216,7 +1265,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * result future exceptionally in the case of non-recoverable or unexpected errors.
          */
         private void onFailure(final long currentTimeMs,
-                               final Errors responseError) {
+                               final Errors responseError,
+                               final long coordinatorVersion) {
             log.debug("Offset fetch failed: {}", responseError.message());
             onFailedAttempt(currentTimeMs);
             ApiException exception = responseError.exception();
@@ -1238,7 +1288,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 future.completeExceptionally(exception);
             } else if (responseError == Errors.NOT_COORDINATOR || responseError == Errors.COORDINATOR_NOT_AVAILABLE) {
                 // Re-discover the coordinator and retry
-                coordinatorRequestManager.markCoordinatorUnknown("error response " + responseError.name(), currentTimeMs);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    CommitRequestManager.class.getSimpleName(),
+                    "error response " + responseError.name(), currentTimeMs, coordinatorVersion));
                 future.completeExceptionally(exception);
             } else if (exception instanceof RetriableException) {
                 future.completeExceptionally(exception);
@@ -1524,17 +1576,6 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             this.log = logContext.logger(getClass());
         }
 
-        public boolean shouldAutoCommit() {
-            if (!this.timer.isExpired()) {
-                return false;
-            }
-            if (this.hasInflightCommit) {
-                log.trace("Skipping auto-commit on the interval because a previous one is still in-flight.");
-                return false;
-            }
-            return true;
-        }
-
         public void resetTimer() {
             this.timer.reset(autoCommitInterval);
         }
@@ -1543,22 +1584,19 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             this.timer.reset(retryBackoffMs);
         }
 
-        public long remainingMs(final long currentTimeMs) {
+        /**
+         * Derives both auto-commit eligibility and the next application activation from one state view.
+         * An in-flight commit is input-driven: elapsed time alone cannot make another commit legal.
+         */
+        public NextPollCondition nextActivation(final long currentTimeMs) {
             this.timer.update(currentTimeMs);
-            // KAFKA-20253: If the auto-commit interval has elapsed but a previous auto-commit is still
-            // in-flight (for example it cannot complete because the coordinator is unavailable after a
-            // failed re-authentication), a new auto-commit cannot be started yet. Returning 0 here would
-            // busy-spin the application thread, since this value feeds AsyncKafkaConsumer.pollForFetches()
-            // via maximumTimeToWait(). Wait for the interval instead; the network thread still wakes on the
-            // in-flight commit's response, which resets this timer.
             if (this.timer.isExpired() && this.hasInflightCommit) {
-                return autoCommitInterval;
+                log.trace("Skipping auto-commit on the interval because a previous one is still in-flight.");
+                return NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION);
             }
-            return this.timer.remainingMs();
-        }
-
-        public void updateTimer(final long currentTimeMs) {
-            this.timer.update(currentTimeMs);
+            if (this.timer.isExpired())
+                return NextPollCondition.pollImmediately();
+            return NextPollCondition.retryAfter(this.timer.remainingMs());
         }
 
         public void setInflightCommitStatus(final boolean inflightCommitStatus) {

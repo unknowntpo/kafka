@@ -1,0 +1,149 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.clients.consumer.internals;
+
+import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult;
+
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+
+public class ManagerPollCacheTest {
+
+    @Test
+    public void testEarlyNetworkReturnDoesNotMoveExistingDeadlineForward() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 10L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 20L);
+
+        ManagerPollCache.PollState state = cache.states().iterator().next();
+        assertEquals(110L, state.reactorDeadlineMs());
+    }
+
+    @Test
+    public void testExpiredDeadlineCanBeReplacedAfterManagerPoll() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 10L);
+        cache.update(manager, new PollResult(100L), ApplicationWait.unbounded(), 110L);
+
+        ManagerPollCache.PollState state = cache.states().iterator().next();
+        assertEquals(210L, state.reactorDeadlineMs());
+    }
+
+    @Test
+    public void testEventWaitWithdrawsPendingManagerDeadline() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, NetworkClientDelegate.PollResult.retryAfter(100L), ApplicationWait.unbounded(), 10L);
+        cache.update(manager, NetworkClientDelegate.PollResult.awaitInput(), ApplicationWait.unbounded(), 20L);
+
+        assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testZeroDelayRetryRetainsCurrentTimeDeadline() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, PollResult.retryAfter(0L), ApplicationWait.unbounded(), 10L);
+
+        assertEquals(10L, cache.states().iterator().next().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testMaximumRetryDelaySaturatesAtMaximumDeadline() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, PollResult.retryAfter(Long.MAX_VALUE), ApplicationWait.unbounded(), 10L);
+
+        assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testRetryDeadlineAdditionSaturatesOnOverflow() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(manager, PollResult.retryAfter(10L), ApplicationWait.unbounded(), Long.MAX_VALUE - 5L);
+
+        assertEquals(Long.MAX_VALUE, cache.states().iterator().next().reactorDeadlineMs());
+    }
+
+    @Test
+    public void testRetainManagersRemovesInactiveManager() {
+        RequestManager first = mock(RequestManager.class);
+        RequestManager second = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(first, new PollResult(10L), ApplicationWait.unbounded(), 0L);
+        cache.update(second, new PollResult(20L), ApplicationWait.unbounded(), 0L);
+        cache.retainManagers(List.of(second));
+
+        assertEquals(1, cache.states().size());
+        assertEquals(second, cache.states().iterator().next().manager());
+    }
+
+    @Test
+    public void testDeliveredApplicationDeadlineStaysInactiveUntilManagerChangesIt() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+        cache.update(manager, PollResult.EMPTY, ApplicationWait.fromLegacyMaximumTimeToWait(0L), 10L);
+        ReactorSchedule schedule = ReactorSchedule.from(cache.states(), 10L);
+
+        cache.markApplicationDeadlineDelivered(schedule);
+        cache.update(manager, PollResult.EMPTY, ApplicationWait.fromLegacyMaximumTimeToWait(0L), 10L);
+
+        assertEquals(Long.MAX_VALUE, cache.states().iterator().next().activeApplicationDeadlineMs());
+    }
+
+    @Test
+    public void testManagerRetryAndApplicationWaitRemainIndependent() {
+        RequestManager manager = mock(RequestManager.class);
+        ManagerPollCache cache = new ManagerPollCache();
+
+        cache.update(
+            manager,
+            PollResult.retryAfter(100L),
+            ApplicationWait.fromLegacyMaximumTimeToWait(25L),
+            10L
+        );
+
+        ManagerPollCache.PollState state = cache.states().iterator().next();
+        assertEquals(110L, state.reactorDeadlineMs());
+        assertEquals(35L, state.activeApplicationDeadlineMs());
+    }
+
+    @Test
+    public void testApplicationWaitAcceptsZeroAndMaximumButRejectsNegativeDelay() {
+        assertEquals(0L, ApplicationWait.fromLegacyMaximumTimeToWait(0L).delayMs());
+        assertEquals(Long.MAX_VALUE, ApplicationWait.unbounded().delayMs());
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> ApplicationWait.fromLegacyMaximumTimeToWait(-1L)
+        );
+    }
+}

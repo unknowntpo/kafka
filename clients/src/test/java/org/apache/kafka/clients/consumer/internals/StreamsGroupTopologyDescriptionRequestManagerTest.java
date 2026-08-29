@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.message.StreamsGroupTopologyDescriptionUpdateRequestData;
 import org.apache.kafka.common.message.StreamsGroupTopologyDescriptionUpdateResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -37,12 +38,14 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -64,6 +67,8 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
     @BeforeEach
     public void setUp() {
         coordinatorRequestManager = mock(CoordinatorRequestManager.class);
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
         membershipManager = mock(StreamsMembershipManager.class);
         when(membershipManager.groupId()).thenReturn(GROUP_ID);
         when(membershipManager.memberId()).thenReturn(MEMBER_ID);
@@ -87,7 +92,11 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         streamsRebalanceData.setTopologyPushRequired(true);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
-        assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(0, result.unsentRequests.size());
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(NextPollCondition.AwaitCause.COORDINATOR_CHANGE, condition.cause());
     }
 
     /**
@@ -148,6 +157,9 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         final NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
 
         assertEquals(1, result.unsentRequests.size());
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, condition.cause());
         final NetworkClientDelegate.UnsentRequest unsent = result.unsentRequests.get(0);
         assertEquals(Optional.of(coordinatorNode), unsent.node());
         final StreamsGroupTopologyDescriptionUpdateRequest request =
@@ -168,7 +180,11 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
 
         manager.poll(time.milliseconds());
-        assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(0, result.unsentRequests.size());
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, condition.cause());
     }
 
     /**
@@ -212,7 +228,9 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
      * coordinator rediscovery should be triggered and the flag should remain set for retry.
      */
     @Test
-    public void testCoordinatorErrorTriggersRediscovery() {
+    public void testCoordinatorErrorPublishesRequestSnapshotVersion() {
+        doReturn(new CoordinatorSnapshot(Optional.of(coordinatorNode), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
         for (final Errors error : new Errors[]{Errors.NOT_COORDINATOR, Errors.COORDINATOR_NOT_AVAILABLE}) {
             streamsRebalanceData.setWireTopologyDescription(
                 new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
@@ -226,8 +244,32 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
 
             assertTrue(streamsRebalanceData.topologyPushRequired(),
                 "Flag should remain set after " + error);
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            assertCoordinatorUnavailableObserved(manager.poll(time.milliseconds()), 7L);
+            assertTrue(manager.poll(time.milliseconds()).managerEvents().isEmpty(),
+                "coordinator observation must be published once");
         }
-        verify(coordinatorRequestManager, times(2)).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
+    }
+
+    @Test
+    public void testDisconnectPublishesCoordinatorInvalidationExactlyOnce() {
+        streamsRebalanceData.setWireTopologyDescription(
+            new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
+        streamsRebalanceData.setTopologyPushRequired(true);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        doReturn(new CoordinatorSnapshot(Optional.of(coordinatorNode), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
+
+        final NetworkClientDelegate.UnsentRequest unsent =
+            manager.poll(time.milliseconds()).unsentRequests.get(0);
+        unsent.handler().onFailure(time.milliseconds(), DisconnectException.INSTANCE);
+
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        assertCoordinatorUnavailableObserved(manager.poll(time.milliseconds()), 7L);
+        assertTrue(manager.poll(time.milliseconds()).managerEvents().isEmpty(),
+            "coordinator observation must be published once");
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
     }
 
     /**
@@ -294,7 +336,11 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         unsent.handler().onFailure(time.milliseconds(), Errors.NETWORK_EXCEPTION.exception());
 
         assertTrue(streamsRebalanceData.topologyPushRequired());
-        assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
+        NetworkClientDelegate.PollResult blocked = manager.poll(time.milliseconds());
+        assertEquals(0, blocked.unsentRequests.size());
+        NextPollCondition.RetryAfter retry = assertInstanceOf(
+            NextPollCondition.RetryAfter.class, blocked.nextPollCondition());
+        assertTrue(retry.delayMs() > 0L);
 
         time.sleep(RETRY_BACKOFF_MAX_MS);
         assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
@@ -338,5 +384,14 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
                     .setThrottleTimeMs(throttleTimeMs)
             )
         );
+    }
+
+    private void assertCoordinatorUnavailableObserved(final NetworkClientDelegate.PollResult result,
+                                                      final long expectedCoordinatorVersion) {
+        assertEquals(1, result.managerEvents().size());
+        ManagerEvent.CoordinatorUnavailableObserved observation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
+        assertEquals(StreamsGroupTopologyDescriptionRequestManager.class.getSimpleName(), observation.source());
+        assertEquals(expectedCoordinatorVersion, observation.observedCoordinatorVersion());
     }
 }

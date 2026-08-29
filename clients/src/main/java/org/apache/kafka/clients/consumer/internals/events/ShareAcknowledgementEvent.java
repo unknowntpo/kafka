@@ -24,7 +24,7 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * This is the class of events created by the {@link ConsumerReactor network thread} to indicate completion
+ * This is the class of events created by the {@link ConsumerReactor reactor} to indicate completion
  * of acknowledgements.
  */
 public class ShareAcknowledgementEvent {

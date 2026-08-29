@@ -28,7 +28,9 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.IsolationLevel;
@@ -121,8 +123,12 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -141,6 +147,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -150,10 +157,12 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class FetchRequestManagerTest {
 
@@ -282,11 +291,9 @@ public class FetchRequestManagerTest {
         }
     }
 
-    /**
-     * A fetch response that carries no records must still wake up a thread blocked on the fetch buffer.
-     */
+    /** A fetch response that carries no records must report progress for the reactor to publish. */
     @Test
-    public void testEmptyFetchResponseWakesUpBuffer() throws InterruptedException {
+    public void testEmptyFetchResponseReportsManagerEvent() throws InterruptedException {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
@@ -304,37 +311,103 @@ public class FetchRequestManagerTest {
         networkClientDelegate.poll(time.timer(0));
         fetchRecords();
         fetcher.fetchBuffer.awaitWakeup(time.timer(0));
+        assertTrue(fetcher.lastManagerEvents().isEmpty());
 
         // A consumer thread blocked waiting for data on the empty buffer.
         Thread blockedOnBuffer = new Thread(() -> fetcher.fetchBuffer.awaitWakeup(time.timer(3_600_000L)));
         blockedOnBuffer.setDaemon(true);
         blockedOnBuffer.start();
 
-        // An empty incremental fetch response (same session, no partition data) must wake the thread blocked on the buffer.
+        // An empty incremental fetch response has no data mutation to wake the buffer directly.
         client.prepareResponse(FetchResponse.of(Errors.NONE, 0, 123, new LinkedHashMap<>(), List.of()));
         assertEquals(1, sendFetches());
         networkClientDelegate.poll(time.timer(0));
 
-        // On a successful run the blocked thread gets unblocked with the response above so this join completes promptly.
-        // This timeout only caps how long we wait before declaring the wakeup missing (failure).
+        blockedOnBuffer.join(200);
+        assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
+        assertEquals(
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            fetcher.pollManagerEvents()
+        );
+
+        // Simulate the reactor applying the returned transition.
+        fetcher.wakeupApplicationThread();
         blockedOnBuffer.join(2_000);
-        assertFalse(blockedOnBuffer.isAlive(), "Empty fetch response did not wake the thread blocked on the fetch buffer");
+        assertFalse(blockedOnBuffer.isAlive(), "Reactor action did not release the fetch wait");
     }
 
     @Test
-    public void testFailedFetchResponseWakesUpBuffer() throws InterruptedException {
+    public void testFailedFetchResponseReportsManagerEvent() throws InterruptedException {
         // The response body is irrelevant: it is discarded once the response is marked as disconnected.
-        assertRequestCompletionWakesUpBuffer(() -> client.prepareResponse(
+        assertRequestCompletionReportsManagerEvent(() -> client.prepareResponse(
                 fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0), true));
     }
 
     @Test
-    public void testFetchSessionErrorResponseWakesUpBuffer() throws InterruptedException {
-        assertRequestCompletionWakesUpBuffer(() -> client.prepareResponse(FetchResponse.of(
+    public void testFetchSessionErrorResponseReportsManagerEvent() throws InterruptedException {
+        assertRequestCompletionReportsManagerEvent(() -> client.prepareResponse(FetchResponse.of(
                 Errors.FETCH_SESSION_ID_NOT_FOUND, 0, INVALID_SESSION_ID, new LinkedHashMap<>(), List.of())));
     }
 
-    private void assertRequestCompletionWakesUpBuffer(Runnable prepareResponse) throws InterruptedException {
+    @Test
+    public void testUnsentFetchExpirationIsPublishedByAffectedPostPoll() throws Exception {
+        buildFetcher();
+
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        Node node = metadata.fetch().leaderFor(tp0);
+        client.delayReady(node, requestTimeoutMs + 1L);
+        fetcher.createFetchRequests();
+
+        AtomicInteger applicationWakeups = new AtomicInteger();
+        RequestManagers managers = mock(RequestManagers.class);
+        when(managers.entries()).thenReturn(List.of(fetcher));
+        when(managers.planManagerEvents(any())).thenAnswer(invocation ->
+            ManagerCoordinationPolicy.standard().evaluate(invocation.getArgument(0)));
+        doAnswer(invocation -> {
+            assertTrue(networkClientDelegate.unsentRequests().isEmpty());
+            applicationWakeups.incrementAndGet();
+            fetcher.wakeupApplicationThread();
+            return null;
+        }).when(managers).wakeupApplicationThread();
+
+        CountDownLatch waiterStarted = new CountDownLatch(1);
+        CompletableFuture<Void> applicationWaiter = CompletableFuture.runAsync(() -> {
+            waiterStarted.countDown();
+            fetcher.fetchBuffer.awaitWakeup(time.timer(Long.MAX_VALUE));
+        });
+        assertTrue(waiterStarted.await(TestUtils.DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS));
+
+        try (ConsumerReactor reactor = new ConsumerReactor(
+            new LogContext(),
+            time,
+            new LinkedBlockingQueue<>(),
+            mock(CompletableEventReaper.class),
+            () -> mock(ApplicationEventProcessor.class),
+            () -> networkClientDelegate,
+            () -> managers,
+            mock(AsyncConsumerMetrics.class)
+        )) {
+            reactor.initializeResources();
+            reactor.runOnce();
+
+            assertEquals(1, networkClientDelegate.unsentRequests().size());
+            assertTrue(client.requests().isEmpty());
+            assertFalse(applicationWaiter.isDone());
+            assertEquals(0, applicationWakeups.get());
+            NetworkClientDelegate.UnsentRequest unsent = networkClientDelegate.unsentRequests().peek();
+
+            time.sleep(requestTimeoutMs);
+            reactor.runOnce();
+
+            assertFutureThrows(org.apache.kafka.common.errors.TimeoutException.class, unsent.future());
+            assertEquals(1, applicationWakeups.get());
+            applicationWaiter.get(TestUtils.DEFAULT_MAX_WAIT_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void assertRequestCompletionReportsManagerEvent(Runnable prepareResponse) throws InterruptedException {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
@@ -350,31 +423,144 @@ public class FetchRequestManagerTest {
         prepareResponse.run();
         networkClientDelegate.poll(time.timer(0));
 
+        blockedOnBuffer.join(200);
+        assertTrue(blockedOnBuffer.isAlive(), "Fetch manager bypassed the reactor and woke the buffer directly");
+        assertEquals(
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            fetcher.pollManagerEvents()
+        );
+
+        fetcher.wakeupApplicationThread();
         blockedOnBuffer.join(2_000);
-        assertFalse(blockedOnBuffer.isAlive(), "Completed fetch request did not wake the thread blocked on the fetch buffer");
+        assertFalse(blockedOnBuffer.isAlive(), "Reactor action did not release the fetch wait");
     }
 
     @Test
     public void testNoFetchablePartitionsDoesNotWakeUpBuffer() throws InterruptedException {
         buildFetcher();
 
+        AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationBlocker.NO_FETCHABLE_PARTITIONS), result.blockers());
+
         // A consumer thread blocked waiting for data on the empty buffer.
         Thread blockedOnBuffer = new Thread(() -> fetcher.fetchBuffer.awaitWakeup(time.timer(3_600_000L)));
         blockedOnBuffer.setDaemon(true);
         blockedOnBuffer.start();
 
-        // Simulate a network thread cycle that finds nothing to fetch.
+        // Simulate a reactor cycle that finds nothing to fetch.
         assertEquals(0, sendFetches());
 
         // The thread must still be blocked: an eager wakeup here would busy-loop the caller.
         blockedOnBuffer.join(500);
         assertTrue(blockedOnBuffer.isAlive(),
                 "Empty fetch result with no fetchable partitions must not wake the thread blocked on the fetch buffer");
+        assertTrue(fetcher.lastManagerEvents().isEmpty());
 
         // Clean up: explicitly wake so the daemon thread can exit instead of leaking as a live thread.
         fetcher.fetchBuffer.wakeup();
         blockedOnBuffer.join(2_000);
         assertFalse(blockedOnBuffer.isAlive());
+    }
+
+    @Test
+    public void testDuplicateManagerEventsAreReturnedOnceByPoll() {
+        buildFetcher();
+
+        fetcher.onFetchRequestTerminated();
+        fetcher.onFetchRequestTerminated();
+
+        assertEquals(
+            List.of(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED),
+            fetcher.pollManagerEvents()
+        );
+        assertTrue(fetcher.pollManagerEvents().isEmpty());
+    }
+
+    @Test
+    public void testNoFetchablePartitionsAwaitsEnablingEvent() {
+        buildFetcher();
+
+        assertEquals(0, sendFetches());
+
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER,
+            fetcher.lastPollResult.timeUntilNextPollMs);
+    }
+
+    @Test
+    public void testZeroRetryBackoffMissingLeaderRetainsTimeDrivenRetry() {
+        buildFetcherWithRetryBackoff(0L);
+        subscriptions.assignFromUser(Set.of(tp0));
+        subscriptions.seek(tp0, 0L);
+
+        AbstractFetch.FetchRequestPreparationResult preparation = fetcher.prepareFetchRequestResult();
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationBlocker.MISSING_LEADER), preparation.blockers());
+
+        CompletableFuture<Void> future = fetcher.createFetchRequests();
+        NetworkClientDelegate.PollResult result = fetcher.poll(time.milliseconds());
+
+        assertTrue(future.isDone());
+        assertTrue(result.networkCommands().isEmpty());
+        NextPollCondition.RetryAfter retry = assertInstanceOf(
+            NextPollCondition.RetryAfter.class,
+            result.nextPollCondition()
+        );
+        assertEquals(0L, retry.delayMs());
+        assertTrue(result.isValidPollResult());
+    }
+
+    @Test
+    public void testRetryableBlockerCompletesEachFutureAndRetainsFetchIntent() {
+        buildFetcher();
+
+        CompletableFuture<Void> first = fetcher.createFetchRequests();
+        CompletableFuture<Void> duplicate = fetcher.createFetchRequests();
+        assertFalse(first.isDone());
+        assertTrue(duplicate.isDone());
+        NetworkClientDelegate.PollResult firstResult = fetcher.poll(time.milliseconds());
+        assertTrue(first.isDone());
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, firstResult.timeUntilNextPollMs);
+
+        CompletableFuture<Void> second = fetcher.createFetchRequests();
+        CompletableFuture<Void> secondDuplicate = fetcher.createFetchRequests();
+        assertFalse(second.isDone());
+        assertTrue(secondDuplicate.isDone());
+        NetworkClientDelegate.PollResult secondResult = fetcher.poll(time.milliseconds());
+        assertTrue(second.isDone());
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, secondResult.timeUntilNextPollMs);
+
+        NetworkClientDelegate.PollResult retainedIntentResult = fetcher.poll(time.milliseconds());
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, retainedIntentResult.timeUntilNextPollMs);
+    }
+
+    @Test
+    public void testRetainedFetchIntentReportsLaterPreparationFailureToCurrentCaller() {
+        buildFetcher();
+
+        CompletableFuture<Void> initial = fetcher.createFetchRequests();
+        NetworkClientDelegate.PollResult blockerResult = fetcher.poll(time.milliseconds());
+        assertTrue(initial.isDone());
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, blockerResult.timeUntilNextPollMs);
+
+        CompletableFuture<Void> current = fetcher.createFetchRequests();
+        CompletableFuture<Void> duplicate = fetcher.createFetchRequests();
+        fetcher.setPreparationException(new AuthenticationException("one-shot preparation failure"));
+
+        assertFalse(current.isDone());
+        assertTrue(duplicate.isDone());
+        NetworkClientDelegate.PollResult failureResult = fetcher.poll(time.milliseconds());
+
+        assertEquals(List.of(ManagerEvent.LocalProgress.FETCH_PREPARATION_FAILED), failureResult.managerEvents());
+        assertFutureThrows(AuthenticationException.class, current);
+    }
+
+    @Test
+    public void testPollOnCloseCompletesPendingFetchFuture() {
+        buildFetcher();
+        CompletableFuture<Void> future = fetcher.createFetchRequests();
+
+        fetcher.pollOnClose(time.milliseconds());
+
+        assertTrue(future.isDone());
     }
 
     @Test
@@ -389,21 +575,30 @@ public class FetchRequestManagerTest {
     }
 
     @Test
-    public void testMaximumTimeToWaitBoundedWhenNoInflightRequest() {
+    public void testMaximumTimeToWaitUnboundedWhenBufferedDataWakesApplication() {
         buildFetcher();
 
         assignFromUser(singleton(tp0));
         subscriptions.seek(tp0, 0);
 
         // Fetch data for tp0, but leave it buffered (unconsumed) so the next prepare() finds every fetchable
-        // partition already buffered. With no in-flight request, maximumTimeToWait is bounded.
+        // partition already buffered. This transition wakes the application directly, so it needs no deadline.
         client.prepareResponse(fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
         assertEquals(1, sendFetches());
         networkClientDelegate.poll(time.timer(0));
         assertTrue(fetcher.hasCompletedFetches());
 
+        AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
+        assertTrue(result.requests().isEmpty());
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED), result.blockers());
+        assertTrue(fetcher.pollManagerEvents().isEmpty());
+
         assertEquals(0, sendFetches());
-        assertEquals(retryBackoffMs, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(
+            List.of(ManagerEvent.FetchBufferHasData.INSTANCE),
+            fetcher.lastManagerEvents()
+        );
+        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
     }
 
     @Test
@@ -441,13 +636,73 @@ public class FetchRequestManagerTest {
         Node node = metadata.fetch().leaderFor(tp0);
 
         client.backoff(node, 500);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        AbstractFetch.FetchRequestPreparationResult result = fetcher.prepareFetchRequestResult();
+        assertTrue(result.requests().isEmpty());
+        assertEquals(Set.of(AbstractFetch.FetchRequestPreparationBlocker.RECONNECT_BACKOFF), result.blockers());
+        assertTrue(result.reconnectBackoffRemainingMs() > 0L);
+        assertTrue(result.reconnectBackoffRemainingMs() <= 500L);
+
         assertEquals(0, sendFetches());
-        assertEquals(retryBackoffMs, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertTrue(fetcher.lastManagerEvents().isEmpty());
+        long remainingMs = fetcher.lastPollResult.timeUntilNextPollMs;
+        assertTrue(remainingMs > 0L);
+        assertTrue(remainingMs <= result.reconnectBackoffRemainingMs());
+        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
 
         // Once the backoff clears, a fetch request can be sent and maximumTimeToWait reverts to unbounded.
         time.sleep(500);
         assertEquals(1, sendFetches());
         assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+    }
+
+    @Test
+    public void testRetryDeadlineWinsWhenInFlightAndReconnectConditionsAreMixed() {
+        buildFetcher();
+        AbstractFetch.FetchRequestPreparationResult result = new AbstractFetch.FetchRequestPreparationResult(
+            Map.of(),
+            Set.of(
+                AbstractFetch.FetchRequestPreparationBlocker.REQUEST_IN_FLIGHT,
+                AbstractFetch.FetchRequestPreparationBlocker.RECONNECT_BACKOFF
+            ),
+            500L
+        );
+
+        assertEquals(500L, fetcher.timeUntilNextPollMs(result, time.milliseconds()));
+    }
+
+    @Test
+    public void testRepeatedPreparationDoesNotPostponeRetryDeadline() {
+        buildFetcher();
+
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        Node node = metadata.fetch().leaderFor(tp0);
+        client.backoff(node, 500L);
+
+        assertEquals(0, sendFetches());
+        long firstDeadlineMs = time.milliseconds() + fetcher.lastPollResult.timeUntilNextPollMs;
+
+        time.sleep(250L);
+        assertEquals(0, sendFetches());
+        long repeatedDeadlineMs = time.milliseconds() + fetcher.lastPollResult.timeUntilNextPollMs;
+
+        // This fixture's MockTime advances by 1ms on each read; compare the absolute deadlines within that tick.
+        assertTrue(Math.abs(firstDeadlineMs - repeatedDeadlineMs) <= 1L);
+        long currentTimeMs = time.milliseconds();
+        long remainingMs = fetcher.lastPollResult.timeUntilNextPollMs;
+        assertTrue(Math.abs((firstDeadlineMs - currentTimeMs) - remainingMs) <= 1L);
+    }
+
+    @Test
+    public void testWaitingForBufferDrainUsesEventDrivenPoll() {
+        buildFetcher();
+        AbstractFetch.FetchRequestPreparationResult result = new AbstractFetch.FetchRequestPreparationResult(
+            Map.of(),
+            Set.of(AbstractFetch.FetchRequestPreparationBlocker.WAITING_FOR_BUFFER_DRAIN)
+        );
+
+        assertEquals(Long.MAX_VALUE, fetcher.timeUntilNextPollMs(result, time.milliseconds()));
     }
 
     @Test
@@ -3667,6 +3922,10 @@ public class FetchRequestManagerTest {
 
         assertDoesNotThrow(() -> sendFetches(false));
         assertFutureThrows(AuthenticationException.class, future);
+        assertEquals(
+            List.of(ManagerEvent.LocalProgress.FETCH_PREPARATION_FAILED),
+            fetcher.lastManagerEvents()
+        );
     }
 
     @Test
@@ -3684,7 +3943,9 @@ public class FetchRequestManagerTest {
             futures.add(future);
         }
 
-        assertEquals(0, futures.stream().filter(CompletableFuture::isDone).count());
+        // One future represents the retained intent. Equivalent requests complete immediately instead of adding
+        // callbacks to a future which may remain pending across a long retryable blocker.
+        assertEquals(futures.size() - 1, futures.stream().filter(CompletableFuture::isDone).count());
 
         assertEquals(1, sendFetches(false));
         assertEquals(futures.size(), futures.stream().filter(CompletableFuture::isDone).count());
@@ -4261,6 +4522,19 @@ public class FetchRequestManagerTest {
         buildFetcher(Integer.MAX_VALUE);
     }
 
+    private void buildFetcherWithRetryBackoff(final long configuredRetryBackoffMs) {
+        buildFetcher(
+            new MetricConfig(),
+            AutoOffsetResetStrategy.EARLIEST,
+            new ByteArrayDeserializer(),
+            new ByteArrayDeserializer(),
+            Integer.MAX_VALUE,
+            IsolationLevel.READ_UNCOMMITTED,
+            Long.MAX_VALUE,
+            configuredRetryBackoffMs
+        );
+    }
+
     private void buildFetcher(Deserializer<?> keyDeserializer,
                               Deserializer<?> valueDeserializer) {
         buildFetcher(AutoOffsetResetStrategy.EARLIEST, keyDeserializer, valueDeserializer,
@@ -4292,10 +4566,30 @@ public class FetchRequestManagerTest {
                                      int maxPollRecords,
                                      IsolationLevel isolationLevel,
                                      long metadataExpireMs) {
+        buildFetcher(
+            metricConfig,
+            offsetResetStrategy,
+            keyDeserializer,
+            valueDeserializer,
+            maxPollRecords,
+            isolationLevel,
+            metadataExpireMs,
+            retryBackoffMs
+        );
+    }
+
+    private <K, V> void buildFetcher(MetricConfig metricConfig,
+                                     AutoOffsetResetStrategy offsetResetStrategy,
+                                     Deserializer<K> keyDeserializer,
+                                     Deserializer<V> valueDeserializer,
+                                     int maxPollRecords,
+                                     IsolationLevel isolationLevel,
+                                     long metadataExpireMs,
+                                     long configuredRetryBackoffMs) {
         LogContext logContext = new LogContext();
         SubscriptionState subscriptionState = new SubscriptionState(logContext, offsetResetStrategy);
         buildFetcher(metricConfig, keyDeserializer, valueDeserializer, maxPollRecords, isolationLevel, metadataExpireMs,
-                subscriptionState, logContext);
+                subscriptionState, logContext, configuredRetryBackoffMs);
     }
 
     private <K, V> void buildFetcher(MetricConfig metricConfig,
@@ -4306,7 +4600,29 @@ public class FetchRequestManagerTest {
                                      long metadataExpireMs,
                                      SubscriptionState subscriptionState,
                                      LogContext logContext) {
-        buildDependencies(metricConfig, metadataExpireMs, subscriptionState, logContext);
+        buildFetcher(
+            metricConfig,
+            keyDeserializer,
+            valueDeserializer,
+            maxPollRecords,
+            isolationLevel,
+            metadataExpireMs,
+            subscriptionState,
+            logContext,
+            retryBackoffMs
+        );
+    }
+
+    private <K, V> void buildFetcher(MetricConfig metricConfig,
+                                     Deserializer<K> keyDeserializer,
+                                     Deserializer<V> valueDeserializer,
+                                     int maxPollRecords,
+                                     IsolationLevel isolationLevel,
+                                     long metadataExpireMs,
+                                     SubscriptionState subscriptionState,
+                                     LogContext logContext,
+                                     long configuredRetryBackoffMs) {
+        buildDependencies(metricConfig, metadataExpireMs, subscriptionState, logContext, configuredRetryBackoffMs);
         Deserializers<K, V> deserializers = new Deserializers<>(keyDeserializer, valueDeserializer, metrics);
         FetchConfig fetchConfig = new FetchConfig(
                 minBytes,
@@ -4335,13 +4651,13 @@ public class FetchRequestManagerTest {
                 networkClientDelegate,
                 fetchCollector,
                 apiVersions,
-                retryBackoffMs));
+                configuredRetryBackoffMs));
         ConsumerNetworkClient consumerNetworkClient = new ConsumerNetworkClient(
                 logContext,
                 client,
                 metadata,
                 time,
-                retryBackoffMs,
+                configuredRetryBackoffMs,
                 requestTimeoutMs,
                 Integer.MAX_VALUE);
         offsetFetcher = new OffsetFetcher(logContext,
@@ -4349,7 +4665,7 @@ public class FetchRequestManagerTest {
                 metadata,
                 subscriptions,
                 time,
-                retryBackoffMs,
+                configuredRetryBackoffMs,
                 requestTimeoutMs,
                 isolationLevel,
                 apiVersions);
@@ -4358,7 +4674,8 @@ public class FetchRequestManagerTest {
     private void buildDependencies(MetricConfig metricConfig,
                                    long metadataExpireMs,
                                    SubscriptionState subscriptionState,
-                                   LogContext logContext) {
+                                   LogContext logContext,
+                                   long configuredRetryBackoffMs) {
         time = new MockTime(1, 0, 0);
         subscriptions = subscriptionState;
         metadata = new ConsumerMetadata(0, 0, metadataExpireMs, false, false,
@@ -4373,7 +4690,7 @@ public class FetchRequestManagerTest {
         properties.put(KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.setProperty(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG, String.valueOf(requestTimeoutMs));
-        properties.setProperty(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, String.valueOf(retryBackoffMs));
+        properties.setProperty(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG, String.valueOf(configuredRetryBackoffMs));
         properties.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
         ConsumerConfig config = new ConsumerConfig(properties);
         networkClientDelegate = spy(new TestableNetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler, true));
@@ -4387,6 +4704,8 @@ public class FetchRequestManagerTest {
 
         private final FetchCollector<K, V> fetchCollector;
         private AuthenticationException authenticationException;
+        private RuntimeException preparationException;
+        private NetworkClientDelegate.PollResult lastPollResult;
 
         public TestableFetchRequestManager(LogContext logContext,
                                            Time time,
@@ -4405,6 +4724,24 @@ public class FetchRequestManagerTest {
 
         public void setAuthenticationException(AuthenticationException authenticationException) {
             this.authenticationException = authenticationException;
+        }
+
+        public void setPreparationException(final RuntimeException preparationException) {
+            this.preparationException = preparationException;
+        }
+
+        @Override
+        protected FetchRequestPreparationResult prepareFetchRequests() {
+            if (preparationException != null) {
+                RuntimeException exception = preparationException;
+                preparationException = null;
+                throw exception;
+            }
+            return super.prepareFetchRequests();
+        }
+
+        private FetchRequestPreparationResult prepareFetchRequestResult() {
+            return prepareFetchRequests();
         }
 
         @Override
@@ -4434,17 +4771,26 @@ public class FetchRequestManagerTest {
             if (requestFetch)
                 createFetchRequests();
 
-            NetworkClientDelegate.PollResult pollResult = poll(time.milliseconds());
-            networkClientDelegate.addAll(pollResult.unsentRequests);
-            return pollResult.unsentRequests.size();
+            lastPollResult = poll(time.milliseconds());
+            networkClientDelegate.addAll(lastPollResult.unsentRequests);
+            return lastPollResult.unsentRequests.size();
         }
 
         private List<NetworkClientDelegate.UnsentRequest> sendFetches() {
             offsetFetcher.validatePositionsOnMetadataChange();
             createFetchRequests();
-            NetworkClientDelegate.PollResult pollResult = poll(time.milliseconds());
-            networkClientDelegate.addAll(pollResult.unsentRequests);
-            return pollResult.unsentRequests;
+            lastPollResult = poll(time.milliseconds());
+            networkClientDelegate.addAll(lastPollResult.unsentRequests);
+            return lastPollResult.unsentRequests;
+        }
+
+        private List<ManagerEvent> lastManagerEvents() {
+            return lastPollResult == null ? List.of() : lastPollResult.managerEvents();
+        }
+
+        private List<ManagerEvent> pollManagerEvents() {
+            lastPollResult = poll(time.milliseconds());
+            return lastPollResult.managerEvents();
         }
 
         private void clearBufferedDataForUnassignedPartitions(Set<TopicPartition> partitions) {

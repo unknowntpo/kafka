@@ -89,6 +89,11 @@ public class Fetcher<K, V> extends AbstractFetch {
     }
 
     @Override
+    protected long unavailableTimeRemainingMs(Node node, long currentTimeMs) {
+        return client.connectionDelay(node, currentTimeMs);
+    }
+
+    @Override
     protected void maybeThrowAuthFailure(Node node) {
         client.maybeThrowAuthFailure(node);
     }

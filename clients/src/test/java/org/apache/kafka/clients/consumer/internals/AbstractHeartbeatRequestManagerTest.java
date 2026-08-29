@@ -29,6 +29,7 @@ import org.apache.logging.log4j.Level;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 
@@ -43,6 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -98,6 +100,11 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(true);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.MEMBERSHIP_CHANGE, wait.cause());
     }
 
     @Test
@@ -107,7 +114,13 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
         assertEquals(1, result.unsentRequests.size());
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, result.timeUntilNextPollMs);
+        assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs,
+            "an admitted heartbeat must wait for its network completion, not another timer");
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, wait.cause());
         assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
         verify(membershipManager).onHeartbeatRequestGenerated();
     }
@@ -118,8 +131,39 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
         assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.COORDINATOR_CHANGE, wait.cause());
         assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
         assertEquals(0, result.unsentRequests.size());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = Errors.class, names = {"NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE"})
+    public void testCoordinatorInvalidationIsPublishedExactlyOnce(final Errors error) {
+        doReturn(new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        NetworkClientDelegate.PollResult heartbeat = heartbeatRequestManager.poll(time.milliseconds());
+        assertEquals(1, heartbeat.unsentRequests.size());
+
+        heartbeat.unsentRequests.get(0).handler().onComplete(
+            createHeartbeatResponse(heartbeat.unsentRequests.get(0), error)
+        );
+
+        NetworkClientDelegate.PollResult invalidated = heartbeatRequestManager.poll(time.milliseconds());
+        assertCoordinatorInvalidation(invalidated);
+        assertTrue(invalidated.unsentRequests.isEmpty(),
+            "the invalidation must be routed before another heartbeat can use the stale coordinator");
+        verify(coordinatorRequestManager).coordinatorSnapshot();
+        assertEquals(0, invalidated.unsentRequests.size());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
+
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        NetworkClientDelegate.PollResult nextPoll = heartbeatRequestManager.poll(time.milliseconds());
+        assertTrue(nextPoll.managerEvents().isEmpty(), "coordinator invalidation must be published once");
     }
 
     /**
@@ -143,6 +187,12 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
 
         assertEquals(1, result.unsentRequests.size(), "A heartbeat request should be generated to" +
             " complete the ongoing leaving operation that was triggered before the poll timer expired.");
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, wait.cause(),
+            "after admitting the leave heartbeat, elapsed poll time must not admit a duplicate request");
     }
 
     @Test
@@ -294,7 +344,7 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
             case COORDINATOR_NOT_AVAILABLE:
             case NOT_COORDINATOR:
                 verify(backgroundEventHandler, never()).add(any());
-                verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+                verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
                 assertNextHeartbeatTiming(0);
                 break;
             case UNKNOWN_MEMBER_ID:
@@ -330,9 +380,29 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
             // Make sure a next heartbeat is sent for all non-fatal errors (to retry or rejoin)
             time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
             NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
+            if (error == Errors.COORDINATOR_NOT_AVAILABLE || error == Errors.NOT_COORDINATOR) {
+                assertCoordinatorInvalidation(result, 0L);
+                assertTrue(result.unsentRequests.isEmpty(),
+                    "the coordinator observation must be published before a follow-up heartbeat");
+                result = heartbeatRequestManager.poll(time.milliseconds());
+            }
             assertEquals(1, result.unsentRequests.size(),
                 "A follow-up heartbeat should be sent after a non-fatal error " + error);
         }
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
+        assertCoordinatorInvalidation(result, 7L);
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result,
+                                               final long expectedCoordinatorVersion) {
+        assertEquals(1, result.managerEvents().size());
+        ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
+        assertEquals(heartbeatRequestManager.getClass().getSimpleName(), invalidation.source());
+        assertEquals(expectedCoordinatorVersion, invalidation.observedCoordinatorVersion(),
+            "the response must retain the coordinator version captured when its request was built");
     }
 
     protected void assertNextHeartbeatTiming(long expectedTimeToNextHeartbeatMs) {

@@ -1310,6 +1310,7 @@ public class ConsumerMembershipManagerTest {
         // Start reconciliation - assignment event is pending
         receiveAssignment(topicId, Collections.singletonList(0), membershipManager);
         membershipManager.maybeReconcile(true);
+        backgroundEventHandler.publishPendingEvents();
         PartitionsAssignedEvent pendingAssignmentEvent = (PartitionsAssignedEvent) backgroundEventQueue.poll();
         assertNotNull(pendingAssignmentEvent);
 
@@ -2281,6 +2282,7 @@ public class ConsumerMembershipManagerTest {
         membershipManager.onHeartbeatRequestGenerated();
 
         assertEquals(MemberState.STALE, membershipManager.state());
+        backgroundEventHandler.publishPendingEvents();
         assertFalse(backgroundEventQueue.isEmpty());
         assertInstanceOf(PartitionsRemovedEvent.class, backgroundEventQueue.peek());
 
@@ -2434,6 +2436,7 @@ public class ConsumerMembershipManagerTest {
                                                                             ConsumerRebalanceListenerMethodName expectedMethodName,
                                                                             SortedSet<TopicPartition> expectedPartitions,
                                                                             boolean complete) {
+        backgroundEventHandler.publishPendingEvents();
         // We expect only our enqueued event in the background queue.
         assertEquals(1, backgroundEventQueue.size());
         assertNotNull(backgroundEventQueue.peek());
@@ -2489,6 +2492,7 @@ public class ConsumerMembershipManagerTest {
      * with invokeCallback=false.
      */
     private void processAssignmentEventNoCallback(ConsumerMembershipManager membershipManager) {
+        backgroundEventHandler.publishPendingEvents();
         assertEquals(1, backgroundEventQueue.size());
         PartitionsAssignedEvent neededEvent =
             (PartitionsAssignedEvent) backgroundEventQueue.poll();

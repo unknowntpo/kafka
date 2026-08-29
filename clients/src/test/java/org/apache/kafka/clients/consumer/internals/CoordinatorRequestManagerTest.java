@@ -47,6 +47,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -81,6 +82,7 @@ public class CoordinatorRequestManagerTest {
 
         NetworkClientDelegate.PollResult pollResult = coordinatorManager.poll(time.milliseconds());
         assertEquals(Collections.emptyList(), pollResult.unsentRequests);
+        assertTrue(pollResult.managerEvents().isEmpty());
     }
 
     /**
@@ -163,7 +165,8 @@ public class CoordinatorRequestManagerTest {
         // been demoted. This can cause a tight loop in which FindCoordinator continues to
         // return node X while that node continues to reply with NOT_COORDINATOR. Hence we
         // still want to ensure a backoff after successfully finding the coordinator.
-        coordinatorManager.markCoordinatorUnknown("coordinator changed", time.milliseconds());
+        assertTrue(coordinatorManager.markCoordinatorUnknown("coordinator changed", time.milliseconds()));
+        assertFalse(coordinatorManager.markCoordinatorUnknown("already unknown", time.milliseconds()));
         assertEquals(Collections.emptyList(), coordinatorManager.poll(time.milliseconds()).unsentRequests);
 
         time.sleep(RETRY_BACKOFF_MS - 1);
@@ -172,6 +175,38 @@ public class CoordinatorRequestManagerTest {
         time.sleep(RETRY_BACKOFF_MS);
         expectFindCoordinatorRequest(coordinatorManager, Errors.NONE);
         assertTrue(coordinatorManager.coordinator().isPresent());
+    }
+
+    @Test
+    public void testDelayedObservationCannotInvalidateRediscoveredCoordinator() {
+        CoordinatorRequestManager coordinatorManager = setupCoordinatorManager(GROUP_ID);
+
+        expectFindCoordinatorRequest(coordinatorManager, Errors.NONE);
+        long nodeOneVersion = coordinatorManager.coordinatorSnapshot().version();
+        ManagerEvent.CoordinatorUnavailableObserved delayedNodeOneObservation =
+            new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "node one rejected", 1L, nodeOneVersion);
+
+        assertTrue(coordinatorManager.markCoordinatorUnknown("replace node one", time.milliseconds()));
+        long unknownVersion = coordinatorManager.coordinatorSnapshot().version();
+        assertTrue(unknownVersion > nodeOneVersion);
+
+        time.sleep(RETRY_BACKOFF_MS);
+        node = new Node(2, "replacement", 9093);
+        expectFindCoordinatorRequest(coordinatorManager, Errors.NONE);
+        long nodeTwoVersion = coordinatorManager.coordinatorSnapshot().version();
+        assertTrue(nodeTwoVersion > unknownVersion);
+
+        assertFalse(coordinatorManager.handleCoordinatorUnavailableObserved(delayedNodeOneObservation));
+        Node currentCoordinator = coordinatorManager.coordinator().orElseThrow();
+        assertEquals(node.id(), Integer.parseInt(currentCoordinator.idString()));
+        assertEquals(node.host(), currentCoordinator.host());
+        assertEquals(node.port(), currentCoordinator.port());
+
+        ManagerEvent.CoordinatorUnavailableObserved currentNodeTwoObservation =
+            new ManagerEvent.CoordinatorUnavailableObserved("commit", "node two rejected", 2L, nodeTwoVersion);
+        assertTrue(coordinatorManager.handleCoordinatorUnavailableObserved(currentNodeTwoObservation));
+        assertTrue(coordinatorManager.coordinator().isEmpty());
+        assertTrue(coordinatorManager.coordinatorSnapshot().version() > nodeTwoVersion);
     }
 
     @Test
@@ -249,15 +284,24 @@ public class CoordinatorRequestManagerTest {
         // First poll sends a FindCoordinator request, marking it in-flight. Do NOT complete it.
         NetworkClientDelegate.PollResult res = coordinatorManager.poll(time.milliseconds());
         assertEquals(1, res.unsentRequests.size());
+        NextPollCondition.AwaitInput initialWait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            res.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, initialWait.cause());
 
         // Advance well past the retry backoff while the request is still in flight.
         time.sleep(60_000);
 
         NetworkClientDelegate.PollResult res2 = coordinatorManager.poll(time.milliseconds());
         assertEquals(0, res2.unsentRequests.size(), "no new request should be sent while one is in flight");
-        assertTrue(res2.timeUntilNextPollMs > 0,
-            "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got "
-                + res2.timeUntilNextPollMs);
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, res2.timeUntilNextPollMs,
+            "an in-flight FindCoordinator request must await its completion event");
+        NextPollCondition.AwaitInput retainedWait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            res2.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, retainedWait.cause());
     }
 
     @ParameterizedTest
@@ -266,6 +310,12 @@ public class CoordinatorRequestManagerTest {
         CoordinatorRequestManager coordinatorManager = setupCoordinatorManager(GROUP_ID);
         expectFindCoordinatorRequest(coordinatorManager, Errors.GROUP_AUTHORIZATION_FAILED);
         assertTrue(coordinatorManager.fatalError().isPresent());
+        NetworkClientDelegate.PollResult fatalResult = coordinatorManager.poll(time.milliseconds());
+        ManagerEvent.CoordinatorFatalError fatalEvent = assertInstanceOf(
+            ManagerEvent.CoordinatorFatalError.class,
+            fatalResult.managerEvents().get(0)
+        );
+        assertSame(coordinatorManager.fatalError().get(), fatalEvent.error());
 
         time.sleep(RETRY_BACKOFF_MS);
         // there are no successful responses, so the fatal error should persist
