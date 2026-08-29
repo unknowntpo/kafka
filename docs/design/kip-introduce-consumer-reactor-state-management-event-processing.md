@@ -15,7 +15,7 @@
  limitations under the License.
 -->
 
-# KIP-1371: Formalize Consumer Reactor Coordination and Publication
+# KIP-1371: Formalize Consumer Reactor Cross-Manager Coordination and Publication
 
 ## Status
 
