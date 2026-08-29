@@ -197,6 +197,15 @@ made by different components along the path. The proposal changes responsibility
 
 ![ConsumerReactor ownership and execution boundary](../images/kip-1371-reactor-architecture.png)
 
+Before this KIP, `ConsumerNetworkThread` already drains application inputs, polls the selected request managers,
+stages their unsent requests, and bounds network polling by the minimum numeric wait. The paths after a manager or
+network completion are component-specific: heartbeat and commit paths can update coordinator state; fetch paths
+store records in `FetchBuffer` or `ShareFetchBuffer` and wake that buffer; managers can publish directly through
+`BackgroundEventHandler`; and operation futures are completed by their owning managers. The diagram describes the
+existing coordination shape; it does not imply that every path is independently defective.
+
+![Async consumer coordination before KIP-1371](../images/kip-1371-before-consumer-network-thread.png)
+
 The following topology expands that boundary into the full runtime path. `AsyncKafkaConsumer`, the Streams-enabled
 regular consumer, and `ShareConsumerImpl` select different `RequestManagers` compositions while using the same
 reactor phases. The manager stack in the diagram is representative: each composition supplies only its applicable
