@@ -582,7 +582,7 @@ the named production-component path has a deterministic test. **Partial** and **
 they are not claims that the POC fixes the historical issue end to end.
 
 Case-study links below use the immutable evidence snapshot
-[`d2e5ff6eb7`](https://github.com/unknowntpo/kafka/tree/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0)
+[`10d2afc2aa`](https://github.com/unknowntpo/kafka/tree/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b)
 unless a study names a later revision. Later working-tree experiments are not counted as verified evidence until
 they are committed with a named test result.
 
@@ -684,7 +684,7 @@ NetworkClientDelegate.poll(published timeout)
 
 **Current evidence.** Regular/share heartbeat activation, heartbeat-to-coordinator routing, manual-assignment
 no-spin, and the auto-commit completion/publication slice are verified at their cited revisions. Tests for the
-KAFKA-20970 regular-commit shape exist on revision `edd4c5b1ab`: an expired auto-commit with an unknown coordinator
+KAFKA-20970 regular-commit shape exist on revision `d9aac66ac9`: an expired auto-commit with an unknown coordinator
 publishes `AwaitInput(COORDINATOR_CHANGE)` and avoids `NetworkClientDelegate.poll(0)`. Their pinned result record,
 the exact historical KAFKA-20253 CPU reproduction, the public-consumer KAFKA-20970 path, and the Streams-heartbeat
 variant remain open; see [Appendix A](#appendix-a-poc-evidence-and-open-gates).
@@ -753,7 +753,7 @@ and Streams topology slices from Phase 2. The target model above also defines la
 | Cross-manager ownership | Coordinator target/version snapshot, typed event handlers, phase-batch policy evaluation, and version-fenced coordinator invalidation are present. Coordinator fatal errors are emitted once by the coordinator owner and converted after schedule publication into an application error plus the final wake; heartbeat managers no longer read and clear coordinator fatal state. | Other cross-owner mutation paths use the same owner/fact/command rule or are placed inside an explicit protocol driver. |
 | Snapshot retention | Only the current `CoordinatorSnapshot` is retained; there is no global registry or snapshot history. | Additional snapshots remain opt-in and latest-only when a real cross-manager decision needs them. |
 | Publish-before-effect | `ReactorAction` and staged `BackgroundEvent` paths publish the schedule first. Direct `FetchBuffer` signalling remains a documented classic-consumer compatibility side channel. | Generic operation completion, async data publication, callback acknowledgement, and timeout paths cross the same boundary. |
-| Application wait projection | `AsyncKafkaConsumer.poll(...)` uses the published reactor decision; the former assignment/position mutable-state rescans have been removed in the POC. Revision [`5c587c4db4`](https://github.com/unknowntpo/kafka/tree/5c587c4db412d4ae45b10855dc21f4ac9f557bb8) wraps legacy `maximumTimeToWait(...)` values as `ApplicationWait` and retains them separately from each manager's `NextPollCondition`. | Remove the legacy method and wrapper after all remaining application waits are derived from immutable schedule or operation results, with integration tests proving that each enabling input wakes a blocked application poll. |
+| Application wait projection | `AsyncKafkaConsumer.poll(...)` uses the published reactor decision; the former assignment/position mutable-state rescans have been removed in the POC. Revision [`be27065ca8`](https://github.com/unknowntpo/kafka/tree/be27065ca888ca281bc71db3e12743b23a2b9b09) wraps legacy `maximumTimeToWait(...)` values as `ApplicationWait` and retains them separately from each manager's `NextPollCondition`. | Remove the legacy method and wrapper after all remaining application waits are derived from immutable schedule or operation results, with integration tests proving that each enabling input wakes a blocked application poll. |
 | Wake coalescing | Equivalent wakes are combined separately in the pre-I/O, post-I/O, and final-drain phases. | Equivalent reasons produce at most one primitive wake per complete reactor iteration. |
 | Cross-owner fact admission | During normal execution, callback-produced facts are drained at the input boundary and their owner commands are applied before the full manager pass builds transport work. A fatal post-I/O manager failure stops the production loop, so the current POC does not guarantee a later drain. An unexpected fact first produced by the pre-I/O manager pass is preserved and diagnosed, but its command is deferred because transport work may already have been built. | Require cross-owner facts to enter through input or network-completion paths and become available no later than the post-I/O owner poll during normal execution. First admission during the ordinary pre-I/O pass is invalid. Fatal cleanup semantics remain outside this KIP. |
 | Diagnostics | Invalid-poll-result, manager-poll, action-failure, and application-wakeup counters are present. | TRACE adds publication generation, deadline source, action reason, and destination without hot-path collection formatting. |
@@ -877,15 +877,27 @@ rather than this KIP.
 
 This appendix records implementation evidence without making the POC structure part of the community decision.
 Linked case-study tests use evidence snapshot
-[`d2e5ff6eb7`](https://github.com/unknowntpo/kafka/tree/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0).
+[`10d2afc2aa`](https://github.com/unknowntpo/kafka/tree/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b).
 Later evidence names its own revision; dirty working-tree experiments are not counted as verified.
+
+### Review structure
+
+The proof of concept is also available as two stacked draft PRs to keep the architectural diff reviewable:
+
+1. [PR #3](https://github.com/unknowntpo/kafka/pull/3) contains only the
+   `ConsumerNetworkThread` to `ConsumerReactor` rename.
+2. [PR #4](https://github.com/unknowntpo/kafka/pull/4) uses the rename branch as its base and therefore shows only
+   the subsequent behavior and structure changes.
+
+This stack changes only how GitHub presents the diff. The two layers together produce the same source tree as the
+POC branch at the corresponding snapshot; they are not separate runtime modes or separate community decisions.
 
 | Case | Verified evidence | Remaining gate |
 | --- | --- | --- |
-| Position scope | [`OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManagerTest.java) and [`AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java). The component test fails at pre-fix baseline `6744a718c2`. | Cross-component position-before-data publication and the exact KAFKA-18641 position/auto-commit race. |
-| Heartbeat and commit readiness | Snapshot `d2e5ff6eb7` contains the coordinator and regular/share heartbeat activation evidence. Revision [`edd4c5b1ab`](https://github.com/unknowntpo/kafka/tree/edd4c5b1ab0743817eb4818d92a09b1f07cc606a) contains `CommitRequestManagerTest.testExpiredAutoCommitAwaitsUnknownCoordinator` and `ConsumerReactorCommitReadinessTest.testExpiredAutoCommitWithUnknownCoordinatorDoesNotZeroPoll`. Both tests pass in the 805-test manager/consumer run recorded for [`68a978bb9f`](https://github.com/unknowntpo/kafka/tree/68a978bb9fb13db069cb365060772343636b0126). | Exact historical KAFKA-20253 CPU reproduction, a public-consumer KAFKA-20970 reproduction, and the Streams-heartbeat variant. |
-| Fetch wakeup | [`AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java) observes the invalid wake at pre-fix baseline `9521d77da3` and its absence in the POC. [`ManagerCoordinationPolicyTest`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ManagerCoordinationPolicyTest.java) covers the typed fact-to-action mapping. | Remove the direct async `FetchBuffer` notification compatibility path and reproduce KAFKA-20397 metadata-error/wait-entry ordering. |
-| POC lifecycle experiment | [`ConsumerReactorTest.testCleanupExecutesStagedAsyncPollCompletion`](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java) proves cleanup executes an already selected completion. Phase 3 uses this only to preserve the existing terminal outcome. | Public lifecycle semantic changes and fatal cleanup design remain outside this KIP. A separate lifecycle design must cover KAFKA-18160, KAFKA-19357, and KAFKA-18569 before those experiments can change compatibility behavior. |
+| Position scope | [`OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManagerTest.java) and [`AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java). The component test fails at pre-fix baseline `6744a718c2`. | Cross-component position-before-data publication and the exact KAFKA-18641 position/auto-commit race. |
+| Heartbeat and commit readiness | Snapshot `10d2afc2aa` contains the coordinator and regular/share heartbeat activation evidence. Revision [`d9aac66ac9`](https://github.com/unknowntpo/kafka/tree/d9aac66ac9b2e9ceff8839e27169b8fc7c12edb8) contains `CommitRequestManagerTest.testExpiredAutoCommitAwaitsUnknownCoordinator` and `ConsumerReactorCommitReadinessTest.testExpiredAutoCommitWithUnknownCoordinatorDoesNotZeroPoll`. Both tests pass in the 805-test manager/consumer run recorded for [`e6feb3f047`](https://github.com/unknowntpo/kafka/tree/e6feb3f047911076ed27e658fa1d1c065ca98107). | Exact historical KAFKA-20253 CPU reproduction, a public-consumer KAFKA-20970 reproduction, and the Streams-heartbeat variant. |
+| Fetch wakeup | [`AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java) observes the invalid wake at pre-fix baseline `9521d77da3` and its absence in the POC. [`ManagerCoordinationPolicyTest`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ManagerCoordinationPolicyTest.java) covers the typed fact-to-action mapping. | Remove the direct async `FetchBuffer` notification compatibility path and reproduce KAFKA-20397 metadata-error/wait-entry ordering. |
+| POC lifecycle experiment | [`ConsumerReactorTest.testCleanupExecutesStagedAsyncPollCompletion`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java) proves cleanup executes an already selected completion. Phase 3 uses this only to preserve the existing terminal outcome. | Public lifecycle semantic changes and fatal cleanup design remain outside this KIP. A separate lifecycle design must cover KAFKA-18160, KAFKA-19357, and KAFKA-18569 before those experiments can change compatibility behavior. |
 
 ### Historical A/B benchmark
 
@@ -898,7 +910,7 @@ the tested revision performed less unnecessary idle polling without a demonstrat
 This is preliminary historical evidence, not acceptance evidence for the current POC. The candidate revision still
 requires saturated-throughput, allocation-per-record, reconnect-recovery, rebalance, and share-consumer workloads.
 Run configuration, statistics, limitations, and artifacts are retained in
-[Consumer Reactor A/B benchmark results](https://github.com/unknowntpo/kafka/blob/d2e5ff6eb7ffe18fc84d53d0e651d13a3d5942a0/docs/design/consumer-reactor-ab-benchmark-results.md).
+[Consumer Reactor A/B benchmark results](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/docs/design/consumer-reactor-ab-benchmark-results.md).
 
 ## Documentation Plan
 
