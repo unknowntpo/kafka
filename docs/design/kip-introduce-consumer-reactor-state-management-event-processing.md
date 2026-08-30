@@ -831,6 +831,26 @@ metadata-error/wait-entry reproduction remains open; see [Appendix A](#appendix-
 The current proof of concept implements Phase 1 plus coordinator ownership, heartbeat/commit readiness, finite retry,
 and Streams topology slices from Phase 2. The target model above also defines later migration work. The distinction is:
 
+The following matrix is the short evidence index. **Verified** means the named POC path is implemented and covered by
+a deterministic production-component test. **Partial** means at least one production path is implemented, while a
+compatibility path or required variant remains. **Experimental / rejected** records a tested mechanism that must not
+be merged or reused. **Pending** means the KIP defines the rule and its exit test, but the production path is not yet
+implemented. A benchmark applies only to its named candidate revision; it does not promote later code to Verified.
+
+| Model slice | Implementation status | Test evidence | Performance evidence |
+| --- | --- | --- | --- |
+| Reactor boundary, schedule publication, and post-publication actions | **Verified POC** | Deterministic schedule-before-action, cleanup, and wake-ordering tests. | Historical A/B covers an earlier candidate revision only. |
+| Typed `PollResult` and `NextPollCondition` | **Partial** | Coordinator, commit, regular/share/Streams heartbeat, fetch, metadata, share acknowledgement, and Streams topology slices have typed-condition tests. Raw-delay compatibility producers remain. | Historical A/B observed lower idle CPU and polling; no current-revision acceptance run. |
+| Coordinator snapshot, version fencing, and cross-owner event routing | **Verified POC** for coordinator paths | Current-version observations apply; stale observations cannot invalidate a newer coordinator; manager and real-broker failover paths are covered. | Not benchmarked independently. |
+| Regular, share, and Streams driver boundary | **Partial** | Concrete driver selection and typed regular/share/Streams heartbeat paths exist. Share fetch and complete per-variant recovery remain open. | Share and Streams workloads are not benchmarked. |
+| Fetch fact-to-action wakeup ordering | **Partial** | Paused/no-progress fetch does not wake the application; typed fact-to-action mapping is covered. Direct compatibility signalling and the KAFKA-20397 path remain. | Included only indirectly in the historical idle workload. |
+| Application wait projection and removal of mutable-state rescans | **Partial** | The POC consumes the published wait projection; legacy `maximumTimeToWait(...)` is isolated as `ApplicationWait`. Complete enabling-input liveness coverage remains. | Historical first-record latency gate passed; current revision is not benchmarked. |
+| Consumed-position publication handshake | **Experimental / rejected** | Happy-path component tests pass, but timeout/interruption analysis exposes a record-loss path and missing wakeup and assignment-generation fencing. | Not benchmarked; mechanism must not be merged. |
+| Complete application-effect migration and once-per-iteration wake coalescing | **Pending** | Current behavior coalesces per execution phase; remaining completion, error, timeout, cancellation, and close paths are exit criteria. | Not benchmarked. |
+| Public lifecycle and fatal cleanup semantics | **Pending / follow-up** | Only preservation of an already selected close-time completion is verified. KAFKA-18160, KAFKA-19357, and KAFKA-18569 require separate lifecycle proof. | Not benchmarked. |
+
+The detailed migration state and remaining target for each internal area follow.
+
 | Area | Current POC | Target after migration |
 | --- | --- | --- |
 | Manager poll result | Canonical `PollResult` storage has `NetworkCommand`, `ManagerEvent`, and `NextPollCondition`; generic reactor/cache consumers use the typed accessors. `StateTransition` and `awaitEvent()` have been removed. Raw-delay compatibility constructors remain for unmigrated producers. | Every manager produces only the typed result and the compatibility constructors are removed. |
