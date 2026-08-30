@@ -33,7 +33,8 @@ may occur, but an empty result does not distinguish work available now, a time-d
 input. State and completion paths can consequently publish different parts of one decision in different orders.
 
 This KIP formalizes the existing loop as `ConsumerReactor`, the final authority for cross-manager input ordering,
-wait aggregation, and application-visible publication. It establishes four behavioral rules:
+wait aggregation, and application-visible publication. It establishes four concurrency semantics: observable
+behavioral rules that do not depend on the internal class layout.
 
 1. **Single-writer manager state.** Each mutable manager or protocol state has one manager or driver owner executing
    on the reactor thread. `ConsumerReactor` orders access and invokes the owner; it does not implement that owner's
@@ -55,7 +56,7 @@ The proposal applies to `AsyncKafkaConsumer`, `ShareConsumerImpl`, and Streams p
 kernel. It preserves thread topology, protocols, public consumer APIs, callback execution, and consumer-specific
 rules. `ClassicKafkaConsumer` keeps its existing execution model.
 
-The community decision covers these four rules and the diagnostic counters in Public Interfaces. Internal class
+The community decision covers these four semantics and the diagnostic counters in Public Interfaces. Internal class
 placement, protocol-driver extraction, and POC lifecycle experiments remain implementation or follow-up work.
 
 ## Motivation
