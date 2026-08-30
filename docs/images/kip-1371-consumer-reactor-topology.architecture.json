@@ -5,7 +5,7 @@
     "title": "KIP-1371 — Ordered Coordinator Failure and Application Data Paths",
     "locale": "en",
     "quality_profile": "showcase",
-    "viewBox": [1700, 1060],
+    "viewBox": [1700, 1120],
     "repository": {
       "url": "https://github.com/unknowntpo/kafka",
       "revision": "65469ad73b8b10d0f479f7a527558cb6d1c2543a"
@@ -20,7 +20,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java", "line": 2012, "label": "regular poll wait"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumerImpl.java", "line": 710, "label": "share poll wait"}
       ],
-      "pos": [35, 350],
+      "pos": [35, 470],
       "size": [220, 90]
     },
     {
@@ -31,7 +31,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorGateway.java", "line": 97, "label": "submit event"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 340, "label": "drain events"}
       ],
-      "pos": [320, 120],
+      "pos": [320, 170],
       "size": [220, 78]
     },
     {
@@ -42,7 +42,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 259, "label": "runOnce phases"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 634, "label": "execute actions"}
       ],
-      "pos": [610, 350],
+      "pos": [650, 430],
       "size": [240, 105],
       "tag": "background thread"
     },
@@ -54,7 +54,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 95, "label": "regular composition"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 145, "label": "share composition"}
       ],
-      "pos": [920, 70],
+      "pos": [940, 100],
       "size": [240, 84]
     },
     {
@@ -64,7 +64,7 @@
       "sources": [
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CoordinatorRequestManager.java", "line": 50, "label": "coordinator owner"}
       ],
-      "pos": [920, 210],
+      "pos": [940, 240],
       "size": [240, 68]
     },
     {
@@ -77,7 +77,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareHeartbeatRequestManager.java", "line": 42, "label": "share heartbeat"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/StreamsGroupHeartbeatRequestManager.java", "line": 69, "label": "Streams heartbeat"}
       ],
-      "pos": [920, 305],
+      "pos": [940, 340],
       "size": [240, 68]
     },
     {
@@ -88,7 +88,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java", "line": 44, "label": "regular fetch"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumeRequestManager.java", "line": 86, "label": "share consume"}
       ],
-      "pos": [920, 400],
+      "pos": [940, 440],
       "size": [240, 68]
     },
     {
@@ -99,7 +99,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java", "line": 76, "label": "regular commit"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumeRequestManager.java", "line": 1391, "label": "share acknowledge"}
       ],
-      "pos": [920, 495],
+      "pos": [940, 540],
       "size": [240, 68]
     },
     {
@@ -111,14 +111,14 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 158, "label": "network poll"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 317, "label": "stage output"}
       ],
-      "pos": [1280, 357.5],
+      "pos": [1230, 437.5],
       "size": [210, 90]
     },
     {
       "id": "brokers",
       "type": "external",
       "label": "Kafka Brokers",
-      "pos": [1540, 357.5],
+      "pos": [1520, 437.5],
       "size": [150, 90]
     },
     {
@@ -128,7 +128,7 @@
       "sources": [
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 574, "label": "publish schedule"}
       ],
-      "pos": [610, 640],
+      "pos": [650, 650],
       "size": [240, 78]
     },
     {
@@ -139,7 +139,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 35, "label": "pending buffer"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 64, "label": "publish queue"}
       ],
-      "pos": [610, 780],
+      "pos": [650, 800],
       "size": [220, 80]
     },
     {
@@ -150,7 +150,7 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java", "line": 373, "label": "regular event queue"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumerImpl.java", "line": 180, "label": "share event queue"}
       ],
-      "pos": [320, 730],
+      "pos": [320, 735],
       "size": [220, 80]
     },
     {
@@ -172,34 +172,34 @@
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ReactorAction.java", "line": 35, "label": "action types"},
         {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerReactor.java", "line": 634, "label": "reactor executes actions"}
       ],
-      "pos": [920, 780],
+      "pos": [910, 800],
       "size": [220, 90]
     }
   ],
   "boundaries": [
     {
       "kind": "region",
-      "label": "Application execution context",
+      "label": "Application thread",
       "wraps": ["application"],
-      "pad": 28
+      "pad": 32
     },
     {
       "kind": "region",
       "label": "Cross-thread handoff",
       "wraps": ["application_events", "background_event_queue", "fetch_buffer"],
-      "pad": 28
-    },
-    {
-      "kind": "region",
-      "label": "Consumer background execution context",
-      "wraps": ["reactor", "composition", "coordinator_manager", "heartbeat_managers", "fetch_managers", "commit_managers", "network", "schedule", "actions", "background_event_handler"],
       "pad": 32
     },
     {
       "kind": "region",
-      "label": "Selected manager stack (composition-dependent)",
-      "wraps": ["coordinator_manager", "heartbeat_managers", "fetch_managers", "commit_managers"],
-      "pad": 24
+      "label": "ConsumerReactor thread",
+      "wraps": ["reactor", "composition", "coordinator_manager", "heartbeat_managers", "fetch_managers", "commit_managers", "network", "schedule", "actions", "background_event_handler"],
+      "pad": 40
+    },
+    {
+      "kind": "region",
+      "label": "External Kafka system",
+      "wraps": ["brokers"],
+      "pad": 30
     }
   ],
   "connections": [
@@ -210,8 +210,8 @@
       "label": "submit ApplicationEvent",
       "fromSide": "top",
       "toSide": "left",
-      "via": [[145, 275], [285, 275], [285, 159]],
-      "labelAt": [215, 263],
+      "via": [[145, 400], [285, 400], [285, 209]],
+      "labelAt": [215, 388],
       "variant": "emphasis"
     },
     {
@@ -221,8 +221,8 @@
       "label": "drain ordered inputs",
       "fromSide": "right",
       "toSide": "left",
-      "via": [[580, 159], [580, 402.5]],
-      "labelAt": [590, 255],
+      "via": [[590, 209], [590, 482.5]],
+      "labelAt": [530, 310],
       "variant": "emphasis"
     },
     {
@@ -232,8 +232,8 @@
       "label": "select managers; evaluate event batch",
       "fromSide": "top",
       "toSide": "left",
-      "via": [[730, 205], [880, 205], [880, 112]],
-      "labelAt": [785, 193]
+      "via": [[770, 200], [900, 200], [900, 142]],
+      "labelAt": [810, 198]
     },
     {
       "id": "heartbeat_observation",
@@ -242,8 +242,8 @@
       "label": "versioned fact",
       "fromSide": "right",
       "toSide": "top",
-      "via": [[1200, 339], [1200, 35], [650, 35], [650, 320], [730, 320]],
-      "labelAt": [1025, 23],
+      "via": [[1200, 374], [1200, 45], [690, 45], [690, 390], [770, 390]],
+      "labelAt": [1000, 65],
       "variant": "emphasis"
     },
     {
@@ -253,7 +253,7 @@
       "label": "InvalidateCoordinatorIfCurrent(v7)",
       "fromSide": "bottom",
       "toSide": "top",
-      "labelAt": [1090, 182],
+      "labelAt": [1060, 206],
       "variant": "emphasis"
     },
     {
@@ -263,7 +263,7 @@
       "label": "snapshot v7",
       "fromSide": "bottom",
       "toSide": "top",
-      "labelAt": [1150, 291],
+      "labelAt": [1100, 326],
       "variant": "dashed"
     },
     {
@@ -273,7 +273,7 @@
       "label": "poll() → PollResult",
       "fromSide": "right",
       "toSide": "left",
-      "labelAt": [880, 292],
+      "labelAt": [915, 322],
       "variant": "emphasis"
     },
     {
@@ -304,8 +304,11 @@
       "id": "stage_network_commands",
       "from": "reactor",
       "to": "network",
-      "fromSide": "right",
-      "toSide": "left",
+      "label": "stage NetworkCommand",
+      "fromSide": "left",
+      "toSide": "right",
+      "via": [[590, 482.5], [590, 10], [1475, 10], [1475, 482.5]],
+      "labelAt": [1280, 22],
       "variant": "emphasis"
     },
     {
@@ -315,7 +318,7 @@
       "label": "request / response",
       "fromSide": "right",
       "toSide": "left",
-      "labelAt": [1510, 330],
+      "labelAt": [1475, 542],
       "variant": "emphasis"
     },
     {
@@ -323,9 +326,10 @@
       "from": "reactor",
       "to": "schedule",
       "label": "publish before effects",
-      "fromSide": "bottom",
-      "toSide": "top",
-      "labelAt": [655, 575],
+      "fromSide": "left",
+      "toSide": "left",
+      "via": [[620, 482.5], [620, 689]],
+      "labelAt": [605, 600],
       "variant": "emphasis"
     },
     {
@@ -333,10 +337,10 @@
       "from": "reactor",
       "to": "actions",
       "label": "execute after schedule publication",
-      "fromSide": "right",
-      "toSide": "left",
-      "via": [[880, 402.5], [880, 825]],
-      "labelAt": [990, 700],
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [[770, 620], [925, 620], [925, 750], [1020, 750]],
+      "labelAt": [1000, 720],
       "variant": "emphasis"
     },
     {
@@ -346,8 +350,8 @@
       "label": "stage BackgroundEvent",
       "fromSide": "top",
       "toSide": "top",
-      "via": [[1030, 740], [720, 740]],
-      "labelAt": [1000, 728]
+      "via": [[1020, 760], [760, 760]],
+      "labelAt": [800, 748]
     },
     {
       "id": "publish_background_queue",
@@ -356,8 +360,8 @@
       "label": "publish",
       "fromSide": "left",
       "toSide": "right",
-      "via": [[575, 820], [575, 770]],
-      "labelAt": [575, 746],
+      "via": [[580, 840], [580, 775], [575, 775]],
+      "labelAt": [570, 750],
       "variant": "emphasis"
     },
     {
@@ -367,8 +371,8 @@
       "label": "response handler stores CompletedFetch",
       "fromSide": "right",
       "toSide": "right",
-      "via": [[1190, 434], [1190, 975], [555, 975], [555, 935]],
-      "labelAt": [1010, 963]
+      "via": [[1190, 474], [1190, 990], [575, 990], [575, 935]],
+      "labelAt": [980, 1020]
     },
     {
       "id": "drain_background_event",
@@ -377,8 +381,8 @@
       "label": "application drains BackgroundEvent",
       "fromSide": "left",
       "toSide": "bottom",
-      "via": [[285, 770], [145, 770]],
-      "labelAt": [215, 758]
+      "via": [[285, 775], [145, 775]],
+      "labelAt": [215, 763]
     },
     {
       "id": "application_wakeup",
@@ -387,8 +391,8 @@
       "label": "WAKE_APPLICATION executes last",
       "fromSide": "bottom",
       "toSide": "right",
-      "via": [[1030, 900], [850, 900], [850, 935], [555, 935]],
-      "labelAt": [1030, 888],
+      "via": [[1020, 970], [820, 970], [820, 935], [575, 935]],
+      "labelAt": [1020, 958],
       "variant": "emphasis"
     },
     {
@@ -398,8 +402,8 @@
       "label": "Consumer.poll() drains records",
       "fromSide": "left",
       "toSide": "bottom",
-      "via": [[285, 935], [95, 935], [95, 490], [145, 490]],
-      "labelAt": [205, 923]
+      "via": [[285, 935], [70, 935], [70, 610], [145, 610]],
+      "labelAt": [190, 923]
     }
   ],
   "cards": [

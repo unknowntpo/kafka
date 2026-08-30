@@ -27,28 +27,36 @@ Jira: [KAFKA-20995](https://issues.apache.org/jira/browse/KAFKA-20995)
 
 ## Summary
 
-Request-manager waiting has three distinct conditions: work is available now, time may make work eligible, or an
-external input must arrive first. The current deadline-based result records only when another poll may occur. For an
-empty result, it does not identify which condition applies.
+The async consumer already has a reactor-like background loop, but it does not define one concurrency model for
+manager state, progress, waiting, and application-visible effects. Request-manager deadlines record when another poll
+may occur, but an empty result does not distinguish work available now, a time-driven retry, and a wait for external
+input. State and completion paths can consequently publish different parts of one decision in different orders.
 
-The async regular and share consumers already use a background loop and request managers, but wait, wakeup,
-completion, and publication decisions remain distributed across paths that may observe different state. This has
-contributed to busy loops, wakeup defects, stale completion handling, and state-publication races.
+This KIP formalizes the existing loop as `ConsumerReactor`, the final authority for cross-manager input ordering,
+wait aggregation, and application-visible publication. It establishes four behavioral rules:
 
-`ConsumerNetworkThread` already behaves as a reactor-like background loop: it drains application inputs, polls
-request managers, drives network I/O, and processes completions. This KIP formalizes that loop as `ConsumerReactor`,
-the final cross-manager coordination and publication boundary. Managers retain local state and policy while reporting
-produced work and one typed next-poll condition. The reactor orders inputs, combines manager timing into one immutable
-scheduling publication, and then releases the corresponding application-visible effects. During migration, the
-publication carries separate reactor and application-wait projections.
+1. **Single-writer manager state.** Each mutable manager or protocol state has one manager or driver owner executing
+   on the reactor thread. `ConsumerReactor` orders access and invokes the owner; it does not implement that owner's
+   domain policy.
+2. **Published application view.** The application thread reads immutable published state and consumes records or
+   events from explicit cross-thread handoff buffers. It submits commands instead of directly mutating manager or
+   protocol state.
+3. **Typed next-poll condition.** A manager reports produced transport intents or facts together with one explicit
+   next-poll condition: poll immediately with produced output, retry after time can change eligibility, or await an
+   admitted external input.
+4. **Publication before effect.** The reactor publishes the state-derived wait decision before completing, notifying,
+   or waking the application for that decision.
+
+Managers retain local policy. The reactor combines their typed results into one immutable `ReactorSchedule` and then
+executes the corresponding `ReactorAction` values. During migration, the schedule carries separate reactor and
+application-wait projections.
 
 The proposal applies to `AsyncKafkaConsumer`, `ShareConsumerImpl`, and Streams paths using the async background
 kernel. It preserves thread topology, protocols, public consumer APIs, callback execution, and consumer-specific
 rules. `ClassicKafkaConsumer` keeps its existing execution model.
 
-The community decision covers typed manager output, single-owner cross-manager state changes, publication before
-reactor-owned application effects, and the four diagnostic counters in Public Interfaces. Internal class placement,
-protocol-driver extraction, and POC lifecycle experiments remain implementation or follow-up work.
+The community decision covers these four rules and the diagnostic counters in Public Interfaces. Internal class
+placement, protocol-driver extraction, and POC lifecycle experiments remain implementation or follow-up work.
 
 ## Motivation
 
@@ -233,6 +241,11 @@ paths therefore return data, notifications, and wakeups to the application threa
 consumer execution contexts.
 
 ![ConsumerReactor complete execution topology](../images/kip-1371-consumer-reactor-topology.png)
+
+The figure combines two kinds of paths. Broker responses, completed fetches, application-event queues, and
+background-event queues already exist in the async consumer. KIP-1371 adds the explicit coordination boundary shown
+around them: managers publish typed results, the selected composition handles cross-manager facts, and
+`ConsumerReactor` publishes the aggregate wait before executing the corresponding application-visible actions.
 
 | Component | Target responsibility after the KIP |
 | --- | --- |
@@ -625,16 +638,32 @@ Case-study links below use the immutable evidence snapshot
 unless a study names a later revision. Later working-tree experiments are not counted as verified evidence until
 they are committed with a named test result.
 
-### Case study 1: position scope and publication ordering
+### Case study 1: position ownership, scope, and publication ordering
 
 This study covers [KAFKA-17066](https://issues.apache.org/jira/browse/KAFKA-17066),
 [KAFKA-17674](https://issues.apache.org/jira/browse/KAFKA-17674),
 [KAFKA-18641](https://issues.apache.org/jira/browse/KAFKA-18641), and
 [KAFKA-15529](https://issues.apache.org/jira/browse/KAFKA-15529).
 
-**Before.** Assignment, an in-flight offset operation, position mutation, auto-commit snapshot creation, and fetch
-publication could proceed on different paths. An older completion could therefore act on state admitted after its
-request was created, or the application could observe data before the matching position mutation.
+**What the existing fixes established.** These issues were fixed incrementally before KIP-1371:
+
+- KAFKA-17066 moved `updateFetchPositions` from a split application/background workflow into one background-thread
+  operation.
+- KAFKA-17674 restricted an in-flight position update to the partitions admitted by that operation, so a later-added
+  partition was not reset by an older completion.
+- KAFKA-18641 ordered auto-commit snapshot creation before the application continued collecting and advancing
+  positions.
+- KAFKA-15529 updated the consumed position before publishing `CompletedFetch.isConsumed`, so the background thread
+  could not observe a consumed fetch together with an older position.
+
+KIP-1371 does not claim to introduce background ownership of `updateFetchPositions` or to re-fix these issues. They
+show the same recurring requirement at different boundaries: an operation needs an admitted scope, related state
+changes need one observable order, and another thread or manager must not act on a partially published state.
+
+**Historical failure shape.** Before those fixes, assignment, an in-flight offset operation, position mutation,
+auto-commit snapshot creation, and fetch visibility could proceed on different paths. An older completion could act
+on state admitted after its request was created, or another thread could observe a completion marker before its
+matching position mutation.
 
 ```text
 ApplicationEventProcessor assigns tp1
@@ -649,10 +678,11 @@ Fetch or auto-commit concurrently reads position state
   -> application-visible data or a commit snapshot may observe a different ordering
 ```
 
-**After applying the reactor model.** The application input and network completion are separate ordered operations.
-The offset operation retains its admitted partition scope, and the state owner applies only that scope. The next full
-manager pass observes the resulting current state. Any migrated data publication or completion is released only after
-the corresponding state and schedule publication.
+**What the reactor model adds.** The proposal turns those issue-specific repairs into shared rules for new and
+migrated paths. Application input and network completion are separate ordered reactor operations. An asynchronous
+operation retains its admitted partition scope. A manager publishes a typed result rather than independently
+choosing a wait or application effect. The next full manager pass observes the resulting state, and any migrated
+completion or notification is released only after the corresponding state and `ReactorSchedule` publication.
 
 ```text
 ConsumerReactor input phase
@@ -672,8 +702,10 @@ ConsumerReactor next ordered pass
 ```
 
 **Current evidence.** Captured-scope protection is verified through the manager and application-event/reactor paths.
-The position/publication and position-versus-auto-commit races remain partial. Exact tests, baselines, and remaining
-gates are listed in [Appendix A](#appendix-a-poc-evidence-and-open-gates).
+The POC has not yet replaced the established KAFKA-18641 and KAFKA-15529 local synchronization with a reactor-owned
+position publication. Those cases remain regression requirements, not evidence that `ReactorSchedule` alone fixes
+position visibility. Exact tests, baselines, and remaining gates are listed in
+[Appendix A](#appendix-a-poc-evidence-and-open-gates).
 
 ### Case study 2: heartbeat and commit cannot progress yet
 
