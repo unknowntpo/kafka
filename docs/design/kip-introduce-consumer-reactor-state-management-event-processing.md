@@ -33,12 +33,13 @@ may occur, but an empty result does not distinguish work available now, a time-d
 input. State and completion paths can consequently publish different parts of one decision in different orders.
 
 This KIP formalizes the existing loop as `ConsumerReactor`, the final authority for cross-manager input ordering,
-wait aggregation, and application-visible publication. It establishes four concurrency semantics: observable
-behavioral rules that do not depend on the internal class layout.
+wait aggregation, and application-visible publication. It establishes four concurrency semantics. Published-view
+and effect-ordering semantics are externally observable. State ownership and typed next-poll conditions are internal
+constraints that make those guarantees enforceable without depending on a particular class layout.
 
-1. **Single-writer manager state.** Each mutable manager or protocol state has one manager or driver owner executing
-   on the reactor thread. `ConsumerReactor` orders access and invokes the owner; it does not implement that owner's
-   domain policy.
+1. **Single-writer state.** Each mutable state domain has one execution-context owner. Manager and protocol state is
+   owned by its manager or driver on the reactor thread. `ConsumerReactor` orders access and invokes the owner; it
+   does not implement that owner's domain policy.
 2. **Published application view.** The application thread reads immutable published state and consumes records or
    events from explicit cross-thread handoff buffers. It submits commands instead of directly mutating manager or
    protocol state.
@@ -47,6 +48,11 @@ behavioral rules that do not depend on the internal class layout.
    admitted external input.
 4. **Publication before effect.** The reactor publishes the state-derived wait decision before completing, notifying,
    or waking the application for that decision.
+
+Cross-thread producer/consumer handoff buffers, such as `FetchBuffer`, are not manager state and retain their
+explicit synchronization rules. This KIP also preserves the current consumed-position ownership and ordering fixes.
+Any later migration of consumed-position publication must define one delivery decision at which records and their
+matching position advance become atomic with respect to timeout, wakeup, cancellation, and reassignment.
 
 Managers retain local policy. The reactor combines their typed results into one immutable `ReactorSchedule` and then
 executes the corresponding `ReactorAction` values. During migration, the schedule carries separate reactor and
@@ -192,7 +198,7 @@ The remaining concepts describe how those outputs form one reactor iteration:
 | `ReactorSchedule` | One immutable scheduling publication. It contains the retained reactor deadline and, during migration, a separate application-wait projection. | Fetch can retry in 100 ms and heartbeat in 50 ms, so the next network poll is bounded to 50 ms; a legacy 25 ms application wait remains separately identifiable. |
 | `ReactorAction` | An application-facing effect executed by `ConsumerReactor` only after the corresponding state and schedule are published. | Complete an async poll, publish a metadata error, or perform one phase-coalesced application wake. |
 
-The model has three invariants:
+These semantics rely on three enforcement invariants:
 
 1. **One state owner.** Each mutable state has one execution-context owner. Another ownership domain may read an
    immutable snapshot or report a `ManagerEvent`, but it may not mutate that state directly. Components deliberately
@@ -685,6 +691,11 @@ operation retains its admitted partition scope. A manager publishes a typed resu
 choosing a wait or application effect. The next full manager pass observes the resulting state, and any migrated
 completion or notification is released only after the corresponding state and `ReactorSchedule` publication.
 
+The model does not require consumed position to move to the reactor thread. If a future implementation changes that
+ownership, it must preserve a delivery linearization point: before record delivery is accepted, timeout, wakeup,
+cancellation, or reassignment leaves the records retryable and does not advance position; after acceptance, the
+selected records are returned and a concurrent wakeup applies to the next consumer call.
+
 ```text
 ConsumerReactor input phase
   -> applies assignment(tp2)
@@ -703,9 +714,12 @@ ConsumerReactor next ordered pass
 ```
 
 **Current evidence.** Captured-scope protection is verified through the manager and application-event/reactor paths.
-The POC has not yet replaced the established KAFKA-18641 and KAFKA-15529 local synchronization with a reactor-owned
-position publication. Those cases remain regression requirements, not evidence that `ReactorSchedule` alone fixes
-position visibility. Exact tests, baselines, and remaining gates are listed in
+An experimental synchronous position-publication handshake demonstrated schedule-before-completion on its happy
+path, but falsified that mechanism under timeout and interruption: the fetch cursor could advance before the wait,
+while the already queued event could later advance position for records not returned to the application. It also
+lacked assignment-generation fencing and a wakeup-safe cancellation rule. The mechanism is not part of this
+proposal. KAFKA-18641 and KAFKA-15529 remain regression requirements; `ReactorSchedule` publication alone is not
+evidence of atomic record delivery. Exact tests, baselines, and remaining gates are listed in
 [Appendix A](#appendix-a-poc-evidence-and-open-gates).
 
 ### Case study 2: heartbeat and commit cannot progress yet
@@ -967,6 +981,7 @@ POC branch at the corresponding snapshot; they are not separate runtime modes or
 | Case | Verified evidence | Remaining gate |
 | --- | --- | --- |
 | Position scope | [`OffsetsRequestManagerTest.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManagerTest.java) and [`AsyncKafkaConsumerTest.testReactorPreservesNewPartitionAcrossOlderOffsetFetchCompletion`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java). The component test fails at pre-fix baseline `6744a718c2`. | Cross-component position-before-data publication and the exact KAFKA-18641 position/auto-commit race. |
+| Position-publication experiment | Experimental revision `b2f14a9f45` demonstrates staged schedule-before-completion on component happy paths. Its synchronous per-partition handshake is falsified by timeout and interruption: destructive fetch progress can precede the wait, and the queued event can later advance position without delivering those records. | Do not merge or reuse this mechanism. Any replacement needs non-destructive prepare/commit or an equivalent atomic delivery decision, assignment-generation fencing, wakeup/cancellation coverage, bounded memory, and a multi-partition partial-failure test. |
 | Heartbeat and commit readiness | Snapshot `10d2afc2aa` contains the coordinator and regular/share heartbeat activation evidence. Revision [`d9aac66ac9`](https://github.com/unknowntpo/kafka/tree/d9aac66ac9b2e9ceff8839e27169b8fc7c12edb8) contains `CommitRequestManagerTest.testExpiredAutoCommitAwaitsUnknownCoordinator` and `ConsumerReactorCommitReadinessTest.testExpiredAutoCommitWithUnknownCoordinatorDoesNotZeroPoll`. Both tests pass in the 805-test manager/consumer run recorded for [`e6feb3f047`](https://github.com/unknowntpo/kafka/tree/e6feb3f047911076ed27e658fa1d1c065ca98107). | Exact historical KAFKA-20253 CPU reproduction, a public-consumer KAFKA-20970 reproduction, and the Streams-heartbeat variant. |
 | Fetch wakeup | [`AsyncKafkaConsumerTest.testPausedPartitionDoesNotProduceNoProgressWakeup`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumerTest.java) observes the invalid wake at pre-fix baseline `9521d77da3` and its absence in the POC. [`ManagerCoordinationPolicyTest`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ManagerCoordinationPolicyTest.java) covers the typed fact-to-action mapping. | Remove the direct async `FetchBuffer` notification compatibility path and reproduce KAFKA-20397 metadata-error/wait-entry ordering. |
 | POC lifecycle experiment | [`ConsumerReactorTest.testCleanupExecutesStagedAsyncPollCompletion`](https://github.com/unknowntpo/kafka/blob/10d2afc2aafb7fc1275d7b1bbd1e1ba1f366585b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerReactorTest.java) proves cleanup executes an already selected completion. Phase 3 uses this only to preserve the existing terminal outcome. | Public lifecycle semantic changes and fatal cleanup design remain outside this KIP. A separate lifecycle design must cover KAFKA-18160, KAFKA-19357, and KAFKA-18569 before those experiments can change compatibility behavior. |
