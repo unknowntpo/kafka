@@ -16,7 +16,8 @@
 
 set -euo pipefail
 
-readonly EXPECTED_BASELINE_COMMIT=80a74f3b84525563ef060b6e0e1b70bc127ec064
+readonly DEFAULT_BASELINE_COMMIT=80a74f3b84525563ef060b6e0e1b70bc127ec064
+readonly EXPECTED_BASELINE_COMMIT="${EXPECTED_BASELINE_COMMIT:-$DEFAULT_BASELINE_COMMIT}"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly POC_WORKTREE="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 readonly DEFAULT_BASELINE_WORKTREE="$(cd -- "$POC_WORKTREE/.." && pwd -P)/reactor-benchmark-baseline"

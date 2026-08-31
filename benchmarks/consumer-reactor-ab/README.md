@@ -180,23 +180,32 @@ portable acceptance checks.
 
 ## Jenkins Ducktape phase
 
-The dedicated wrapper is:
+The dedicated wrappers are:
 
 ```text
 tests/kafkatest/tests/client/consumer_reactor_ab_test.py
 ```
 
-It compiles and runs `IdleWakeHarness.java` against the client artifact from the current checkout. It does not invoke
-`run-idle.sh`, because that local runner deliberately requires two sibling worktrees, and it never performs a Git
-checkout. Selecting the method without parameters is a short smoke run:
+`ConsumerReactorABTest` compiles and runs `IdleWakeHarness.java` against the client artifact from the current
+checkout. It never checks out or measures another revision. Selecting the method without parameters is a short smoke
+run:
 
 ```text
 tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorABTest.test_current_revision
 ```
 
-Formal runs inject only the metadata quorum, profile, and logical variant. The profile expands to fixed workload
-values inside the test, keeping Ducktape's parameter-derived result-directory names safely below filesystem limits.
-Jenkins `run_tests.sh` already
+`ConsumerReactorPairedABTest` is the reproducible comparison path. One Ducktape service node fetches the pinned
+baseline, builds both client artifacts before measurement, and runs `run-idle.sh` against one broker. Formal runs
+alternate the order `AB`, `BA`, `AB`, `BA`, `AB`, so both variants share the same Jenkins allocation, host, Java
+runtime, broker, and test configuration:
+
+```text
+tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorPairedABTest.test_same_worker --parameters '{"metadata_quorum":"COMBINED_KRAFT","reactor_ab_profile":"formal"}'
+```
+
+Single-revision formal runs inject the metadata quorum, profile, and logical variant. Paired runs inject only the
+metadata quorum and profile. The profile expands to fixed workload values inside the test, keeping Ducktape's
+parameter-derived result-directory names safely below filesystem limits. Jenkins `run_tests.sh` already
 appends the single `--` separator consumed by `ducker-ak` before its Ducktape options. Therefore, a Jenkins
 `TC_PATHS` value must put `--parameters` directly after the test selector and must not add another `--`:
 

@@ -326,6 +326,141 @@ fi
         node.account.ssh("rm -rf -- %s" % self.ROOT, allow_fail=False)
 
 
+class PairedConsumerReactorABService(ConsumerReactorABService):
+    """Build and measure the pinned baseline and current proposal on one node."""
+
+    ROOT = "/mnt/consumer-reactor-ab-paired"
+    RESULTS_CSV = ROOT + "/results.csv"
+    MANIFEST = ROOT + "/manifest.json"
+    BROKER_CONFIG = ROOT + "/broker.properties"
+    BASELINE_COMMIT = "9d940a6537c65357684d63d6defc573807c8831b"
+
+    logs = {
+        "consumer_reactor_paired_ab_results": {
+            "path": ROOT,
+            "collect_default": True,
+        }
+    }
+
+    def __init__(self, context, kafka, profile, parameters):
+        super(PairedConsumerReactorABService, self).__init__(
+            context,
+            kafka,
+            profile,
+            "paired",
+            parameters,
+        )
+
+    def _prepare_and_run(self, node):
+        script = r"""
+set -euo pipefail
+repo=%(repository)s
+root=%(root)s
+baseline_commit=%(baseline_commit)s
+baseline_worktree="$root/baseline-worktree"
+build_dir="$root/build"
+output_root="$root/results"
+
+rm -rf -- "$root"
+mkdir -p "$root"
+if ! git -C "$repo" cat-file -e "${baseline_commit}^{commit}"; then
+    git -C "$repo" fetch --no-tags --depth=1 origin \
+        "+${baseline_commit}:refs/reactor-ab/baseline"
+fi
+git clone --shared --no-checkout "$repo" "$baseline_worktree"
+git -C "$baseline_worktree" checkout --detach "$baseline_commit"
+test "$(git -C "$baseline_worktree" rev-parse HEAD)" = "$baseline_commit"
+
+EXPECTED_BASELINE_COMMIT="$baseline_commit" \
+BASELINE_WORKTREE="$baseline_worktree" \
+REACTOR_AB_BUILD_DIR="$build_dir" \
+    "$repo/benchmarks/consumer-reactor-ab/prepare.sh"
+
+REPETITIONS=%(repetitions)s \
+IDLE_DURATION_MS=%(idle_duration_ms)s \
+FIRST_RECORD_WARMUP_SAMPLES=%(first_record_warmup_samples)s \
+FIRST_RECORD_SAMPLES=%(first_record_samples)s \
+FIRST_RECORD_IDLE_MS=%(first_record_idle_ms)s \
+POLL_TIMEOUT_MS=%(poll_timeout_ms)s \
+REACTOR_AB_BUILD_DIR="$build_dir" \
+REACTOR_AB_OUTPUT_ROOT="$output_root" \
+    "$repo/benchmarks/consumer-reactor-ab/run-idle.sh" %(bootstrap_servers)s
+
+results_csv="$(find "$output_root" -mindepth 2 -maxdepth 2 -name results.csv -print)"
+test -n "$results_csv"
+test "$(printf '%%s\n' "$results_csv" | wc -l)" -eq 1
+cp "$results_csv" %(results_csv)s
+printf '%%s\n' "$results_csv" >"$root/results-path"
+""" % {
+            "repository": shlex.quote(self.REPOSITORY),
+            "root": shlex.quote(self.ROOT),
+            "baseline_commit": shlex.quote(self.BASELINE_COMMIT),
+            "repetitions": self.parameters["repetitions"],
+            "idle_duration_ms": self.parameters["idle_duration_ms"],
+            "first_record_warmup_samples": self.parameters["first_record_warmup_samples"],
+            "first_record_samples": self.parameters["first_record_samples"],
+            "first_record_idle_ms": self.parameters["first_record_idle_ms"],
+            "poll_timeout_ms": self.parameters["poll_timeout_ms"],
+            "bootstrap_servers": shlex.quote(self.kafka.bootstrap_servers()),
+            "results_csv": shlex.quote(self.RESULTS_CSV),
+        }
+        node.account.ssh("bash -lc %s" % shlex.quote(script), allow_fail=False)
+        contents = self._capture(node, "cat %s" % self.RESULTS_CSV)
+        self.results = list(csv.DictReader(io.StringIO(contents)))
+
+    def _write_paired_manifest(self, node):
+        build_info = self._property_map(
+            self._capture(node, "cat %s/build/build-info.properties" % self.ROOT)
+        )
+        variants = []
+        for name in ("baseline", "reactor"):
+            variants.append({
+                "name": name,
+                "commit": build_info["%s.commit" % name],
+                "artifact": build_info["%s.artifact" % name],
+                "artifact_sha256": build_info["%s.artifact.sha256" % name],
+                "consumer_config": build_info["%s.consumer.config" % name],
+            })
+        manifest = {
+            "schema_version": 1,
+            "scope": "single-node-paired-revisions",
+            "profile": self.profile,
+            "collected_variants": variants,
+            "broker": self._broker_metadata(node),
+            "workload": self.parameters,
+            "execution_order": [
+                {
+                    "repetition": result["repetition"],
+                    "order": result["order"],
+                    "sequence": result["sequence"],
+                    "variant": result["variant"],
+                    "scenario": result["scenario"],
+                }
+                for result in self.results
+            ],
+            "runtime": {
+                "measurement_node": self._capture(node, "hostname"),
+                "java": self._capture(node, "java -version 2>&1 | head -n 1"),
+                "os": self._capture(node, "uname -a"),
+            },
+            "artifacts": {
+                "results_csv": "results.csv",
+                "raw_logs": [result["raw_log"] for result in self.results],
+            },
+        }
+        node.account.create_file(
+            self.MANIFEST,
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        )
+
+    def _worker(self, idx, node):
+        self._prepare_and_run(node)
+        self._write_paired_manifest(node)
+
+    def wait_timeout_seconds(self):
+        return 1200 + 2 * super(PairedConsumerReactorABService, self).wait_timeout_seconds()
+
+
 class ConsumerReactorABTest(Test):
     """Dedicated, current-checkout wrapper for the consumer reactor benchmark harness."""
 
@@ -401,6 +536,54 @@ class ConsumerReactorABTest(Test):
         finally:
             self.benchmark.stop()
         expected_rows = self.parameters["repetitions"] * 2
+        assert len(self.benchmark.results) == expected_rows, (
+            "Expected %d result rows, found %d" %
+            (expected_rows, len(self.benchmark.results))
+        )
+
+
+class ConsumerReactorPairedABTest(Test):
+    """Run the pinned baseline and current proposal in one Jenkins allocation."""
+
+    PROFILES = ConsumerReactorABTest.PROFILES
+
+    def __init__(self, test_context):
+        super(ConsumerReactorPairedABTest, self).__init__(test_context)
+        injected = test_context.injected_args or {}
+        profile = injected.get("reactor_ab_profile", "smoke")
+        if profile not in self.PROFILES:
+            raise ValueError("Unknown reactor_ab_profile: %s" % profile)
+        parameters = dict(self.PROFILES[profile])
+        self.profile = profile
+        self.parameters = parameters
+        self.kafka = KafkaService(
+            test_context,
+            num_nodes=1,
+            zk=None,
+            controller_num_nodes_override=1,
+        )
+        self.benchmark = PairedConsumerReactorABService(
+            test_context,
+            self.kafka,
+            profile,
+            parameters,
+        )
+
+    @cluster(num_nodes=2)
+    @parametrize(metadata_quorum=quorum.combined_kraft)
+    def test_same_worker(
+        self,
+        metadata_quorum=quorum.combined_kraft,
+        reactor_ab_profile="smoke",
+    ):
+        """Alternate the pinned baseline and proposal against one broker and node."""
+        self.kafka.start()
+        self.benchmark.start()
+        try:
+            self.benchmark.wait(timeout_sec=self.benchmark.wait_timeout_seconds())
+        finally:
+            self.benchmark.stop()
+        expected_rows = self.parameters["repetitions"] * 4
         assert len(self.benchmark.results) == expected_rows, (
             "Expected %d result rows, found %d" %
             (expected_rows, len(self.benchmark.results))
