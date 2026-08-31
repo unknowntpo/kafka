@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Before KIP-1371 — Coordinator Failure and Application Data Paths",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "viewBox": [1680, 980],
+    "repository": {
+      "url": "https://github.com/unknowntpo/kafka",
+      "revision": "04c326d9d5bfb43127157e72d00d2d8d3395e1ac"
+    }
+  },
+  "components": [
+    {"id": "application", "type": "frontend", "label": "Application Thread", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java", "line": 933, "label": "regular consumer poll"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumerImpl.java", "line": 597, "label": "share consumer poll"}], "pos": [40, 330], "size": [220, 90]},
+    {"id": "application_events", "type": "messagebus", "label": "ApplicationEventQueue", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java", "line": 71, "label": "application event queue"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java", "line": 247, "label": "drain and process"}], "pos": [320, 120], "size": [220, 78]},
+    {"id": "network_thread", "type": "backend", "label": "ConsumerNetworkThread", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java", "line": 210, "label": "runOnce loop"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java", "line": 343, "label": "cached application wait"}], "pos": [620, 318.5], "size": [240, 105]},
+    {"id": "composition", "type": "backend", "label": "RequestManagers", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 49, "label": "composition"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java", "line": 136, "label": "ordered entries"}], "pos": [910, 75], "size": [230, 82]},
+    {"id": "coordinator_manager", "type": "backend", "label": "CoordinatorRequestManager", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CoordinatorRequestManager.java", "line": 51, "label": "coordinator state owner"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CoordinatorRequestManager.java", "line": 101, "label": "discovery poll"}], "pos": [910, 225], "size": [250, 72]},
+    {"id": "group_managers", "type": "backend", "label": "Heartbeat / Commit Managers", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManager.java", "line": 50, "label": "regular heartbeat"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java", "line": 76, "label": "commit manager"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java", "line": 415, "label": "complete async commit"}], "pos": [910, 335], "size": [250, 72]},
+    {"id": "fetch_managers", "type": "backend", "label": "Fetch / Share Consume Managers", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java", "line": 44, "label": "regular fetch"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ShareConsumeRequestManager.java", "line": 86, "label": "share consume"}], "pos": [910, 455], "size": [250, 72]},
+    {"id": "network", "type": "backend", "label": "NetworkClientDelegate", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 149, "label": "network poll"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java", "line": 308, "label": "stage PollResult"}], "pos": [1260, 335], "size": [210, 90]},
+    {"id": "brokers", "type": "external", "label": "Kafka Brokers", "pos": [1510, 335], "size": [150, 90]},
+    {"id": "background_events", "type": "messagebus", "label": "BackgroundEventHandler + Queue", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 34, "label": "handler and queue"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java", "line": 53, "label": "direct add"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java", "line": 2373, "label": "application drain"}], "pos": [1380, 650], "size": [240, 82]},
+    {"id": "fetch_buffer", "type": "database", "label": "FetchBuffer / ShareFetchBuffer", "sources": [{"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractFetch.java", "line": 225, "label": "store completed fetch"}, {"path": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java", "line": 169, "label": "wake buffer"}], "pos": [770, 700], "size": [220, 82]}
+  ],
+  "boundaries": [
+    {"kind": "region", "label": "Application execution context", "wraps": ["application"]},
+    {"kind": "region", "label": "Consumer background execution context", "wraps": ["network_thread", "composition", "coordinator_manager", "group_managers", "fetch_managers", "network"]},
+    {"kind": "region", "label": "Selected RequestManager set", "wraps": ["coordinator_manager", "group_managers", "fetch_managers"], "pad": 18}
+  ],
+  "connections": [
+    {"id": "submit_event", "from": "application", "to": "application_events", "label": "submit ApplicationEvent", "fromSide": "top", "toSide": "left", "via": [[150, 260], [290, 260], [290, 159]], "labelAt": [220, 248], "variant": "emphasis"},
+    {"id": "drain_events", "from": "application_events", "to": "network_thread", "label": "drain inputs", "fromSide": "right", "toSide": "left", "via": [[580, 159], [580, 371]], "labelAt": [600, 245], "variant": "emphasis"},
+    {"id": "select_managers", "from": "composition", "to": "network_thread", "label": "ordered manager entries", "fromSide": "left", "toSide": "top", "via": [[880, 116], [740, 116], [740, 300]], "labelAt": [810, 175]},
+    {"id": "poll_coordinator", "from": "network_thread", "to": "coordinator_manager", "label": "poll() → requests + wait", "fromSide": "right", "toSide": "left", "labelAt": [950, 312]},
+    {"id": "poll_group", "from": "network_thread", "to": "group_managers", "fromSide": "right", "toSide": "left"},
+    {"id": "poll_fetch", "from": "network_thread", "to": "fetch_managers", "fromSide": "right", "toSide": "right", "via": [[890, 371], [890, 445], [1170, 445], [1170, 491]]},
+    {"id": "stage_requests", "from": "network_thread", "to": "network", "label": "stage requests; poll with minimum wait", "fromSide": "top", "toSide": "top", "via": [[740, 190], [1365, 190]], "labelAt": [1080, 178], "variant": "emphasis"},
+    {"id": "broker_roundtrip", "from": "network", "to": "brokers", "label": "request / response", "fromSide": "right", "toSide": "left", "labelAt": [1490, 315], "variant": "emphasis"},
+    {"id": "group_response", "from": "network", "to": "group_managers", "label": "response callbacks", "fromSide": "top", "toSide": "right", "via": [[1365, 310], [1180, 310], [1180, 371]], "labelAt": [1265, 298]},
+    {"id": "peer_state_write", "from": "group_managers", "to": "coordinator_manager", "label": "response callback calls markCoordinatorUnknown()", "fromSide": "top", "toSide": "bottom", "labelAt": [1035, 326], "variant": "dashed"},
+    {"id": "fetch_records", "from": "fetch_managers", "to": "fetch_buffer", "label": "add records or wake buffer", "fromSide": "left", "toSide": "top", "via": [[880, 491]], "labelAt": [870, 610]},
+    {"id": "background_notification", "from": "group_managers", "to": "background_events", "label": "add ErrorEvent / callback event", "fromSide": "bottom", "toSide": "top", "via": [[1035, 420], [1220, 420], [1220, 600], [1500, 600]], "labelAt": [1350, 588]},
+    {"id": "application_wait", "from": "network_thread", "to": "application", "label": "cached maximumTimeToWait", "fromSide": "left", "toSide": "bottom", "via": [[570, 371], [570, 500], [150, 500]], "labelAt": [380, 488]},
+    {"id": "drain_background", "from": "background_events", "to": "application", "label": "drain BackgroundEvent", "fromSide": "bottom", "toSide": "bottom", "via": [[1500, 820], [210, 820], [210, 460], [150, 460]], "labelAt": [1060, 808]},
+    {"id": "drain_fetch", "from": "fetch_buffer", "to": "application", "label": "Consumer.poll() drains records", "fromSide": "bottom", "toSide": "bottom", "via": [[880, 870], [95, 870], [95, 470], [150, 470]], "labelAt": [430, 858]}
+  ],
+  "cards": [
+    {"dot": "cyan", "title": "Existing execution shape", "items": ["ConsumerNetworkThread polls a selected RequestManager set and delegates network I/O", "Fetch completion, BackgroundEvent publication, future completion, and numeric waits follow component-specific paths"]},
+    {"dot": "amber", "title": "Case study: coordinator unavailable", "items": ["Coordinator discovery and heartbeat or commit callbacks can write the same coordinator state", "The peer callback does not carry the coordinator version used to build its request"]}
+  ]
+}

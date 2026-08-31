@@ -755,6 +755,24 @@ public class OffsetsRequestManagerTest {
     }
 
     @Test
+    public void testAsyncPollPositionUpdateFailureReportsManagerEventOnce() {
+        when(subscriptionState.hasAllFetchPositions()).thenThrow(new RuntimeException("position update failed"));
+
+        CompletableFuture<Void> updatePositions =
+            requestManager.updateFetchPositionsForAsyncPoll(time.milliseconds());
+        assertTrue(updatePositions.isCompletedExceptionally());
+
+        NetworkClientDelegate.PollResult firstResult = requestManager.poll(time.milliseconds());
+        assertEquals(
+            List.of(ManagerEvent.LocalProgress.FETCH_POSITIONS_UPDATE_FAILED),
+            firstResult.managerEvents()
+        );
+
+        NetworkClientDelegate.PollResult secondResult = requestManager.poll(time.milliseconds());
+        assertTrue(secondResult.managerEvents().isEmpty());
+    }
+
+    @Test
     public void testUpdatePositionsWithCommittedOffsetsReusesRequest() {
         long internalFetchCommittedTimeout = time.milliseconds() + DEFAULT_API_TIMEOUT_MS;
         TopicPartition tp1 = new TopicPartition("topic1", 1);

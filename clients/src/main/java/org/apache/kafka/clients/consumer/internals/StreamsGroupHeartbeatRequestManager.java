@@ -23,6 +23,7 @@ import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.HeartbeatMetricsManager;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
@@ -364,6 +365,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
 
     private final CoordinatorRequestManager coordinatorRequestManager;
 
+    /** Cross-manager facts completed by heartbeat callbacks and published atomically by the next poll. */
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
+
     private final HeartbeatRequestState heartbeatRequestState;
 
     private final HeartbeatState heartbeatState;
@@ -449,10 +453,14 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
+        // Publish an observation before admitting any new request. In particular, a coordinator-unavailable
+        // response must not be followed by a same-phase heartbeat built from the stale coordinator snapshot.
+        if (pendingManagerEvents.hasPendingEvents())
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
+
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
             membershipManager.onHeartbeatRequestSkipped();
-            maybePropagateCoordinatorFatalErrorEvent();
-            return NetworkClientDelegate.PollResult.EMPTY;
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.EMPTY);
         }
         pollTimer.update(currentTimeMs);
         if (pollTimer.isExpired() && !membershipManager.isLeavingGroup()) {
@@ -468,20 +476,32 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             heartbeatState.reset();
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat));
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(leaveHeartbeat),
+                List.of(),
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION)));
         }
         if (membershipManager.state() == MemberState.LEAVING && shouldSkipLeaveHeartbeat()) {
             logger.info("Dynamic member {} skipping leave heartbeat (operation=REMAIN_IN_GROUP). " +
                 "The broker will remove the member from the group via session timeout.",
                 membershipManager.memberId());
             membershipManager.onHeartbeatRequestSkipped();
-            return EMPTY;
+            return pendingManagerEvents.publishWith(EMPTY);
+        }
+        if (heartbeatRequestState.requestInFlight() && !shouldSendLeaveHeartbeat()) {
+            // Once a heartbeat is in flight, time alone cannot make another heartbeat sendable. The response
+            // completion marks this manager for a post-I/O poll, so retaining a zero deadline here would only spin.
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
         }
         if (shouldHeartbeatBeforeIntervalExpires() || heartbeatRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(request),
+                List.of(),
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION)));
         } else {
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.retryAfter(
+                heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
         }
     }
 
@@ -506,7 +526,10 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     public NetworkClientDelegate.PollResult pollOnClose(long currentTimeMs) {
         if (membershipManager.isLeavingGroup() && !shouldSkipLeaveHeartbeat()) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndLogResponse(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), List.of(request));
+            return NetworkClientDelegate.PollResult.progress(
+                List.of(request),
+                List.of(),
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION));
         }
         return EMPTY;
     }
@@ -536,6 +559,16 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             return 0L;
         }
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+    }
+
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
+    }
+
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
     }
 
     public void resetPollTimer(final long pollMs) {
@@ -594,11 +627,6 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             && membershipManager.groupInstanceId().isEmpty();
     }
 
-    private void maybePropagateCoordinatorFatalErrorEvent() {
-        coordinatorRequestManager.getAndClearFatalError()
-            .ifPresent(fatalError -> backgroundEventHandler.add(new ErrorEvent(fatalError)));
-    }
-
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequestAndLogResponse(final long currentTimeMs) {
         return makeHeartbeatRequest(currentTimeMs).whenComplete((response, exception) -> {
             if (response != null) {
@@ -615,22 +643,29 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequestAndHandleResponse(final long currentTimeMs) {
-        NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs);
+        final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
+        NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, coordinatorSnapshot);
         return request.whenComplete((response, exception) -> {
             long completionTimeMs = request.handler().completionTimeMs();
             if (response != null) {
                 metricsManager.recordRequestLatency(response.requestLatencyMs());
-                onResponse((StreamsGroupHeartbeatResponse) response.responseBody(), completionTimeMs);
+                onResponse((StreamsGroupHeartbeatResponse) response.responseBody(), completionTimeMs,
+                    coordinatorSnapshot.version());
             } else {
-                onFailure(exception, completionTimeMs);
+                onFailure(exception, completionTimeMs, coordinatorSnapshot.version());
             }
         });
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final long currentTimeMs) {
+        return makeHeartbeatRequest(currentTimeMs, coordinatorRequestManager.coordinatorSnapshot());
+    }
+
+    private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final long currentTimeMs,
+                                                                     final CoordinatorSnapshot coordinatorSnapshot) {
         NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
             new StreamsGroupHeartbeatRequest.Builder(this.heartbeatState.buildRequestData()),
-            coordinatorRequestManager.coordinator()
+            coordinatorSnapshot.coordinator()
         );
         heartbeatRequestState.onSendAttempt(currentTimeMs);
         membershipManager.onHeartbeatRequestGenerated();
@@ -639,11 +674,13 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return request;
     }
 
-    private void onResponse(final StreamsGroupHeartbeatResponse response, long currentTimeMs) {
+    private void onResponse(final StreamsGroupHeartbeatResponse response,
+                            final long currentTimeMs,
+                            final long coordinatorVersion) {
         if (Errors.forCode(response.data().errorCode()) == Errors.NONE) {
             onSuccessResponse(response, currentTimeMs);
         } else {
-            onErrorResponse(response, currentTimeMs);
+            onErrorResponse(response, currentTimeMs, coordinatorVersion);
         }
     }
 
@@ -722,7 +759,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return value < minValid ? "not provided (older broker)" : Long.toString(value);
     }
 
-    private void onErrorResponse(final StreamsGroupHeartbeatResponse response, final long currentTimeMs) {
+    private void onErrorResponse(final StreamsGroupHeartbeatResponse response,
+                                 final long currentTimeMs,
+                                 final long coordinatorVersion) {
         final Errors error = Errors.forCode(response.data().errorCode());
         final String errorMessage = response.data().errorMessage();
 
@@ -737,7 +776,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs, coordinatorVersion));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -749,7 +789,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs, coordinatorVersion));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -843,11 +884,16 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             response.data().errorMessage());
     }
 
-    private void onFailure(final Throwable exception, final long responseTimeMs) {
+    private void onFailure(final Throwable exception,
+                           final long responseTimeMs,
+                           final long coordinatorVersion) {
         heartbeatRequestState.onFailedAttempt(responseTimeMs);
         heartbeatState.reset();
         if (exception instanceof RetriableException) {
-            coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+            if (exception instanceof DisconnectException) {
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), exception.getMessage(), responseTimeMs, coordinatorVersion));
+            }
             String message = String.format("StreamsGroupHeartbeatRequest failed because of a retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),
                 exception.getMessage());

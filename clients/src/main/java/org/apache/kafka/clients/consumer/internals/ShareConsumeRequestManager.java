@@ -525,8 +525,11 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
         if (!unsentRequests.isEmpty()) {
             pollResult = new PollResult(unsentRequests);
         } else if (checkAndRemoveCompletedAcknowledgements()) {
-            // Return empty result until all the acknowledgement request states are processed
-            pollResult = PollResult.EMPTY;
+            // A retry backoff is time-driven; an in-flight request or node availability is input-driven.
+            long nextRetryMs = nextAcknowledgementRetryMs(currentTimeMs);
+            pollResult = nextRetryMs == Long.MAX_VALUE
+                ? PollResult.awaitInput()
+                : PollResult.retryAfter(nextRetryMs);
         } else if (closing) {
             if (!closeFuture.isDone()) {
                 closeFuture.complete(null);
@@ -534,6 +537,27 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
             pollResult = PollResult.EMPTY;
         }
         return pollResult;
+    }
+
+    private long nextAcknowledgementRetryMs(final long currentTimeMs) {
+        long nextRetryMs = Long.MAX_VALUE;
+        for (Tuple<AcknowledgeRequestState> states : acknowledgeRequestStates.values()) {
+            nextRetryMs = Math.min(nextRetryMs, acknowledgementRetryMs(states.getAsyncRequest(), currentTimeMs));
+            nextRetryMs = Math.min(nextRetryMs, acknowledgementRetryMs(states.getCloseRequest(), currentTimeMs));
+            Queue<AcknowledgeRequestState> syncRequests = states.getSyncRequestQueue();
+            if (syncRequests != null) {
+                for (AcknowledgeRequestState state : syncRequests)
+                    nextRetryMs = Math.min(nextRetryMs, acknowledgementRetryMs(state, currentTimeMs));
+            }
+        }
+        return nextRetryMs;
+    }
+
+    private long acknowledgementRetryMs(final AcknowledgeRequestState state, final long currentTimeMs) {
+        if (!isRequestStateInProgress(state) || state.requestInFlight())
+            return Long.MAX_VALUE;
+        long remainingBackoffMs = state.remainingBackoffMs(currentTimeMs);
+        return remainingBackoffMs > 0L ? remainingBackoffMs : Long.MAX_VALUE;
     }
 
     private boolean isNodeFree(int nodeId) {
@@ -1341,6 +1365,10 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
 
     boolean hasCompletedFetches() {
         return !shareFetchBuffer.isEmpty();
+    }
+
+    void wakeupApplicationThread() {
+        shareFetchBuffer.wakeup();
     }
 
     protected void closeInternal() {

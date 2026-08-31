@@ -24,6 +24,7 @@ import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.HeartbeatMetricsManager;
+import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.protocol.Errors;
@@ -35,8 +36,8 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.Collections;
+import java.util.List;
 
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 import static org.apache.kafka.clients.consumer.internals.RequestState.RETRY_BACKOFF_JITTER;
 
 /**
@@ -96,6 +97,9 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      * Holding the heartbeat sensor to measure heartbeat timing and response latency
      */
     private final HeartbeatMetricsManager metricsManager;
+
+    /** Cross-manager facts completed by heartbeat callbacks and published atomically by the next poll. */
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
 
     public static final String CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG = "The cluster does not support the new CONSUMER " +
         "group protocol. Set group.protocol=classic on the consumer configs to revert to the CLASSIC protocol " +
@@ -162,13 +166,18 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      */
     @Override
     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
-        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
+        // Publish an observation before admitting any new request. In particular, a coordinator-unavailable
+        // response must not be followed by a same-phase heartbeat built from the stale coordinator snapshot.
+        if (pendingManagerEvents.hasPendingEvents())
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.awaitInput());
+
+        HeartbeatActivation activation = heartbeatActivation(currentTimeMs, true);
+        if (activation.blockedByCoordinatorOrMembership()) {
             membershipManager().onHeartbeatRequestSkipped();
-            maybePropagateCoordinatorFatalErrorEvent();
-            return NetworkClientDelegate.PollResult.EMPTY;
+            return pendingManagerEvents.publishWith(
+                NetworkClientDelegate.PollResult.waitFor(activation.nextPollCondition()));
         }
-        pollTimer.update(currentTimeMs);
-        if (pollTimer.isExpired() && !membershipManager().isLeavingGroup()) {
+        if (activation.pollTimerExpired() && !membershipManager().isLeavingGroup()) {
             logger.warn("Consumer poll timeout has expired. This means the time between " +
                 "subsequent calls to poll() was longer than the configured max.poll.interval.ms, " +
                 "which typically implies that the poll loop is spending too much time processing " +
@@ -181,22 +190,142 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             resetHeartbeatState();
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat));
+            return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(leaveHeartbeat),
+                List.of(),
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION)
+            ));
         }
 
-        // Case 1: The member state is LEAVING - if the member is a share consumer, we should immediately send leave;
-        // if the member is an async consumer, this will also depend on leavingGroupOperation.
-        boolean heartbeatNow = shouldSendLeaveHeartbeatNow() ||
-            // Case 2: The member state indicates it should send a heartbeat without waiting for the interval,
-            // and there is no heartbeat request currently in-flight
-            (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
-
-        if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
-        }
+        if (!(activation.nextPollCondition() instanceof NextPollCondition.PollImmediately))
+            return pendingManagerEvents.publishWith(
+                NetworkClientDelegate.PollResult.waitFor(activation.nextPollCondition()));
 
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
-        return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+        // Request admission changes the same local projection from runnable to in-flight. Publish the
+        // post-transition condition so time alone cannot admit a duplicate heartbeat.
+        HeartbeatActivation afterAdmission = heartbeatActivation(currentTimeMs, false);
+        return pendingManagerEvents.publishWith(NetworkClientDelegate.PollResult.progress(
+            Collections.singletonList(request),
+            List.of(),
+            afterAdmission.nextPollCondition()
+        ));
+    }
+
+    /**
+     * Derives request eligibility, the next useful manager poll, and the legacy application wait from one
+     * manager-local state view. The reactor aggregates the result but does not reproduce heartbeat policy.
+     */
+    private HeartbeatActivation heartbeatActivation(final long currentTimeMs,
+                                                    final boolean allowLeaveToSupersedeInflight) {
+        pollTimer.update(currentTimeMs);
+
+        if (coordinatorRequestManager.coordinator().isEmpty()) {
+            return HeartbeatActivation.blocked(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.COORDINATOR_CHANGE),
+                legacyBlockedApplicationWait()
+            );
+        }
+        if (membershipManager().shouldSkipHeartbeat()) {
+            return HeartbeatActivation.blocked(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.MEMBERSHIP_CHANGE),
+                legacyBlockedApplicationWait()
+            );
+        }
+        if (!allowLeaveToSupersedeInflight && heartbeatRequestState.requestInFlight()) {
+            return HeartbeatActivation.waiting(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION),
+                legacyApplicationWait(Math.min(
+                    pollTimer.remainingMs() / 2,
+                    heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)
+                ))
+            );
+        }
+        if (pollTimer.isExpired())
+            return HeartbeatActivation.expiredPollTimer(legacyApplicationWait(0L));
+
+        // A leave heartbeat may deliberately supersede an ordinary in-flight heartbeat. Other immediate
+        // membership transitions must still wait until the current request completes.
+        boolean heartbeatNow = (allowLeaveToSupersedeInflight && shouldSendLeaveHeartbeatNow())
+            || (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
+        if (heartbeatNow || heartbeatRequestState.canSendRequest(currentTimeMs))
+            return HeartbeatActivation.runnable(legacyApplicationWait(0L));
+
+        long applicationWaitMs = legacyApplicationWait(Math.min(
+            pollTimer.remainingMs() / 2,
+            heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)
+        ));
+        if (heartbeatRequestState.requestInFlight()) {
+            return HeartbeatActivation.waiting(
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION),
+                applicationWaitMs
+            );
+        }
+
+        long delayMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
+        NextPollCondition nextPollCondition = delayMs == NetworkClientDelegate.PollResult.WAIT_FOREVER
+            ? NextPollCondition.awaitInput()
+            : NextPollCondition.retryAfter(delayMs);
+        return HeartbeatActivation.waiting(nextPollCondition, applicationWaitMs);
+    }
+
+    private long legacyBlockedApplicationWait() {
+        return legacyApplicationWait(heartbeatRequestState.heartbeatIntervalMs());
+    }
+
+    private long legacyApplicationWait(final long proposedWaitMs) {
+        return membershipManager().state() == MemberState.UNSUBSCRIBED ? Long.MAX_VALUE : proposedWaitMs;
+    }
+
+    private static final class HeartbeatActivation {
+        private final NextPollCondition nextPollCondition;
+        private final long applicationWaitMs;
+        private final boolean blockedByCoordinatorOrMembership;
+        private final boolean pollTimerExpired;
+
+        private HeartbeatActivation(final NextPollCondition nextPollCondition,
+                                    final long applicationWaitMs,
+                                    final boolean blockedByCoordinatorOrMembership,
+                                    final boolean pollTimerExpired) {
+            this.nextPollCondition = nextPollCondition;
+            this.applicationWaitMs = applicationWaitMs;
+            this.blockedByCoordinatorOrMembership = blockedByCoordinatorOrMembership;
+            this.pollTimerExpired = pollTimerExpired;
+        }
+
+        private static HeartbeatActivation blocked(final NextPollCondition nextPollCondition,
+                                                    final long applicationWaitMs) {
+            return new HeartbeatActivation(nextPollCondition, applicationWaitMs, true, false);
+        }
+
+        private static HeartbeatActivation waiting(final NextPollCondition nextPollCondition,
+                                                    final long applicationWaitMs) {
+            return new HeartbeatActivation(nextPollCondition, applicationWaitMs, false, false);
+        }
+
+        private static HeartbeatActivation runnable(final long applicationWaitMs) {
+            return new HeartbeatActivation(NextPollCondition.pollImmediately(), applicationWaitMs, false, false);
+        }
+
+        private static HeartbeatActivation expiredPollTimer(final long applicationWaitMs) {
+            return new HeartbeatActivation(NextPollCondition.pollImmediately(), applicationWaitMs, false, true);
+        }
+
+        private NextPollCondition nextPollCondition() {
+            return nextPollCondition;
+        }
+
+        private long applicationWaitMs() {
+            return applicationWaitMs;
+        }
+
+        private boolean blockedByCoordinatorOrMembership() {
+            return blockedByCoordinatorOrMembership;
+        }
+
+        private boolean pollTimerExpired() {
+            return pollTimerExpired;
+        }
     }
 
     /**
@@ -231,9 +360,12 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
     public PollResult pollOnClose(long currentTimeMs) {
         if (membershipManager().isLeavingGroup()) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, true);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+            return NetworkClientDelegate.PollResult.progress(
+                Collections.singletonList(request),
+                List.of(),
+                NextPollCondition.awaitInput(NextPollCondition.AwaitCause.NETWORK_COMPLETION));
         }
-        return EMPTY;
+        return NetworkClientDelegate.PollResult.awaitInput();
     }
 
     /**
@@ -252,25 +384,17 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        pollTimer.update(currentTimeMs);
-        if (membershipManager().state() == MemberState.UNSUBSCRIBED) {
-            return Long.MAX_VALUE;
-        }
-        if (pollTimer.isExpired()) {
-            return 0L;
-        }
-        // KAFKA-20253: mirror the guard in poll(). A heartbeat is only sent when the coordinator is known
-        // and the member is in a state that heartbeats. When the coordinator is unavailable (e.g. after a
-        // re-authentication failure) or the member should skip heartbeats (FATAL/FENCED/STALE/UNSUBSCRIBED),
-        // poll() returns EMPTY, so falling through to the timer-based branches below would return 0 (the
-        // heartbeat timer is left permanently expired) and busy-spin both the application and network threads.
-        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
-            return heartbeatRequestState.heartbeatIntervalMs();
-        }
-        if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
-            return 0L;
-        }
-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+        return heartbeatActivation(currentTimeMs, true).applicationWaitMs();
+    }
+
+    @Override
+    public boolean usesLegacyApplicationWait() {
+        return true;
+    }
+
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
     }
 
     /**
@@ -289,11 +413,6 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         pollTimer.reset(maxPollIntervalMs);
     }
 
-    private void maybePropagateCoordinatorFatalErrorEvent() {
-        coordinatorRequestManager.getAndClearFatalError()
-                .ifPresent(fatalError -> backgroundEventHandler.add(new ErrorEvent(fatalError)));
-    }
-
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final long currentTimeMs, final boolean ignoreResponse) {
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(ignoreResponse);
         heartbeatRequestState.onSendAttempt(currentTimeMs);
@@ -305,7 +424,8 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
 
     @SuppressWarnings("unchecked")
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final boolean ignoreResponse) {
-        NetworkClientDelegate.UnsentRequest request = buildHeartbeatRequest();
+        final CoordinatorSnapshot coordinatorSnapshot = coordinatorRequestManager.coordinatorSnapshot();
+        NetworkClientDelegate.UnsentRequest request = buildHeartbeatRequest(coordinatorSnapshot);
         if (ignoreResponse)
             return logResponse(request);
         else
@@ -313,9 +433,9 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                 long completionTimeMs = request.handler().completionTimeMs();
                 if (response != null) {
                     metricsManager.recordRequestLatency(response.requestLatencyMs());
-                    onResponse((R) response.responseBody(), completionTimeMs);
+                    onResponse((R) response.responseBody(), completionTimeMs, coordinatorSnapshot.version());
                 } else {
-                    onFailure(exception, completionTimeMs);
+                    onFailure(exception, completionTimeMs, coordinatorSnapshot.version());
                 }
             });
     }
@@ -336,11 +456,16 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         });
     }
 
-    private void onFailure(final Throwable exception, final long responseTimeMs) {
+    private void onFailure(final Throwable exception,
+                           final long responseTimeMs,
+                           final long coordinatorVersion) {
         this.heartbeatRequestState.onFailedAttempt(responseTimeMs);
         resetHeartbeatState();
         if (exception instanceof RetriableException) {
-            coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+            if (exception instanceof DisconnectException) {
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), exception.getMessage(), responseTimeMs, coordinatorVersion));
+            }
             String message = String.format("%s failed because of the retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestName(),
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),
@@ -354,7 +479,9 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         membershipManager().onHeartbeatFailure(exception instanceof RetriableException);
     }
 
-    private void onResponse(final R response, final long currentTimeMs) {
+    private void onResponse(final R response,
+                            final long currentTimeMs,
+                            final long coordinatorVersion) {
         if (errorForResponse(response) == Errors.NONE) {
             long previousHeartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
             long heartbeatIntervalMs = heartbeatIntervalForResponse(response);
@@ -368,10 +495,12 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             membershipManager().onHeartbeatSuccess(response);
             return;
         }
-        onErrorResponse(response, currentTimeMs);
+        onErrorResponse(response, currentTimeMs, coordinatorVersion);
     }
 
-    private void onErrorResponse(final R response, final long currentTimeMs) {
+    private void onErrorResponse(final R response,
+                                 final long currentTimeMs,
+                                 final long coordinatorVersion) {
         Errors error = errorForResponse(response);
         String errorMessage = errorMessageForResponse(response);
         String message;
@@ -386,7 +515,8 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                                 "Will attempt to find the coordinator again and retry",
                         heartbeatRequestName(), coordinatorRequestManager.coordinator());
                 logInfo(message, response, currentTimeMs);
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs, coordinatorVersion));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -396,7 +526,8 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                                 "Will attempt to find the coordinator again and retry",
                         heartbeatRequestName(), coordinatorRequestManager.coordinator());
                 logInfo(message, response, currentTimeMs);
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                pendingManagerEvents.add(new ManagerEvent.CoordinatorUnavailableObserved(
+                    getClass().getSimpleName(), errorMessage, currentTimeMs, coordinatorVersion));
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -527,7 +658,12 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      *
      * @return The heartbeat request
      */
-    public abstract NetworkClientDelegate.UnsentRequest buildHeartbeatRequest();
+    public final NetworkClientDelegate.UnsentRequest buildHeartbeatRequest() {
+        return buildHeartbeatRequest(coordinatorRequestManager.coordinatorSnapshot());
+    }
+
+    /** Builds one request from one immutable coordinator target/version pair. */
+    abstract NetworkClientDelegate.UnsentRequest buildHeartbeatRequest(CoordinatorSnapshot coordinatorSnapshot);
 
     /**
      * Returns the heartbeat RPC request name to be used for logging.

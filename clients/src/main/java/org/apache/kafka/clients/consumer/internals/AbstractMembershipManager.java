@@ -1451,7 +1451,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
      * During normal operation of the {@link Consumer}, a request manager may need to send out network requests.
      * Implementations can return {@link NetworkClientDelegate.PollResult their need for network I/O} by returning
      * the requests here. This method is called within a single-threaded context from
-     * {@link ConsumerReactor the consumer's network I/O thread}. As such, there should be no need for
+     * {@link ConsumerReactor the consumer reactor}. As such, there should be no need for
      * synchronization protection in this method's implementation.
      *
      * <p/>

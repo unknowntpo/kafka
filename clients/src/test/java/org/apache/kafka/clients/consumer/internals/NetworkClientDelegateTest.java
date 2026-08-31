@@ -48,6 +48,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
@@ -64,6 +65,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -108,6 +110,138 @@ public class NetworkClientDelegateTest {
                     new ArrayList<>());
             assertEquals(10, ncd.addAll(failure));
         }
+    }
+
+    @Test
+    void testPollResultProgressAllowsImmediateRepollOnlyWithProgress() {
+        NetworkClientDelegate.UnsentRequest request = mock(NetworkClientDelegate.UnsentRequest.class);
+
+        NetworkClientDelegate.PollResult requestProgress = NetworkClientDelegate.PollResult.progress(
+            List.of(request), List.of(), NextPollCondition.pollImmediately());
+        NetworkClientDelegate.PollResult managerEventProgress = NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            List.of(new ManagerEvent.CoordinatorUnavailableObserved("heartbeat", "not coordinator", 1L, 7L)),
+            NextPollCondition.pollImmediately()
+        );
+
+        assertTrue(requestProgress.isValidPollResult());
+        assertTrue(managerEventProgress.isValidPollResult());
+        assertEquals(1L, NetworkClientDelegate.PollResult.progress(
+            List.of(request), List.of(), NextPollCondition.retryAfter(1L)).timeUntilNextPollMs);
+        assertEquals(Long.MAX_VALUE, NetworkClientDelegate.PollResult.progress(
+            List.of(request), List.of(), NextPollCondition.awaitInput()).timeUntilNextPollMs);
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.progress(
+                List.of(), List.of(), NextPollCondition.pollImmediately()));
+    }
+
+    @Test
+    void testTargetPollResultExpressesEventOnlyAwaitInput() {
+        ManagerEvent event = ManagerEvent.FetchBufferHasData.INSTANCE;
+
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            List.of(event),
+            NextPollCondition.awaitInput()
+        );
+
+        assertTrue(result.networkCommands().isEmpty());
+        assertEquals(List.of(event), result.managerEvents());
+        assertInstanceOf(NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        assertTrue(result.isValidPollResult());
+    }
+
+    @Test
+    void testTargetPollResultExpressesNetworkCommandAndNextCondition() {
+        NetworkClientDelegate.UnsentRequest command = mock(NetworkClientDelegate.UnsentRequest.class);
+
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.progress(
+            List.of(command),
+            List.of(),
+            NextPollCondition.retryAfter(25L)
+        );
+
+        assertEquals(List.of(command), result.networkCommands());
+        assertEquals(List.of(command), result.unsentRequests);
+        NextPollCondition.RetryAfter retry = assertInstanceOf(
+            NextPollCondition.RetryAfter.class,
+            result.nextPollCondition()
+        );
+        assertEquals(25L, retry.delayMs());
+    }
+
+    @Test
+    void testTargetPollResultRejectsImmediatePollWithoutOutput() {
+        assertThrows(IllegalArgumentException.class, () -> NetworkClientDelegate.PollResult.progress(
+            List.of(),
+            List.of(),
+            NextPollCondition.pollImmediately()
+        ));
+    }
+
+    @Test
+    void testPollResultRetryAcceptsEveryNonNegativeDelay() {
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.retryAfter(0L);
+
+        assertEquals(0L, result.timeUntilNextPollMs);
+        assertInstanceOf(NextPollCondition.RetryAfter.class, result.nextPollCondition());
+        assertTrue(result.networkCommands().isEmpty());
+        assertTrue(result.managerEvents().isEmpty());
+        assertTrue(result.isValidPollResult());
+        assertEquals(
+            Long.MAX_VALUE,
+            NetworkClientDelegate.PollResult.retryAfter(Long.MAX_VALUE).timeUntilNextPollMs
+        );
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.retryAfter(-1L));
+    }
+
+    @Test
+    void testPollResultAwaitInputHasNoTimerDeadline() {
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.awaitInput();
+
+        assertTrue(result.unsentRequests.isEmpty());
+        assertInstanceOf(NextPollCondition.AwaitInput.class, result.nextPollCondition());
+        assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        assertTrue(result.isValidPollResult());
+        assertFalse(new NetworkClientDelegate.PollResult(0L).isValidPollResult());
+    }
+
+    @Test
+    void testLegacyPollDelayMapsToTypedNextPollCondition() {
+        assertInstanceOf(
+            NextPollCondition.PollImmediately.class,
+            new NetworkClientDelegate.PollResult(0L).nextPollCondition()
+        );
+        assertInstanceOf(
+            NextPollCondition.RetryAfter.class,
+            new NetworkClientDelegate.PollResult(25L).nextPollCondition()
+        );
+        assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            new NetworkClientDelegate.PollResult(Long.MAX_VALUE).nextPollCondition()
+        );
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> new NetworkClientDelegate.PollResult(-1L)
+        );
+    }
+
+    @Test
+    void testPollResultAwaitInputRetainsDiagnosticCauseWithoutCreatingAnotherSignalChannel() {
+        NetworkClientDelegate.PollResult result = NetworkClientDelegate.PollResult.awaitInput(
+            NextPollCondition.AwaitCause.NETWORK_COMPLETION
+        );
+
+        NextPollCondition.AwaitInput condition = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.NETWORK_COMPLETION, condition.cause());
+        assertEquals(Long.MAX_VALUE, condition.delayMs());
+        assertThrows(IllegalArgumentException.class,
+            () -> NetworkClientDelegate.PollResult.waitFor(NextPollCondition.pollImmediately()));
     }
 
     @Test
@@ -243,6 +377,7 @@ public class NetworkClientDelegateTest {
 
         assertEquals(0, backgroundEventQueue.size());
         networkClientDelegate.poll(0, time.milliseconds());
+        this.backgroundEventHandler.publishPendingEvents();
         assertEquals(1, backgroundEventQueue.size());
 
         BackgroundEvent event = backgroundEventQueue.poll();
@@ -281,6 +416,7 @@ public class NetworkClientDelegateTest {
 
             assertEquals(0, backgroundEventQueue.size());
             ncd.poll(0, time.milliseconds());
+            this.backgroundEventHandler.publishPendingEvents();
             assertEquals(1, backgroundEventQueue.size());
 
             BackgroundEvent event = backgroundEventQueue.poll();
@@ -292,6 +428,7 @@ public class NetworkClientDelegateTest {
             // even though metadata.maybeThrowAnyException keeps surfacing the permanent error.
             ncd.poll(0, time.milliseconds());
             ncd.poll(0, time.milliseconds());
+            this.backgroundEventHandler.publishPendingEvents();
             assertEquals(0, backgroundEventQueue.size());
         }
     }
