@@ -168,10 +168,10 @@ public class ConsumerHeartbeatRequestManager extends AbstractHeartbeatRequestMan
      * {@inheritDoc}
      */
     @Override
-    public NetworkClientDelegate.UnsentRequest buildHeartbeatRequest() {
+    NetworkClientDelegate.UnsentRequest buildHeartbeatRequest(final CoordinatorSnapshot coordinatorSnapshot) {
         return new NetworkClientDelegate.UnsentRequest(
             new ConsumerGroupHeartbeatRequest.Builder(this.heartbeatState.buildRequestData()),
-            coordinatorRequestManager.coordinator());
+            coordinatorSnapshot.coordinator());
     }
 
     /**

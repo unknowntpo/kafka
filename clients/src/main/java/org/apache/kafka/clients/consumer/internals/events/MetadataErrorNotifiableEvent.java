@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals.events;
 
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.consumer.internals.ConsumerReactor;
+import org.apache.kafka.clients.consumer.internals.ConsumerReactorGateway;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
 
 /**
@@ -35,7 +36,7 @@ public interface MetadataErrorNotifiableEvent {
      *
      * <ul>
      *     <li>
-     *         At the very top of the {@link ConsumerReactor}'s loop, the {@link ApplicationEventHandler}'s
+     *         At the very top of the {@link ConsumerReactor}'s loop, the {@link ConsumerReactorGateway}'s
      *         queue is drained. Before processing each event via
      *         {@link ApplicationEventProcessor#process(ApplicationEvent)}, if a metadata error occurred, this method
      *         will be invoked on the event if it implements this interface.

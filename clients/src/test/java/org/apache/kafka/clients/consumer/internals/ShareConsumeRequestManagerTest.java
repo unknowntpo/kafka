@@ -675,9 +675,15 @@ public class ShareConsumeRequestManagerTest {
         assertEquals(6, shareConsumeRequestManager.requestStates(0).getSyncRequestQueue().peek().getIncompleteAcknowledgementsCount(tip0));
         assertEquals(0, shareConsumeRequestManager.requestStates(0).getSyncRequestQueue().peek().getInFlightAcknowledgementsCount(tip0));
 
-        // Wait for backoff time before sending the next request.
-        // After the first attempt, it can maximum be 1.2x of the configured backoff when acknowledge fails. (jitter = 0.2)
-        time.sleep((long) (1.5 * retryBackoffMs));
+        NetworkClientDelegate.PollResult backoffResult = shareConsumeRequestManager.poll(time.milliseconds());
+        NextPollCondition.RetryAfter retryAfter = assertInstanceOf(
+            NextPollCondition.RetryAfter.class,
+            backoffResult.nextPollCondition()
+        );
+        assertTrue(retryAfter.delayMs() > 0L);
+        assertTrue(retryAfter.delayMs() <= (long) (1.2 * retryBackoffMs));
+
+        time.sleep(retryAfter.delayMs());
         assertEquals(1, shareConsumeRequestManager.sendAcknowledgements());
 
         assertEquals(6, shareConsumeRequestManager.requestStates(0).getSyncRequestQueue().peek().getInFlightAcknowledgementsCount(tip0));

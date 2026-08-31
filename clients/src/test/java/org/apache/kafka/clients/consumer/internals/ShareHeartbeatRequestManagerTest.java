@@ -64,6 +64,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -94,6 +95,8 @@ public class ShareHeartbeatRequestManagerTest
         time = new MockTime();
         pollTimer = spy(time.timer(DEFAULT_MAX_POLL_INTERVAL_MS));
         coordinatorRequestManager = mock(CoordinatorRequestManager.class);
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
         subscriptions = mock(SubscriptionState.class);
         backgroundEventHandler = mock(BackgroundEventHandler.class);
         membershipManager = mock(ShareMembershipManager.class);
@@ -234,7 +237,7 @@ public class ShareHeartbeatRequestManagerTest
 
         if (!shouldSkipHeartbeat) {
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(0, result.timeUntilNextPollMs);
+            assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
         } else {
             assertEquals(0, result.unsentRequests.size());
             assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
@@ -423,7 +426,7 @@ public class ShareHeartbeatRequestManagerTest
         // On poll timer expiration, the member should send a last heartbeat to leave the group
         // and notify the membership manager
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         verify(membershipManager).transitionToSendingLeaveGroup(true);
         verify(heartbeatState).reset();
         verify(heartbeatRequestState).reset();
@@ -435,7 +438,7 @@ public class ShareHeartbeatRequestManagerTest
         assertTrue(pollTimer.notExpired());
         verify(membershipManager).maybeRejoinStaleMember();
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
     }
 
     @Test
@@ -447,12 +450,12 @@ public class ShareHeartbeatRequestManagerTest
 
         // test poll
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         time.sleep(1000);
         assertEquals(1.0, getMetric("heartbeat-total").metricValue());
         assertEquals((double) TimeUnit.MILLISECONDS.toSeconds(DEFAULT_HEARTBEAT_INTERVAL_MS), getMetric("last-heartbeat-seconds-ago").metricValue());
 
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         assertEquals(0.06d, (double) getMetric("heartbeat-rate").metricValue(), 0.005d);
         assertEquals(2.0, getMetric("heartbeat-total").metricValue());
 
@@ -463,7 +466,7 @@ public class ShareHeartbeatRequestManagerTest
         assertEquals((double) randomSleepS, getMetric("last-heartbeat-seconds-ago").metricValue());
     }
 
-    private void assertHeartbeat(AbstractHeartbeatRequestManager<ShareGroupHeartbeatResponse> hrm, int nextPollMs) {
+    private void assertHeartbeat(AbstractHeartbeatRequestManager<ShareGroupHeartbeatResponse> hrm, long nextPollMs) {
         NetworkClientDelegate.PollResult pollResult = hrm.poll(time.milliseconds());
         assertEquals(1, pollResult.unsentRequests.size());
         assertEquals(nextPollMs, pollResult.timeUntilNextPollMs);

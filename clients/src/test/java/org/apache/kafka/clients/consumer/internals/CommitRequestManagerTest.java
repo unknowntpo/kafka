@@ -95,6 +95,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -129,6 +131,8 @@ public class CommitRequestManagerTest {
         this.subscriptionState = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.EARLIEST);
         this.metadata = mock(ConsumerMetadata.class);
         this.coordinatorRequestManager = mock(CoordinatorRequestManager.class);
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
         this.offsetCommitCallbackInvoker = mock(OffsetCommitCallbackInvoker.class);
         this.props = new Properties();
         this.props.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 100);
@@ -290,6 +294,21 @@ public class CommitRequestManagerTest {
         assertEquals(1, commitRequestManager.poll(time.milliseconds()).unsentRequests.size());
         assertTrue(commitRequestManager.unsentOffsetCommitRequests().isEmpty());
         assertEmptyPendingRequests(commitRequestManager);
+    }
+
+    @Test
+    public void testInFlightCommitAwaitsCompletionEvent() {
+        CommitRequestManager commitRequestManager = create(false, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        commitRequestManager.commitAsync(Map.of(
+            new TopicPartition("topic", 0), new OffsetAndMetadata(1L)));
+
+        NetworkClientDelegate.PollResult progress = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, progress.unsentRequests.size());
+
+        NetworkClientDelegate.PollResult inFlight = commitRequestManager.poll(time.milliseconds());
+        assertTrue(inFlight.unsentRequests.isEmpty());
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, inFlight.timeUntilNextPollMs);
     }
 
     @Test
@@ -721,6 +740,8 @@ public class CommitRequestManagerTest {
         time.sleep(100);
         commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds());
         assertPoll(0, commitRequestManager);
+        assertEquals(Long.MAX_VALUE, commitRequestManager.maximumTimeToWait(time.milliseconds()),
+            "an in-flight auto-commit must await its network completion rather than schedule a timer retry");
         verify(commitRequestManager, never()).resetAutoCommitTimer();
 
         // When a response for the inflight is received, a next auto-commit should be sent when
@@ -729,6 +750,28 @@ public class CommitRequestManagerTest {
             mockOffsetCommitResponse(t1p.topic(), t1p.partition(), (short) 1, Errors.NONE));
         commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds());
         assertPoll(1, commitRequestManager);
+    }
+
+    /**
+     * KAFKA-20970: an expired auto-commit interval is not sufficient to make a commit request sendable while
+     * coordinator discovery is incomplete. The typed manager result and the legacy application-wait projection
+     * must therefore both wait for the coordinator change instead of requesting an immediate retry.
+     */
+    @Test
+    public void testExpiredAutoCommitAwaitsUnknownCoordinator() {
+        CommitRequestManager commitRequestManager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+
+        time.sleep(100L);
+        NetworkClientDelegate.PollResult result = commitRequestManager.poll(time.milliseconds());
+
+        NextPollCondition.AwaitInput wait = assertInstanceOf(
+            NextPollCondition.AwaitInput.class,
+            result.nextPollCondition()
+        );
+        assertEquals(NextPollCondition.AwaitCause.COORDINATOR_CHANGE, wait.cause());
+        assertEquals(Long.MAX_VALUE, commitRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertTrue(result.unsentRequests.isEmpty());
     }
 
     @Test
@@ -861,7 +904,7 @@ public class CommitRequestManagerTest {
             // OffsetFetchRequestState is evaluated via isExpired().
             time.sleep(defaultApiTimeoutMs);
             assertFalse(commitRequestManager.pendingRequests.unsentOffsetFetches.isEmpty());
-            NetworkClientDelegate.PollResult poll = commitRequestManager.poll(time.milliseconds());
+            NetworkClientDelegate.PollResult poll = pollAfterRoutingManagerEvents(commitRequestManager);
             mimicResponse(error, poll);
             futures.forEach(f -> assertFutureThrows(expectedExceptionClass, f));
             assertTrue(commitRequestManager.pendingRequests.unsentOffsetFetches.isEmpty());
@@ -948,6 +991,13 @@ public class CommitRequestManagerTest {
         // Request should be retried with backoff.
         NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
         assertEquals(0, res.unsentRequests.size());
+        if (shouldRediscoverCoordinator) {
+            assertCoordinatorInvalidation(res);
+            assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
+                "coordinator invalidation must be published once");
+        } else {
+            assertTrue(res.managerEvents().isEmpty());
+        }
         time.sleep(retryBackoffMs);
         res = commitRequestManager.poll(time.milliseconds());
         assertEquals(1, res.unsentRequests.size());
@@ -964,7 +1014,7 @@ public class CommitRequestManagerTest {
         long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
         CompletableFuture<CommitRequestManager.OffsetFetchResult> result = commitRequestManager.fetchOffsets(partitions, deadlineMs);
 
-        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult res = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(1, res.unsentRequests.size());
         NetworkClientDelegate.UnsentRequest request = res.unsentRequests.get(0);
         ClientResponse response = buildOffsetFetchClientResponseDisconnected(request);
@@ -973,6 +1023,9 @@ public class CommitRequestManagerTest {
         // Request not completed just yet, but should have marked the coordinator unknown
         assertFalse(result.isDone());
         assertCoordinatorDisconnectHandling();
+        assertCoordinatorInvalidation(commitRequestManager.poll(time.milliseconds()));
+        assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
+            "coordinator invalidation must be published once");
 
         time.sleep(retryBackoffMs);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
@@ -993,7 +1046,7 @@ public class CommitRequestManagerTest {
         // Send async commit (not expected to be retried).
         CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitResult = commitRequestManager.commitAsync(offsets);
         completeOffsetCommitRequestWithError(commitRequestManager, error);
-        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult res = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(0, res.unsentRequests.size());
         assertTrue(commitResult.isDone());
         assertTrue(commitResult.isCompletedExceptionally());
@@ -1027,7 +1080,7 @@ public class CommitRequestManagerTest {
 
         // Sleep to expire the request timeout. Request should fail on the next poll.
         time.sleep(retryBackoffMs);
-        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult res = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(0, res.unsentRequests.size());
         assertTrue(commitResult.isDone());
         assertTrue(commitResult.isCompletedExceptionally());
@@ -1057,7 +1110,7 @@ public class CommitRequestManagerTest {
         // Sleep to expire the request timeout. Request should fail on the next poll with a
         // TimeoutException.
         time.sleep(deadlineMs);
-        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult res = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(0, res.unsentRequests.size());
         assertTrue(commitResult.isDone());
 
@@ -1092,6 +1145,31 @@ public class CommitRequestManagerTest {
         assertFutureThrows(RetriableCommitFailedException.class, commitResult);
     }
 
+    @Test
+    public void testOffsetCommitCoordinatorInvalidationIsPublishedExactlyOnce() {
+        CommitRequestManager commitRequestManager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        doReturn(new CoordinatorSnapshot(Optional.of(mockedNode), 7L))
+            .when(coordinatorRequestManager).coordinatorSnapshot();
+
+        Map<TopicPartition, OffsetAndMetadata> offsets = Collections.singletonMap(
+            new TopicPartition("topic", 1), new OffsetAndMetadata(0));
+        commitRequestManager.commitAsync(offsets);
+        NetworkClientDelegate.PollResult requestResult = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, requestResult.unsentRequests.size());
+        requestResult.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NOT_COORDINATOR));
+
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult invalidated = commitRequestManager.poll(time.milliseconds());
+        assertCoordinatorInvalidation(invalidated, 7L);
+        assertTrue(invalidated.unsentRequests.isEmpty(),
+            "the invalidation must be routed before a retry can use the stale coordinator");
+        verify(coordinatorRequestManager).coordinatorSnapshot();
+        assertTrue(commitRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
+            "coordinator invalidation must be published once");
+    }
+
     @ParameterizedTest
     @MethodSource("offsetCommitExceptionSupplier")
     public void testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(final Errors error) {
@@ -1113,7 +1191,7 @@ public class CommitRequestManagerTest {
             assertNotNull(commitRequest);
             assertEquals(1, commitRequest.numAttempts, "Only one failed attempt should be registered, even if the response contains multiple partition errors");
             time.sleep(retryBackoffMs);
-            res = commitRequestManager.poll(time.milliseconds());
+            res = pollAfterRoutingManagerEvents(commitRequestManager);
             res.unsentRequests.get(0).handler().onComplete(mockOffsetCommitResponse("topic", (short) 1, error, offsets.size()));
             assertEquals(2, commitRequest.numAttempts, "Only one failed attempt should be registered, even if the response contains multiple partition errors");
         } else assertNull(commitRequest);
@@ -1129,7 +1207,7 @@ public class CommitRequestManagerTest {
 
         long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
         commitRequestManager.commitSync(offsets, deadlineMs);
-        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult res = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(1, res.unsentRequests.size());
         res.unsentRequests.get(0).handler().onFailure(time.milliseconds(), new TimeoutException());
 
@@ -1139,11 +1217,24 @@ public class CommitRequestManagerTest {
     }
 
     private void assertCoordinatorDisconnectHandling() {
-        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
+        assertCoordinatorInvalidation(result, 0L);
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result,
+                                               final long expectedCoordinatorVersion) {
+        assertEquals(1, result.managerEvents().size());
+        ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
+        assertEquals(CommitRequestManager.class.getSimpleName(), invalidation.source());
+        assertEquals(expectedCoordinatorVersion, invalidation.observedCoordinatorVersion());
     }
 
     private void assertCoordinatorDisconnectOnCoordinatorError() {
-        verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
     }
 
     private void assertExceptionHandling(CommitRequestManager commitRequestManager, Errors errors,
@@ -1158,7 +1249,7 @@ public class CommitRequestManagerTest {
             case NOT_COORDINATOR:
             case COORDINATOR_NOT_AVAILABLE:
             case REQUEST_TIMED_OUT:
-                verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+                verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
                 assertPollDoesNotReturn(commitRequestManager, remainBackoffMs);
                 break;
             case UNKNOWN_TOPIC_OR_PARTITION:
@@ -1363,7 +1454,7 @@ public class CommitRequestManagerTest {
             NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
             assertEquals(0, res.unsentRequests.size());
             time.sleep(retryBackoffMs);
-            res = commitRequestManager.poll(time.milliseconds());
+            res = pollAfterRoutingManagerEvents(commitRequestManager);
             assertEquals(1, res.unsentRequests.size());
             if (error == Errors.STALE_MEMBER_EPOCH) {
                 // The retried request should include the latest member ID and epoch
@@ -1446,7 +1537,7 @@ public class CommitRequestManagerTest {
         long commitCreationTimeMs = time.milliseconds();
         commitRequestManager.commitAsync(offsets);
 
-        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult res = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(1, res.unsentRequests.size());
 
         time.sleep(latencyMs);
@@ -1471,9 +1562,28 @@ public class CommitRequestManagerTest {
 
     private void completeOffsetCommitRequestWithError(CommitRequestManager commitRequestManager,
                                                       Errors error) {
-        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult res = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(1, res.unsentRequests.size());
         res.unsentRequests.get(0).future().complete(mockOffsetCommitResponse("topic", 1, (short) 1, error));
+    }
+
+    private NetworkClientDelegate.PollResult pollAfterRoutingManagerEvents(
+            final CommitRequestManager commitRequestManager) {
+        NetworkClientDelegate.PollResult result = commitRequestManager.poll(time.milliseconds());
+        if (!result.managerEvents().isEmpty()) {
+            assertTrue(result.unsentRequests.isEmpty(),
+                "a manager observation must be published before another request is admitted");
+
+            // Model the reactor routing the observation to the coordinator owner. No retry is admitted while the
+            // owner is unknown; after this test's stubbed rediscovery, the local retry behavior can be exercised.
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            NetworkClientDelegate.PollResult waiting = commitRequestManager.poll(time.milliseconds());
+            assertTrue(waiting.unsentRequests.isEmpty());
+            assertTrue(waiting.managerEvents().isEmpty());
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+            result = commitRequestManager.poll(time.milliseconds());
+        }
+        return result;
     }
 
     private void testRetriable(final CommitRequestManager commitRequestManager,
@@ -1486,7 +1596,7 @@ public class CommitRequestManagerTest {
 
         // The manager should backoff before retry
         time.sleep(retryBackoffMs);
-        NetworkClientDelegate.PollResult poll = commitRequestManager.poll(time.milliseconds());
+        NetworkClientDelegate.PollResult poll = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(1, poll.unsentRequests.size());
         futures.forEach(f -> assertFalse(f.isDone()));
         mimicResponse(error, poll);
@@ -1495,7 +1605,7 @@ public class CommitRequestManagerTest {
 
         // Sleep util timeout
         time.sleep(defaultApiTimeoutMs);
-        poll = commitRequestManager.poll(time.milliseconds());
+        poll = pollAfterRoutingManagerEvents(commitRequestManager);
         assertEquals(1, poll.unsentRequests.size());
         mimicResponse(error, poll);
         futures.forEach(f -> {
@@ -1669,7 +1779,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Group authorization exception")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(200));
+        assertAwaitInputWithoutOutput(commitRequestManager.poll(200));
 
         assertEmptyPendingRequests(commitRequestManager);
     }
@@ -1694,7 +1804,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Fatal error")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertAwaitInputWithoutOutput(commitRequestManager.poll(time.milliseconds()));
 
         assertTrue(commitFuture.isCompletedExceptionally());
 
@@ -1713,7 +1823,7 @@ public class CommitRequestManagerTest {
         commitRequestManager.signalClose();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertAwaitInputWithoutOutput(commitRequestManager.poll(time.milliseconds()));
 
         assertTrue(commitFuture.isCompletedExceptionally());
 
@@ -1729,6 +1839,12 @@ public class CommitRequestManagerTest {
             Arguments.of(Errors.UNKNOWN_TOPIC_ID, true),
             Arguments.of(Errors.TOPIC_AUTHORIZATION_FAILED, false),
             Arguments.of(Errors.UNKNOWN_SERVER_ERROR, false));
+    }
+
+    private static void assertAwaitInputWithoutOutput(final NetworkClientDelegate.PollResult result) {
+        assertTrue(result.networkCommands().isEmpty());
+        assertTrue(result.managerEvents().isEmpty());
+        assertInstanceOf(NextPollCondition.AwaitInput.class, result.nextPollCondition());
     }
 
     private List<CompletableFuture<CommitRequestManager.OffsetFetchResult>> sendAndVerifyDuplicatedOffsetFetchRequests(

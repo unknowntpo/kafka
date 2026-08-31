@@ -233,7 +233,12 @@ public final class ConsumerUtils {
     }
 
     public static <T> T getResult(Future<T> future, Timer timer) {
-        return getResult(future, timer.remainingMs());
+        timer.update();
+        try {
+            return getResult(future, timer.remainingMs());
+        } finally {
+            timer.update();
+        }
     }
 
     public static <T> T getResult(Future<T> future) {

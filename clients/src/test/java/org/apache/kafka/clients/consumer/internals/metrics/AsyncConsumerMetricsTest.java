@@ -78,7 +78,11 @@ public class AsyncConsumerMetricsTest extends AbstractConsumerMetricsManagerTest
             metrics.metricName("background-event-queue-time-avg", groupName),
             metrics.metricName("background-event-queue-time-max", groupName),
             metrics.metricName("background-event-queue-processing-time-avg", groupName),
-            metrics.metricName("background-event-queue-processing-time-max", groupName)
+            metrics.metricName("background-event-queue-processing-time-max", groupName),
+            metrics.metricName("reactor-invalid-poll-result-total", groupName),
+            metrics.metricName("reactor-manager-poll-failure-total", groupName),
+            metrics.metricName("reactor-action-failure-total", groupName),
+            metrics.metricName("reactor-application-wakeup-total", groupName)
         );
         expectedMetrics.forEach(
             metricName -> assertTrue(
@@ -224,6 +228,26 @@ public class AsyncConsumerMetricsTest extends AbstractConsumerMetricsManagerTest
         // Then:
         assertMetricValue("background-event-queue-processing-time-avg", groupName);
         assertMetricValue("background-event-queue-processing-time-max", groupName);
+    }
+
+    @ParameterizedTest
+    @MethodSource("groupNameProvider")
+    public void shouldRecordReactorDiagnosticCounters(String groupName) {
+        consumerMetrics = new AsyncConsumerMetrics(metrics, groupName);
+
+        consumerMetrics.recordInvalidPollResult();
+        consumerMetrics.recordManagerPollFailure();
+        consumerMetrics.recordReactorActionFailure();
+        consumerMetrics.recordApplicationWakeup();
+
+        assertEquals(1.0, metricValue("reactor-invalid-poll-result-total", groupName));
+        assertEquals(1.0, metricValue("reactor-manager-poll-failure-total", groupName));
+        assertEquals(1.0, metricValue("reactor-action-failure-total", groupName));
+        assertEquals(1.0, metricValue("reactor-application-wakeup-total", groupName));
+    }
+
+    private double metricValue(final String name, final String groupName) {
+        return (double) metrics.metric(metrics.metricName(name, groupName)).metricValue();
     }
 
     private void assertMetricValue(final String name, final String groupName) {

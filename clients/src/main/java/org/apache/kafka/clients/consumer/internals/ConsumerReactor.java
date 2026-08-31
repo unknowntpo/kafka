@@ -42,10 +42,14 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -58,14 +62,18 @@ import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.DEFAULT_
 import static org.apache.kafka.common.utils.Utils.closeQuietly;
 
 /**
- * Background thread runnable that consumes {@link ApplicationEvent} and produces {@link BackgroundEvent}. It
- * uses an event loop to consume and produce events, and poll the network client to handle network IO.
+ * Single-owner event loop that consumes {@link ApplicationEvent}, polls manager-owned state, decides the
+ * shared schedule, produces {@link BackgroundEvent}, and polls the network client.
+ *
+ * <p>The reactor is the only component that combines manager results into network-poll, application-wait, and
+ * external-action decisions. Request managers retain their local state and request-building rules.</p>
  */
 public class ConsumerReactor extends KafkaThread implements Closeable {
 
     // visible for testing
     static final long MAX_POLL_TIMEOUT_MS = 5000;
-    private static final String BACKGROUND_THREAD_NAME = "consumer_background_thread";
+    // Keep the runtime thread name stable for diagnostics and compatibility with existing tooling.
+    private static final String REACTOR_THREAD_NAME = "consumer_background_thread";
     private final Time time;
     private final Logger log;
     private final BlockingQueue<ApplicationEvent> applicationEventQueue;
@@ -81,19 +89,56 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     private final IdempotentCloser closer = new IdempotentCloser();
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
+    private final Object lifecycleLock = new Object();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
-    private volatile long cachedMaximumTimeToWait = MAX_POLL_TIMEOUT_MS;
+
+    /**
+     * Latest immutable decision published to the application thread. Volatile publication is the ownership
+     * boundary: readers may derive a wait bound, but only the reactor thread replaces the schedule.
+     */
+    private volatile ReactorSchedule reactorSchedule;
+
+    /** Retains one absolute deadline per manager so unrelated early I/O cannot postpone another manager's work. */
+    private final ManagerPollCache managerPollCache = new ManagerPollCache();
+
+    /**
+     * Managers whose requests completed during network polling. Request callbacks add their owning manager and
+     * the post-I/O pass polls only this stable snapshot; newly affected managers wait for the next full pass.
+     */
+    private final Set<RequestManager> affectedManagers =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+
+    /** Managers currently violating the progress contract, retained only to rate-limit repeated error logs. */
+    private final Set<RequestManager> managersWithInvalidPollResult =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+
+    /**
+     * Commands derived from post-I/O manager facts and retained until the next deterministic input phase. Facts are
+     * evaluated by the composition-owned policy when their PollResult is staged; only the resulting targeted command
+     * crosses an iteration boundary.
+     */
+    private final List<ManagerCommand> deferredManagerCommands = new ArrayList<>();
+
+    /**
+     * Effects staged for the current reactor phase. They execute only after schedule publication; application
+     * wakeup is de-duplicated and executed last so the released thread observes all preceding effects.
+     */
+    private final List<ReactorAction> pendingReactorActions = new ArrayList<>();
+
+    /** Diagnostic causes associated with {@link #pendingReactorActions}; these do not make scheduling decisions. */
+    private final EnumSet<ReactorActionReason> pendingReactorActionReasons =
+        EnumSet.noneOf(ReactorActionReason.class);
     private long lastPollTimeMs = 0L;
 
     public ConsumerReactor(LogContext logContext,
-                                 Time time,
-                                 BlockingQueue<ApplicationEvent> applicationEventQueue,
-                                 CompletableEventReaper applicationEventReaper,
-                                 Supplier<ApplicationEventProcessor> applicationEventProcessorSupplier,
-                                 Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
-                                 Supplier<RequestManagers> requestManagersSupplier,
-                                 AsyncConsumerMetrics asyncConsumerMetrics) {
-        super(BACKGROUND_THREAD_NAME, true);
+                           Time time,
+                           BlockingQueue<ApplicationEvent> applicationEventQueue,
+                           CompletableEventReaper applicationEventReaper,
+                           Supplier<ApplicationEventProcessor> applicationEventProcessorSupplier,
+                           Supplier<NetworkClientDelegate> networkClientDelegateSupplier,
+                           Supplier<RequestManagers> requestManagersSupplier,
+                           AsyncConsumerMetrics asyncConsumerMetrics) {
+        super(REACTOR_THREAD_NAME, true);
         this.time = time;
         this.log = logContext.logger(getClass());
         this.applicationEventQueue = applicationEventQueue;
@@ -103,10 +148,14 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         this.requestManagersSupplier = requestManagersSupplier;
         this.running = true;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
+        this.reactorSchedule = ReactorSchedule.initial(
+            MAX_POLL_TIMEOUT_MS,
+            time.milliseconds()
+        );
     }
 
     /**
-     * Start the network thread and let it complete its initialization before proceeding. The
+     * Start the reactor thread and let it complete its initialization before proceeding. The
      * {@link ClassicKafkaConsumer} constructor blocks during creation of its {@link NetworkClient}, providing
      * precedent for waiting here.
      *
@@ -124,12 +173,12 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         try {
             if (!initializationLatch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
                 maybeSetInitializationError(
-                    new TimeoutException("Consumer network thread resource initialization timed out after " + timeoutMs + " ms")
+                    new TimeoutException("Consumer reactor resource initialization timed out after " + timeoutMs + " ms")
                 );
             }
         } catch (InterruptedException e) {
             maybeSetInitializationError(
-                new InterruptException("Consumer network thread resource initialization was interrupted", e)
+                new InterruptException("Consumer reactor resource initialization was interrupted", e)
             );
         }
 
@@ -142,9 +191,9 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     @Override
     public void run() {
         try {
-            log.debug("Consumer network thread started");
+            log.debug("Consumer reactor started");
 
-            // Wait until we're securely in the background network thread to initialize these objects...
+            // Wait until we're securely in the reactor thread to initialize these objects...
             try {
                 initializeResources();
             } catch (Throwable t) {
@@ -162,11 +211,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
                     runOnce();
                 } catch (final Throwable e) {
                     // Swallow the exception and continue
-                    log.error("Unexpected error caught in consumer network thread", e);
+                    log.error("Unexpected error caught in consumer reactor", e);
                 }
             }
         } catch (Throwable t) {
-            log.error("Unexpected failure in consumer network thread", t);
+            log.error("Unexpected failure in consumer reactor", t);
         } finally {
             cleanup();
         }
@@ -176,7 +225,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         if (initializationError.compareAndSet(null, error))
             return;
 
-        log.error("Consumer network thread resource initialization error ({}) will be suppressed as an error was already set", error.getMessage(), error);
+        log.error("Consumer reactor resource initialization error ({}) will be suppressed as an error was already set", error.getMessage(), error);
     }
 
     void initializeResources() {
@@ -194,8 +243,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      *         {@link ApplicationEventProcessor}
      *     </li>
      *     <li>
-     *         Iterate through the {@link RequestManager} list and invoke {@link RequestManager#poll(long)} to get
-     *         the {@link NetworkClientDelegate.UnsentRequest} list and the poll time for the network poll
+     *         Poll each {@link RequestManager} and collect its proposed network work, state transitions, and next
+     *         poll delay
      *     </li>
      *     <li>
      *         Stage each {@link AbstractRequest.Builder request} to be sent via
@@ -209,6 +258,8 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      */
     void runOnce() {
         // The following code avoids use of the Java Collections Streams API to reduce overhead in this loop.
+        applyDeferredManagerCommands();
+        stageManagerEvents(requestManagers.drainPendingManagerEvents(), PollPhase.INPUT);
         processApplicationEvents();
 
         final long currentTimeMs = time.milliseconds();
@@ -219,26 +270,66 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
 
         long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
 
+        // A full pre-I/O pass remains the correctness fallback while metadata, disconnect, capacity, and
+        // cross-manager dependencies are migrated to typed input events. It supersedes and discards any completion
+        // marks deferred from a previous post-I/O pass because every manager is polled below.
+        affectedManagers.clear();
+        List<NetworkClientDelegate.PollResult> pollResults = new ArrayList<>();
+        List<RequestManager> managers = new ArrayList<>();
         for (RequestManager rm : requestManagers.entries()) {
-            NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
-            long timeoutMs = networkClientDelegate.addAll(pollResult);
-            pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
+            NetworkClientDelegate.PollResult result = pollManager(rm, currentTimeMs);
+            managers.add(rm);
+            pollResults.add(result);
+            stagePollResult(rm, result, currentTimeMs);
+            // The network delegate still accepts its concrete UnsentRequest implementation during migration.
+            networkClientDelegate.addAll(result.unsentRequests);
         }
+        stageManagerEventBatch(pollResults, PollPhase.PRE_IO);
+        managerPollCache.retainManagers(managers);
+
+        ReactorSchedule proposedSchedule = ReactorSchedule.from(
+            managerPollCache.states(),
+            currentTimeMs
+        );
+        proposedSchedule = publishReactorSchedule(proposedSchedule, currentTimeMs);
+        pollWaitTimeMs = Math.min(
+            pollWaitTimeMs,
+            proposedSchedule.networkPollTimeoutMs(currentTimeMs)
+        );
+        pollWaitTimeMs = Math.min(
+            pollWaitTimeMs,
+            applicationEventReaper.timeUntilNextExpirationMs(currentTimeMs)
+        );
+        collectApplicationEventActions();
+        publishPendingBackgroundEvents();
+        executeReactorActions();
 
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
-        long maxTimeToWaitMs = Long.MAX_VALUE;
+        // Deliver an expired legacy application deadline before asking managers for a fresh one. The manager poll
+        // deadline itself is consumed by polling the manager again and never directly wakes the application thread.
+        long afterNetworkPollMs = time.milliseconds();
+        deliverExpiredApplicationDeadline(afterNetworkPollMs);
 
-        for (RequestManager rm : requestManagers.entries()) {
-            long waitMs = rm.maximumTimeToWait(currentTimeMs);
-            maxTimeToWaitMs = Math.min(maxTimeToWaitMs, waitMs);
+        // Request completion callbacks mark their owning manager. Poll only that stable snapshot here; marks produced
+        // by this pass are intentionally deferred to the next full pre-I/O pass.
+        List<NetworkClientDelegate.PollResult> postIoResults = pollAffectedManagers(afterNetworkPollMs);
+        stageManagerEventBatch(postIoResults, PollPhase.POST_IO);
+        if (!postIoResults.isEmpty() || requestManagers.hasPendingBackgroundEvents()) {
+            publishReactorSchedule(
+                ReactorSchedule.from(managerPollCache.states(), afterNetworkPollMs),
+                afterNetworkPollMs
+            );
+            deliverExpiredApplicationDeadline(afterNetworkPollMs);
         }
+        collectApplicationEventActions();
+        publishPendingBackgroundEvents();
+        executeReactorActions();
 
-        cachedMaximumTimeToWait = maxTimeToWaitMs;
-
-        reapExpiredApplicationEvents(currentTimeMs);
+        reapExpiredApplicationEvents(afterNetworkPollMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
-        maybeFailOnMetadataError(uncompletedEvents);
+        if (stageMetadataErrorActions(uncompletedEvents))
+            executeReactorActions();
     }
 
     /**
@@ -262,7 +353,7 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
                 // This call is meant to handle "immediately completed events" which may not enter the
                 // awaiting state, so metadata errors need to be checked and handled right away.
                 if (event instanceof MetadataErrorNotifiableEvent) {
-                    if (maybeFailOnMetadataError(List.of(event)))
+                    if (stageMetadataErrorActions(List.of(event)))
                         continue;
                 }
                 applicationEventProcessor.process(event);
@@ -322,6 +413,31 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         return running;
     }
 
+    /**
+     * Atomically accepts one application event while the reactor is running. Closing uses the same lifecycle lock,
+     * so cleanup either observes an accepted event or submission fails before the event enters the queue.
+     *
+     * @return queue size immediately after the event was accepted
+     * @throws KafkaException if the reactor is no longer accepting events or the queue is full
+     */
+    int acceptApplicationEvent(final ApplicationEvent event) {
+        synchronized (lifecycleLock) {
+            if (!running || !isAlive())
+                throw new KafkaException("The consumer reactor is not running and cannot process requests.");
+
+            int queueSizeBeforeSubmit = applicationEventQueue.size();
+            if (!applicationEventQueue.offer(event))
+                throw new KafkaException("The consumer reactor input queue is full and cannot accept " + event.type());
+            return queueSizeBeforeSubmit + 1;
+        }
+    }
+
+    private void stopAcceptingApplicationEvents() {
+        synchronized (lifecycleLock) {
+            running = false;
+        }
+    }
+
     public void wakeup() {
         // The network client can be null if the initializeResources method has not yet been called.
         if (networkClientDelegate != null)
@@ -335,13 +451,261 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      * responsive to changes.
      *
      * Because this method is called by the application thread, it's not allowed to access the request managers
-     * that actually provide the information. As a result, the consumer network thread periodically caches the
+     * that actually provide the information. As a result, the consumer reactor periodically caches the
      * information from the request managers and this can then be read safely using this method.
      *
      * @return The maximum delay in milliseconds
      */
     public long maximumTimeToWait() {
-        return cachedMaximumTimeToWait;
+        return reactorSchedule.remainingMsForApplication(time.milliseconds());
+    }
+
+    /** Stages one manager's deadlines and request-completion ownership before phase-level event evaluation. */
+    private void stagePollResult(final RequestManager manager,
+                                 final NetworkClientDelegate.PollResult result,
+                                 final long currentTimeMs) {
+        ApplicationWait applicationWait = manager.usesLegacyApplicationWait()
+            ? ApplicationWait.fromLegacyMaximumTimeToWait(manager.maximumTimeToWait(currentTimeMs))
+            : ApplicationWait.unbounded();
+        managerPollCache.update(manager, result, applicationWait, currentTimeMs);
+        for (NetworkCommand command : result.networkCommands())
+            command.onCompletion((response, error) -> affectedManagers.add(manager));
+    }
+
+    /** Evaluates one ordered phase of manager facts as a batch, then stages its derived commands and effects. */
+    private void stageManagerEventBatch(final Collection<NetworkClientDelegate.PollResult> results,
+                                        final PollPhase phase) {
+        List<ManagerEvent> events = new ArrayList<>();
+        for (NetworkClientDelegate.PollResult result : results)
+            events.addAll(result.managerEvents());
+        stageManagerEvents(events, phase);
+    }
+
+    /** Evaluates one stable batch of facts and applies the phase-specific command ordering rule. */
+    private void stageManagerEvents(final Collection<ManagerEvent> events, final PollPhase phase) {
+        if (events.isEmpty())
+            return;
+
+        CoordinationPlan coordinationPlan = requestManagers.planManagerEvents(events);
+        for (ReactorAction action : coordinationPlan.reactorActions())
+            stageReactorAction(action);
+        if (!coordinationPlan.reactorActions().isEmpty())
+            pendingReactorActionReasons.add(ReactorActionReason.MANAGER_EVENT);
+        if (!coordinationPlan.managerCommands().isEmpty()) {
+            if (phase == PollPhase.INPUT) {
+                // Callback-produced facts are drained before the full manager pass, so owner mutation is visible to
+                // every request builder and to the ReactorSchedule published for this iteration.
+                requestManagers.applyManagerCommands(coordinationPlan.managerCommands());
+            } else {
+                if (phase == PollPhase.PRE_IO) {
+                    // This is diagnostic containment, not a generic stale-request solution: managers may already
+                    // have built transport work in this pass. Normal callback-produced cross-owner facts use the
+                    // INPUT path above. Preserve an unexpected fact and apply it at the next input boundary.
+                    log.error("Cross-owner manager command was produced after the input boundary; deferring it "
+                        + "without loss, but transport work from this pass cannot be generically replayed");
+                }
+                deferredManagerCommands.addAll(coordinationPlan.managerCommands());
+            }
+        }
+    }
+
+    /** Keep a malformed manager result from forcing a zero-timeout loop and make an unexpected failure terminal. */
+    private NetworkClientDelegate.PollResult pollManager(final RequestManager manager, final long currentTimeMs) {
+        final NetworkClientDelegate.PollResult result;
+        try {
+            result = manager.poll(currentTimeMs);
+        } catch (RuntimeException exception) {
+            log.error("Request manager {} failed while polling; publishing a terminal background error after the "
+                    + "current schedule and stopping the reactor after this phase",
+                manager.getClass().getName(), exception);
+            asyncConsumerMetrics.recordManagerPollFailure();
+            stageReactorAction(ReactorAction.publishBackgroundError(exception));
+            stageWakeApplication();
+            pendingReactorActionReasons.add(ReactorActionReason.MANAGER_POLL_FAILURE);
+            stopAcceptingApplicationEvents();
+            return NetworkClientDelegate.PollResult.awaitInput();
+        }
+
+        if (result.isValidPollResult()) {
+            managersWithInvalidPollResult.remove(manager);
+            return result;
+        }
+
+        if (managersWithInvalidPollResult.add(manager)) {
+            log.error("Request manager {} returned no progress with an immediate repoll; replacing the invalid "
+                + "deadline with an event wait", manager.getClass().getName());
+        }
+        asyncConsumerMetrics.recordInvalidPollResult();
+        return NetworkClientDelegate.PollResult.awaitInput();
+    }
+
+    /** Applies policy-derived commands before application events and the next full ordered manager pass. */
+    private void applyDeferredManagerCommands() {
+        if (deferredManagerCommands.isEmpty())
+            return;
+
+        requestManagers.applyManagerCommands(List.copyOf(deferredManagerCommands));
+        deferredManagerCommands.clear();
+    }
+
+    private List<NetworkClientDelegate.PollResult> pollAffectedManagers(final long currentTimeMs) {
+        if (affectedManagers.isEmpty())
+            return List.of();
+
+        Set<RequestManager> scheduledManagers = Collections.newSetFromMap(new IdentityHashMap<>());
+        List<RequestManager> managers = new ArrayList<>();
+        for (RequestManager manager : affectedManagers) {
+            if (scheduledManagers.add(manager))
+                managers.add(manager);
+        }
+        affectedManagers.clear();
+
+        List<NetworkClientDelegate.PollResult> results = new ArrayList<>(managers.size());
+        for (RequestManager manager : managers) {
+            NetworkClientDelegate.PollResult result = pollManager(manager, currentTimeMs);
+            results.add(result);
+            stagePollResult(manager, result, currentTimeMs);
+            // The network delegate still accepts its concrete UnsentRequest implementation during migration.
+            networkClientDelegate.addAll(result.unsentRequests);
+        }
+        return results;
+    }
+
+    private ReactorSchedule publishReactorSchedule(
+        final ReactorSchedule decision,
+        final long currentTimeMs
+    ) {
+        ReactorSchedule previous = reactorSchedule;
+        ReactorSchedule next = decision.withGeneration(previous.generation() + 1L);
+
+        // Publish before signaling. Fetch buffers latch wakeups, so the application either observes the new
+        // snapshot before waiting or is released after it has started waiting on the old snapshot.
+        reactorSchedule = next;
+
+        if (log.isTraceEnabled() && !next.sameSchedule(previous)) {
+            log.trace(
+                "Reactor schedule changed: source={}, previousDeadline={}, deadline={}, networkPollTimeout={}",
+                next.deadlineSource().orElse("none"),
+                previous.pollDeadlineMs(),
+                next.pollDeadlineMs(),
+                next.networkPollTimeoutMs(currentTimeMs)
+            );
+        }
+
+        // This compatibility action only applies to the legacy application wait projection. Manager poll deadlines
+        // such as fetch reconnect backoff are reactor-only and cannot enter this branch.
+        if (next.shortensApplicationWait(previous) && next.applicationRemainingMs(currentTimeMs) > 0L) {
+            stageWakeApplication();
+            pendingReactorActionReasons.add(
+                ReactorActionReason.SCHEDULE_SHORTENED
+            );
+        }
+
+        return next;
+    }
+
+    private void deliverExpiredApplicationDeadline(final long currentTimeMs) {
+        ReactorSchedule current = reactorSchedule;
+        if (current.applicationDeadlineMs() == Long.MAX_VALUE
+            || current.applicationRemainingMs(currentTimeMs) > 0L
+            || current.applicationDeadlineDelivered()) {
+            return;
+        }
+
+        // Mark delivery in the published snapshot before signaling. This prevents the released application thread
+        // from observing a stale 0ms timeout and spinning while the manager processes the resulting event.
+        managerPollCache.markApplicationDeadlineDelivered(current);
+        reactorSchedule = current.withApplicationDeadlineDelivered();
+        stageWakeApplication();
+        pendingReactorActionReasons.add(
+            ReactorActionReason.WAIT_DEADLINE_EXPIRED
+        );
+    }
+
+    /** Publish staged application events only after the current phase schedule, then release the application. */
+    private void publishPendingBackgroundEvents() {
+        int published = requestManagers.publishPendingBackgroundEvents();
+        if (published == 0)
+            return;
+        stageWakeApplication();
+        pendingReactorActionReasons.add(ReactorActionReason.BACKGROUND_EVENT_PUBLISHED);
+    }
+
+    private void executeReactorActions() {
+        if (pendingReactorActions.isEmpty())
+            return;
+
+        if (log.isTraceEnabled()) {
+            log.trace(
+                "Executing reactor action: actions={}, reasons={}",
+                pendingReactorActions,
+                pendingReactorActionReasons
+            );
+        }
+        // Detach this phase before execution. One failed action is then never retried accidentally, cannot suppress
+        // later independent actions, and cannot prevent a coalesced application wake from running last.
+        List<ReactorAction> actions = new ArrayList<>(pendingReactorActions);
+        boolean wakeApplication = actions.remove(ReactorAction.wakeApplication());
+        pendingReactorActions.clear();
+        pendingReactorActionReasons.clear();
+
+        for (ReactorAction action : actions)
+            executeReactorAction(action);
+        if (wakeApplication && executeReactorAction(ReactorAction.wakeApplication()))
+            asyncConsumerMetrics.recordApplicationWakeup();
+    }
+
+    private boolean executeReactorAction(final ReactorAction action) {
+        try {
+            action.execute(requestManagers);
+            return true;
+        } catch (RuntimeException exception) {
+            asyncConsumerMetrics.recordReactorActionFailure();
+            log.error("Reactor action {} failed; continuing the phase so later effects and network I/O are not lost",
+                action.type(), exception);
+            return false;
+        }
+    }
+
+    private void collectApplicationEventActions() {
+        List<ReactorAction> actions = applicationEventProcessor.drainReactorActions();
+        pendingReactorActions.addAll(actions);
+        if (!actions.isEmpty())
+            pendingReactorActionReasons.add(ReactorActionReason.APPLICATION_EVENT_PROGRESS);
+    }
+
+    /**
+     * Records and coalesces a wakeup for the current reactor phase; this method does not wake the application
+     * thread immediately. The reactor first publishes the corresponding state and schedule and executes other
+     * completion actions, then performs the staged wakeup last so the application cannot observe stale state or
+     * lose a notification.
+     */
+    private void stageWakeApplication() {
+        ReactorAction wakeApplication = ReactorAction.wakeApplication();
+        if (!pendingReactorActions.contains(wakeApplication))
+            pendingReactorActions.add(wakeApplication);
+    }
+
+    private void stageReactorAction(final ReactorAction action) {
+        if (action == ReactorAction.wakeApplication())
+            stageWakeApplication();
+        else
+            pendingReactorActions.add(action);
+    }
+
+    private enum PollPhase {
+        INPUT,
+        PRE_IO,
+        POST_IO
+    }
+
+    // Visible for testing. The immutable snapshot is safe to inspect without exposing request-manager state.
+    ReactorSchedule reactorSchedule() {
+        return reactorSchedule;
+    }
+
+    public long reactorScheduleGeneration() {
+        return reactorSchedule.generation();
     }
 
     @Override
@@ -350,11 +714,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
     }
 
     public void close(final Duration timeout) {
-        Objects.requireNonNull(timeout, "Close timeout for consumer network thread must be non-null");
+        Objects.requireNonNull(timeout, "Close timeout for consumer reactor must be non-null");
 
         closer.close(
                 () -> closeInternal(timeout),
-                () -> log.warn("The consumer network thread was already closed")
+                () -> log.warn("The consumer reactor was already closed")
         );
     }
 
@@ -363,30 +727,36 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
      *
      * <p/>
      *
-     * This method is called from the application thread, but our resources are owned by the network thread. As such,
+     * This method is called from the application thread, but our resources are owned by the reactor. As such,
      * we don't actually close any of those resources here, immediately, on the application thread. Instead, we just
-     * update our internal state on the application thread. When the network thread next
+     * update our internal state on the application thread. When the reactor next
      * {@link #run() executes its loop}, it will notice that state, cease processing any further events, and begin
      * {@link #cleanup() closing its resources}.
      *
      * <p/>
      *
      * This method will wait (i.e. block the application thread) for up to the duration of the given timeout to give
-     * the network thread the time to close down cleanly.
+     * the reactor the time to close down cleanly.
      *
-     * @param timeout Upper bound of time to wait for the network thread to close its resources
+     * @param timeout Upper bound of time to wait for the reactor to close its resources
      */
     private void closeInternal(final Duration timeout) {
         long timeoutMs = timeout.toMillis();
-        log.trace("Signaling the consumer network thread to close in {}ms", timeoutMs);
-        running = false;
+        log.trace("Signaling the consumer reactor to close in {}ms", timeoutMs);
+        stopAcceptingApplicationEvents();
         closeTimeout = timeout;
         wakeup();
 
         try {
-            join();
+            if (timeoutMs > 0L)
+                join(timeoutMs);
+            if (isAlive()) {
+                log.warn("Consumer reactor did not finish cleanup within the close timeout of {} ms; cleanup will "
+                    + "continue on the daemon reactor thread", timeoutMs);
+            }
         } catch (InterruptedException e) {
-            log.error("Interrupted while waiting for consumer network thread to complete", e);
+            log.error("Interrupted while waiting for consumer reactor to complete", e);
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -403,21 +773,23 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         } while (timer.notExpired() && networkClientDelegate.hasAnyPendingRequests());
 
         if (networkClientDelegate.hasAnyPendingRequests()) {
-            log.warn("Close timeout of {} ms expired before the consumer network thread was able " +
+            log.warn("Close timeout of {} ms expired before the consumer reactor was able " +
                 "to complete pending requests. Inflight request count: {}, Unsent request count: {}",
                 timer.timeoutMs(), networkClientDelegate.inflightRequestCount(), networkClientDelegate.unsentRequests().size());
         }
     }
 
     void cleanup() {
-        log.trace("Closing the consumer network thread");
+        log.trace("Closing the consumer reactor");
         Timer timer = time.timer(closeTimeout);
         try {
             // If an error was thrown from initializeResources(), it's possible that the list of request managers
             // is null, so check before using. If the request manager list is null, there wasn't any real work
             // performed, so not being able to close the request managers isn't so bad.
-            if (requestManagers != null && networkClientDelegate != null)
+            if (requestManagers != null && networkClientDelegate != null) {
+                applyDeferredManagerCommands();
                 runAtClose(requestManagers.entries(), networkClientDelegate, time.milliseconds());
+            }
         } catch (Exception e) {
             log.error("Unexpected error during shutdown. Proceed with closing.", e);
         } finally {
@@ -427,18 +799,37 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
             if (networkClientDelegate != null)
                 sendUnsentRequests(timer);
 
+            // An asynchronous completion can stage an action after the final runOnce drain. AsyncPollEvent is not
+            // tracked by the CompletableEventReaper, so execute already-selected actions before closing resources.
+            if (applicationEventProcessor != null) {
+                try {
+                    if (requestManagers != null && requestManagers.hasPendingBackgroundEvents()) {
+                        publishReactorSchedule(
+                            ReactorSchedule.from(managerPollCache.states(), time.milliseconds()),
+                            time.milliseconds()
+                        );
+                        publishPendingBackgroundEvents();
+                    }
+                    collectApplicationEventActions();
+                    executeReactorActions();
+                } catch (Exception e) {
+                    log.error("Unexpected error executing staged reactor actions during shutdown", e);
+                }
+            }
+
             asyncConsumerMetrics.recordApplicationEventExpiredSize(applicationEventReaper.reap(applicationEventQueue));
 
             closeQuietly(requestManagers, "request managers");
             closeQuietly(networkClientDelegate, "network client delegate");
-            log.debug("Closed the consumer network thread");
+            log.debug("Closed the consumer reactor");
         }
     }
 
     /**
-     * If there is a metadata error, complete all uncompleted events that require subscription metadata.
+     * If there is a metadata error, stage completion of all uncompleted events that require subscription metadata.
+     * The caller publishes the current schedule before these actions complete the events and wake the application.
      */
-    private boolean maybeFailOnMetadataError(List<?> events) {
+    private boolean stageMetadataErrorActions(List<?> events) {
         List<MetadataErrorNotifiableEvent> filteredEvents = new ArrayList<>();
 
         for (Object obj : events) {
@@ -454,7 +845,11 @@ public class ConsumerReactor extends KafkaThread implements Closeable {
         Optional<Exception> metadataError = networkClientDelegate.getAndClearMetadataError();
 
         if (metadataError.isPresent()) {
-            filteredEvents.forEach(e -> e.onMetadataError(metadataError.get()));
+            filteredEvents.forEach(e -> pendingReactorActions.add(
+                ReactorAction.notifyMetadataError(e, metadataError.get())
+            ));
+            stageWakeApplication();
+            pendingReactorActionReasons.add(ReactorActionReason.METADATA_ERROR);
             return true;
         } else {
             return false;

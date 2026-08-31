@@ -45,7 +45,13 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     private final NetworkClientDelegate networkClientDelegate;
     private final long retryBackoffMs;
+
+    /** Fetch intent retained until preparation creates requests, reaches a terminal blocker, or fails. */
+    private boolean fetchRequestPending;
+
+    /** Sole caller waiting for the next preparation outcome; null when retained intent currently has no waiter. */
     private CompletableFuture<Void> pendingFetchRequestFuture;
+    private final PendingManagerEvents pendingManagerEvents = new PendingManagerEvents();
 
     FetchRequestManager(final LogContext logContext,
                         final Time time,
@@ -68,20 +74,13 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     }
 
     @Override
-    protected void maybeThrowAuthFailure(Node node) {
-        networkClientDelegate.maybeThrowAuthFailure(node);
+    protected long unavailableTimeRemainingMs(Node node, long currentTimeMs) {
+        return networkClientDelegate.connectionDelay(node, currentTimeMs);
     }
 
-    /**
-     * {@inheritDoc}
-     *
-     * If any request is in flight, its completion will wake the application thread regardless of the outcome, so
-     * no separate bound is needed. Otherwise, the application thread's wait is bounded by {@code retryBackoffMs}
-     * so it can re-evaluate subscription state changes promptly.
-     */
     @Override
-    public long maximumTimeToWait(long currentTimeMs) {
-        return nodesWithPendingFetchRequests.isEmpty() ? retryBackoffMs : Long.MAX_VALUE;
+    protected void maybeThrowAuthFailure(Node node) {
+        networkClientDelegate.maybeThrowAuthFailure(node);
     }
 
     /**
@@ -93,20 +92,19 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     public CompletableFuture<Void> createFetchRequests() {
         CompletableFuture<Void> future = new CompletableFuture<>();
-
-        if (pendingFetchRequestFuture != null) {
-            // In this case, we have an outstanding fetch request, so chain the newly created future to be
-            // completed when the "pending" future is completed.
-            pendingFetchRequestFuture.whenComplete((value, exception) -> {
-                if (exception != null) {
-                    future.completeExceptionally(exception);
-                } else {
-                    future.complete(value);
-                }
-            });
-        } else {
-            pendingFetchRequestFuture = future;
+        if (fetchRequestPending) {
+            // A retryable blocker can retain the fetch intent after the previous caller has completed. Attach the
+            // first caller arriving after that completion so the next preparation outcome, including an exception,
+            // is delivered to it. Keep at most one waiter; additional equivalent callers complete immediately.
+            if (pendingFetchRequestFuture == null)
+                pendingFetchRequestFuture = future;
+            else
+                future.complete(null);
+            return future;
         }
+
+        fetchRequestPending = true;
+        pendingFetchRequestFuture = future;
 
         return future;
     }
@@ -117,10 +115,16 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     @Override
     public PollResult poll(long currentTimeMs) {
         return pollInternal(
+            currentTimeMs,
             this::prepareFetchRequests,
             this::handleFetchSuccess,
             this::handleFetchFailure
         );
+    }
+
+    @Override
+    public List<ManagerEvent> drainPendingManagerEvents() {
+        return pendingManagerEvents.drain();
     }
 
     /**
@@ -133,6 +137,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
         // TODO: move the logic to poll to handle signal close
         return pollInternal(
+                currentTimeMs,
                 this::prepareCloseFetchSessionRequests,
                 this::handleCloseFetchSessionSuccess,
                 this::handleCloseFetchSessionFailure
@@ -143,33 +148,32 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * Creates the {@link PollResult poll result} that contains a list of zero or more
      * {@link FetchRequest.Builder fetch requests}.
      *
-     * @param fetchRequestPreparer {@link FetchRequestPreparer} to generate a {@link FetchRequestPreparationResult}
-     *                             mapping {@link Node nodes} to their {@link FetchSessionHandler.FetchRequestData}
+     * @param fetchRequestPreparer {@link FetchRequestPreparer} to describe both requests that can be created and
+     *                             blockers preventing other requests from being created
      * @param successHandler       {@link ResponseHandler Handler for successful responses}
      * @param errorHandler         {@link ResponseHandler Handler for failure responses}
      * @return {@link PollResult}
      */
-    private PollResult pollInternal(FetchRequestPreparer fetchRequestPreparer,
+    private PollResult pollInternal(long currentTimeMs,
+                                    FetchRequestPreparer fetchRequestPreparer,
                                     ResponseHandler<ClientResponse> successHandler,
                                     ResponseHandler<Throwable> errorHandler) {
-        if (pendingFetchRequestFuture == null) {
-            // If no explicit request for creating fetch requests was issued, just short-circuit.
-            return PollResult.EMPTY;
+        if (!fetchRequestPending) {
+            // Network completions can report a manager fact without creating new network work.
+            return pollResult(PollResult.WAIT_FOREVER, List.of());
         }
 
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
+            long timeUntilNextPollMs = timeUntilNextPollMs(result, currentTimeMs);
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
-                if (result.canWakeBufferIfNoFetchRequestsToSend()) {
-                    // If there's nothing to fetch because every fetchable partition already has buffered data,
-                    // wake up the FetchBuffer so it doesn't needlessly wait for a wakeup that won't come until
-                    // the data in the fetch buffer is consumed.
-                    fetchBuffer.wakeup();
-                }
-                pendingFetchRequestFuture.complete(null);
-                return PollResult.EMPTY;
+                reportPreparationEvent(result);
+                fetchRequestPending = shouldRetryPreparation(result);
+                if (pendingFetchRequestFuture != null)
+                    pendingFetchRequestFuture.complete(null);
+                return pollResult(timeUntilNextPollMs, List.of());
             }
 
             List<UnsentRequest> requests = fetchRequests.entrySet().stream().map(entry -> {
@@ -186,17 +190,88 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
             }).collect(Collectors.toList());
 
-            pendingFetchRequestFuture.complete(null);
-            return new PollResult(requests);
+            fetchRequestPending = false;
+            if (pendingFetchRequestFuture != null)
+                pendingFetchRequestFuture.complete(null);
+            return pollResult(PollResult.WAIT_FOREVER, requests);
         } catch (Throwable t) {
             // A "dummy" poll result is returned here rather than rethrowing the error because any error
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
-            pendingFetchRequestFuture.completeExceptionally(t);
-            return PollResult.EMPTY;
+            fetchRequestPending = false;
+            if (pendingFetchRequestFuture != null)
+                pendingFetchRequestFuture.completeExceptionally(t);
+            pendingManagerEvents.add(ManagerEvent.LocalProgress.FETCH_PREPARATION_FAILED);
+            return pollResult(PollResult.WAIT_FOREVER, List.of());
         } finally {
             pendingFetchRequestFuture = null;
         }
+    }
+
+    long timeUntilNextPollMs(
+        final FetchRequestPreparationResult result,
+        final long currentTimeMs
+    ) {
+        boolean noFetchablePartitions =
+            result.blockers().contains(FetchRequestPreparationBlocker.NO_FETCHABLE_PARTITIONS);
+        boolean missingLeader = result.blockers().contains(FetchRequestPreparationBlocker.MISSING_LEADER);
+        boolean reconnectBackoff = result.blockers().contains(FetchRequestPreparationBlocker.RECONNECT_BACKOFF);
+        if (noFetchablePartitions || missingLeader || reconnectBackoff) {
+            // Paused, unassigned, or otherwise unfetchable partitions become actionable through application,
+            // assignment, position, or metadata input, all of which wake the reactor. A missing leader still needs
+            // a bounded metadata retry; reconnects use their actual connection delay.
+            long delayMs = missingLeader ? retryBackoffMs : Long.MAX_VALUE;
+            if (reconnectBackoff)
+                delayMs = Math.min(delayMs, result.reconnectBackoffRemainingMs());
+
+            return delayMs;
+        }
+
+        return PollResult.WAIT_FOREVER;
+    }
+
+    private boolean shouldRetryPreparation(final FetchRequestPreparationResult result) {
+        if (result.blockers().contains(FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED))
+            return false;
+        return result.blockers().contains(FetchRequestPreparationBlocker.NO_FETCHABLE_PARTITIONS)
+            || result.blockers().contains(FetchRequestPreparationBlocker.MISSING_LEADER)
+            || result.blockers().contains(FetchRequestPreparationBlocker.RECONNECT_BACKOFF);
+    }
+
+    private PollResult pollResult(final long timeUntilNextPollMs,
+                                  final List<UnsentRequest> requests) {
+        final PollResult pollResult;
+        if (!requests.isEmpty()) {
+            pollResult = PollResult.progress(
+                requests,
+                List.of(),
+                NextPollCondition.fromLegacyDelay(timeUntilNextPollMs)
+            );
+        } else if (timeUntilNextPollMs == PollResult.WAIT_FOREVER) {
+            pollResult = PollResult.awaitInput();
+        } else {
+            // A zero configured backoff is a legal time-driven retry. Use the typed factory so it cannot be
+            // confused with PollImmediately, which requires output in the same result.
+            pollResult = PollResult.retryAfter(timeUntilNextPollMs);
+        }
+        return pendingManagerEvents.publishWith(
+            pollResult
+        );
+    }
+
+    private void reportPreparationEvent(final FetchRequestPreparationResult result) {
+        if (result.blockers().contains(FetchRequestPreparationBlocker.DATA_ALREADY_BUFFERED)) {
+            pendingManagerEvents.add(ManagerEvent.FetchBufferHasData.INSTANCE);
+        }
+    }
+
+    @Override
+    protected void onFetchRequestTerminated() {
+        pendingManagerEvents.add(ManagerEvent.LocalProgress.FETCH_REQUEST_TERMINATED);
+    }
+
+    void wakeupApplicationThread() {
+        fetchBuffer.wakeup();
     }
 
     /**

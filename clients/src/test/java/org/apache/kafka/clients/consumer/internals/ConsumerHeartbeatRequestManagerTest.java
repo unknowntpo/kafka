@@ -81,6 +81,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -113,6 +114,8 @@ public class ConsumerHeartbeatRequestManagerTest
         this.logContext = new LogContext();
         this.pollTimer = spy(time.timer(DEFAULT_MAX_POLL_INTERVAL_MS));
         this.coordinatorRequestManager = mock(CoordinatorRequestManager.class);
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
         this.heartbeatState = mock(HeartbeatState.class);
         this.backgroundEventHandler = mock(BackgroundEventHandler.class);
         this.subscriptions = mock(SubscriptionState.class);
@@ -272,7 +275,7 @@ public class ConsumerHeartbeatRequestManagerTest
 
         if (!shouldSkipHeartbeat) {
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(0, result.timeUntilNextPollMs);
+            assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
         } else {
             assertEquals(0, result.unsentRequests.size());
             assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
@@ -311,7 +314,7 @@ public class ConsumerHeartbeatRequestManagerTest
      * KAFKA-20253: when the coordinator is unavailable (e.g. after a re-authentication failure),
      * poll() returns EMPTY, so no heartbeat can be sent. maximumTimeToWait() must return a positive
      * value in that case; returning 0 busy-spins the application thread (and, via wakeups, the
-     * consumer network thread), which is the AsyncKafkaConsumer high-CPU loop in this ticket.
+     * consumer reactor), which is the AsyncKafkaConsumer high-CPU loop in this ticket.
      */
     @Test
     public void testMaximumTimeToWaitWhenCoordinatorUnavailableDoesNotSpin() {
@@ -339,11 +342,15 @@ public class ConsumerHeartbeatRequestManagerTest
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No heartbeat should be sent while a " +
                 "previous one is in-flight");
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs,
+            "an in-flight heartbeat must await its completion event");
 
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No heartbeat should be sent when the " +
                 "interval expires if there is a previous HB request in-flight");
+        assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs,
+            "elapsed heartbeat timing must not turn in-flight work into an immediate repoll");
 
         // Receive response for the inflight after the interval expired. The next HB should be sent
         // on the next poll waiting only for the minimal backoff.
@@ -384,17 +391,20 @@ public class ConsumerHeartbeatRequestManagerTest
         // Mimic disconnect
         result.unsentRequests.get(0).handler().onFailure(time.milliseconds(), DisconnectException.INSTANCE);
         verify(membershipManager).onHeartbeatFailure(true);
-        // Ensure that the coordinatorManager rediscovers the coordinator
-        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong());
+        // The state owner is not mutated directly; the reactor routes the published event.
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
         verify(backgroundEventHandler, never()).add(any());
 
         time.sleep(DEFAULT_RETRY_BACKOFF_MS - 1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(), "No request should be generated before the backoff expires");
+        assertEquals(1, result.managerEvents().size());
+        assertInstanceOf(ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
 
         time.sleep(1);
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size(), "A new request should be generated after the backoff expires");
+        assertTrue(result.managerEvents().isEmpty(), "coordinator invalidation must be published once");
     }
 
     @Test
@@ -660,7 +670,7 @@ public class ConsumerHeartbeatRequestManagerTest
         // On poll timer expiration, the member should send a last heartbeat to leave the group
         // and notify the membership manager
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         verify(membershipManager).transitionToSendingLeaveGroup(true);
         verify(heartbeatState).reset();
         verify(heartbeatRequestState).reset();
@@ -672,7 +682,7 @@ public class ConsumerHeartbeatRequestManagerTest
         assertTrue(pollTimer.notExpired());
         verify(membershipManager).maybeRejoinStaleMember();
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
     }
 
     @ParameterizedTest
@@ -692,7 +702,7 @@ public class ConsumerHeartbeatRequestManagerTest
             assertNoHeartbeat(heartbeatRequestManager);
             verify(membershipManager, never()).onHeartbeatRequestGenerated();
         } else {
-            assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+            assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
             verify(membershipManager).onHeartbeatRequestGenerated();
         }
 
@@ -796,7 +806,7 @@ public class ConsumerHeartbeatRequestManagerTest
         
         // heartbeat request manager resets the sentFields to null HeartbeatState.reset()
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, Long.MAX_VALUE);
         verify(heartbeatRequestState).reset();
         
         // following HB will include tp0 (and act as ack), tp0 != null
@@ -918,7 +928,7 @@ public class ConsumerHeartbeatRequestManagerTest
         assertNull(data.rackId());
     }
 
-    private void assertHeartbeat(AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> hrm, int nextPollMs) {
+    private void assertHeartbeat(AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> hrm, long nextPollMs) {
         NetworkClientDelegate.PollResult pollResult = hrm.poll(time.milliseconds());
         assertEquals(1, pollResult.unsentRequests.size());
         assertEquals(nextPollMs, pollResult.timeUntilNextPollMs);

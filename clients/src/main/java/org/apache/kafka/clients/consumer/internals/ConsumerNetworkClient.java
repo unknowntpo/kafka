@@ -585,6 +585,15 @@ public class ConsumerNetworkClient implements Closeable {
         }
     }
 
+    public long connectionDelay(Node node, long currentTimeMs) {
+        lock.lock();
+        try {
+            return client.connectionDelay(node, currentTimeMs);
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /**
      * Check for an authentication error on a given node and raise the exception if there is one.
      */

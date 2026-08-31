@@ -44,6 +44,7 @@ import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.apache.logging.log4j.Level;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -64,7 +65,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
@@ -83,7 +83,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
-import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -195,6 +196,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
     private final Node coordinatorNode = new Node(1, "localhost", 9092);
 
+    @BeforeEach
+    public void setUpCoordinatorSnapshot() {
+        lenient().when(coordinatorRequestManager.coordinatorSnapshot()).thenAnswer(ignored ->
+            new CoordinatorSnapshot(coordinatorRequestManager.coordinator(), 0L));
+    }
+
     @Test
     public void testConstructWithNullCoordinatorRequestManager() {
         final Exception exception = assertThrows(NullPointerException.class, () -> new StreamsGroupHeartbeatRequestManager(
@@ -302,18 +309,15 @@ class StreamsGroupHeartbeatRequestManagerTest {
     }
 
     @Test
-    public void testPropagateCoordinatorFatalErrorToApplicationThread() {
+    public void testHeartbeatDoesNotConsumeCoordinatorFatalError() {
         final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
-        final Throwable fatalError = new RuntimeException("KABOOM");
-        when(coordinatorRequestManager.getAndClearFatalError()).thenReturn(Optional.of(fatalError));
 
         final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
         assertEquals(0, result.unsentRequests.size());
         verify(membershipManager).onHeartbeatRequestSkipped();
-        verify(backgroundEventHandler).add(argThat(
-            errorEvent -> errorEvent instanceof ErrorEvent && ((ErrorEvent) errorEvent).error() == fatalError));
+        verify(backgroundEventHandler, never()).add(any());
     }
 
     @ParameterizedTest
@@ -338,7 +342,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -413,7 +417,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -421,13 +425,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
     @ParameterizedTest
     @EnumSource(value = MemberState.class, names = {"JOINING", "ACKNOWLEDGING"})
     public void testNotSendingHeartbeatIfMemberIsJoiningOrAcknowledgingWhenHeartbeatInFlight(final MemberState memberState) {
-        final long timeToNextHeartbeatMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> heartbeatRequestStateMockedConstruction = mockConstruction(
                 HeartbeatRequestState.class,
                 (mock, context) -> {
                     when(mock.canSendRequest(time.milliseconds())).thenReturn(false);
-                    when(mock.timeToNextHeartbeatMs(time.milliseconds())).thenReturn(timeToNextHeartbeatMs);
+                    when(mock.timeToNextHeartbeatMs(time.milliseconds())).thenReturn(0L);
                     when(mock.requestInFlight()).thenReturn(true);
                 });
             final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(Timer.class)
@@ -440,8 +443,11 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(timeToNextHeartbeatMs, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
+            assertTrue(result.isValidPollResult());
             verify(pollTimer).update(time.milliseconds());
+            verify(heartbeatRequestStateMockedConstruction.constructed().get(0), never())
+                .timeToNextHeartbeatMs(anyLong());
         }
     }
 
@@ -466,7 +472,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -517,7 +523,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
             verify(pollTimer).update(time.milliseconds());
             verify(membershipManager).onPollTimerExpired();
             verify(heartbeatRequestState).reset();
@@ -577,7 +583,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
-            assertEquals(0, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
             assertEquals(1, result.unsentRequests.size());
             assertEquals(Optional.of(coordinatorNode), result.unsentRequests.get(0).node());
             NetworkClientDelegate.UnsentRequest networkRequest = result.unsentRequests.get(0);
@@ -613,7 +619,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
-            assertEquals(0, result.timeUntilNextPollMs);
+            assertEquals(NetworkClientDelegate.PollResult.WAIT_FOREVER, result.timeUntilNextPollMs);
             assertEquals(1, result.unsentRequests.size());
             assertEquals(Optional.of(coordinatorNode), result.unsentRequests.get(0).node());
             NetworkClientDelegate.UnsentRequest networkRequest = result.unsentRequests.get(0);
@@ -2033,8 +2039,13 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final HeartbeatRequestState heartbeatRequestState = heartbeatRequestStateMockedConstruction.constructed().get(0);
             verify(heartbeatRequestState).onFailedAttempt(completionTimeMs);
             verify(heartbeatState).reset();
-            verify(coordinatorRequestManager).handleCoordinatorDisconnect(disconnectException, completionTimeMs);
+            verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
             verify(membershipManager).onRetriableHeartbeatFailure();
+
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            assertCoordinatorInvalidation(heartbeatRequestManager.poll(time.milliseconds()));
+            assertTrue(heartbeatRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
+                "coordinator invalidation must be published once");
         }
     }
 
@@ -2126,6 +2137,8 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final StreamsGroupHeartbeatRequestManager.HeartbeatState heartbeatState = heartbeatStateMockedConstruction.constructed().get(0);
             final HeartbeatRequestState heartbeatRequestState = heartbeatRequestStateMockedConstruction.constructed().get(0);
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+            doReturn(new CoordinatorSnapshot(Optional.of(coordinatorNode), 7L))
+                .when(coordinatorRequestManager).coordinatorSnapshot();
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
@@ -2135,13 +2148,22 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final long completionTimeMs = time.milliseconds();
             final ClientResponse response = buildClientErrorResponse(error, "error message");
             networkRequest.handler().onComplete(response);
-            verify(coordinatorRequestManager).markCoordinatorUnknown(
+            verify(coordinatorRequestManager, never()).markCoordinatorUnknown(
                 ((StreamsGroupHeartbeatResponse) response.responseBody()).data().errorMessage(),
                 completionTimeMs
             );
             verify(heartbeatState).reset();
             verify(heartbeatRequestState).reset();
             verify(membershipManager).onFatalHeartbeatFailure();
+
+            NetworkClientDelegate.PollResult invalidated = heartbeatRequestManager.poll(time.milliseconds());
+            assertCoordinatorInvalidation(invalidated, 7L);
+            assertTrue(invalidated.unsentRequests.isEmpty(),
+                "the invalidation must be routed before another heartbeat can use the stale coordinator");
+            verify(coordinatorRequestManager).coordinatorSnapshot();
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            assertTrue(heartbeatRequestManager.poll(time.milliseconds()).managerEvents().isEmpty(),
+                "coordinator invalidation must be published once");
         }
     }
 
@@ -2695,12 +2717,12 @@ class StreamsGroupHeartbeatRequestManagerTest {
     }
 
     private static ConsumerConfig config() {
-        Properties prop = new Properties();
-        prop.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        prop.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
-        prop.setProperty(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, String.valueOf(DEFAULT_MAX_POLL_INTERVAL_MS));
-        prop.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
-        return new ConsumerConfig(prop);
+        return new ConsumerConfig(Map.of(
+            ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+            ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class,
+            ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG, DEFAULT_MAX_POLL_INTERVAL_MS,
+            ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092"
+        ));
     }
 
     private StreamsGroupHeartbeatRequestManager createStreamsGroupHeartbeatRequestManager() {
@@ -2990,6 +3012,19 @@ class StreamsGroupHeartbeatRequestManagerTest {
             .sorted(Comparator.comparing(StreamsGroupHeartbeatRequestData.TaskIds::subtopologyId))
             .collect(Collectors.toList());
         assertEquals(sortedExpected, sortedActual);
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result) {
+        assertCoordinatorInvalidation(result, 0L);
+    }
+
+    private void assertCoordinatorInvalidation(final NetworkClientDelegate.PollResult result,
+                                               final long expectedCoordinatorVersion) {
+        assertEquals(1, result.managerEvents().size());
+        ManagerEvent.CoordinatorUnavailableObserved invalidation = assertInstanceOf(
+            ManagerEvent.CoordinatorUnavailableObserved.class, result.managerEvents().get(0));
+        assertEquals(StreamsGroupHeartbeatRequestManager.class.getSimpleName(), invalidation.source());
+        assertEquals(expectedCoordinatorVersion, invalidation.observedCoordinatorVersion());
     }
 
     private ClientResponse buildClientResponseWithTopologyRequired(final boolean topologyRequired) {
