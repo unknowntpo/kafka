@@ -363,18 +363,28 @@ output_root="$root/results"
 
 rm -rf -- "$root"
 mkdir -p "$root"
+git -C "$repo" worktree prune
 if ! git -C "$repo" cat-file -e "${baseline_commit}^{commit}"; then
     git -C "$repo" fetch --no-tags --depth=1 origin \
         "+${baseline_commit}:refs/reactor-ab/baseline"
 fi
-git clone --shared --no-checkout "$repo" "$baseline_worktree"
-git -C "$baseline_worktree" checkout --detach "$baseline_commit"
+git -C "$repo" worktree add --detach "$baseline_worktree" "$baseline_commit"
 test "$(git -C "$baseline_worktree" rev-parse HEAD)" = "$baseline_commit"
+
+cleanup_baseline_worktree() {
+    git -C "$repo" worktree remove --force "$baseline_worktree" >/dev/null 2>&1 || true
+}
+trap cleanup_baseline_worktree EXIT
 
 EXPECTED_BASELINE_COMMIT="$baseline_commit" \
 BASELINE_WORKTREE="$baseline_worktree" \
 REACTOR_AB_BUILD_DIR="$build_dir" \
     "$repo/benchmarks/consumer-reactor-ab/prepare.sh"
+
+# The prepared jars are self-contained. Do not archive the baseline source tree
+# with the benchmark results, and do not leave stale worktree metadata behind.
+cleanup_baseline_worktree
+trap - EXIT
 
 REPETITIONS=%(repetitions)s \
 IDLE_DURATION_MS=%(idle_duration_ms)s \
