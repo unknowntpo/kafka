@@ -202,6 +202,29 @@ public class CommitRequestManagerTest {
         assertPoll(true, 1, commitRequestManager);
     }
 
+    /**
+     * KAFKA-21010: with auto-commit enabled, once the auto-commit interval elapses while the
+     * coordinator is unknown (e.g. unresolvable bootstrap servers on startup), poll() returns
+     * EMPTY so no commit can be created and the timer is never reset. remainingMs() then stays 0
+     * and maximumTimeToWait() returns 0 forever, busy-spinning both the application and network
+     * threads. It must be positive.
+     */
+    @Test
+    public void testMaximumTimeToWaitWhenCoordinatorUnknownAfterAutoCommitIntervalExpires() {
+        final long autoCommitIntervalMs = 100;
+        CommitRequestManager commitRequestManager = create(true, autoCommitIntervalMs);
+
+        time.sleep(autoCommitIntervalMs * 2);
+        // No commit request can be generated while the coordinator is unknown.
+        assertPoll(false, 0, commitRequestManager);
+
+        long result = commitRequestManager.maximumTimeToWait(time.milliseconds());
+
+        assertTrue(result > 0,
+            "maximumTimeToWait must be > 0 when the coordinator is unknown and the auto-commit " +
+                "interval has already elapsed, to avoid a busy-spin; got " + result);
+    }
+
     @Test
     public void testPollEnsureManualCommitSent() {
         CommitRequestManager commitRequestManager = create(false, 0);

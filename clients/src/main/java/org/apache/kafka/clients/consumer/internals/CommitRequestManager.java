@@ -221,7 +221,16 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
+        return autoCommitState.map(ac -> {
+            long remainingMs = ac.remainingMs(currentTimeMs);
+            // KAFKA-21010: no auto-commit can be started while the coordinator is unknown, so the
+            // expired timer is never reset and returning 0 would busy-spin the application thread.
+            // Wait for the retry backoff and re-check.
+            if (remainingMs == 0 && coordinatorRequestManager.coordinator().isEmpty()) {
+                return retryBackoffMs;
+            }
+            return remainingMs;
+        }).orElse(Long.MAX_VALUE);
     }
 
     private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
