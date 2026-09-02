@@ -60,6 +60,15 @@ public class HeartbeatRequestState extends RequestState {
         return heartbeatIntervalMs;
     }
 
+    /**
+     * The configured initial retry backoff. Used as the wait time while no heartbeat can be sent
+     * at all (e.g. coordinator unknown), since the heartbeat interval is only known after the
+     * first heartbeat response.
+     */
+    public long retryBackoffMs() {
+        return exponentialBackoff.initialInterval();
+    }
+
     public void resetTimer() {
         this.heartbeatTimer.reset(heartbeatIntervalMs);
     }
