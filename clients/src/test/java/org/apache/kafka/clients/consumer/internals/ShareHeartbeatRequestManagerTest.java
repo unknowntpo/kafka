@@ -172,7 +172,36 @@ public class ShareHeartbeatRequestManagerTest
 
         assertTrue(result > 0,
             "maximumTimeToWait must be > 0 while heartbeats are skipped to avoid a busy-spin; got " + result);
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, result);
+        assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
+    }
+
+    /**
+     * KAFKA-21010: the production constructor initialises the heartbeat interval to 0 until the
+     * first heartbeat response is received. If the coordinator is unknown while the member is
+     * JOINING (e.g. unresolvable bootstrap servers on startup), no heartbeat response can ever
+     * arrive, so the coordinator-unavailable guard returns heartbeatIntervalMs() == 0 and both
+     * the application and network threads busy-spin. maximumTimeToWait() must be positive.
+     */
+    @Test
+    public void testMaximumTimeToWaitWhenCoordinatorUnknownBeforeFirstHeartbeatResponse() {
+        // Zero heartbeat interval mirrors the initial state of the production constructor.
+        createHeartbeatRequestStateWithZeroHeartbeatInterval();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        when(membershipManager.state()).thenReturn(MemberState.JOINING);
+
+        long result = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+
+        assertTrue(result > 0,
+            "maximumTimeToWait must be > 0 when the coordinator is unknown and no heartbeat " +
+                "response has been received yet, to avoid a busy-spin; got " + result);
+        assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
+
+        // Liveness: once the coordinator is discovered, the joining heartbeat goes out on the
+        // next poll, so waiting for the retry backoff does not slow down joining the group.
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(new Node(1, "localhost", 9999)));
+        when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
+        NetworkClientDelegate.PollResult pollResult = heartbeatRequestManager.poll(time.milliseconds());
+        assertEquals(1, pollResult.unsentRequests.size());
     }
 
     @Test

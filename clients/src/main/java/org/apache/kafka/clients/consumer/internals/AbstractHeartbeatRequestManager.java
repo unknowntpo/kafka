@@ -264,8 +264,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         // re-authentication failure) or the member should skip heartbeats (FATAL/FENCED/STALE/UNSUBSCRIBED),
         // poll() returns EMPTY, so falling through to the timer-based branches below would return 0 (the
         // heartbeat timer is left permanently expired) and busy-spin both the application and network threads.
+        // KAFKA-21010: the heartbeat interval initialises to 0 and is only known after the first heartbeat
+        // response, so wait for the retry backoff instead of the interval.
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
-            return heartbeatRequestState.heartbeatIntervalMs();
+            return heartbeatRequestState.retryBackoffMs();
         }
         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
