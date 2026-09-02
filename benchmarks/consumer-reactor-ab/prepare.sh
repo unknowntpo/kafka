@@ -30,6 +30,7 @@ readonly DEFAULT_BASELINE_WORKTREE="$(cd -- "$POC_WORKTREE/.." && pwd -P)/reacto
 readonly BASELINE_WORKTREE="${BASELINE_WORKTREE:-$DEFAULT_BASELINE_WORKTREE}"
 readonly BUILD_DIR="${REACTOR_AB_BUILD_DIR:-$SCRIPT_DIR/build}"
 readonly INIT_SCRIPT="$SCRIPT_DIR/runtime-classpath.gradle"
+readonly THROUGHPUT_HARNESS="$SCRIPT_DIR/ThroughputHarness.java"
 
 die() {
     printf 'prepare.sh: %s\n' "$*" >&2
@@ -91,7 +92,8 @@ build_variant() {
         --release 11 \
         -classpath "$output_dir/lib/*" \
         -d "$output_dir/classes" \
-        "$SCRIPT_DIR/IdleWakeHarness.java"
+        "$SCRIPT_DIR/IdleWakeHarness.java" \
+        "$THROUGHPUT_HARNESS"
 }
 
 # Finish all compilation before any measurement begins.

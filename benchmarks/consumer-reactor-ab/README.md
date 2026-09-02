@@ -290,3 +290,31 @@ bin/kafka-consumer-perf-test.sh \
 
 Gate on field 10, `fetch.nMsg.sec`, not field 6, because field 10 removes group rebalance time. A duration-based
 warmup/measurement throughput harness is still required before treating W1 as release-grade evidence.
+
+`ConsumerPerformance` is the initial screening tool. It cannot reset its counters after an in-process warmup, so a
+separate warmup invocation warms only broker caches and must not be described as a warmed client measurement. The
+paired system-test harness therefore uses the same `KafkaConsumer` workload in a small dedicated runner: each JVM
+consumes the warmup records, resets its wall and process-CPU counters, and then consumes the measured records.
+
+The harness keeps both client revisions on one worker and preloads one unique eight-partition topic. Odd repetitions
+run baseline then proposal; even repetitions reverse the order. The formal profile uses five repetitions, 500,000
+warmup records, and at least 5,000,000 measured 1 KiB records per variant. The smoke profile uses 10,000 warmup and
+100,000 measured records.
+
+```text
+tests/kafkatest/tests/client/consumer_reactor_ab_test.py::ConsumerReactorPairedThroughputTest.test_same_worker_throughput --parameters '{"metadata_quorum":"COMBINED_KRAFT","reactor_ab_profile":"smoke"}'
+```
+
+Use `reactor_ab_profile=formal` only after the smoke artifact contains two complete rows. Compare `records_per_sec`
+with the following gate so a throughput decrease is treated as regression:
+
+```shell
+python3 benchmarks/consumer-reactor-ab/compare.py \
+  --input RESULT_DIR/results.csv --scenario throughput --metric records_per_sec \
+  --direction higher --relative-threshold 3 --absolute-threshold 0
+```
+
+Also retain `cpu_ns_per_record`, `max_rss_kb`, network-poll metrics, exact client commits, and the producer output.
+Keep an official `ConsumerPerformance` screening result beside the formal artifact as a tool-level cross-check. This harness measures
+saturated regular async-consumer throughput under `group.protocol=consumer`; share-consumer throughput requires its
+own tool and workload.

@@ -19,6 +19,7 @@ import io
 import json
 import os
 import shlex
+import uuid
 
 from ducktape.mark import parametrize
 from ducktape.mark.resource import cluster
@@ -26,6 +27,7 @@ from ducktape.services.background_thread import BackgroundThreadService
 from ducktape.tests.test import Test
 
 from kafkatest.services.kafka import KafkaService, quorum
+from kafkatest.services.performance import ProducerPerformanceService
 
 
 class ConsumerReactorABService(BackgroundThreadService):
@@ -476,6 +478,108 @@ printf '%%s\n' "$results_csv" >"$root/results-path"
         return 1200 + 2 * super(PairedConsumerReactorABService, self).wait_timeout_seconds()
 
 
+class PairedConsumerReactorThroughputService(PairedConsumerReactorABService):
+    """Measure saturated ConsumerPerformance throughput for both client revisions."""
+
+    ROOT = "/mnt/consumer-reactor-throughput-paired"
+    RESULTS_CSV = ROOT + "/results.csv"
+    MANIFEST = ROOT + "/manifest.json"
+    BROKER_CONFIG = ROOT + "/broker.properties"
+
+    logs = {
+        "consumer_reactor_throughput_paired_results": {
+            "path": ROOT,
+            "collect_default": True,
+        }
+    }
+
+    def __init__(self, context, kafka, profile, parameters, topic):
+        super(PairedConsumerReactorThroughputService, self).__init__(
+            context,
+            kafka,
+            profile,
+            parameters,
+        )
+        self.topic = topic
+
+    def _prepare_and_run(self, node):
+        script = r"""
+set -euo pipefail
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+repo=%(repository)s
+root=%(root)s
+baseline_commit=%(baseline_commit)s
+baseline_worktree="$root/baseline-worktree"
+build_dir="$root/build"
+output_root="$root/results"
+
+rm -rf -- "$root"
+mkdir -p "$root"
+git -C "$repo" worktree prune
+if ! git -C "$repo" cat-file -e "${baseline_commit}^{commit}"; then
+    git -C "$repo" fetch --no-tags --depth=1 origin \
+        "+${baseline_commit}:refs/reactor-ab/baseline"
+fi
+git -C "$repo" worktree add --detach "$baseline_worktree" "$baseline_commit"
+test "$(git -C "$baseline_worktree" rev-parse HEAD)" = "$baseline_commit"
+
+cleanup_baseline_worktree() {
+    git -C "$repo" worktree remove --force "$baseline_worktree" >/dev/null 2>&1 || true
+}
+trap cleanup_baseline_worktree EXIT
+
+EXPECTED_BASELINE_COMMIT="$baseline_commit" \
+BASELINE_WORKTREE="$baseline_worktree" \
+REACTOR_AB_BUILD_DIR="$build_dir" \
+    "$repo/benchmarks/consumer-reactor-ab/prepare.sh"
+
+cleanup_baseline_worktree
+trap - EXIT
+
+REPETITIONS=%(repetitions)s \
+THROUGHPUT_WARMUP_RECORDS=%(warmup_records)s \
+THROUGHPUT_MEASUREMENT_RECORDS=%(measurement_records)s \
+THROUGHPUT_FETCH_TIMEOUT_MS=%(fetch_timeout_ms)s \
+REACTOR_AB_BUILD_DIR="$build_dir" \
+REACTOR_AB_OUTPUT_ROOT="$output_root" \
+    "$repo/benchmarks/consumer-reactor-ab/run-throughput.sh" \
+    %(bootstrap_servers)s %(topic)s
+
+results_csv="$(find "$output_root" -mindepth 2 -maxdepth 2 -name results.csv -print)"
+test -n "$results_csv"
+test "$(printf '%%s\n' "$results_csv" | wc -l)" -eq 1
+cp "$results_csv" %(results_csv)s
+printf '%%s\n' "$results_csv" >"$root/results-path"
+""" % {
+            "repository": shlex.quote(self.REPOSITORY),
+            "root": shlex.quote(self.ROOT),
+            "baseline_commit": shlex.quote(self.BASELINE_COMMIT),
+            "repetitions": self.parameters["repetitions"],
+            "warmup_records": self.parameters["throughput_warmup_records"],
+            "measurement_records": self.parameters["throughput_measurement_records"],
+            "fetch_timeout_ms": self.parameters["throughput_fetch_timeout_ms"],
+            "bootstrap_servers": shlex.quote(self.kafka.bootstrap_servers()),
+            "topic": shlex.quote(self.topic),
+            "results_csv": shlex.quote(self.RESULTS_CSV),
+        }
+        node.account.ssh("bash -lc %s" % shlex.quote(script), allow_fail=False)
+        contents = self._capture(node, "cat %s" % self.RESULTS_CSV)
+        self.results = list(csv.DictReader(io.StringIO(contents)))
+
+    def _write_paired_manifest(self, node):
+        super(PairedConsumerReactorThroughputService, self)._write_paired_manifest(node)
+        manifest = json.loads(self._capture(node, "cat %s" % self.MANIFEST))
+        manifest["workload"]["topic"] = self.topic
+        node.account.create_file(
+            self.MANIFEST,
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        )
+
+    def wait_timeout_seconds(self):
+        return 25 * 60
+
+
 class ConsumerReactorABTest(Test):
     """Dedicated, current-checkout wrapper for the consumer reactor benchmark harness."""
 
@@ -625,6 +729,97 @@ class ConsumerReactorPairedABTest(Test):
         finally:
             self.benchmark.stop()
         expected_rows = self.parameters["repetitions"] * 4
+        assert len(self.benchmark.results) == expected_rows, (
+            "Expected %d result rows, found %d" %
+            (expected_rows, len(self.benchmark.results))
+        )
+
+
+class ConsumerReactorPairedThroughputTest(Test):
+    """Run a warmup-separated ConsumerPerformance comparison on one worker."""
+
+    PROFILES = {
+        "smoke": {
+            "repetitions": 1,
+            "throughput_warmup_records": 10_000,
+            "throughput_measurement_records": 100_000,
+            "throughput_fetch_timeout_ms": 60_000,
+            "throughput_record_size": 1_024,
+            "throughput_partitions": 8,
+        },
+        "formal": {
+            "repetitions": 5,
+            "throughput_warmup_records": 500_000,
+            "throughput_measurement_records": 5_000_000,
+            "throughput_fetch_timeout_ms": 60_000,
+            "throughput_record_size": 1_024,
+            "throughput_partitions": 8,
+        },
+    }
+
+    def __init__(self, test_context):
+        super(ConsumerReactorPairedThroughputTest, self).__init__(test_context)
+        injected = test_context.injected_args or {}
+        profile = injected.get("reactor_ab_profile", "smoke")
+        if profile not in self.PROFILES:
+            raise ValueError("Unknown reactor_ab_profile: %s" % profile)
+        parameters = dict(self.PROFILES[profile])
+        for name, value in parameters.items():
+            if value <= 0:
+                raise ValueError("Profile value %s must be positive" % name)
+
+        self.profile = profile
+        self.parameters = parameters
+        self.topic = "consumer-reactor-throughput-%s" % uuid.uuid4().hex
+        self.kafka = KafkaService(
+            test_context,
+            num_nodes=1,
+            zk=None,
+            controller_num_nodes_override=1,
+        )
+        self.benchmark = PairedConsumerReactorThroughputService(
+            test_context,
+            self.kafka,
+            profile,
+            parameters,
+            self.topic,
+        )
+        preload_records = (
+            parameters["throughput_warmup_records"]
+            + parameters["throughput_measurement_records"]
+            + 10_000
+        )
+        self.producer = ProducerPerformanceService(
+            test_context,
+            1,
+            self.kafka,
+            topic=self.topic,
+            num_records=preload_records,
+            record_size=parameters["throughput_record_size"],
+            throughput=-1,
+        )
+
+    @cluster(num_nodes=3)
+    @parametrize(metadata_quorum=quorum.combined_kraft)
+    def test_same_worker_throughput(
+        self,
+        metadata_quorum=quorum.combined_kraft,
+        reactor_ab_profile="smoke",
+    ):
+        """Preload once, then alternate baseline and proposal ConsumerPerformance runs."""
+        self.kafka.start()
+        self.kafka.create_topic({
+            "topic": self.topic,
+            "partitions": self.parameters["throughput_partitions"],
+            "replication-factor": 1,
+        })
+        self.producer.run()
+        self.benchmark.start()
+        try:
+            self.benchmark.wait(timeout_sec=self.benchmark.wait_timeout_seconds())
+        finally:
+            self.benchmark.stop()
+        expected_rows = self.parameters["repetitions"] * 2
         assert len(self.benchmark.results) == expected_rows, (
             "Expected %d result rows, found %d" %
             (expected_rows, len(self.benchmark.results))
