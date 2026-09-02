@@ -133,7 +133,7 @@ For a formal run, use at least five repetitions, 60 seconds of idle measurement,
 idle interval which is longer than `retry.backoff.ms`:
 
 ```shell
-REPETITIONS=5 IDLE_DURATION_MS=60000 FIRST_RECORD_SAMPLES=100 FIRST_RECORD_IDLE_MS=1000 \
+REPETITIONS=5 IDLE_DURATION_MS=60000 FIRST_RECORD_SAMPLES=100 FIRST_RECORD_IDLE_MS=500 \
   benchmarks/consumer-reactor-ab/run-idle.sh localhost:9092
 ```
 
@@ -229,9 +229,11 @@ is discouraged; the method selector above makes the Jenkins scope auditable. Rev
 live job before submission if its wrapper script changes.
 
 The smoke workload itself is about 7 seconds, with roughly 2-5 minutes expected for broker startup and test overhead
-after the repository build. The formal workload has 850 seconds of deliberate measurement scheduling and should take
-about 15-25 minutes after the build. Its service wait budget is 2,320 seconds so a slow or failed sample remains
-bounded instead of inheriting Ducktape's 600-second service default.
+after the repository build. A paired formal run has 1,150 seconds (19 minutes 10 seconds) of deliberate measurement
+scheduling: five AB/BA repetitions, with 60 seconds of idle measurement and 110 first-record attempts at a 500 ms
+interval for each variant. This leaves build and startup headroom under Jenkins' 30-minute Ducktape runner timeout.
+The interval remains longer than the default retry backoff. The service wait budget is intentionally larger than the
+outer runner timeout so an individual scenario still reports its own bounded failure when Jenkins allows it to finish.
 
 The Jenkins job at `https://jenkins.opensource4you.tw/job/kafka-e2e/` checks out one `ACCOUNT`/`REVISION` per build.
 Do not make a Ducktape test perform its own Git checkout. Put the same harness-only test change on a branch based on

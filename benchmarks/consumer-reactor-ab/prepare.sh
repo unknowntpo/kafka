@@ -16,6 +16,12 @@
 
 set -euo pipefail
 
+# Jenkins workers may start with the C locale, which makes Gradle and javac
+# decode Java sources as US-ASCII. Keep artifact preparation reproducible when
+# a source comment contains non-ASCII punctuation.
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
 readonly DEFAULT_BASELINE_COMMIT=80a74f3b84525563ef060b6e0e1b70bc127ec064
 readonly EXPECTED_BASELINE_COMMIT="${EXPECTED_BASELINE_COMMIT:-$DEFAULT_BASELINE_COMMIT}"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -69,7 +75,7 @@ build_variant() {
     printf 'Building %s client artifacts from %s\n' "$label" "$worktree"
     (
         cd -- "$worktree"
-        ./gradlew --no-daemon \
+        ./gradlew --no-daemon -Dfile.encoding=UTF-8 \
             --init-script "$INIT_SCRIPT" \
             -PreactorAbLibDir="$output_dir/lib" \
             :clients:copyReactorAbRuntimeClasspath
@@ -81,6 +87,7 @@ build_variant() {
         die "$label runtime directory must contain exactly one kafka-clients jar; found $client_jar_count"
 
     javac \
+        -encoding UTF-8 \
         --release 11 \
         -classpath "$output_dir/lib/*" \
         -d "$output_dir/classes" \

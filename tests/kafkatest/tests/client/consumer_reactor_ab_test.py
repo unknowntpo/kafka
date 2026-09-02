@@ -88,6 +88,8 @@ class ConsumerReactorABService(BackgroundThreadService):
     def _compile_harness(self, node):
         script = r"""
 set -euo pipefail
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 repo=%(repository)s
 root=%(root)s
 rm -rf -- "$root"
@@ -112,7 +114,8 @@ if [[ "$classpath" == "$client_jar" ]]; then
     echo "No current-revision client runtime dependencies were found" >&2
     exit 1
 fi
-javac --release 11 -proc:none -classpath "$classpath" -d "$root/classes" %(harness_source)s
+javac -encoding UTF-8 --release 11 -proc:none -classpath "$classpath" \
+    -d "$root/classes" %(harness_source)s
 printf 'classpath=%%s\n' "$classpath" >"$root/client.properties"
 printf 'artifact=%%s\n' "$client_jar" >>"$root/client.properties"
 printf 'artifact.sha256=%%s\n' "$(sha256sum "$client_jar" | awk '{ print $1 }')" \
@@ -354,6 +357,8 @@ class PairedConsumerReactorABService(ConsumerReactorABService):
     def _prepare_and_run(self, node):
         script = r"""
 set -euo pipefail
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 repo=%(repository)s
 root=%(root)s
 baseline_commit=%(baseline_commit)s
@@ -474,6 +479,7 @@ printf '%%s\n' "$results_csv" >"$root/results-path"
 class ConsumerReactorABTest(Test):
     """Dedicated, current-checkout wrapper for the consumer reactor benchmark harness."""
 
+    PAIRED_MEASUREMENT_BUDGET_MS = 20 * 60 * 1_000
     PROFILES = {
         "smoke": {
             "repetitions": 1,
@@ -488,11 +494,27 @@ class ConsumerReactorABTest(Test):
             "idle_duration_ms": 60_000,
             "first_record_warmup_samples": 10,
             "first_record_samples": 100,
-            "first_record_idle_ms": 1_000,
+            # Keep the paired workload below Ducktape's 30-minute runner limit
+            # after accounting for both client builds. This remains well above
+            # the default retry backoff, so samples still cross a fresh idle
+            # interval instead of measuring a tight retry loop.
+            "first_record_idle_ms": 500,
             "poll_timeout_ms": 30_000,
         },
     }
     FORMAL_VARIANTS = {"pre-refactor-async-baseline", "proposal"}
+
+    @staticmethod
+    def scheduled_measurement_ms(parameters, variant_count=1):
+        first_record_attempts = (
+            parameters["first_record_warmup_samples"]
+            + parameters["first_record_samples"]
+        )
+        per_variant_ms = (
+            parameters["idle_duration_ms"]
+            + first_record_attempts * parameters["first_record_idle_ms"]
+        )
+        return parameters["repetitions"] * variant_count * per_variant_ms
 
     def __init__(self, test_context):
         super(ConsumerReactorABTest, self).__init__(test_context)
@@ -564,6 +586,15 @@ class ConsumerReactorPairedABTest(Test):
         if profile not in self.PROFILES:
             raise ValueError("Unknown reactor_ab_profile: %s" % profile)
         parameters = dict(self.PROFILES[profile])
+        scheduled_ms = ConsumerReactorABTest.scheduled_measurement_ms(
+            parameters,
+            variant_count=2,
+        )
+        if scheduled_ms > ConsumerReactorABTest.PAIRED_MEASUREMENT_BUDGET_MS:
+            raise ValueError(
+                "Paired profile schedules %d ms of measurement; budget is %d ms" %
+                (scheduled_ms, ConsumerReactorABTest.PAIRED_MEASUREMENT_BUDGET_MS)
+            )
         self.profile = profile
         self.parameters = parameters
         self.kafka = KafkaService(
