@@ -16,14 +16,18 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import org.apache.kafka.clients.CommonClientConfigs;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.PausePartitionsEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.LogContext;
@@ -41,6 +45,9 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.Properties;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Supplier;
@@ -183,6 +190,79 @@ public class ConsumerNetworkThreadTest {
         consumerNetworkThread.runOnce();
         // After runOnce has been called, it takes the default heartbeat interval from the heartbeat request manager
         assertEquals(defaultHeartbeatIntervalMs, consumerNetworkThread.maximumTimeToWait());
+    }
+
+    /**
+     * KAFKA-21010: with a real heartbeat request manager (whose heartbeat interval initialises
+     * to 0), a JOINING member with an unknown coordinator (e.g. unresolvable bootstrap servers)
+     * must not leave maximumTimeToWait() at 0, or the application thread busy-spins in
+     * pollForFetches and wakes the network thread on every iteration.
+     */
+    @Test
+    public void testRunOnceLeavesPositiveMaximumTimeToWaitWhenCoordinatorUnknownWhileJoining() {
+        ConsumerConfig config = mock(ConsumerConfig.class);
+        when(config.getInt(CommonClientConfigs.MAX_POLL_INTERVAL_MS_CONFIG)).thenReturn(300_000);
+        when(config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG)).thenReturn(100L);
+        when(config.getLong(ConsumerConfig.RETRY_BACKOFF_MAX_MS_CONFIG)).thenReturn(1000L);
+        ConsumerMembershipManager membershipManager = mock(ConsumerMembershipManager.class);
+        when(membershipManager.state()).thenReturn(MemberState.JOINING);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        ConsumerHeartbeatRequestManager realHeartbeatRequestManager = new ConsumerHeartbeatRequestManager(
+                new LogContext(),
+                time,
+                config,
+                coordinatorRequestManager,
+                mock(SubscriptionState.class),
+                membershipManager,
+                mock(BackgroundEventHandler.class),
+                new Metrics(time));
+        when(requestManagers.entries()).thenReturn(List.of(realHeartbeatRequestManager));
+
+        consumerNetworkThread.runOnce();
+
+        assertTrue(consumerNetworkThread.maximumTimeToWait() > 0,
+            "maximumTimeToWait must be > 0 when the coordinator is unknown and the member is " +
+                "joining, to avoid a busy-spin; got " + consumerNetworkThread.maximumTimeToWait());
+    }
+
+    /**
+     * KAFKA-21010: with a real commit request manager, once the auto-commit interval elapses
+     * while the coordinator is unknown, no commit can be created and the auto-commit timer is
+     * never reset, so maximumTimeToWait() must not be left at 0.
+     */
+    @Test
+    public void testRunOnceLeavesPositiveMaximumTimeToWaitWhenAutoCommitIntervalExpiredAndCoordinatorUnknown() {
+        final long autoCommitIntervalMs = 100;
+        Properties props = new Properties();
+        props.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        props.setProperty(ConsumerConfig.GROUP_ID_CONFIG, "group-id");
+        props.setProperty(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "true");
+        props.setProperty(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, String.valueOf(autoCommitIntervalMs));
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        CommitRequestManager commitRequestManager = new CommitRequestManager(
+                time,
+                new LogContext(),
+                mock(SubscriptionState.class),
+                new ConsumerConfig(props),
+                coordinatorRequestManager,
+                mock(OffsetCommitCallbackInvoker.class),
+                "group-id",
+                Optional.empty(),
+                100,
+                1000,
+                OptionalDouble.of(0),
+                new Metrics(time),
+                mock(ConsumerMetadata.class));
+        when(requestManagers.entries()).thenReturn(List.of(commitRequestManager));
+
+        time.sleep(autoCommitIntervalMs * 2);
+        consumerNetworkThread.runOnce();
+
+        assertTrue(consumerNetworkThread.maximumTimeToWait() > 0,
+            "maximumTimeToWait must be > 0 when the coordinator is unknown and the auto-commit " +
+                "interval has already elapsed, to avoid a busy-spin; got " + consumerNetworkThread.maximumTimeToWait());
     }
 
     @Test
