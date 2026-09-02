@@ -530,9 +530,18 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
         pollTimer.update(currentTimeMs);
-        if (pollTimer.isExpired() ||
-            membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
-
+        if (pollTimer.isExpired()) {
+            return 0L;
+        }
+        // KAFKA-21010: mirror the guard in poll(). When the coordinator is unknown (e.g. unresolvable
+        // bootstrap servers on startup) or the member should skip heartbeats, poll() returns EMPTY, so
+        // no heartbeat can be in flight and returning 0 for a JOINING member would busy-spin both the
+        // application and network threads. The heartbeat interval initialises to 0 and is only known
+        // after the first heartbeat response, so wait for the retry backoff instead.
+        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
+            return heartbeatRequestState.retryBackoffMs();
+        }
+        if (membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
         }
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));

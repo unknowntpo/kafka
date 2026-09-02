@@ -84,6 +84,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -2512,6 +2513,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
         ) {
             final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
             final Timer pollTimer = timerMockedConstruction.constructed().get(0);
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
             when(membershipManager.shouldNotWaitForHeartbeatInterval()).thenReturn(true);
             time.sleep(1234);
 
@@ -2520,6 +2522,26 @@ class StreamsGroupHeartbeatRequestManagerTest {
             assertEquals(0, maximumTimeToWait);
             verify(pollTimer).update(time.milliseconds());
         }
+    }
+
+    /**
+     * KAFKA-21010: while the member is JOINING but the coordinator is unknown (e.g. unresolvable
+     * bootstrap servers on startup), no heartbeat can be sent, so no heartbeat can ever be in
+     * flight. shouldNotWaitForHeartbeatInterval() is true for JOINING, so maximumTimeToWait()
+     * returns 0 and both the application and network threads busy-spin. It must be positive.
+     * This uses the real (production) constructor, whose heartbeat interval initialises to 0.
+     */
+    @Test
+    public void testMaximumTimeToWaitWhenCoordinatorUnknownWhileJoining() {
+        final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
+        lenient().when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        lenient().when(membershipManager.shouldNotWaitForHeartbeatInterval()).thenReturn(true);
+
+        final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+
+        assertTrue(maximumTimeToWait > 0,
+            "maximumTimeToWait must be > 0 when the coordinator is unknown and the member is " +
+                "joining, to avoid a busy-spin; got " + maximumTimeToWait);
     }
 
     @ParameterizedTest
@@ -2540,6 +2562,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
         ) {
             final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
             final Timer pollTimer = timerMockedConstruction.constructed().get(0);
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
             when(membershipManager.shouldNotWaitForHeartbeatInterval()).thenReturn(shouldNotWaitForHeartbeatInterval);
             time.sleep(1234);
 
@@ -2563,6 +2586,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
         ) {
             final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
             final Timer pollTimer = timerMockedConstruction.constructed().get(0);
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
             time.sleep(1234);
 
             final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
