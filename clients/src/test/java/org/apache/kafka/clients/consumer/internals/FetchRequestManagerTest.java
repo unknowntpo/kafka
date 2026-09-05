@@ -382,8 +382,13 @@ public class FetchRequestManagerTest {
         buildFetcher();
         var first = fetcher.createFetchRequests();
         var next = first.thenApply(ignored -> fetcher.createFetchRequests());
+        var failedObserver = first.thenRun(() -> {
+            throw new IllegalStateException("observer failed");
+        });
         fetcher.poll(time.milliseconds());
         assertTrue(first.isDone());
+        assertFalse(first.isCompletedExceptionally());
+        assertTrue(failedObserver.isCompletedExceptionally(), "a failed dependent must not lose another operation");
         assertFalse(next.join().isDone(), "a request submitted by completion must not inherit the already completed operation");
         fetcher.poll(time.milliseconds());
         assertTrue(next.join().isDone());

@@ -227,6 +227,29 @@ public class CommitRequestManagerTest {
             org.apache.kafka.common.requests.FindCoordinatorResponse.prepareResponse(Errors.NONE, DEFAULT_GROUP_ID, mockedNode)));
     }
 
+    @Test
+    public void testInflightReadyAndBackingOffOperationsRemainIndependent() {
+        CommitRequestManager manager = create(false, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition tp = new TopicPartition("topic", 0);
+        var inflight = manager.commitAsync(Map.of(tp, new OffsetAndMetadata(1)));
+        assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+        manager.fetchOffsets(Set.of(tp), time.milliseconds() + defaultApiTimeoutMs);
+        NetworkClientDelegate.UnsentRequest backingOff = manager.poll(time.milliseconds()).unsentRequests.get(0);
+        backingOff.handler().onComplete(buildOffsetFetchClientResponse(backingOff, Set.of(tp), Errors.COORDINATOR_LOAD_IN_PROGRESS));
+        manager.commitAsync(Map.of(tp, new OffsetAndMetadata(2)));
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size(), "ready B must not starve behind in-flight A or backing-off C");
+        OffsetCommitRequest request = (OffsetCommitRequest) result.unsentRequests.get(0).requestBuilder().build();
+        assertEquals(2, request.data().topics().get(0).partitions().get(0).committedOffset());
+        assertEquals(NextPollCondition.Kind.RETRY_AFTER, result.nextPollCondition().kind());
+        assertTrue(result.timeUntilNextPollMs > 0, "produced output does not require immediate polling");
+        assertFalse(inflight.isDone());
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty(), "neither A nor C may be sent again yet");
+        time.sleep(retryBackoffMaxMs);
+        assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size(), "C must become eligible after its backoff");
+    }
+
 
     @Test
     public void testExpiredAutoCommitAwaitsCoordinatorInsteadOfZeroApplicationWait() {

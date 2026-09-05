@@ -123,3 +123,65 @@ Do not silently solve this by retaining only the latest operation or by broadcas
 
 No new throughput, allocation, GC, CPU, real-broker recovery, or tail-latency claim is made.
 The old POC's benchmark does not validate this branch. No Jenkins job is submitted by this work.
+
+## Step 4: extraction decision and final verification
+
+The smaller mechanisms are sufficient for the tested paths; these tests do not establish that a generic
+event/command/action framework is necessary. No additional framework is extracted in this POC.
+
+The four concerns remain useful review obligations, not four mandatory classes: typed activation does not
+supply its own enabling input; single-threaded ownership does not imply captured-scope/version safety;
+an immutable schedule does not prove record-delivery acceptance; publication order alone does not latch a wake.
+Each obligation needs its own named production path and counterexample.
+
+Final combined validation: **1,253 tests in 23 suites, zero failures/errors/skips**, run twice on the same
+code/test tree. The second invocation used `:clients:test --rerun`, not cached test results. Checkstyle and
+SpotBugs passed. Test retries were disabled (`maxTestRetries=0`). This is not all Kafka tests or an E2E run.
+
+The final tests additionally cover in-flight A / ready B / backing-off C in the real commit manager:
+B is sent without duplicating A or sending C early, and producing B can coexist with a finite retry for C.
+A throwing completion dependent also cannot erase a separate reentrant fetch preparation.
+
+Exact combined command (add `--rerun` immediately after `:clients:test` to repeat):
+
+```sh
+JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-17.jdk/Contents/Home ./gradlew :clients:test \
+  --tests '*CommitRequestManagerTest' \
+  --tests '*CoordinatorRequestManagerTest' \
+  --tests '*ConsumerAdmissionContractTest' \
+  --tests '*ConsumerHeartbeatRequestManagerTest' \
+  --tests '*ShareHeartbeatRequestManagerTest' \
+  --tests '*StreamsGroupHeartbeatRequestManagerTest' \
+  --tests '*StreamsGroupTopologyDescriptionRequestManagerTest' \
+  --tests '*OffsetsRequestManagerTest' \
+  --tests '*ConsumerPublicationContractTest' \
+  --tests '*FetchRequestManagerTest' \
+  --tests '*AsyncKafkaConsumerTest' \
+  --tests '*ApplicationEventProcessorTest' \
+  --tests '*FetchCollectorTest' \
+  --tests '*FetchBufferTest' \
+  --tests '*ShareConsumerImplTest' \
+  --tests '*NetworkClientDelegateTest' \
+  --tests '*ConsumerNetworkThreadTest' \
+  --tests '*ApplicationEventHandlerTest' \
+  --tests '*RequestStateTest' \
+  --offline --max-workers=2 -PmaxParallelForks=1
+```
+
+### Required follow-up before a production-ready claim
+
+1. Complete metadata-error delivery after async-poll admission, not just notification once the error arrives.
+2. Add the exact heartbeat-plus-commit completion-batch and real-broker recovery variants. The tested
+   commit/offset-fetch batch demonstrates the boundary, not every protocol combination.
+3. Migrate and prove enabling inputs for remaining adapters: AbstractHeartbeatRequestManager (regular/share),
+   StreamsGroupHeartbeatRequestManager, StreamsGroupTopologyDescriptionRequestManager, CommitRequestManager
+   (other/close paths), FetchRequestManager, OffsetsRequestManager, TopicMetadataRequestManager and
+   ShareConsumeRequestManager. Retain their existing guards until their replacements are proven.
+4. Cover full affected lifecycle and terminal-result paths through the production run loop. Existing close tests
+   passing does not prove a new fatal-error or cancellation protocol; none is proposed by this POC.
+5. Benchmark this branch independently: throughput, CPU, allocation/GC, tail latency, reconnect and rebalance,
+   with a pinned baseline/candidate and predeclared thresholds. No current performance conclusion is available.
+
+Three red-to-green component regressions were observed, but none is labelled a pinned historical-release
+reproduction. Previously fixed historical issues remain inherited regression evidence. The implementation
+therefore supports a **partial feasibility result**, not a claim that every listed issue is fixed end to end.
