@@ -24,6 +24,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.utils.Time;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -45,6 +46,7 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
 
     private final long deadlineMs;
     private final long pollTimeMs;
+    private final Runnable errorNotification;
     private volatile KafkaException error;
     private volatile boolean isComplete;
     private volatile boolean isValidatePositionsComplete;
@@ -58,9 +60,14 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
      * @param pollTimeMs        Time, in milliseconds, at which point the event was created
      */
     public AsyncPollEvent(long deadlineMs, long pollTimeMs) {
+        this(deadlineMs, pollTimeMs, () -> { });
+    }
+
+    public AsyncPollEvent(long deadlineMs, long pollTimeMs, Runnable errorNotification) {
         super(Type.ASYNC_POLL);
         this.deadlineMs = deadlineMs;
         this.pollTimeMs = pollTimeMs;
+        this.errorNotification = Objects.requireNonNull(errorNotification);
     }
 
     public long deadlineMs() {
@@ -119,17 +126,19 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
     }
 
     public void completeSuccessfully() {
+        isComplete = true;
         // Complete reconciliation future as safety net in case it wasn't already marked complete
         reconciliationCheckFuture.complete(null);
-        isComplete = true;
     }
 
     public void completeExceptionally(KafkaException e) {
-        // Complete reconciliation future to unblock any waiters - the error will be surfaced
-        // through the normal checkInflightPoll() mechanism via the error field
-        reconciliationCheckFuture.complete(null);
         error = e;
         isComplete = true;
+        // Complete reconciliation future to unblock any waiters - the error will be surfaced
+        // through checkInflightPoll(). Publish before completing: future dependents can run inline.
+        reconciliationCheckFuture.complete(null);
+        // The application may already have crossed into its buffer wait. The buffer owns latching.
+        errorNotification.run();
     }
 
     @Override

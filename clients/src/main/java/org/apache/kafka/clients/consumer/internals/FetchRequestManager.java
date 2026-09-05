@@ -157,6 +157,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             return PollResult.EMPTY;
         }
 
+        // Detach the selected operation before releasing any completion. An inline dependent may
+        // submit another preparation; it must neither inherit this result nor be cleared afterwards.
+        CompletableFuture<Void> completion = pendingFetchRequestFuture;
+        pendingFetchRequestFuture = null;
+
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
@@ -168,7 +173,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                     // the data in the fetch buffer is consumed.
                     fetchBuffer.wakeup();
                 }
-                pendingFetchRequestFuture.complete(null);
+                completion.complete(null);
                 return PollResult.EMPTY;
             }
 
@@ -186,16 +191,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
             }).collect(Collectors.toList());
 
-            pendingFetchRequestFuture.complete(null);
+            completion.complete(null);
             return new PollResult(requests);
         } catch (Throwable t) {
             // A "dummy" poll result is returned here rather than rethrowing the error because any error
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
-            pendingFetchRequestFuture.completeExceptionally(t);
+            completion.completeExceptionally(t);
             return PollResult.EMPTY;
-        } finally {
-            pendingFetchRequestFuture = null;
         }
     }
 

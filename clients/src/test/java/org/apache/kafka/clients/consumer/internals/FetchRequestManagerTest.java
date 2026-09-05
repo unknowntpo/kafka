@@ -378,6 +378,18 @@ public class FetchRequestManagerTest {
     }
 
     @Test
+    public void testReentrantPreparationRemainsANewOperation() {
+        buildFetcher();
+        var first = fetcher.createFetchRequests();
+        var next = first.thenApply(ignored -> fetcher.createFetchRequests());
+        fetcher.poll(time.milliseconds());
+        assertTrue(first.isDone());
+        assertFalse(next.join().isDone(), "a request submitted by completion must not inherit the already completed operation");
+        fetcher.poll(time.milliseconds());
+        assertTrue(next.join().isDone());
+    }
+
+    @Test
     public void testMaximumTimeToWaitUnboundedWhenFetchSent() {
         buildFetcher();
 

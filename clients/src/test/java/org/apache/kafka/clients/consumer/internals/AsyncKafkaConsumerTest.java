@@ -589,6 +589,34 @@ public class AsyncKafkaConsumerTest {
         verify(applicationEventHandler, times(2)).add(isA(AsyncPollEvent.class));
     }
 
+    @Test
+    @org.junit.jupiter.api.Timeout(5)
+    public void testMetadataErrorAtWaitEntryWakesAndSurfacesThroughPoll() {
+        FetchBuffer buffer = mock(FetchBuffer.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.EARLIEST);
+        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class), mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
+        TopicPartition tp = new TopicPartition("topic", 0);
+        subscriptions.assignFromUser(singleton(tp));
+        subscriptions.seek(tp, 0);
+        AtomicReference<AsyncPollEvent> event = new AtomicReference<>();
+        KafkaException error = new KafkaException("metadata failure at wait entry");
+        doAnswer(invocation -> {
+            AsyncPollEvent submitted = invocation.getArgument(0);
+            submitted.markValidatePositionsComplete();
+            submitted.markReconciliationCheckComplete();
+            event.set(submitted);
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        doReturn(true).when(buffer).isEmpty();
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+        doAnswer(invocation -> {
+            event.get().onMetadataError(error);
+            verify(buffer).wakeup();
+            return null;
+        }).when(buffer).awaitWakeup(any());
+        assertEquals(error, assertThrows(KafkaException.class, () -> consumer.poll(Duration.ofSeconds(60))));
+    }
+
     /**
      * When an inflight poll completes with records already in the fetch buffer, the next poll must return those
      * records <em>without</em> submitting a new poll event: a fresh event would re-run the validate-positions

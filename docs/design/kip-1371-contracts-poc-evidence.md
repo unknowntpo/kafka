@@ -59,8 +59,6 @@ and topology producers still have raw-delay adapters. Existing local guards rema
 credited as new typed-activation fixes. Public-consumer recovery and all enabling-input interleavings need
 coverage before declaring the complete activation slice ready for production.
 
-## Historical issues and acceptance scope
-
 ### Step 2: ownership and admission
 
 Validation: 568 tests passed, zero failed/skipped/errors: commit 147, coordinator 12, admission contract 1,
@@ -84,13 +82,44 @@ Checkstyle passed. The unchanged captured-partition regression
   That variant and real-broker recovery remain explicit gates. Existing pre-batch admitted requests are retained;
   no newly introduced command-discard or in-flight rollback protocol is claimed.
 
+### Step 3: publication and selected effects
+
+Validation: 630 tests passed, zero failed/skipped/errors, with Checkstyle and SpotBugs passing:
+publication contract 4, fetch manager 111, async consumer 128, application processor 46,
+fetch collector 155, share collector 132, fetch buffer 5, share buffer 8, share consumer 41.
+
+Two new tests first failed against unchanged step-2 production code:
+
+- `ConsumerPublicationContractTest.testErrorStatePrecedesReconciliationFutureRelease`: a future dependent ran
+  inline and found no published error (`NoSuchElementException`). Publish the error and completion state first.
+- `FetchRequestManagerTest.testReentrantPreparationRemainsANewOperation`: a request created by a completion
+  callback was immediately completed as part of the old preparation. Detach the selected operation before
+  completion; reentrant preparation remains pending until its own subsequent manager poll.
+
+`AsyncPollEvent` now accepts a per-event error notification. `AsyncKafkaConsumer` connects it to the existing
+latched fetch-buffer wake; successful empty preparation does not use this error notification. Tests cover
+error-before-wait, an actual thread already blocked on the buffer, independent error identities, and public
+`poll()` surfacing an error injected at wait entry. The public-poll wiring test controls error arrival; it is not
+a real-broker metadata-error reproduction. No generic effect queue, retry, or coalescing registry was introduced.
+
+The baseline position-before-drain and no-fetchable-partitions/no-wake tests pass unchanged. FetchBuffer,
+ShareFetchBuffer, consumed-position ownership, user wakeup, and existing timeout/cancel/close policies remain.
+
+**Open metadata-delivery gate:** `ConsumerNetworkThread` checks metadata errors at application admission and
+against its `CompletableEventReaper` list after I/O. `AsyncPollEvent` is not a `CompletableEvent`. The notification
+tests do not prove that every transport metadata error arriving after admission reaches that async operation.
+An admission-to-transport-to-wait reproduction is required before claiming KAFKA-20397 fixed end to end.
+Do not silently solve this by retaining only the latest operation or by broadcasting errors to unrelated calls.
+
+## Historical issues and acceptance scope
+
 | Evidence | What this experiment must establish | Status |
 | --- | --- | --- |
 | KAFKA-20253 / PR 22836 | In-flight work must not create a no-progress poll loop. | Existing coordinator regression retained and strengthened with typed cause; exact historical CPU reproduction not performed. |
-| KAFKA-17674 / PR 17342 | An older offset operation must retain its admitted partition scope. | Baseline contains the historical fix; existing production-path regression must remain passing. |
-| PR 21476 | Consumed position must precede the matching consumed marker. | Baseline fix and synchronized handoff retained; consumed-position ownership is not moved. |
-| KAFKA-20854 / PR 23014 | Empty/no-progress fetch preparation must not select a wake. | Baseline classification retained; no credit claimed for re-fixing it. |
-| KAFKA-20397 / proposed PR 21991 | Metadata error must be observable before a latched notification, including error-before-wait. | Selected effect-path experiment pending. |
+| KAFKA-17674 / PR 17342 | An older offset operation must retain its admitted partition scope. | Baseline contains the historical fix; captured-scope regression passed in step 2. |
+| PR 21476 | Consumed position must precede the matching consumed marker. | Baseline fix and synchronized handoff retained; position-before-drain regression passed in step 3. |
+| KAFKA-20854 / PR 23014 | Empty/no-progress fetch preparation must not select a wake. | Baseline classification and no-wakeup regression passed; no credit claimed for re-fixing it. |
+| KAFKA-20397 / proposed PR 21991 | Metadata error must be observable before a latched notification, including error-before-wait. | Selected notification/publication path tested; complete transport-to-operation delivery remains open as described above. |
 
 No new throughput, allocation, GC, CPU, real-broker recovery, or tail-latency claim is made.
 The old POC's benchmark does not validate this branch. No Jenkins job is submitted by this work.
