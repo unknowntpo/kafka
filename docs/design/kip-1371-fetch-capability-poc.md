@@ -227,3 +227,62 @@ above plus `*ConsumerNetworkThreadTest`, `*ConsumerAdmissionContractTest`,
 new; the other additional cases are expanded regression coverage. Checkstyle
 main/test and Spotless Java passed; unchanged production sources retain their
 previous passing SpotBugs main result (up-to-date in these runs).
+
+## Follow-up: owner changes during manager polling
+
+The next boundary is not a hypothetical manager arbitrarily corrupting its peer.
+The regular `RequestManagers` order is coordinator, commit, heartbeat, then
+membership and the remaining managers. `AbstractHeartbeatRequestManager.poll`
+can detect `max.poll.interval.ms` expiry and call
+`membership.transitionToSendingLeaveGroup(true)`. The membership owner updates
+its epoch and notifies the registered Commit RM listener. This is a real owner
+transition occurring during polling, after Commit RM may already have built an
+attempt in the same pass.
+
+`ConsumerBatchedDecisionTest.testLeaveTransitionDoesNotRewriteAnAdmittedCommit`
+uses real coordinator, commit, heartbeat, membership and network-delegate code,
+with MockClient, controlled metadata, and MockTime. Membership starts in a
+controlled joined-epoch setup; advancing time triggers the real heartbeat poll
+timeout path. The test evaluates two orders without changing production order:
+
+| Order | Commit request field after both polls | Leave heartbeat field | Observed MockClient submission order |
+| --- | --- | --- | --- |
+| Existing commit poll, then heartbeat poll | Captured member epoch 7 remains 7. | Member epoch -1. | Commit, leave heartbeat. |
+| Comparison: heartbeat poll, then commit poll | Commit uses its now-empty member epoch, encoded as default -1. | Member epoch -1. | Leave heartbeat, commit. |
+
+Both cases reach membership STALE. A supplied successful commit response still
+completes the admitted commit operation. This does **not** prove a broker would
+accept either sequence, establish processing order at a real broker, endorse a
+commit after leave, or prove stale-epoch retry handling. It characterizes request
+construction, local transport submission, and preservation of an observed success.
+The test executes the production-order manager slice and delegate directly, not
+a complete public-consumer or `runOnce` lifecycle.
+
+The important distinction is between an operation already queued and an attempt
+already admitted. Changing the poll order changes the request's membership
+context even though the operation was queued at the same point in both tests.
+Reordering managers or rebuilding staged requests is therefore not a harmless
+implementation cleanup.
+
+### Resulting design question
+
+The current approach can preserve sequential admission: owner transitions affect
+later admissions, while existing attempts retain their captured context. It does
+not provide the stronger rule that **all timer-driven owner transitions in this
+pass are applied before any request is admitted**. Completing the I/O callback
+batch first does not itself establish that stronger rule, because polling can
+create another owner transition.
+
+If the stronger rule is required, the next design step is to specify whether
+poll expiry must preempt a same-pass commit and how pending operations retain
+their outcomes, then evaluate a separate transition/admission boundary. Do not
+silently move heartbeat before commit, discard reserved attempts, or run manager
+polls repeatedly to a fixed point. No production defect or need for a new generic
+event framework is claimed by this characterization alone.
+
+Validation: **809 tests across 17 suites passed twice**, zero failures/errors/skips,
+with retries disabled and a forced `--rerun` for the second execution. This is
+the preceding 807-test selection plus the two admission-order cases. Checkstyle
+main/test and Spotless Java passed; production sources are unchanged, and their
+previous passing SpotBugs main result remains up-to-date. This follow-up changes
+only the characterization test and this evidence record.

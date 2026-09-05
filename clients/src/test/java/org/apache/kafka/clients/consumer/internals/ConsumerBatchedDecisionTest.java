@@ -32,6 +32,7 @@ import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.requests.ConsumerGroupHeartbeatRequest;
 import org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse;
 import org.apache.kafka.common.requests.FindCoordinatorResponse;
 import org.apache.kafka.common.requests.OffsetCommitRequest;
@@ -54,6 +55,7 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Properties;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -76,6 +78,10 @@ class ConsumerBatchedDecisionTest {
     private MockClient client;
     private NetworkClientDelegate delegate;
     private ConsumerNetworkThread thread;
+    private ConsumerConfig config;
+    private ConsumerMetadata metadata;
+    private BackgroundEventHandler background;
+    private SubscriptionState subscriptions;
 
     @BeforeEach
     void setUp() {
@@ -84,16 +90,17 @@ class ConsumerBatchedDecisionTest {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
-        ConsumerConfig config = new ConsumerConfig(props);
-        ConsumerMetadata metadata = mock(ConsumerMetadata.class);
+        config = new ConsumerConfig(props);
+        metadata = mock(ConsumerMetadata.class);
         AsyncConsumerMetrics asyncMetrics = mock(AsyncConsumerMetrics.class);
-        BackgroundEventHandler background = mock(BackgroundEventHandler.class);
+        background = mock(BackgroundEventHandler.class);
         coordinator = new CoordinatorRequestManager(logContext, 100, 1000, GROUP_ID);
         discoverCoordinator();
         // The real discovery retry delay is already elapsed, not bypassed by the batch mechanism.
         time.sleep(1000);
+        subscriptions = new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST);
         commits = new CommitRequestManager(time, logContext,
-            new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST), config, coordinator,
+            subscriptions, config, coordinator,
             mock(OffsetCommitCallbackInvoker.class), GROUP_ID, Optional.empty(), 100, 1000,
             OptionalDouble.of(0), metrics, metadata);
         when(membership.groupInstanceId()).thenReturn(Optional.empty());
@@ -131,6 +138,64 @@ class ConsumerBatchedDecisionTest {
 
     private ClientRequest request(ApiKeys apiKey) {
         return client.requests().stream().filter(r -> r.requestBuilder().apiKey() == apiKey).findFirst().orElseThrow();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testLeaveTransitionDoesNotRewriteAnAdmittedCommit(boolean leaveBeforeCommitAdmission) {
+        try (Metrics transitionMetrics = new Metrics(time)) {
+            ConsumerMembershipManager realMembership = new ConsumerMembershipManager(GROUP_ID,
+                    Optional.empty(), Optional.empty(), 30_000, Optional.empty(), subscriptions,
+                    commits, metadata, logContext, background, time, transitionMetrics, false);
+            realMembership.registerStateListener(commits);
+            realMembership.transitionToJoining();
+            realMembership.updateMemberEpoch(7);
+            ConsumerHeartbeatRequestManager realHeartbeat = new ConsumerHeartbeatRequestManager(
+                    logContext, time, config, coordinator, subscriptions, realMembership, background, transitionMetrics);
+            time.sleep(config.getInt(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG) + 1L);
+
+            var operation = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+            NetworkClientDelegate.PollResult commitResult;
+            NetworkClientDelegate.PollResult leaveResult;
+            if (leaveBeforeCommitAdmission) {
+                // Contrast: the owner transition is already known when commit admission starts.
+                leaveResult = realHeartbeat.poll(time.milliseconds());
+                commitResult = commits.poll(time.milliseconds());
+            } else {
+                // Existing RequestManagers order: commit builds before heartbeat observes poll expiry.
+                commitResult = commits.poll(time.milliseconds());
+                leaveResult = realHeartbeat.poll(time.milliseconds());
+            }
+
+            assertEquals(MemberState.STALE, realMembership.state());
+            assertEquals(1, commitResult.unsentRequests.size());
+            assertEquals(1, leaveResult.unsentRequests.size());
+            OffsetCommitRequest commitRequest = (OffsetCommitRequest) commitResult.unsentRequests.get(0).requestBuilder().build();
+            ConsumerGroupHeartbeatRequest leaveRequest = (ConsumerGroupHeartbeatRequest) leaveResult.unsentRequests.get(0).requestBuilder().build();
+            assertEquals(leaveBeforeCommitAdmission ? -1 : 7, commitRequest.data().generationIdOrMemberEpoch());
+            assertEquals(-1, leaveRequest.data().memberEpoch());
+
+            if (leaveBeforeCommitAdmission) {
+                delegate.addAll(leaveResult);
+                delegate.addAll(commitResult);
+            } else {
+                delegate.addAll(commitResult);
+                delegate.addAll(leaveResult);
+            }
+            delegate.poll(0, time.milliseconds());
+            assertEquals(leaveBeforeCommitAdmission
+                            ? List.of(ApiKeys.CONSUMER_GROUP_HEARTBEAT, ApiKeys.OFFSET_COMMIT)
+                            : List.of(ApiKeys.OFFSET_COMMIT, ApiKeys.CONSUMER_GROUP_HEARTBEAT),
+                    client.requests().stream().map(r -> r.requestBuilder().apiKey()).collect(Collectors.toList()));
+            assertEquals(leaveBeforeCommitAdmission ? -1 : 7,
+                    ((OffsetCommitRequest) request(ApiKeys.OFFSET_COMMIT).requestBuilder().build()).data().generationIdOrMemberEpoch());
+
+            // A broker success belongs to that admitted attempt; membership changes do not erase it.
+            client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
+            delegate.poll(0, time.milliseconds());
+            assertTrue(operation.isDone());
+            assertFalse(operation.isCompletedExceptionally());
+        }
     }
 
     @ParameterizedTest
