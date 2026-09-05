@@ -207,6 +207,10 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      *         Poll the client via {@link KafkaClient#poll(long, long)} to send the requests, as well as
      *         retrieve any available responses
      *     </li>
+     *     <li>
+     *         After a completed I/O batch, run one more full manager decision pass and stage its requests
+     *         for the next transport poll. Publish the application wait after these decisions.
+     *     </li>
      * </ol>
      */
     void runOnce() {
@@ -219,21 +223,25 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         }
         lastPollTimeMs = currentTimeMs;
 
-        long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
-
-        for (RequestManager rm : requestManagers.entries()) {
-            NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
-            long timeoutMs = networkClientDelegate.addAll(pollResult);
-            pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
-        }
+        long pollWaitTimeMs = pollAndStageRequests(currentTimeMs);
 
         // Completion callbacks finish their owner updates as one I/O batch. They may queue new
-        // operations, but admission (manager.poll + delegate.addAll) resumes only at the next full pass.
+        // operations, but must not build/send follow-up requests recursively inside the batch.
         // Requests admitted before this batch retain their captured attempt context; do not discard
         // transport work after its manager has reserved an in-flight attempt.
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
         final long afterIoTimeMs = time.milliseconds();
+        if (running && applicationEventQueue.isEmpty() && networkClientDelegate.completedRequestsInLastPoll()) {
+            // Exactly one full pass, after ALL callbacks return. Do not poll only the completing owner:
+            // a coordinator update may enable heartbeat and commit. Do not run I/O again or drain to a
+            // fixed point: follow-up completions belong to a subsequent batch. Transport attempts built
+            // here are retained with their captured context, even if a later input changes owner state.
+            // If close was observed at this boundary, leave further work to the existing cleanup path.
+            // Already queued application commands keep priority at the next input boundary. Commands
+            // arriving after this check belong to the next iteration, not an unbounded input drain.
+            pollAndStageRequests(afterIoTimeMs);
+        }
         long maxTimeToWaitMs = Long.MAX_VALUE;
 
         for (RequestManager rm : requestManagers.entries()) {
@@ -254,6 +262,16 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         reapExpiredApplicationEvents(currentTimeMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
         maybeFailOnMetadataError(uncompletedEvents);
+    }
+
+    private long pollAndStageRequests(long currentTimeMs) {
+        long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
+        for (RequestManager rm : requestManagers.entries()) {
+            NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
+            long timeoutMs = networkClientDelegate.addAll(pollResult);
+            pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
+        }
+        return pollWaitTimeMs;
     }
 
     public void setScheduleWakeup(Runnable scheduleWakeup) {

@@ -144,6 +144,9 @@ public class NetworkClientDelegateTest {
 
             assertTrue(unsentRequest.future().isDone());
             assertNotNull(unsentRequest.future().get());
+            assertTrue(ncd.completedRequestsInLastPoll());
+            ncd.poll(0, time.milliseconds());
+            assertFalse(ncd.completedRequestsInLastPoll(), "an idle poll must not inherit the preceding batch marker");
         }
     }
 
@@ -154,9 +157,11 @@ public class NetworkClientDelegateTest {
             NetworkClientDelegate.UnsentRequest unsentRequest = newUnsentFindCoordinatorRequest();
             ncd.add(unsentRequest);
             ncd.poll(0, time.milliseconds());
+            assertFalse(ncd.completedRequestsInLastPoll());
             time.sleep(REQUEST_TIMEOUT_MS);
             ncd.poll(0, time.milliseconds());
             assertTrue(unsentRequest.future().isDone());
+            assertTrue(ncd.completedRequestsInLastPoll(), "unsent timeout callbacks also enable a decision pass");
             TestUtils.assertFutureThrows(TimeoutException.class, unsentRequest.future());
         }
     }
@@ -171,6 +176,7 @@ public class NetworkClientDelegateTest {
             ncd.poll(0, time.milliseconds());
             assertTrue(unsentRequest.future().isDone());
             TestUtils.assertFutureThrows(DisconnectException.class, unsentRequest.future());
+            assertTrue(ncd.completedRequestsInLastPoll(), "in-flight disconnect callbacks also form a completion batch");
         }
     }
 
@@ -395,6 +401,7 @@ public class NetworkClientDelegateTest {
             assertFalse(ncd.hasAnyPendingRequests());
             assertTrue(unsentRequest.future().isDone());
             TestUtils.assertFutureThrows(NetworkException.class, unsentRequest.future());
+            assertTrue(ncd.completedRequestsInLastPoll());
         }
     }
 

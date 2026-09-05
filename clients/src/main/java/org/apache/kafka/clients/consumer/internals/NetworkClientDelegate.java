@@ -75,6 +75,7 @@ public class NetworkClientDelegate implements AutoCloseable {
     private Optional<Exception> metadataError;
     private final boolean notifyMetadataErrorsViaErrorQueue;
     private boolean bootstrapErrorPropagated = false;
+    private boolean completedRequestsInLastPoll;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
     public NetworkClientDelegate(
@@ -159,16 +160,27 @@ public class NetworkClientDelegate implements AutoCloseable {
      * @param onClose       True when the network thread is closing.
      */
     public void poll(final long timeoutMs, final long currentTimeMs, boolean onClose) {
+        completedRequestsInLastPoll = false;
         trySend(currentTimeMs);
 
         long pollTimeoutMs = timeoutMs;
         if (!unsentRequests.isEmpty()) {
             pollTimeoutMs = Math.min(retryBackoffMs, pollTimeoutMs);
         }
-        this.client.poll(pollTimeoutMs, currentTimeMs);
+        if (!this.client.poll(pollTimeoutMs, currentTimeMs).isEmpty())
+            completedRequestsInLastPoll = true;
         maybePropagateMetadataError();
         checkDisconnects(currentTimeMs, onClose);
         asyncConsumerMetrics.recordUnsentRequestsQueueSize(unsentRequests.size(), currentTimeMs);
+    }
+
+    /**
+     * Whether the last poll delivered responses or failed queued requests. Read only after poll returns:
+     * synchronous completion callbacks must finish before the next manager decision pass. This is a
+     * network-thread-local batch marker, not a count, event queue, or subscription to individual owners.
+     */
+    boolean completedRequestsInLastPoll() {
+        return completedRequestsInLastPoll;
     }
 
     private void maybePropagateMetadataError() {
@@ -213,6 +225,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             unsent.timer.update(currentTimeMs);
             if (unsent.timer.isExpired()) {
                 iterator.remove();
+                completedRequestsInLastPoll = true;
                 asyncConsumerMetrics.recordUnsentRequestsQueueTime(time.milliseconds() - unsent.enqueueTimeMs());
                 unsent.handler.onFailure(currentTimeMs, new TimeoutException(
                     "Failed to send request after " + unsent.timer.timeoutMs() + " ms."));
@@ -252,12 +265,14 @@ public class NetworkClientDelegate implements AutoCloseable {
             UnsentRequest u = iter.next();
             if (u.node.isPresent() && client.connectionFailed(u.node.get())) {
                 iter.remove();
+                completedRequestsInLastPoll = true;
                 asyncConsumerMetrics.recordUnsentRequestsQueueTime(time.milliseconds() - u.enqueueTimeMs());
                 AuthenticationException authenticationException = client.authenticationException(u.node.get());
                 u.handler.onFailure(currentTimeMs, authenticationException);
             } else if (u.node.isEmpty() && onClose) {
                 log.debug("Removing unsent request {} because the client is closing", u);
                 iter.remove();
+                completedRequestsInLastPoll = true;
                 asyncConsumerMetrics.recordUnsentRequestsQueueTime(time.milliseconds() - u.enqueueTimeMs());
                 u.handler.onFailure(currentTimeMs, Errors.NETWORK_EXCEPTION.exception());
             }

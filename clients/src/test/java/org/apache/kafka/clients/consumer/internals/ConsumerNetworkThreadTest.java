@@ -38,6 +38,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
@@ -54,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -194,6 +196,90 @@ public class ConsumerNetworkThreadTest {
         requestManagers.entries().forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));
         verify(networkClientDelegate).addAll(any(NetworkClientDelegate.PollResult.class));
         verify(networkClientDelegate).poll(anyLong(), anyLong());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testOnePostIoDecisionPassOnlyForACompletedBatch(boolean completedBatch) {
+        List<String> phases = new ArrayList<>();
+        long beforeIo = time.milliseconds();
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong())).thenAnswer(invocation -> {
+            phases.add("decide:" + invocation.getArgument(0));
+            return NetworkClientDelegate.PollResult.EMPTY;
+        });
+        when(networkClientDelegate.addAll(any(NetworkClientDelegate.PollResult.class))).thenReturn(Long.MAX_VALUE);
+        doAnswer(ignored -> {
+            phases.add("io");
+            time.sleep(25);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+        when(networkClientDelegate.completedRequestsInLastPoll()).thenReturn(completedBatch);
+        when(coordinatorRequestManager.maximumTimeToWait(anyLong())).thenAnswer(ignored -> {
+            phases.add("wait");
+            return 10L;
+        });
+        consumerNetworkThread.setScheduleWakeup(() -> {
+            assertEquals(10L, consumerNetworkThread.maximumTimeToWait());
+            phases.add("wake");
+        });
+
+        consumerNetworkThread.runOnce();
+        List<String> expected = new ArrayList<>(List.of("decide:" + beforeIo, "io"));
+        if (completedBatch)
+            expected.add("decide:" + (beforeIo + 25));
+        expected.addAll(List.of("wait", "wake"));
+        assertEquals(expected, phases);
+        verify(networkClientDelegate, times(1)).poll(anyLong(), anyLong());
+        verify(coordinatorRequestManager, times(completedBatch ? 2 : 1)).poll(anyLong());
+    }
+
+    @Test
+    public void testCloseObservedDuringIoSkipsPostBatchAdmission() {
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(networkClientDelegate.completedRequestsInLastPoll()).thenReturn(true);
+        doAnswer(ignored -> {
+            // The thread is not started: simulate the close flag becoming visible while I/O runs.
+            consumerNetworkThread.close(Duration.ZERO);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+
+        consumerNetworkThread.runOnce();
+        assertFalse(consumerNetworkThread.isRunning());
+        verify(coordinatorRequestManager, times(1)).poll(anyLong());
+        verify(networkClientDelegate, times(1)).poll(anyLong(), anyLong());
+    }
+
+    @Test
+    public void testApplicationInputQueuedDuringIoPrecedesAnotherDecisionPass() {
+        PausePartitionsEvent event = new PausePartitionsEvent(List.of(), Long.MAX_VALUE);
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(networkClientDelegate.completedRequestsInLastPoll()).thenReturn(true);
+        doAnswer(ignored -> {
+            applicationEventQueue.add(event);
+            return null;
+        }).when(networkClientDelegate).poll(anyLong(), anyLong());
+
+        consumerNetworkThread.runOnce();
+        verify(coordinatorRequestManager, times(1)).poll(anyLong());
+        assertEquals(List.of(event), List.copyOf(applicationEventQueue));
+
+        doAnswer(ignored -> null).when(networkClientDelegate).poll(anyLong(), anyLong());
+        when(networkClientDelegate.completedRequestsInLastPoll()).thenReturn(false);
+        List<String> order = new ArrayList<>();
+        doAnswer(ignored -> {
+            order.add("input");
+            return null;
+        }).when(applicationEventProcessor).process(event);
+        when(coordinatorRequestManager.poll(anyLong())).thenAnswer(ignored -> {
+            order.add("decision");
+            return NetworkClientDelegate.PollResult.EMPTY;
+        });
+        consumerNetworkThread.runOnce();
+        assertEquals(List.of("input", "decision"), order);
+        assertTrue(applicationEventQueue.isEmpty());
     }
 
     @Test

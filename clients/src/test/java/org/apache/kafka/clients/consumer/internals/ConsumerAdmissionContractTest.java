@@ -122,13 +122,15 @@ class ConsumerAdmissionContractTest {
                 assertFalse(followup.isDone());
                 assertTrue(coordinatorRequestManager.coordinator().isEmpty());
                 assertEquals(0, client.inFlightRequestCount(), "no new request may be sent between completion callbacks");
-                assertTrue(delegate.unsentRequests().isEmpty(), "no speculative work may be staged after the batch");
+                assertEquals(1, delegate.unsentRequests().size(), "only discovery may be staged after the batch");
+                assertEquals(ApiKeys.FIND_COORDINATOR, delegate.unsentRequests().peek().requestBuilder().apiKey());
 
                 client.prepareResponse(org.apache.kafka.common.requests.FindCoordinatorResponse.prepareResponse(
                     Errors.NONE, DEFAULT_GROUP_ID, mockedNode));
                 thread.runOnce();
                 assertTrue(coordinatorRequestManager.coordinator().isPresent());
                 assertEquals(0, client.inFlightRequestCount(), "recovery does not admit sibling work in the discovery callback");
+                assertEquals(1, delegate.unsentRequests().size(), "the post-batch pass stages the ready commit");
                 thread.runOnce();
                 assertEquals(1, client.inFlightRequestCount(), "the very next full pass sends the ready commit without a timer tick");
                 assertInstanceOf(OffsetCommitRequest.Builder.class, client.requests().peek().requestBuilder());
