@@ -4403,6 +4403,7 @@ public class FetchRequestManagerTest {
     private class TestableFetchRequestManager<K, V> extends FetchRequestManager {
 
         private final FetchCollector<K, V> fetchCollector;
+        private final FetchBuffer fetchBuffer;
         private AuthenticationException authenticationException;
 
         public TestableFetchRequestManager(LogContext logContext,
@@ -4416,7 +4417,8 @@ public class FetchRequestManagerTest {
                                            FetchCollector<K, V> fetchCollector,
                                            ApiVersions apiVersions,
                                            long retryBackoffMs) {
-            super(logContext, time, metadata, subscriptions, fetchConfig, fetchBuffer, metricsManager, networkClientDelegate, apiVersions, retryBackoffMs);
+            super(logContext, time, metadata, subscriptions, fetchConfig, new FetchBufferProducer(fetchBuffer), metricsManager, networkClientDelegate, apiVersions, retryBackoffMs);
+            this.fetchBuffer = fetchBuffer;
             this.fetchCollector = fetchCollector;
         }
 

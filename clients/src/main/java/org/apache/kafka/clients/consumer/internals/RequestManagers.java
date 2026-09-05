@@ -191,7 +191,7 @@ public class RequestManagers implements Closeable {
                         metadata,
                         subscriptions,
                         fetchConfig,
-                        fetchBuffer,
+                        new FetchBufferProducer(fetchBuffer),
                         fetchMetricsManager,
                         networkClientDelegate,
                         apiVersions,

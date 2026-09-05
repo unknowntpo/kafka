@@ -52,12 +52,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                         final ConsumerMetadata metadata,
                         final SubscriptionState subscriptions,
                         final FetchConfig fetchConfig,
-                        final FetchBuffer fetchBuffer,
+                        final FetchBufferProducer bufferProducer,
                         final FetchMetricsManager metricsManager,
                         final NetworkClientDelegate networkClientDelegate,
                         final ApiVersions apiVersions,
                         final long retryBackoffMs) {
-        super(logContext, metadata, subscriptions, fetchConfig, fetchBuffer, metricsManager, time, apiVersions);
+        super(logContext, metadata, subscriptions, fetchConfig, bufferProducer, metricsManager, time, apiVersions);
         this.networkClientDelegate = networkClientDelegate;
         this.retryBackoffMs = retryBackoffMs;
     }
@@ -81,7 +81,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return nodesWithPendingFetchRequests.isEmpty() ? retryBackoffMs : Long.MAX_VALUE;
+        return hasPendingFetchRequests() ? Long.MAX_VALUE : retryBackoffMs;
     }
 
     /**
@@ -167,12 +167,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
-                if (result.canWakeBufferIfNoFetchRequestsToSend()) {
-                    // If there's nothing to fetch because every fetchable partition already has buffered data,
-                    // wake up the FetchBuffer so it doesn't needlessly wait for a wakeup that won't come until
-                    // the data in the fetch buffer is consumed.
-                    fetchBuffer.wakeup();
-                }
+                finishFetchPreparation(result);
                 completion.complete(null);
                 return PollResult.EMPTY;
             }

@@ -47,7 +47,6 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -74,9 +73,8 @@ public abstract class AbstractFetch implements Closeable {
     protected final FetchConfig fetchConfig;
     protected final Time time;
     protected final FetchMetricsManager metricsManager;
-    protected final FetchBuffer fetchBuffer;
+    private final FetchBufferProducer bufferProducer;
     protected final BufferSupplier decompressionBufferSupplier;
-    protected final Set<Integer> nodesWithPendingFetchRequests;
 
     private final Map<Integer, FetchSessionHandler> sessionHandlers;
 
@@ -86,7 +84,7 @@ public abstract class AbstractFetch implements Closeable {
                          final ConsumerMetadata metadata,
                          final SubscriptionState subscriptions,
                          final FetchConfig fetchConfig,
-                         final FetchBuffer fetchBuffer,
+                         final FetchBufferProducer bufferProducer,
                          final FetchMetricsManager metricsManager,
                          final Time time,
                          final ApiVersions apiVersions) {
@@ -96,10 +94,9 @@ public abstract class AbstractFetch implements Closeable {
         this.metadata = metadata;
         this.subscriptions = subscriptions;
         this.fetchConfig = fetchConfig;
-        this.fetchBuffer = fetchBuffer;
+        this.bufferProducer = bufferProducer;
         this.decompressionBufferSupplier = BufferSupplier.create();
         this.sessionHandlers = new HashMap<>();
-        this.nodesWithPendingFetchRequests = new HashSet<>();
         this.metricsManager = metricsManager;
         this.time = time;
         this.apiVersions = apiVersions;
@@ -129,7 +126,7 @@ public abstract class AbstractFetch implements Closeable {
      * @return true if there are completed fetches, false otherwise
      */
     boolean hasCompletedFetches() {
-        return !fetchBuffer.isEmpty();
+        return bufferProducer.hasCompletedFetches();
     }
 
     /**
@@ -137,7 +134,16 @@ public abstract class AbstractFetch implements Closeable {
      * @return true if there are completed fetches that can be returned, false otherwise
      */
     public boolean hasAvailableFetches() {
-        return fetchBuffer.hasCompletedFetches(fetch -> subscriptions.isFetchable(fetch.partition));
+        return bufferProducer.hasAvailableFetches(subscriptions::isFetchable);
+    }
+
+    protected final boolean hasPendingFetchRequests() {
+        return bufferProducer.hasPendingRequests();
+    }
+
+    protected final void finishFetchPreparation(FetchRequestPreparationResult result) {
+        if (result.requests().isEmpty() && result.canWakeBufferIfNoFetchRequestsToSend())
+            bufferProducer.signalIfAvailable(subscriptions::isFetchable);
     }
 
     /**
@@ -222,7 +228,7 @@ public abstract class AbstractFetch implements Closeable {
                         partitionData,
                         metricAggregator,
                         fetchOffset);
-                fetchBuffer.add(completedFetch);
+                bufferProducer.add(completedFetch);
             }
 
             if (!partitionsWithUpdatedLeaderInfo.isEmpty()) {
@@ -289,12 +295,7 @@ public abstract class AbstractFetch implements Closeable {
 
     private void removePendingFetchRequest(Node fetchTarget, int sessionId) {
         log.debug("Removing pending request for fetch session: {} for node: {}", sessionId, fetchTarget);
-        nodesWithPendingFetchRequests.remove(fetchTarget.id());
-
-        // Wake the buffer whenever a node stops having a request in flight, whatever the outcome was: data, an
-        // empty response, a fetch session error, or a failure. This ensures the caller is not left waiting on a
-        // wakeup that only a completed request could have delivered.
-        fetchBuffer.wakeup();
+        bufferProducer.requestCompleted(fetchTarget.id());
     }
 
     /**
@@ -326,7 +327,7 @@ public abstract class AbstractFetch implements Closeable {
         // disconnection being handled by the heartbeat thread) which will mean the listener
         // will be invoked synchronously.
         log.debug("Adding pending request for node {}", fetchTarget);
-        nodesWithPendingFetchRequests.add(fetchTarget.id());
+        bufferProducer.requestStarted(fetchTarget.id());
 
         return request;
     }
@@ -426,7 +427,7 @@ public abstract class AbstractFetch implements Closeable {
         Map<String, Uuid> topicIds = metadata.topicIds();
 
         // This is the set of partitions that have buffered data
-        Set<TopicPartition> buffered = Collections.unmodifiableSet(fetchBuffer.bufferedPartitions());
+        Set<TopicPartition> buffered = bufferProducer.bufferedPartitions();
 
         // This is the list of partitions that are fetchable and have no buffered data
         List<TopicPartition> unbuffered = fetchablePartitions(buffered);
@@ -459,7 +460,7 @@ public abstract class AbstractFetch implements Closeable {
                 // If we try to send during the reconnect backoff window, then the request is just
                 // going to be failed anyway before being sent, so skip sending the request for now
                 log.trace("Skipping fetch for partition {} because node {} is awaiting reconnect backoff", partition, node);
-            } else if (nodesWithPendingFetchRequests.contains(node.id())) {
+            } else if (bufferProducer.isRequestPending(node.id())) {
                 // If there's already an inflight request for this node, don't issue another request.
                 log.trace("Skipping fetch for partition {} because previous request to {} has not been processed", partition, node);
             } else if (bufferedNodes.contains(node.id())) {
@@ -522,7 +523,7 @@ public abstract class AbstractFetch implements Closeable {
         }
 
         /**
-         * Whether, if {@link #requests()} is empty, this is a safe point to wake up the {@link FetchBuffer}
+         * Whether, if {@link #requests()} is empty, this is a safe point to notify the fetch handoff
          * immediately, as opposed to a state that will only change once some other event happens (for example, a
          * metadata update, reconnect backoff expiration, or an in-flight response arriving). Ignored when
          * {@link #requests()} is non-empty.
@@ -668,7 +669,7 @@ public abstract class AbstractFetch implements Closeable {
     // Visible for testing
     protected void closeInternal(Timer timer) {
         // we do not need to re-enable wake-ups since we are closing already
-        Utils.closeQuietly(fetchBuffer, "fetchBuffer");
+        Utils.closeQuietly(bufferProducer, "fetchBuffer");
         Utils.closeQuietly(decompressionBufferSupplier, "decompressionBufferSupplier");
     }
 

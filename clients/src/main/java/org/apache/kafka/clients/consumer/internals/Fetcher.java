@@ -61,6 +61,7 @@ public class Fetcher<K, V> extends AbstractFetch {
     private final Logger log;
     private final ConsumerNetworkClient client;
     private final FetchCollector<K, V> fetchCollector;
+    private final FetchBuffer fetchBuffer;
 
     public Fetcher(LogContext logContext,
                    ConsumerNetworkClient client,
@@ -71,7 +72,22 @@ public class Fetcher<K, V> extends AbstractFetch {
                    FetchMetricsManager metricsManager,
                    Time time,
                    ApiVersions apiVersions) {
-        super(logContext, metadata, subscriptions, fetchConfig, new FetchBuffer(logContext), metricsManager, time, apiVersions);
+        this(logContext, client, metadata, subscriptions, fetchConfig, deserializers, metricsManager, time,
+                apiVersions, new FetchBuffer(logContext));
+    }
+
+    private Fetcher(LogContext logContext,
+                    ConsumerNetworkClient client,
+                    ConsumerMetadata metadata,
+                    SubscriptionState subscriptions,
+                    FetchConfig fetchConfig,
+                    Deserializers<K, V> deserializers,
+                    FetchMetricsManager metricsManager,
+                    Time time,
+                    ApiVersions apiVersions,
+                    FetchBuffer fetchBuffer) {
+        super(logContext, metadata, subscriptions, fetchConfig, new FetchBufferProducer(fetchBuffer), metricsManager, time, apiVersions);
+        this.fetchBuffer = fetchBuffer;
         this.log = logContext.logger(Fetcher.class);
         this.client = client;
         this.fetchCollector = new FetchCollector<>(logContext,
