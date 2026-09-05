@@ -34,6 +34,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -43,13 +44,20 @@ import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -143,6 +151,106 @@ public class ConsumerNetworkThreadTest {
             assertEquals(before, time.milliseconds(), "wake must survive arrival before wait entry");
             consumerNetworkThread.runOnce();
             assertEquals(1, wakes.get(), "an unchanged expired obligation must not produce wakeup ping-pong");
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    public void testEarlyFetchWakeAndAggregateSchedule(boolean notifySchedule, boolean enterWaitBeforePublication) throws Exception {
+        AtomicLong heartbeatWait = new AtomicLong(30_000);
+        when(requestManagers.entries()).thenReturn(List.of(offsetsRequestManager, heartbeatRequestManager));
+        when(offsetsRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(offsetsRequestManager.maximumTimeToWait(anyLong())).thenReturn(60_000L);
+        when(heartbeatRequestManager.maximumTimeToWait(anyLong())).thenAnswer(ignored -> heartbeatWait.get());
+        when(networkClientDelegate.addAll(any(NetworkClientDelegate.PollResult.class))).thenReturn(Long.MAX_VALUE);
+        consumerNetworkThread.runOnce();
+        assertEquals(30_000L, consumerNetworkThread.maximumTimeToWait());
+
+        try (FetchBuffer buffer = new FetchBuffer(new LogContext())) {
+            FetchBufferProducer producer = new FetchBufferProducer(buffer);
+            producer.requestStarted(1);
+            CountDownLatch earlyWakeConsumed = new CountDownLatch(1);
+            CountDownLatch enterSecondWait = new CountDownLatch(enterWaitBeforePublication ? 0 : 1);
+            AtomicBoolean returnedFromSecondWait = new AtomicBoolean();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AtomicInteger scheduleWakes = new AtomicInteger();
+            Thread application = new Thread(() -> {
+                try {
+                    buffer.awaitWakeup(time.timer(60_000));
+                    assertFalse(producer.hasPendingRequests(), "local completion state must precede the first wake");
+                    long oldWait = consumerNetworkThread.maximumTimeToWait();
+                    assertEquals(30_000L, oldWait, "the I/O batch has not published its aggregate yet");
+                    earlyWakeConsumed.countDown();
+                    assertTrue(enterSecondWait.await(2, TimeUnit.SECONDS));
+                    buffer.awaitWakeup(time.timer(oldWait));
+                    assertEquals(0L, consumerNetworkThread.maximumTimeToWait());
+                    returnedFromSecondWait.set(true);
+                } catch (Throwable t) {
+                    failure.set(t);
+                } finally {
+                    earlyWakeConsumed.countDown();
+                }
+            }, "early-fetch-wake-application");
+
+            consumerNetworkThread.setScheduleWakeup(() -> {
+                assertEquals(0L, consumerNetworkThread.maximumTimeToWait(), "publish aggregate before notifying");
+                scheduleWakes.incrementAndGet();
+                if (notifySchedule)
+                    buffer.wakeup();
+            });
+            when(networkClientDelegate.completedRequestsInLastPoll()).thenReturn(true);
+            doAnswer(ignored -> {
+                producer.requestCompleted(1);
+                assertTrue(earlyWakeConsumed.await(2, TimeUnit.SECONDS));
+                assertNull(failure.get());
+                if (enterWaitBeforePublication)
+                    TestUtils.waitForCondition(() -> application.getState() == Thread.State.TIMED_WAITING,
+                            2_000, "application did not re-enter its old wait");
+                // Model a later completion in the same I/O batch changing another manager's contribution.
+                heartbeatWait.set(0);
+                return null;
+            }).when(networkClientDelegate).poll(anyLong(), anyLong());
+
+            try {
+                application.start();
+                consumerNetworkThread.runOnce();
+                assertEquals(1, scheduleWakes.get());
+                enterSecondWait.countDown();
+                if (notifySchedule) {
+                    application.join(2_000);
+                    assertFalse(application.isAlive());
+                    assertTrue(returnedFromSecondWait.get());
+                } else {
+                    // Negative control: publishing the bound alone cannot release an existing/stale wait.
+                    TestUtils.waitForCondition(() -> application.getState() == Thread.State.TIMED_WAITING,
+                            2_000, "negative control did not remain in the old wait");
+                    assertFalse(returnedFromSecondWait.get());
+                }
+                assertNull(failure.get());
+                if (!notifySchedule) {
+                    // Release the negative-control waiter explicitly before checking a later deadline.
+                    buffer.wakeup();
+                    application.join(2_000);
+                    assertFalse(application.isAlive());
+                    assertTrue(returnedFromSecondWait.get());
+                    assertNull(failure.get());
+                }
+                heartbeatWait.set(Long.MAX_VALUE);
+                doAnswer(ignored -> null).when(networkClientDelegate).poll(anyLong(), anyLong());
+                consumerNetworkThread.runOnce();
+                assertEquals(60_000L, consumerNetworkThread.maximumTimeToWait());
+                assertEquals(1, scheduleWakes.get(), "a later deadline does not require a schedule wake");
+            } finally {
+                enterSecondWait.countDown();
+                buffer.wakeup();
+                application.join(2_000);
+                if (application.isAlive()) {
+                    application.interrupt();
+                    application.join(2_000);
+                }
+                assertFalse(application.isAlive(), "test must not leak its application waiter");
+            }
         }
     }
 
