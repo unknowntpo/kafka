@@ -191,6 +191,21 @@ public class CommitRequestManagerTest {
     }
 
     @Test
+    public void testExpiredAutoCommitAwaitsCoordinatorInsteadOfZeroApplicationWait() {
+        CommitRequestManager manager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        time.sleep(101);
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertEquals(Long.MAX_VALUE, manager.maximumTimeToWait(time.milliseconds()),
+            "an expired auto-commit cannot progress until coordinator discovery completes");
+        assertEquals(NextPollCondition.Input.COORDINATOR_CHANGE,
+            manager.poll(time.milliseconds()).nextPollCondition().input());
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(new Node(1, "localhost", 9092)));
+        assertEquals(0, manager.maximumTimeToWait(time.milliseconds()),
+            "discovery must re-enable the expired obligation without advancing the clock");
+    }
+
+    @Test
     public void testAsyncCommitWhileCoordinatorUnknownIsSentOutWhenCoordinatorDiscovered() {
         CommitRequestManager commitRequestManager = create(false, 0);
         assertPoll(false, 0, commitRequestManager);
@@ -1669,7 +1684,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Group authorization exception")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(200));
+        assertTrue(commitRequestManager.poll(200).unsentRequests.isEmpty());
 
         assertEmptyPendingRequests(commitRequestManager);
     }
@@ -1694,7 +1709,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Fatal error")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertTrue(commitRequestManager.poll(time.milliseconds()).unsentRequests.isEmpty());
 
         assertTrue(commitFuture.isCompletedExceptionally());
 
@@ -1713,7 +1728,7 @@ public class CommitRequestManagerTest {
         commitRequestManager.signalClose();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertTrue(commitRequestManager.poll(time.milliseconds()).unsentRequests.isEmpty());
 
         assertTrue(commitFuture.isCompletedExceptionally());
 

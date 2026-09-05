@@ -30,10 +30,10 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.slf4j.Logger;
 
+import java.util.Collections;
 import java.util.Objects;
 import java.util.Optional;
 
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
  * This is responsible for timing to send the next {@link FindCoordinatorRequest} based on the following criteria:
@@ -99,22 +99,22 @@ public class CoordinatorRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
-        if (closing || this.coordinator != null)
-            return EMPTY;
+        NextPollCondition activation = nextPollCondition(currentTimeMs);
+        if (activation.kind() == NextPollCondition.Kind.AWAIT_INPUT || activation.delayMs() > 0)
+            return new NetworkClientDelegate.PollResult(activation);
 
-        if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
-            NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(request);
-        }
+        NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
+        return new NetworkClientDelegate.PollResult(nextPollCondition(currentTimeMs), Collections.singletonList(request));
+    }
 
-        // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
-        // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
-        // backoff
-        if (coordinatorRequestState.requestInFlight()) {
-            return EMPTY;
-        }
-
-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+    private NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (closing)
+            return NextPollCondition.awaitInput(NextPollCondition.Input.SHUTDOWN);
+        if (coordinator != null)
+            return NextPollCondition.awaitInput(NextPollCondition.Input.COORDINATOR_CHANGE);
+        if (coordinatorRequestState.requestInFlight())
+            return NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION);
+        return NextPollCondition.retryAfter(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {

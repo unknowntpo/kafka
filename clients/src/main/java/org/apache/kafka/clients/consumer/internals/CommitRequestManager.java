@@ -190,7 +190,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         .forEach(request -> request.future().completeExceptionally(exception));
             }
 
-            return EMPTY;
+            return new NetworkClientDelegate.PollResult(NextPollCondition.awaitInput(NextPollCondition.Input.COORDINATOR_CHANGE));
         }
 
         if (closing) {
@@ -221,6 +221,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
+        // The same coordinator requirement gates poll(): time cannot enable a commit without its owner.
+        // Discovery completion returns control to the next full manager pass, which recomputes this wait.
+        if (coordinatorRequestManager.coordinator().isEmpty())
+            return Long.MAX_VALUE;
         return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
     }
 

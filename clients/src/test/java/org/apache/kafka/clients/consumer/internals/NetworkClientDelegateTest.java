@@ -64,12 +64,35 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 public class NetworkClientDelegateTest {
+    @Test
+    public void testTypedActivationPreservesOutputAndWaitIndependence() {
+        NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
+            new FindCoordinatorRequest.Builder(new FindCoordinatorRequestData().setKey("group")), Optional.empty());
+        assertThrows(IllegalArgumentException.class, () ->
+            new NetworkClientDelegate.PollResult(NextPollCondition.pollImmediately()));
+        assertThrows(IllegalArgumentException.class, () -> NextPollCondition.retryAfter(-1));
+        for (NextPollCondition condition : java.util.List.of(NextPollCondition.pollImmediately(),
+                NextPollCondition.retryAfter(10), NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION))) {
+            ArrayList<NetworkClientDelegate.UnsentRequest> requests = new ArrayList<>();
+            requests.add(request);
+            NetworkClientDelegate.PollResult result = new NetworkClientDelegate.PollResult(condition, requests);
+            requests.clear();
+            assertEquals(1, result.unsentRequests.size());
+            assertEquals(condition.delayMs(), result.timeUntilNextPollMs);
+            assertEquals(condition, result.nextPollCondition());
+        }
+        assertEquals(NextPollCondition.Kind.RETRY_AFTER, new NetworkClientDelegate.PollResult(0).nextPollCondition().kind());
+        assertEquals(NextPollCondition.Kind.RETRY_AFTER, NextPollCondition.retryAfter(Long.MAX_VALUE).kind());
+        assertEquals(NextPollCondition.Kind.AWAIT_INPUT, NetworkClientDelegate.PollResult.EMPTY.nextPollCondition().kind());
+    }
+
     private static final int REQUEST_TIMEOUT_MS = 5000;
     private static final String GROUP_ID = "group";
     private static final long DEFAULT_REQUEST_TIMEOUT_MS = 500;

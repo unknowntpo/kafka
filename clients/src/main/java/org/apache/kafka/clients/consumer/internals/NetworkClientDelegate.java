@@ -308,7 +308,7 @@ public class NetworkClientDelegate implements AutoCloseable {
     public long addAll(PollResult pollResult) {
         Objects.requireNonNull(pollResult);
         addAll(pollResult.unsentRequests);
-        return pollResult.timeUntilNextPollMs;
+        return pollResult.nextPollCondition().delayMs();
     }
 
     public void addAll(final List<UnsentRequest> requests) {
@@ -330,10 +330,29 @@ public class NetworkClientDelegate implements AutoCloseable {
         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
         public final long timeUntilNextPollMs;
         public final List<UnsentRequest> unsentRequests;
+        private final NextPollCondition nextPollCondition;
 
+        // Compatibility adapter: a legacy zero is not proof that output was produced.
         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
-            this.timeUntilNextPollMs = timeUntilNextPollMs;
-            this.unsentRequests = Collections.unmodifiableList(unsentRequests);
+            this(timeUntilNextPollMs == WAIT_FOREVER
+                    ? NextPollCondition.awaitInput(NextPollCondition.Input.LEGACY_UNSPECIFIED)
+                    : NextPollCondition.retryAfter(timeUntilNextPollMs), unsentRequests);
+        }
+
+        public PollResult(final NextPollCondition nextPollCondition, final List<UnsentRequest> unsentRequests) {
+            this.nextPollCondition = Objects.requireNonNull(nextPollCondition);
+            if (nextPollCondition.kind() == NextPollCondition.Kind.POLL_IMMEDIATELY && unsentRequests.isEmpty())
+                throw new IllegalArgumentException("An empty result cannot request immediate polling");
+            this.timeUntilNextPollMs = nextPollCondition.delayMs();
+            this.unsentRequests = List.copyOf(unsentRequests);
+        }
+
+        public PollResult(final NextPollCondition nextPollCondition) {
+            this(nextPollCondition, Collections.emptyList());
+        }
+
+        public NextPollCondition nextPollCondition() {
+            return nextPollCondition;
         }
 
         public PollResult(final List<UnsentRequest> unsentRequests) {

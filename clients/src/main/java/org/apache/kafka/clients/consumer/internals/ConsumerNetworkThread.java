@@ -83,6 +83,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
     private volatile long cachedMaximumTimeToWait = MAX_POLL_TIMEOUT_MS;
+    private volatile Runnable scheduleWakeup = () -> { };
+    private long applicationWaitDeadlineMs = Long.MAX_VALUE;
     private long lastPollTimeMs = 0L;
 
     public ConsumerNetworkThread(LogContext logContext,
@@ -227,18 +229,31 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
 
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
+        final long afterIoTimeMs = time.milliseconds();
         long maxTimeToWaitMs = Long.MAX_VALUE;
 
         for (RequestManager rm : requestManagers.entries()) {
-            long waitMs = rm.maximumTimeToWait(currentTimeMs);
+            long waitMs = rm.maximumTimeToWait(afterIoTimeMs);
             maxTimeToWaitMs = Math.min(maxTimeToWaitMs, waitMs);
         }
 
         cachedMaximumTimeToWait = maxTimeToWaitMs;
+        long nextDeadlineMs = maxTimeToWaitMs > Long.MAX_VALUE - afterIoTimeMs
+            ? Long.MAX_VALUE : afterIoTimeMs + maxTimeToWaitMs;
+        boolean earlierDeadline = nextDeadlineMs < applicationWaitDeadlineMs;
+        applicationWaitDeadlineMs = nextDeadlineMs;
+        // A waiter may already have entered its old wait. Publish first, then latch a notification
+        // only when an input moves the bound earlier, not on every unchanged manager poll.
+        if (earlierDeadline)
+            scheduleWakeup.run();
 
         reapExpiredApplicationEvents(currentTimeMs);
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
         maybeFailOnMetadataError(uncompletedEvents);
+    }
+
+    public void setScheduleWakeup(Runnable scheduleWakeup) {
+        this.scheduleWakeup = Objects.requireNonNull(scheduleWakeup);
     }
 
     /**

@@ -123,6 +123,10 @@ public class ApplicationEventHandler implements Closeable {
         return networkThread.maximumTimeToWait();
     }
 
+    public void setScheduleWakeup(Runnable scheduleWakeup) {
+        networkThread.setScheduleWakeup(scheduleWakeup);
+    }
+
     /**
      * Add a {@link CompletableApplicationEvent} to the handler. The method blocks waiting for the result, and will
      * return the result value upon successful completion; otherwise throws an error.

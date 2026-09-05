@@ -119,6 +119,31 @@ public class ConsumerNetworkThreadTest {
             "close() should make consumerNetworkThread.running false by calling closeInternal(Duration timeout)");
     }
 
+    @Test
+    public void testEarlierInputDrivenScheduleIsPublishedBeforeLatchedWake() throws InterruptedException {
+        when(requestManagers.entries()).thenReturn(List.of(coordinatorRequestManager));
+        when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(networkClientDelegate.addAll(any(NetworkClientDelegate.PollResult.class))).thenReturn(Long.MAX_VALUE);
+        when(coordinatorRequestManager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE, 0L, 0L);
+        try (FetchBuffer buffer = new FetchBuffer(new LogContext())) {
+            java.util.concurrent.atomic.AtomicInteger wakes = new java.util.concurrent.atomic.AtomicInteger();
+            consumerNetworkThread.setScheduleWakeup(() -> {
+                assertEquals(0, consumerNetworkThread.maximumTimeToWait());
+                wakes.incrementAndGet();
+                buffer.wakeup();
+            });
+            consumerNetworkThread.runOnce();
+            assertEquals(0, wakes.get());
+            consumerNetworkThread.runOnce();
+            assertEquals(1, wakes.get());
+            long before = time.milliseconds();
+            buffer.awaitWakeup(time.timer(60_000));
+            assertEquals(before, time.milliseconds(), "wake must survive arrival before wait entry");
+            consumerNetworkThread.runOnce();
+            assertEquals(1, wakes.get(), "an unchanged expired obligation must not produce wakeup ping-pong");
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(longs = {ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS - 1, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS + 1})
     public void testConsumerNetworkThreadPollTimeComputations(long exampleTime) {

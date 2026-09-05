@@ -566,6 +566,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     requestManagersSupplier,
                     asyncConsumerMetrics
             );
+            this.applicationEventHandler.setScheduleWakeup(fetchBuffer::wakeup);
             this.rebalanceCallbackMetricsManager = new RebalanceCallbackMetricsManager(metrics);
             this.rebalanceListenerInvoker = new ConsumerRebalanceListenerInvoker(
                     logContext,
@@ -768,6 +769,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 networkClientDelegateSupplier,
                 requestManagersSupplier,
                 asyncConsumerMetrics);
+        this.applicationEventHandler.setScheduleWakeup(fetchBuffer::wakeup);
         this.streamsRebalanceListenerInvoker = Optional.empty();
         this.backgroundEventProcessor = new BackgroundEventProcessor();
         this.backgroundEventReaper = new CompletableEventReaper(logContext);
