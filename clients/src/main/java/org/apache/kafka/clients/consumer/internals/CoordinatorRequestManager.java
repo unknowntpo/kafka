@@ -58,6 +58,7 @@ public class CoordinatorRequestManager implements RequestManager {
     private long totalDisconnectedMin = 0;
     private boolean closing = false;
     private Node coordinator;
+    private long coordinatorVersion;
     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
     // appropriate actions. 
     // For example:
@@ -153,6 +154,24 @@ public class CoordinatorRequestManager implements RequestManager {
         }
     }
 
+    /** Owner-local identity, unrelated to the Kafka group/member epoch. Read on the network thread. */
+    public long coordinatorVersion() {
+        return coordinatorVersion;
+    }
+
+    public void handleCoordinatorDisconnect(Throwable exception, long currentTimeMs, long observedVersion) {
+        if (exception instanceof DisconnectException)
+            markCoordinatorUnknownIfCurrent(exception.getMessage(), currentTimeMs, observedVersion);
+    }
+
+    /** Validate an observation from a captured attempt; still complete that attempt's own outcome normally. */
+    public boolean markCoordinatorUnknownIfCurrent(String cause, long currentTimeMs, long observedVersion) {
+        if (observedVersion != coordinatorVersion)
+            return false;
+        markCoordinatorUnknown(cause, currentTimeMs);
+        return true;
+    }
+
     /**
      * Mark the coordinator as "unknown" (i.e. {@code null}) when a disconnect is detected. This detection can occur
      * in one of two paths:
@@ -178,6 +197,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 cause
             );
             coordinator = null;
+            coordinatorVersion++;
         } else {
             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
             long currDisconnectMin = durationOfOngoingDisconnectMs / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
@@ -192,10 +212,13 @@ public class CoordinatorRequestManager implements RequestManager {
         final long currentTimeMs,
         final FindCoordinatorResponseData.Coordinator coordinator
     ) {
-        this.coordinator = new GroupCoordinatorNode(
+        Node discovered = new GroupCoordinatorNode(
                 coordinator.nodeId(),
                 coordinator.host(),
                 coordinator.port());
+        if (!discovered.equals(this.coordinator))
+            coordinatorVersion++;
+        this.coordinator = discovered;
         log.info("Discovered group coordinator {}", coordinator);
         coordinatorRequestState.onSuccessfulAttempt(currentTimeMs);
     }

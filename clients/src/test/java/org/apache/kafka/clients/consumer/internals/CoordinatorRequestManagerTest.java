@@ -304,6 +304,23 @@ public class CoordinatorRequestManagerTest {
         );
     }
 
+    @Test
+    public void testDelayedObservationCannotInvalidateRediscoveredSameNode() {
+        CoordinatorRequestManager owner = setupCoordinatorManager(GROUP_ID);
+        expectFindCoordinatorRequest(owner, Errors.NONE);
+        long capturedVersion = owner.coordinatorVersion();
+        Node capturedNode = owner.coordinator().orElseThrow();
+        assertTrue(owner.markCoordinatorUnknownIfCurrent("current observation", time.milliseconds(), capturedVersion));
+        time.sleep(RETRY_BACKOFF_MS);
+        expectFindCoordinatorRequest(owner, Errors.NONE);
+        assertEquals(capturedNode, owner.coordinator().orElseThrow(), "even rediscovery of the same node is a new attempt context");
+        assertTrue(owner.coordinatorVersion() > capturedVersion);
+        assertFalse(owner.markCoordinatorUnknownIfCurrent("late observation", time.milliseconds(), capturedVersion));
+        assertTrue(owner.coordinator().isPresent());
+        assertTrue(owner.markCoordinatorUnknownIfCurrent("new observation", time.milliseconds(), owner.coordinatorVersion()));
+        assertTrue(owner.coordinator().isEmpty());
+    }
+
     private ClientResponse buildResponse(
         NetworkClientDelegate.UnsentRequest request,
         Errors error

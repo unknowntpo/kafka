@@ -851,7 +851,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          */
         @Override
         @SuppressWarnings("NPathComplexity")
-        public void onResponse(final ClientResponse response) {
+        public void onResponse(final ClientResponse response, final long observedVersion) {
             metricsManager.recordRequestLatency(response.requestLatencyMs());
             long currentTimeMs = response.receivedTimeMs();
             OffsetCommitResponse commitResponse = (OffsetCommitResponse) response.responseBody();
@@ -889,7 +889,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                     } else if (error == Errors.COORDINATOR_NOT_AVAILABLE ||
                         error == Errors.NOT_COORDINATOR ||
                         error == Errors.REQUEST_TIMED_OUT) {
-                        coordinatorRequestManager.markCoordinatorUnknown(error.message(), currentTimeMs);
+                        coordinatorRequestManager.markCoordinatorUnknownIfCurrent(error.message(), currentTimeMs, observedVersion);
                         future.completeExceptionally(error.exception());
                         return;
                     } else if (error == Errors.OFFSET_METADATA_TOO_LARGE ||
@@ -1011,6 +1011,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Build request with the given builder, including response handling logic.
          */
         NetworkClientDelegate.UnsentRequest buildRequestWithResponseHandling(final AbstractRequest.Builder<?> builder) {
+            final long observedVersion = coordinatorRequestManager.coordinatorVersion();
             NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
                 builder,
                 coordinatorRequestManager.coordinator()
@@ -1018,21 +1019,22 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             request.whenComplete(
                 (response, throwable) -> {
                     long completionTimeMs = request.handler().completionTimeMs();
-                    handleClientResponse(response, throwable, completionTimeMs);
+                    handleClientResponse(response, throwable, completionTimeMs, observedVersion);
                 });
             return request;
         }
 
         private void handleClientResponse(final ClientResponse response,
                                           final Throwable error,
-                                          final long requestCompletionTimeMs) {
+                                          final long requestCompletionTimeMs,
+                                          final long observedVersion) {
             try {
                 if (error == null) {
-                    onResponse(response);
+                    onResponse(response, observedVersion);
                 } else {
                     log.debug("{} completed with error", requestDescription(), error);
                     onFailedAttempt(requestCompletionTimeMs);
-                    coordinatorRequestManager.handleCoordinatorDisconnect(error, requestCompletionTimeMs);
+                    coordinatorRequestManager.handleCoordinatorDisconnect(error, requestCompletionTimeMs, observedVersion);
                     future().completeExceptionally(error);
                 }
             } catch (Throwable t) {
@@ -1046,7 +1048,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             return super.toStringBase() + ", " + memberInfo;
         }
 
-        abstract void onResponse(final ClientResponse response);
+        abstract void onResponse(final ClientResponse response, final long observedVersion);
 
         abstract void removeRequest();
     }
@@ -1203,13 +1205,13 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Handle OffsetFetch response, including successful and failed.
          */
         @Override
-        void onResponse(final ClientResponse response) {
+        void onResponse(final ClientResponse response, final long observedVersion) {
             long currentTimeMs = response.receivedTimeMs();
             var fetchResponse = (OffsetFetchResponse) response.responseBody();
             var groupResponse = fetchResponse.group(groupId);
             var error = Errors.forCode(groupResponse.errorCode());
             if (error != Errors.NONE) {
-                onFailure(currentTimeMs, error);
+                onFailure(currentTimeMs, error, observedVersion);
                 return;
             }
             onSuccess(currentTimeMs, groupResponse);
@@ -1220,7 +1222,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * result future exceptionally in the case of non-recoverable or unexpected errors.
          */
         private void onFailure(final long currentTimeMs,
-                               final Errors responseError) {
+                               final Errors responseError,
+                               final long observedVersion) {
             log.debug("Offset fetch failed: {}", responseError.message());
             onFailedAttempt(currentTimeMs);
             ApiException exception = responseError.exception();
@@ -1242,7 +1245,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 future.completeExceptionally(exception);
             } else if (responseError == Errors.NOT_COORDINATOR || responseError == Errors.COORDINATOR_NOT_AVAILABLE) {
                 // Re-discover the coordinator and retry
-                coordinatorRequestManager.markCoordinatorUnknown("error response " + responseError.name(), currentTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknownIfCurrent("error response " + responseError.name(), currentTimeMs, observedVersion);
                 future.completeExceptionally(exception);
             } else if (exception instanceof RetriableException) {
                 future.completeExceptionally(exception);

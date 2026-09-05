@@ -294,7 +294,7 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
             case COORDINATOR_NOT_AVAILABLE:
             case NOT_COORDINATOR:
                 verify(backgroundEventHandler, never()).add(any());
-                verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+                verify(coordinatorRequestManager).markCoordinatorUnknownIfCurrent(any(), anyLong(), anyLong());
                 assertNextHeartbeatTiming(0);
                 break;
             case UNKNOWN_MEMBER_ID:

@@ -2033,7 +2033,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final HeartbeatRequestState heartbeatRequestState = heartbeatRequestStateMockedConstruction.constructed().get(0);
             verify(heartbeatRequestState).onFailedAttempt(completionTimeMs);
             verify(heartbeatState).reset();
-            verify(coordinatorRequestManager).handleCoordinatorDisconnect(disconnectException, completionTimeMs);
+            verify(coordinatorRequestManager).handleCoordinatorDisconnect(disconnectException, completionTimeMs, 0L);
             verify(membershipManager).onRetriableHeartbeatFailure();
         }
     }
@@ -2135,9 +2135,10 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final long completionTimeMs = time.milliseconds();
             final ClientResponse response = buildClientErrorResponse(error, "error message");
             networkRequest.handler().onComplete(response);
-            verify(coordinatorRequestManager).markCoordinatorUnknown(
+            verify(coordinatorRequestManager).markCoordinatorUnknownIfCurrent(
                 ((StreamsGroupHeartbeatResponse) response.responseBody()).data().errorMessage(),
-                completionTimeMs
+                completionTimeMs,
+                0L
             );
             verify(heartbeatState).reset();
             verify(heartbeatRequestState).reset();

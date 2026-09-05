@@ -385,7 +385,7 @@ public class ConsumerHeartbeatRequestManagerTest
         result.unsentRequests.get(0).handler().onFailure(time.milliseconds(), DisconnectException.INSTANCE);
         verify(membershipManager).onHeartbeatFailure(true);
         // Ensure that the coordinatorManager rediscovers the coordinator
-        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong());
+        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong(), anyLong());
         verify(backgroundEventHandler, never()).add(any());
 
         time.sleep(DEFAULT_RETRY_BACKOFF_MS - 1);

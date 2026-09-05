@@ -227,6 +227,10 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
             pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
         }
 
+        // Completion callbacks finish their owner updates as one I/O batch. They may queue new
+        // operations, but admission (manager.poll + delegate.addAll) resumes only at the next full pass.
+        // Requests admitted before this batch retain their captured attempt context; do not discard
+        // transport work after its manager has reserved an in-flight attempt.
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
         final long afterIoTimeMs = time.milliseconds();

@@ -61,6 +61,29 @@ coverage before declaring the complete activation slice ready for production.
 
 ## Historical issues and acceptance scope
 
+### Step 2: ownership and admission
+
+Validation: 568 tests passed, zero failed/skipped/errors: commit 147, coordinator 12, admission contract 1,
+regular heartbeat 67, share heartbeat 35, Streams heartbeat 256, Streams topology 13, offsets 37.
+Checkstyle passed. The unchanged captured-partition regression
+`testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition` passed.
+
+- Coordinator target/version is network-thread-owned. Request construction captures its version on the same thread.
+  Only `CoordinatorRequestManager` compares it before applying invalidation. Node rediscovery, including the same
+  node after an unknown interval, creates a new identity. This is not a member epoch or transport correlation ID.
+- Regular/share/Streams heartbeat, offset commit/fetch, and Streams topology callbacks pass the captured version.
+  A stale invalidation does not mutate the current coordinator; the originating operation still completes or retries
+  by its existing policy. Successful older offset-fetch results remain usable within their captured scope.
+- The selected admission boundary is the existing **next full pass**, not a new post-I/O owner poll.
+  `ConsumerAdmissionContractTest.testCompletionBatchFinishesBeforeReentrantCommitAdmission` runs the real
+  network thread, delegate, coordinator and commit manager with `MockClient`. Offset-commit success queues a
+  distinct follow-up commit; an offset-fetch error invalidates the coordinator in the same I/O poll. No speculative
+  request is staged/sent. Discovery restores the owner, and the following full pass sends the ready commit without
+  another timer tick. The legitimate discovery backoff is elapsed before this race starts, not removed.
+- This is a commit/offset-fetch completion batch, not the exact heartbeat-plus-commit integration variant.
+  That variant and real-broker recovery remain explicit gates. Existing pre-batch admitted requests are retained;
+  no newly introduced command-discard or in-flight rollback protocol is claimed.
+
 | Evidence | What this experiment must establish | Status |
 | --- | --- | --- |
 | KAFKA-20253 / PR 22836 | In-flight work must not create a no-progress poll loop. | Existing coordinator regression retained and strengthened with typed cause; exact historical CPU reproduction not performed. |

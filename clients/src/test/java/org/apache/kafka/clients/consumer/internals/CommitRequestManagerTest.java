@@ -56,6 +56,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.Mockito;
 
@@ -189,6 +190,43 @@ public class CommitRequestManagerTest {
         commitRequestManager.commitAsync(offsets);
         assertPoll(false, 0, commitRequestManager);
     }
+
+    @ParameterizedTest
+    @EnumSource(value = Errors.class, names = {"NONE", "NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE"})
+    public void testCapturedOffsetFetchResponsePreservesNewCoordinator(Errors error) {
+        coordinatorRequestManager = new CoordinatorRequestManager(logContext, retryBackoffMs, retryBackoffMaxMs, DEFAULT_GROUP_ID);
+        discoverCoordinator();
+        CommitRequestManager manager = create(false, 100);
+        Set<TopicPartition> scope = Set.of(new TopicPartition("topic", 0));
+        var future = manager.fetchOffsets(scope, time.milliseconds() + defaultApiTimeoutMs);
+        NetworkClientDelegate.UnsentRequest request = manager.poll(time.milliseconds()).unsentRequests.get(0);
+        long capturedVersion = coordinatorRequestManager.coordinatorVersion();
+        coordinatorRequestManager.markCoordinatorUnknown("another completion", time.milliseconds());
+        time.sleep(retryBackoffMaxMs);
+        discoverCoordinator();
+        long currentVersion = coordinatorRequestManager.coordinatorVersion();
+        assertTrue(currentVersion > capturedVersion);
+        request.handler().onComplete(buildOffsetFetchClientResponse(request, scope, error));
+        assertTrue(coordinatorRequestManager.coordinator().isPresent());
+        assertEquals(currentVersion, coordinatorRequestManager.coordinatorVersion());
+        if (error == Errors.NONE) {
+            assertTrue(future.isDone(), "a still-valid captured result must not be discarded merely because owner version changed");
+            assertFalse(future.isCompletedExceptionally());
+        } else {
+            time.sleep(retryBackoffMaxMs);
+            assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size(),
+                "fencing the owner mutation must not lose the operation's retry responsibility");
+        }
+    }
+
+    private void discoverCoordinator() {
+        NetworkClientDelegate.UnsentRequest request = coordinatorRequestManager.poll(time.milliseconds()).unsentRequests.get(0);
+        request.handler().onComplete(new ClientResponse(
+            new RequestHeader(ApiKeys.FIND_COORDINATOR, request.requestBuilder().build().version(), "test", 1),
+            request.handler(), mockedNode.idString(), time.milliseconds(), time.milliseconds(), false, null, null,
+            org.apache.kafka.common.requests.FindCoordinatorResponse.prepareResponse(Errors.NONE, DEFAULT_GROUP_ID, mockedNode)));
+    }
+
 
     @Test
     public void testExpiredAutoCommitAwaitsCoordinatorInsteadOfZeroApplicationWait() {
@@ -1154,11 +1192,11 @@ public class CommitRequestManagerTest {
     }
 
     private void assertCoordinatorDisconnectHandling() {
-        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong());
+        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong(), anyLong());
     }
 
     private void assertCoordinatorDisconnectOnCoordinatorError() {
-        verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager).markCoordinatorUnknownIfCurrent(any(), anyLong(), anyLong());
     }
 
     private void assertExceptionHandling(CommitRequestManager commitRequestManager, Errors errors,
@@ -1173,7 +1211,7 @@ public class CommitRequestManagerTest {
             case NOT_COORDINATOR:
             case COORDINATOR_NOT_AVAILABLE:
             case REQUEST_TIMED_OUT:
-                verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+                verify(coordinatorRequestManager).markCoordinatorUnknownIfCurrent(any(), anyLong(), anyLong());
                 assertPollDoesNotReturn(commitRequestManager, remainBackoffMs);
                 break;
             case UNKNOWN_TOPIC_OR_PARTITION:

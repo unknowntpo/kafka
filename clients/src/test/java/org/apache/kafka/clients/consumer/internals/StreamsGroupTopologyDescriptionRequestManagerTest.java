@@ -227,7 +227,7 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
             assertTrue(streamsRebalanceData.topologyPushRequired(),
                 "Flag should remain set after " + error);
         }
-        verify(coordinatorRequestManager, times(2)).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager, times(2)).markCoordinatorUnknownIfCurrent(any(), anyLong(), anyLong());
     }
 
     /**
@@ -247,7 +247,7 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         unsent.handler().onComplete(buildResponse(Errors.COORDINATOR_LOAD_IN_PROGRESS, 0));
 
         assertTrue(streamsRebalanceData.topologyPushRequired());
-        verify(coordinatorRequestManager, never()).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager, never()).markCoordinatorUnknownIfCurrent(any(), anyLong(), anyLong());
     }
 
     /**
