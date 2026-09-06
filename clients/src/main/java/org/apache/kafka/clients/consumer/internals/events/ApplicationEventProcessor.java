@@ -763,7 +763,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
             if (maybeCompleteAsyncPollEventExceptionally(event, updatePositionsError))
                 return;
 
-            requestManagers.fetchRequestManager.createFetchRequests().whenComplete((___, fetchError) -> {
+            createFetchRequestsForAsyncPoll().whenComplete((___, fetchError) -> {
                 if (event.isComplete())
                     return;
                 if (maybeCompleteAsyncPollEventExceptionally(event, fetchError))
@@ -772,6 +772,17 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
                 event.completeSuccessfully();
             });
         });
+    }
+
+    private CompletableFuture<Void> createFetchRequestsForAsyncPoll() {
+        try {
+            return requestManagers.fetchRequestManager.createFetchRequests();
+        } catch (Throwable t) {
+            // This call runs inside a future continuation. A synchronous rejection must follow the
+            // same error/publication path as an exceptional result, not disappear into an ignored
+            // dependent future. Preserve the original cause for the existing timeout classification.
+            return CompletableFuture.failedFuture(t);
+        }
     }
 
     /**

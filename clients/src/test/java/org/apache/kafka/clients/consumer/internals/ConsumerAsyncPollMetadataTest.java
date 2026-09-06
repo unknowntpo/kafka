@@ -36,6 +36,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
@@ -344,5 +345,49 @@ class ConsumerAsyncPollMetadataTest {
         assertTrue(event.isComplete());
         assertSame(error, event.error().orElseThrow());
         assertEquals(1, notifications.get());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void testNewFetchValidationFailureDoesNotDependOnFutureTiming(boolean throwsBeforeReturning, boolean positionsAlreadyReady) {
+        // Extension probe: a manager may reject new work before returning its future, or complete
+        // the returned future exceptionally. Application delivery must not depend on that choice.
+        if (throwsBeforeReturning)
+            when(fetch.createFetchRequests()).thenThrow(error);
+        else
+            when(fetch.createFetchRequests()).thenReturn(CompletableFuture.failedFuture(error));
+        if (positionsAlreadyReady)
+            positions.complete(null);
+
+        AsyncPollEvent event = admit(time.milliseconds() + 60_000);
+        if (!positionsAlreadyReady) {
+            assertFalse(event.isComplete());
+            positions.complete(null);
+        }
+        assertTrue(event.isComplete(), "a validation error must not disappear into an unobserved dependent future");
+        assertSame(error, event.error().orElseThrow());
+        assertEquals(1, notifications.get());
+        verify(fetch).createFetchRequests();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void testFetchRejectionPreservesExistingTimeoutPolicy(boolean throwsBeforeReturning, boolean kafkaTimeout) {
+        Throwable timeout = kafkaTimeout ? new org.apache.kafka.common.errors.TimeoutException("preparation expired")
+                : new java.util.concurrent.TimeoutException("preparation expired");
+        if (throwsBeforeReturning) {
+            // Answer permits exercising either timeout family without declaring a checked throws clause.
+            when(fetch.createFetchRequests()).thenAnswer(ignored -> {
+                throw timeout;
+            });
+        } else {
+            when(fetch.createFetchRequests()).thenReturn(CompletableFuture.failedFuture(timeout));
+        }
+        AsyncPollEvent event = admit(time.milliseconds() + 60_000);
+        positions.complete(null);
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isEmpty(), "the adapter must not wrap the cause and change timeout classification");
+        assertEquals(0, notifications.get());
+        verify(fetch).createFetchRequests();
     }
 }

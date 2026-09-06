@@ -110,6 +110,9 @@ benchmark submission or performance claim is part of this assessment.
 
 ## Evidence and validation boundary
 
+- [RM extension contract probe](kip-1371-rm-extension-contract-probe.md):
+  a synchronous preparation rejection could disappear in a future continuation;
+  a scoped adapter removes that caller-detail dependency, not all author burden.
 - [Effect-specific observation validation](kip-1371-effect-observation-validation.md):
   per-effect prerequisites, pre-aggregate error observation, and public-poll
   error/wakeup/recovery schedules; no new production barrier is introduced.
