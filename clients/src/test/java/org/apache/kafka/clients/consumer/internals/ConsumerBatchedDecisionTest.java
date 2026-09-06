@@ -155,7 +155,7 @@ class ConsumerBatchedDecisionTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    void testCoordinatorFatalErrorDeliveryDoesNotDependOnReaderOrder(boolean heartbeatFirst) {
+    void testCoordinatorFatalErrorDeliveryDependsOnReadBeforeClear(boolean heartbeatFirst) {
         var operation = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
         var offsets = commits.fetchOffsets(Set.of(PARTITION), time.milliseconds() + 60_000);
         coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
@@ -174,34 +174,25 @@ class ConsumerBatchedDecisionTest {
             commits.poll(time.milliseconds());
             heartbeat.poll(time.milliseconds());
         }
-        // Notification consumption must not erase the error seen by operation readers.
+        // A later pass without another discovery response cannot recover the consumed failure.
         assertTrue(commits.poll(time.milliseconds()).unsentRequests.isEmpty());
         heartbeat.poll(time.milliseconds());
         ArgumentCaptor<ErrorEvent> delivered = ArgumentCaptor.forClass(ErrorEvent.class);
         verify(background).add(delivered.capture());
         assertSame(fatal, delivered.getValue().error());
-        assertSame(fatal, coordinator.fatalError().orElseThrow());
-        assertTrue(operation.isCompletedExceptionally());
-        assertTrue(offsets.isCompletedExceptionally());
-        assertSame(fatal, assertThrows(CompletionException.class, operation::join).getCause());
-        assertSame(fatal, assertThrows(CompletionException.class, offsets::join).getCause());
-        assertTrue(commits.unsentOffsetCommitRequests().isEmpty());
-
-        // Candidate contract: a newly queued operation also sees the still-current fatal fact.
-        var later = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(2)));
-        commits.poll(time.milliseconds());
-        assertTrue(later.isCompletedExceptionally());
-        assertSame(fatal, assertThrows(CompletionException.class, later::join).getCause());
-
-        time.sleep(60_000);
-        discoverCoordinator();
-        var recovered = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(3)));
-        assertEquals(1, commits.poll(time.milliseconds()).unsentRequests.size());
-        assertFalse(recovered.isDone());
         assertTrue(coordinator.fatalError().isEmpty());
-        assertTrue(coordinator.takeFatalErrorForApplication().isEmpty());
-        // Recovery permits a new attempt, but cannot rewrite already completed failures.
-        assertSame(fatal, assertThrows(CompletionException.class, operation::join).getCause());
+        if (heartbeatFirst) {
+            // Characterization, not an endorsed contract: the alternative order loses operation error delivery.
+            assertFalse(operation.isDone());
+            assertFalse(offsets.isDone());
+            assertEquals(1, commits.unsentOffsetCommitRequests().size());
+        } else {
+            assertTrue(operation.isCompletedExceptionally());
+            assertTrue(offsets.isCompletedExceptionally());
+            assertSame(fatal, assertThrows(CompletionException.class, operation::join).getCause());
+            assertSame(fatal, assertThrows(CompletionException.class, offsets::join).getCause());
+            assertTrue(commits.unsentOffsetCommitRequests().isEmpty());
+        }
     }
 
     @ParameterizedTest

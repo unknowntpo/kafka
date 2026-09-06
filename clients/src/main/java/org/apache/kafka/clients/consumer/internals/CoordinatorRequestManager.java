@@ -65,7 +65,6 @@ public class CoordinatorRequestManager implements RequestManager {
     // - AbstractHeartbeatRequestManager propagates the error event to the application thread.
     // - CommitRequestManager fail pending requests.
     private Optional<Throwable> fatalError = Optional.empty();
-    private boolean fatalErrorNotificationPending;
 
     public CoordinatorRequestManager(
         final LogContext logContext,
@@ -130,9 +129,7 @@ public class CoordinatorRequestManager implements RequestManager {
         );
 
         return unsentRequest.whenComplete((clientResponse, throwable) -> {
-            // A new discovery outcome supersedes the previous fact and its notification.
-            fatalError = Optional.empty();
-            fatalErrorNotificationPending = false;
+            getAndClearFatalError();
             if (clientResponse != null) {
                 FindCoordinatorResponse response = (FindCoordinatorResponse) clientResponse.responseBody();
                 onResponse(clientResponse.receivedTimeMs(), response);
@@ -239,13 +236,11 @@ public class CoordinatorRequestManager implements RequestManager {
             log.debug("FindCoordinator request failed due to authorization error {}", exception.getMessage());
             KafkaException groupAuthorizationException = GroupAuthorizationException.forGroupId(this.groupId);
             fatalError = Optional.of(groupAuthorizationException);
-            fatalErrorNotificationPending = true;
             return;
         }
 
         log.warn("FindCoordinator request failed due to fatal exception", exception);
         fatalError = Optional.of(exception);
-        fatalErrorNotificationPending = true;
     }
 
     /**
@@ -285,16 +280,9 @@ public class CoordinatorRequestManager implements RequestManager {
         return Optional.ofNullable(this.coordinator);
     }
     
-    /**
-     * Takes the current error for the single application-error handoff path, once per discovery
-     * failure. This does not clear the fact read by dependent operations. Both the fact and any
-     * unclaimed notification are superseded by the next discovery response. Network-thread only;
-     * taking a notification does not acknowledge that the application has observed it.
-     */
-    public Optional<Throwable> takeFatalErrorForApplication() {
-        if (!fatalErrorNotificationPending)
-            return Optional.empty();
-        fatalErrorNotificationPending = false;
+    public Optional<Throwable> getAndClearFatalError() {
+        Optional<Throwable> fatalError = this.fatalError;
+        this.fatalError = Optional.empty();
         return fatalError;
     }
 
