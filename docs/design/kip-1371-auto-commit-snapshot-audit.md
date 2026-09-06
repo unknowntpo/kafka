@@ -103,14 +103,54 @@ that every public-poll gate permits this schedule or that records were lost.
 The initial run omitted the test group's configuration and failed before reaching
 the scenario; correcting that fixture is not a production red-to-green result.
 
-Next gate: reproduce this schedule through actual public poll admission, including
-the collection fast path, then choose the smallest repair if reachable. Preserve
+The public-poll experiment below now exercises the collection fast path. Preserve
 the two schedules as a counterexample/control pair.
 
 Two-thread validation on 2026-09-06: 439 tests across `FetchCollectorTest`,
 `ShareFetchCollectorTest`, and `CommitRequestManagerTest` passed twice, with no
 failures/errors/skips and retries disabled. Checkstyle and Spotless Java checks
 passed. The new test characterizes the hazard; a passing run is not a safety fix.
+
+## Public poll and runOnce reproduction
+
+`FetchCollectorTest.testPublicPollAutoCommitCaptureBeforeOrDuringCollection`
+extends the experiment to actual `AsyncKafkaConsumer.poll(Duration)`, a real
+input queue, `ConsumerNetworkThread.runOnce()`, transport delegate, and request
+transmission to `MockClient`. The application handler is a queue-forwarding test
+adapter. Unrelated request work and coordinator discovery remain mocked.
+
+The fixture starts with an established manual assignment, buffered records, and
+a position validated through `PositionsValidator.refreshAndGetPartitionsToValidate`
+on the background executor. It asserts the real validator's fast-path predicate,
+rather than mocking that predicate or fabricating a validation-complete event.
+Auto-commit is enabled in both the consumer and commit manager.
+
+- Control: run the queued poll event on the background executor during admission,
+  before collection starts. The transmitted request offset is 0.
+- Counterexample: retain that input until the collector's exhausted-fetch boundary.
+  While public `poll()` is still inside the collector, execute `runOnce()` on the
+  background executor. The transmitted request offset is 10.
+
+Both public calls eventually return the ten records. The mock transport supplies
+a successful offset-commit response before the paused collector proceeds. This
+establishes a public-method/real-loop request-before-return schedule for this POC,
+not broker durability or a tested crash/restart loss. There is no actual broker,
+subscription/group-join setup, or group-reconciliation coverage. Queue admission
+and scheduler timing are controlled, while the relevant poll gates, collector
+position mutation, auto-commit capture, and runOnce ordering are production code.
+
+The remaining design obligation is no longer just proving reachability for this
+manual-assignment fast path. It is preventing the request from committing records
+not yet eligible for auto-commit, while preserving buffered-record delivery,
+timeout/wakeup semantics, and the separate reconciliation commit contract.
+The shared-state owner and immutable captured map do not establish that boundary.
+Do not call the characterization test a passing safety regression: its expected
+offset 10 deliberately records the current hazard.
+
+Validation on 2026-09-06: 572 tests across `AsyncKafkaConsumerTest`,
+`CommitRequestManagerTest`, `FetchCollectorTest`, and `ShareFetchCollectorTest`
+passed twice, with zero failures/errors/skips and retries disabled. Final
+Checkstyle and Spotless Java checks passed. Production code remains unchanged.
 
 If the interleaving is reachable, compare a scoped capture handshake against an
 explicit application-provided offset snapshot. Preserve existing timeout,

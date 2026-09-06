@@ -16,10 +16,20 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import org.apache.kafka.clients.ApiVersions;
+import org.apache.kafka.clients.MockClient;
+import org.apache.kafka.clients.consumer.CloseOptions;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
+import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
+import org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager;
 import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
@@ -39,6 +49,8 @@ import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.record.internal.Records;
 import org.apache.kafka.common.record.internal.SimpleRecord;
+import org.apache.kafka.common.requests.OffsetCommitRequest;
+import org.apache.kafka.common.requests.OffsetCommitResponse;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.MockTime;
@@ -55,10 +67,12 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Properties;
@@ -66,6 +80,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
@@ -94,6 +109,8 @@ import static org.mockito.Mockito.when;
  * of its tests.
  */
 @MockitoSettings(strictness = Strictness.STRICT_STUBS)
+// The snapshot regression intentionally composes the real collector, public consumer, and background loop.
+@SuppressWarnings({"ClassDataAbstractionCoupling", "ClassFanOutComplexity"})
 public class FetchCollectorTest {
 
     private static final int DEFAULT_RECORD_COUNT = 10;
@@ -265,6 +282,101 @@ public class FetchCollectorTest {
         } finally {
             background.shutdownNow();
             assertTrue(background.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testPublicPollAutoCommitCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
+        buildDependencies(DEFAULT_RECORD_COUNT + 1);
+        assignAndSeek(topicAPartition0);
+        Properties properties = consumerProps();
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "public-snapshot-group");
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
+        properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 100);
+        ConsumerConfig config = new ConsumerConfig(properties);
+        Node node = new Node(1, "localhost", 9092);
+        CoordinatorRequestManager coordinator = mock(CoordinatorRequestManager.class);
+        when(coordinator.coordinator()).thenReturn(Optional.of(node));
+        OffsetsRequestManager offsets = mock(OffsetsRequestManager.class);
+        TopicMetadataRequestManager topics = mock(TopicMetadataRequestManager.class);
+        FetchRequestManager fetchRequests = mock(FetchRequestManager.class);
+        for (RequestManager manager : List.of(offsets, topics, fetchRequests, coordinator)) {
+            when(manager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+            when(manager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
+        }
+        when(offsets.updateFetchPositions(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+        when(fetchRequests.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
+        LinkedBlockingQueue<ApplicationEvent> inputs = new LinkedBlockingQueue<>();
+        ApplicationEventHandler handler = mock(ApplicationEventHandler.class);
+        ExecutorService background = Executors.newSingleThreadExecutor();
+        ConsumerNetworkThread networkThread = null;
+        AsyncKafkaConsumer<String, String> consumer = null;
+        try (Metrics commitMetrics = new Metrics(time)) {
+            CommitRequestManager commits = new CommitRequestManager(time, logContext, subscriptions,
+                config, coordinator, mock(OffsetCommitCallbackInvoker.class), "public-snapshot-group",
+                Optional.empty(), 100, 1000, OptionalDouble.of(0), commitMetrics, metadata);
+            RequestManagers managers = new RequestManagers(logContext, offsets, topics, fetchRequests,
+                Optional.of(coordinator), Optional.of(commits), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty());
+            AsyncConsumerMetrics asyncMetrics = mock(AsyncConsumerMetrics.class);
+            MockClient client = new MockClient(time, List.of(node));
+            NetworkClientDelegate delegate = new NetworkClientDelegate(time, config, logContext, client,
+                metadata, mock(BackgroundEventHandler.class), false, asyncMetrics);
+            networkThread = new ConsumerNetworkThread(logContext, time, inputs,
+                new CompletableEventReaper(logContext),
+                () -> new ApplicationEventProcessor(logContext, managers, metadata, subscriptions),
+                () -> delegate, () -> managers, asyncMetrics);
+            networkThread.initializeResources();
+            ConsumerNetworkThread loop = networkThread;
+            PositionsValidator validator = new PositionsValidator(logContext, time, subscriptions, metadata);
+            background.submit(() -> validator.refreshAndGetPartitionsToValidate(new ApiVersions()))
+                .get(5, TimeUnit.SECONDS);
+            assertTrue(validator.canSkipUpdateFetchPositions(), "exercise a previously validated position");
+            AtomicLong offsetBeforePollReturns = new AtomicLong(-1);
+            client.prepareResponse(request -> {
+                OffsetCommitRequestData data = ((OffsetCommitRequest) request).data();
+                offsetBeforePollReturns.set(data.topics().get(0).partitions().get(0).committedOffset());
+                return true;
+            }, new OffsetCommitResponse(0, Map.of(topicAPartition0, Errors.NONE)));
+            doAnswer(invocation -> {
+                ApplicationEvent event = invocation.getArgument(0);
+                inputs.add(event);
+                if (event instanceof AsyncPollEvent && !captureDuringCollection)
+                    background.submit(loop::runOnce).get(5, TimeUnit.SECONDS);
+                return null;
+            }).when(handler).add(any());
+            consumer = new AsyncKafkaConsumer<>(logContext, "public-snapshot-client", deserializers,
+                fetchBuffer, fetchCollector, metricsManager, mock(RebalanceCallbackMetricsManager.class),
+                new ConsumerInterceptors<>(Collections.emptyList(), commitMetrics), time, handler,
+                new LinkedBlockingQueue<>(), new CompletableEventReaper(logContext),
+                mock(ConsumerRebalanceListenerInvoker.class), commitMetrics, subscriptions, metadata,
+                100, 30000, 1000, "public-snapshot-group", true, validator);
+            CompletedFetch completed = spy(completedFetchBuilder.recordCount(DEFAULT_RECORD_COUNT).build());
+            doAnswer(invocation -> {
+                if (captureDuringCollection) {
+                    assertTrue(inputs.peek() instanceof AsyncPollEvent);
+                    background.submit(loop::runOnce).get(5, TimeUnit.SECONDS);
+                }
+                invocation.callRealMethod();
+                return null;
+            }).when(completed).drain();
+            fetchBuffer.add(completed);
+            time.sleep(100);
+
+            ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(1));
+
+            assertEquals(DEFAULT_RECORD_COUNT, records.count());
+            assertEquals(captureDuringCollection ? DEFAULT_RECORD_COUNT : 0, offsetBeforePollReturns.get());
+        } finally {
+            background.shutdownNow();
+            assertTrue(background.awaitTermination(5, TimeUnit.SECONDS));
+            if (consumer != null)
+                consumer.close(CloseOptions.timeout(Duration.ZERO));
+            if (networkThread != null) {
+                networkThread.close(Duration.ZERO);
+                networkThread.cleanup();
+            }
         }
     }
 
