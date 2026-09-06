@@ -602,6 +602,89 @@ public class AsyncKafkaConsumerTest {
         assertEquals(1, consumer.poll(Duration.ZERO).count(), "timed-out waiting must not discard buffered records");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testCaptureCheckpointWakeupAndErrorAreBothObserved(boolean wakeupFirst) {
+        FetchBuffer buffer = mock(FetchBuffer.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        consumer = newConsumer(buffer, new ConsumerInterceptors<>(Collections.emptyList(), metrics),
+            mock(ConsumerRebalanceListenerInvoker.class), subscriptions, true);
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptions.assignFromUser(singleton(partition));
+        subscriptions.seek(partition, 0);
+        doReturn(-1).when(metadata).updateVersion();
+        AtomicReference<AsyncPollEvent> admitted = new AtomicReference<>();
+        doAnswer(invocation -> {
+            admitted.set(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        KafkaException error = new KafkaException("capture failure alongside wakeup");
+
+        try (MockedStatic<ConsumerUtils> utils = mockStatic(ConsumerUtils.class, Mockito.CALLS_REAL_METHODS)) {
+            utils.when(() -> ConsumerUtils.getResult(any(CompletableFuture.class), Mockito.anyLong()))
+                .thenAnswer(invocation -> {
+                    if (wakeupFirst)
+                        consumer.wakeup();
+                    admitted.get().completeExceptionally(error);
+                    if (!wakeupFirst)
+                        consumer.wakeup();
+                    return invocation.callRealMethod();
+                });
+            KafkaException first = assertThrows(KafkaException.class, () -> consumer.poll(Duration.ofSeconds(1)));
+            if (wakeupFirst)
+                assertInstanceOf(WakeupException.class, first);
+            else
+                assertSame(error, first);
+        }
+        KafkaException second = assertThrows(KafkaException.class, () -> consumer.poll(Duration.ZERO));
+        if (wakeupFirst)
+            assertSame(error, second);
+        else
+            assertInstanceOf(WakeupException.class, second);
+        assertTrue(consumer.poll(Duration.ZERO).isEmpty(), "neither outcome should be delivered twice");
+        verify(fetchCollector, never()).collectFetch(buffer);
+        assertEquals(0, subscriptions.position(partition).offset);
+    }
+
+    @Test
+    public void testCaptureCheckpointThreadInterruptionDoesNotCompleteOwnerOperation() {
+        FetchBuffer buffer = mock(FetchBuffer.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        consumer = newConsumer(buffer, new ConsumerInterceptors<>(Collections.emptyList(), metrics),
+            mock(ConsumerRebalanceListenerInvoker.class), subscriptions, true);
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptions.assignFromUser(singleton(partition));
+        subscriptions.seek(partition, 0);
+        doReturn(-1).when(metadata).updateVersion();
+        AtomicReference<AsyncPollEvent> admitted = new AtomicReference<>();
+        doAnswer(invocation -> {
+            admitted.set(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        doReturn(Fetch.forPartition(partition,
+            List.of(new ConsumerRecord<>("topic", 0, 0, "key", "value")), true,
+            new OffsetAndMetadata(1))).when(fetchCollector).collectFetch(buffer);
+
+        try (MockedStatic<ConsumerUtils> utils = mockStatic(ConsumerUtils.class, Mockito.CALLS_REAL_METHODS)) {
+            utils.when(() -> ConsumerUtils.getResult(any(CompletableFuture.class), Mockito.anyLong()))
+                .thenAnswer(invocation -> {
+                    // Use the real Future.get interruption path, not a fabricated Kafka exception.
+                    Thread.currentThread().interrupt();
+                    return invocation.callRealMethod();
+                });
+            assertThrows(InterruptException.class, () -> consumer.poll(Duration.ofSeconds(1)));
+        } finally {
+            // Never leak interruption into the test runner or consumer cleanup.
+            Thread.interrupted();
+        }
+        assertFalse(admitted.get().isReconciliationCheckComplete());
+        assertTrue(consumer.poll(Duration.ZERO).isEmpty());
+        verify(fetchCollector, never()).collectFetch(buffer);
+        assertEquals(0, subscriptions.position(partition).offset);
+        admitted.get().markReconciliationCheckComplete();
+        assertEquals(1, consumer.poll(Duration.ZERO).count());
+    }
+
     /**
      * When a single {@link AsyncKafkaConsumer#poll(Duration)} call runs multiple internal iterations (because
      * fetches keep coming back empty), the consumer must keep a fetch request pending on the broker: if the

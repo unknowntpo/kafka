@@ -245,6 +245,40 @@ with retries disabled. The affected error/wakeup/timeout tests ran in both.
 Checkstyle main/test, Spotless Java, and SpotBugs main passed. Both negative
 results above were observed before the repair; neither was a fixture failure.
 
+## Interruption and competing wakeup/error outcomes
+
+At production baseline `d85e8308dd`, three additional controlled cases pass
+without a production change:
+
+- Wakeup first while the wait copy is active, then event error: the first poll
+  throws `WakeupException`; the next poll throws the original event error.
+- Event error first completes the checkpoint and its copy, then wakeup: the
+  first poll throws the original error; the next poll throws `WakeupException`.
+- Interruption immediately before the real `Future.get` on the incomplete wait
+  copy throws `InterruptException`, without completing the owner checkpoint.
+  After clearing interruption, zero-duration polling remains gated; after
+  background checkpoint completion the fixture's record can be collected.
+
+`testCaptureCheckpointWakeupAndErrorAreBothObserved` asserts both orderings,
+no duplicate third outcome, no collector calls, and unchanged position.
+`testCaptureCheckpointThreadInterruptionDoesNotCompleteOwnerOperation` uses
+the real thread interrupt flag and real future wait; a finally block clears
+interruption so it cannot contaminate cleanup or later tests.
+
+These tests control delivery at the `getResult` seam and use a mocked collector.
+They establish the two serialized competing-outcome schedules at an active
+capture wait, not exhaustive simultaneous-thread interleavings, broker durability,
+or rebalance behavior. They preserve existing WakeupTrigger winner/pending rules,
+rather than introducing a new global error-priority policy. The next main gate
+is reconciliation/revocation, where commit capture and partition eligibility
+must be validated together.
+
+Validation on 2026-09-06: the three new cases passed the focused run. Fresh XML
+reports from the broader regression contain 685 tests across seven suites, with
+zero failures, errors, or skips. Both runs disabled retries and used Java 17,
+offline dependencies, and one test fork. Spotless Java and test Checkstyle passed
+in the focused run. No production code changed for this verification slice.
+
 If the interleaving is reachable, compare a scoped capture handshake against an
 explicit application-provided offset snapshot. Preserve existing timeout,
 wakeup, and record-delivery outcomes before choosing a mechanism; do not restore
