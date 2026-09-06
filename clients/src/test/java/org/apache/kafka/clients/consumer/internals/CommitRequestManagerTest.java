@@ -312,6 +312,46 @@ public class CommitRequestManagerTest {
     }
 
     @Test
+    public void testAutoCommitRetainsAdmissionOffsetsWhenPositionsAdvanceBeforeSend() {
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptionState.assignFromUser(singleton(partition));
+        subscriptionState.seek(partition, 100);
+        CommitRequestManager manager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        time.sleep(100);
+
+        // The application-event path admits the snapshot before subsequent collection advances position.
+        manager.updateTimerAndMaybeCommit(time.milliseconds());
+        subscriptionState.seek(partition, 200);
+
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData)
+            result.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(1, data.topics().size());
+        assertEquals(partition.topic(), data.topics().get(0).name());
+        assertEquals(1, data.topics().get(0).partitions().size());
+        assertEquals(partition.partition(), data.topics().get(0).partitions().get(0).partitionIndex());
+        assertEquals(100, data.topics().get(0).partitions().get(0).committedOffset(),
+            "sending later must not recapture offsets advanced by subsequent record collection");
+        assertEquals(200, subscriptionState.position(partition).offset);
+    }
+
+    @Test
+    public void testExpiredAutoCommitIsNotAdmittedByOrdinaryManagerPoll() {
+        subscriptionState = spy(subscriptionState);
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptionState.assignFromUser(singleton(partition));
+        subscriptionState.seek(partition, 100);
+        CommitRequestManager manager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        time.sleep(100);
+
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        verify(subscriptionState, never()).allConsumed();
+    }
+
+    @Test
     public void testPollEnsureCorrectInflightRequestBufferSize() {
         CommitRequestManager commitManager = create(false, 100);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
