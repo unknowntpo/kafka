@@ -757,10 +757,15 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
         event.markValidatePositionsComplete();
 
         updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
+            // A metadata error may have already ended this event while position work was pending.
+            if (event.isComplete())
+                return;
             if (maybeCompleteAsyncPollEventExceptionally(event, updatePositionsError))
                 return;
 
             requestManagers.fetchRequestManager.createFetchRequests().whenComplete((___, fetchError) -> {
+                if (event.isComplete())
+                    return;
                 if (maybeCompleteAsyncPollEventExceptionally(event, fetchError))
                     return;
 

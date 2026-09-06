@@ -20,6 +20,7 @@ import org.apache.kafka.clients.KafkaClient;
 import org.apache.kafka.clients.NetworkClient;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
@@ -86,6 +87,9 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private volatile Runnable scheduleWakeup = () -> { };
     private long applicationWaitDeadlineMs = Long.MAX_VALUE;
     private long lastPollTimeMs = 0L;
+    // AsyncPollEvent is not a CompletableEvent, but still needs metadata errors after admission.
+    // Network-thread confined; retain each live dependent, never only the latest event.
+    private final List<AsyncPollEvent> pendingAsyncPolls = new ArrayList<>();
 
     public ConsumerNetworkThread(LogContext logContext,
                                  Time time,
@@ -260,8 +264,12 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
             scheduleWakeup.run();
 
         reapExpiredApplicationEvents(currentTimeMs);
-        List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
+        pendingAsyncPolls.removeIf(event -> event.isComplete() ||
+                (event.isValidatePositionsComplete() && event.isExpired(time)));
+        List<Object> uncompletedEvents = new ArrayList<>(applicationEventReaper.uncompletedEvents());
+        uncompletedEvents.addAll(pendingAsyncPolls);
         maybeFailOnMetadataError(uncompletedEvents);
+        pendingAsyncPolls.removeIf(AsyncPollEvent::isComplete);
     }
 
     private long pollAndStageRequests(long currentTimeMs) {
@@ -302,11 +310,15 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
                     if (maybeFailOnMetadataError(List.of(event)))
                         continue;
                 }
+                if (event instanceof AsyncPollEvent)
+                    pendingAsyncPolls.add((AsyncPollEvent) event);
                 applicationEventProcessor.process(event);
             } catch (Throwable t) {
                 log.error("Error processing event {}", t.getMessage(), t);
                 if (event instanceof CompletableEvent) {
                     ((CompletableEvent<?>) event).future().completeExceptionally(t);
+                } else if (event instanceof AsyncPollEvent) {
+                    ((AsyncPollEvent) event).completeExceptionally(ConsumerUtils.maybeWrapAsKafkaException(t));
                 }
             }
         }
@@ -468,6 +480,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
 
             closeQuietly(requestManagers, "request managers");
             closeQuietly(networkClientDelegate, "network client delegate");
+            pendingAsyncPolls.clear();
             log.debug("Closed the consumer network thread");
         }
     }

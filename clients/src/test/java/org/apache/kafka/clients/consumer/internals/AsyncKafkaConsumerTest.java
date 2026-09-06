@@ -617,6 +617,63 @@ public class AsyncKafkaConsumerTest {
         assertEquals(error, assertThrows(KafkaException.class, () -> consumer.poll(Duration.ofSeconds(60))));
     }
 
+    @Test
+    @org.junit.jupiter.api.Timeout(10)
+    public void testMetadataErrorFromDelegateAfterAdmissionSurfacesThroughPoll() {
+        LogContext logContext = new LogContext();
+        FetchBuffer buffer = mock(FetchBuffer.class);
+        SubscriptionState subscriptions = new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST);
+        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class), mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
+        TopicPartition tp = new TopicPartition("topic", 0);
+        subscriptions.assignFromUser(singleton(tp));
+        subscriptions.seek(tp, 0);
+        OffsetsRequestManager offsets = mock(OffsetsRequestManager.class);
+        FetchRequestManager fetch = mock(FetchRequestManager.class);
+        TopicMetadataRequestManager topics = mock(TopicMetadataRequestManager.class);
+        RequestManagers managers = new RequestManagers(logContext, offsets, topics, fetch,
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty());
+        for (RequestManager manager : List.of(offsets, topics, fetch)) {
+            when(manager.poll(org.mockito.ArgumentMatchers.anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+            when(manager.pollOnClose(org.mockito.ArgumentMatchers.anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+            when(manager.maximumTimeToWait(org.mockito.ArgumentMatchers.anyLong())).thenReturn(Long.MAX_VALUE);
+        }
+        when(offsets.updateFetchPositions(org.mockito.ArgumentMatchers.anyLong())).thenReturn(new CompletableFuture<>());
+        var processor = new org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor(
+                logContext, managers, metadata, subscriptions);
+        Properties properties = requiredConsumerConfig();
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        var asyncMetrics = mock(org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics.class);
+        var delegate = new NetworkClientDelegate(time, new ConsumerConfig(properties), logContext,
+                new org.apache.kafka.clients.MockClient(time), metadata,
+                mock(org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler.class), false, asyncMetrics);
+        LinkedBlockingQueue<ApplicationEvent> inputs = new LinkedBlockingQueue<>();
+        ConsumerNetworkThread loop = new ConsumerNetworkThread(logContext, time, inputs,
+                new CompletableEventReaper(logContext), () -> processor, () -> delegate, () -> managers, asyncMetrics);
+        loop.initializeResources();
+        try {
+            doAnswer(invocation -> {
+                inputs.add(invocation.getArgument(0));
+                loop.runOnce();
+                return null;
+            }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+            doReturn(true).when(buffer).isEmpty();
+            doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+            KafkaException error = new KafkaException("metadata failure after async admission");
+            doAnswer(invocation -> {
+                doThrow(error).doNothing().when(metadata).maybeThrowAnyException();
+                loop.runOnce();
+                verify(buffer).wakeup();
+                return null;
+            }).when(buffer).awaitWakeup(any());
+            assertSame(error, assertThrows(KafkaException.class, () -> consumer.poll(Duration.ofSeconds(60))));
+            assertTrue(delegate.getAndClearMetadataError().isEmpty());
+        } finally {
+            loop.close(Duration.ZERO);
+            loop.cleanup();
+        }
+    }
+
     /**
      * When an inflight poll completes with records already in the fetch buffer, the next poll must return those
      * records <em>without</em> submitting a new poll event: a fresh event would re-run the validate-positions

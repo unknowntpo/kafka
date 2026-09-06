@@ -45,8 +45,11 @@ public interface MetadataErrorNotifiableEvent {
      *     </li>
      *     <li>
      *         At the very bottom of the {@link ConsumerNetworkThread}'s loop, the {@link CompletableEventReaper}
-     *         is executed and any outstanding event is returned. If a metadata error occurred, this method
-     *         will be invoked on all unexpired events if it implements this interface.
+     *         is executed and any outstanding event is returned. Pending {@link AsyncPollEvent} values
+     *         are tracked separately because they are not CompletableEvent values. If a metadata error
+     *         occurred, this method will be invoked on the live metadata-dependent events. Completed
+     *         async polls and those whose validated-position stage has passed their deadline are removed
+     *         from that tracking; they do not consume errors intended for a later operation.
      *     </li>
      * </ul>
      *
