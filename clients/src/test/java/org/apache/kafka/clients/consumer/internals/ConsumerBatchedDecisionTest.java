@@ -24,9 +24,11 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.RetriableCommitFailedException;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.CommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.SyncCommitEvent;
@@ -86,7 +88,8 @@ import static org.mockito.Mockito.when;
 
 /** Component tests: real managers and transport delegate, no broker or real clock. */
 // This fixture deliberately includes the production RequestManagers wiring, not just isolated managers.
-@SuppressWarnings("ClassDataAbstractionCoupling")
+// Public-facade tests also span the input bridge; fan-out is intentional at this component boundary.
+@SuppressWarnings({"ClassDataAbstractionCoupling", "ClassFanOutComplexity"})
 class ConsumerBatchedDecisionTest {
     private static final String GROUP_ID = "batch-group";
     private static final TopicPartition PARTITION = new TopicPartition("topic", 0);
@@ -114,6 +117,7 @@ class ConsumerBatchedDecisionTest {
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
         props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, GROUP_ID);
         config = new ConsumerConfig(props);
         metadata = mock(ConsumerMetadata.class);
         AsyncConsumerMetrics asyncMetrics = mock(AsyncConsumerMetrics.class);
@@ -214,6 +218,84 @@ class ConsumerBatchedDecisionTest {
     private void useDecisionBoundary(boolean postIoPass) {
         if (!postIoPass)
             when(delegate.completedRequestsInLastPoll()).thenReturn(false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private AsyncKafkaConsumer<String, String> publicConsumerOnControlledLoop() {
+        ApplicationEventHandler bridge = mock(ApplicationEventHandler.class);
+        doAnswer(invocation -> {
+            ApplicationEvent event = invocation.getArgument(0);
+            if (event instanceof CommitEvent) {
+                applicationEvents.add(event);
+                // Deterministic scheduling seam: background completes this round before add returns.
+                // Do not synthesize offsetsReady or an operation result here.
+                thread.runOnce();
+            }
+            return null;
+        }).when(bridge).add(any(ApplicationEvent.class));
+        return new AsyncKafkaConsumer<>(config, new StringDeserializer(), new StringDeserializer(), time,
+            (context, clock, timeout, queue, reaper, processor, network, managers, asyncMetrics) -> bridge,
+            CompletableEventReaper::new,
+            (context, consumerMetadata, state, fetchConfig, deserializers, fetchMetrics, clock) -> mock(FetchCollector.class),
+            (consumerConfig, state, context, listeners) -> metadata,
+            new LinkedBlockingQueue<>(), Optional.empty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testPublicCommitSyncObservesDecisionBoundaryWinner(boolean postIoPass) {
+        useDecisionBoundary(postIoPass);
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+        try (AsyncKafkaConsumer<String, String> consumer = publicConsumerOnControlledLoop()) {
+            RuntimeException outcome = assertThrows(RuntimeException.class,
+                () -> consumer.commitSync(Map.of(PARTITION, new OffsetAndMetadata(1)), Duration.ZERO));
+            if (postIoPass)
+                assertInstanceOf(GroupAuthorizationException.class, outcome);
+            else
+                assertInstanceOf(org.apache.kafka.common.errors.TimeoutException.class, outcome);
+            thread.runOnce();
+            verify(background).add(any(ErrorEvent.class));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testPublicCommitAsyncErrorAudienceAndRecovery(boolean postIoPass) {
+        useDecisionBoundary(postIoPass);
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+        try (AsyncKafkaConsumer<String, String> consumer = publicConsumerOnControlledLoop()) {
+            List<Exception> first = new java.util.ArrayList<>();
+            List<Exception> second = new java.util.ArrayList<>();
+            List<Exception> recovered = new java.util.ArrayList<>();
+            consumer.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)), (offsets, error) -> first.add(error));
+            consumer.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(2)), (offsets, error) -> second.add(error));
+            consumer.commitAsync(Map.of(), null);
+            assertEquals(1, first.size());
+            assertInstanceOf(GroupAuthorizationException.class, first.get(0));
+            assertEquals(postIoPass ? 0 : 1, second.size());
+            if (!postIoPass)
+                assertSame(first.get(0), second.get(0));
+
+            time.sleep(1000); // Advance MockTime beyond discovery's failure backoff.
+            discoverCoordinator();
+            OffsetCommitResponse success = new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE));
+            if (postIoPass)
+                client.prepareResponse(success);
+            client.prepareResponse(success);
+            consumer.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(3)), (offsets, error) -> recovered.add(error));
+            consumer.commitAsync(Map.of(), null);
+            assertEquals(1, recovered.size());
+            assertEquals(null, recovered.get(0));
+            assertEquals(1, first.size());
+            assertEquals(1, second.size());
+            if (postIoPass)
+                assertEquals(null, second.get(0));
+            else
+                assertSame(first.get(0), second.get(0));
+            verify(background).add(any(ErrorEvent.class));
+        }
     }
 
     @ParameterizedTest

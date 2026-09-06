@@ -98,6 +98,88 @@ the architecture. Continue the full behavior inventory even if G1 passes.
 
 ## Current validation receipt
 
+### Integrated public commit follow-up and decision gate
+
+`testPublicCommitSyncObservesDecisionBoundaryWinner` and
+`testPublicCommitAsyncErrorAudienceAndRecovery` add four cases, both with and
+without the extra post-I/O pass. They call real `AsyncKafkaConsumer` commit APIs,
+enqueue their actual events, run the real `ApplicationEventProcessor`, Commit RM,
+Coordinator RM, Heartbeat and `ConsumerNetworkThread`, and obtain responses from
+MockClient. The bridge does not synthesize an event result or mark offsets ready.
+
+The scheduling seam is explicit: a mocked ApplicationEventHandler enqueues each
+commit and runs one background iteration synchronously before `add` returns.
+This models background completion before the application starts waiting, using
+one physical test thread, not two independently scheduled threads. Membership,
+metadata, fetch, background ErrorEvent handoff and non-commit shutdown inputs are
+controlled/mocked. The consumer and loop do not share all construction state;
+these cases use explicit offsets and do not claim implicit-position capture,
+normal bootstrap, application consumption of ErrorEvent, or complete close.
+The comparison still suppresses the extra pass on current sources rather than
+running the complete historical binary.
+
+Observed public results:
+
+- Zero-duration `commitSync`: next-pass control throws TimeoutException;
+  post-I/O mode throws GroupAuthorizationException in the selected schedule.
+- Two sequential `commitAsync` calls: first operation fails in both modes.
+  The second receives the same authorization error in next-pass mode; in
+  post-I/O mode it stays pending and later succeeds after coordinator recovery.
+- A third commit succeeds after simulated recovery in both modes. Earlier
+  failed callbacks retain their outcome and are delivered once. Recovery respects
+  discovery backoff by advancing MockTime, then supplies successful discovery and
+  commit responses. It is not a real broker authorization change.
+
+This goes beyond the earlier disconnected facade seam: the loop now selects the
+result that reaches the actual public method/callback. It establishes a public
+observation difference in an integrated component schedule. It does not establish
+that Kafka's API specification forbids both outcomes, nor demonstrate the exact
+schedule against a real broker or the complete historical revision.
+
+**Decision required before claiming behavior-preserving migration:** should the
+new architecture preserve the existing next-iteration error audience, or accept
+the earlier decision boundary as an intentional behavior change? Recommendation:
+retain the next-iteration boundary as the default candidate, preserve the current
+post-I/O experiment in history, and continue proving the narrower owner and
+notification contracts. No such production change is made in this follow-up.
+This is independent of the retained-retry-snapshot decision.
+
+### Broader acceptance inventory (not closure)
+
+| Area | Evidence exercised / inspected | Still required |
+| --- | --- | --- |
+| Coordinator / commit / heartbeat | Integrated public commit comparison and existing normal/error/backoff/admission suites | Select completion boundary; full pinned-baseline comparison; actual discovery/authorization recovery |
+| Fetch / application observation | FetchCollector capture schedules; FetchBuffer synchronization; public poll metadata delivery and checkpoint tests | Broker committed-offset/crash proof; retained-snapshot freshness decision; no full at-least-once claim |
+| Regular/share/Streams variants | Heartbeat, membership, ShareConsumerImpl, share fetch/buffer and Streams topology suites; separate source branches inspected | Equivalent whole-loop recovery per variant; raw-delay/EMPTY migration remains incomplete |
+| Timeout/wakeup/close | ConsumerNetworkThread, AsyncKafkaConsumer and ShareConsumerImpl lifecycle suites; close remains its own pollOnClose path | Exact original KAFKA-18160/19357/18569 schedules and end-to-end acknowledgement/discovery deadlines remain open |
+
+These categories cover the acceptance inventory, not every runtime interleaving.
+Existing green regressions do not close the explicitly unverified original issues.
+No new benchmark, remote job, broker, original KIP edit or production flag change
+is part of this work. The semantic decision above is the stopping point, not a
+claim that all verification is complete.
+
+Broad regression receipt: **1,594 tests in 24 suites, zero failures/errors/skips**,
+on the final behavioral test additions, JDK 17 / Gradle 9.7.1 offline, one test
+fork, two workers, retries disabled. Selection (all names end in `Test`):
+CoordinatorRequestManager, CommitRequestManager, ConsumerHeartbeatRequestManager,
+ShareHeartbeatRequestManager, StreamsGroupHeartbeatRequestManager,
+ConsumerBatchedDecision, ConsumerAdmissionContract, RequestManagers,
+ConsumerNetworkThread, AsyncKafkaConsumer, ShareConsumerImpl,
+ConsumerMembershipManager, ShareMembershipManager, StreamsMembershipManager,
+FetchCollector, FetchRequestManager, ShareFetchRequestManager, FetchBuffer,
+ShareFetchBuffer, NetworkClientDelegate, ApplicationEventProcessor,
+ConsumerPublicationContract, ConsumerAsyncPollMetadata,
+StreamsGroupTopologyDescriptionRequestManager. Counts were read from test XML;
+the broad selection ran once. The four new public-loop cases also passed in a
+prior focused run. Initial fixture failures (discovery backoff omitted) and a
+test-class fan-out checkstyle violation were corrected before these green runs;
+they were not production regressions or silently retried test failures.
+After the final comment/import-order cleanup, the complete 51-case
+ConsumerBatchedDecisionTest suite passed again with no failures/errors/skips;
+clients Checkstyle and Spotless Java checks passed. A root-level Spotless task
+lookup failed before execution and was corrected to the clients module task.
+
 ### Follow-up: application-facing propagation, not an integrated race proof
 
 `ApplicationEventProcessor.process(SyncCommitEvent/AsyncCommitEvent)` connects the
