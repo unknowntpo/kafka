@@ -395,6 +395,45 @@ public class AsyncKafkaConsumerTest {
         assertTrue(commitEvent.offsets().get().containsKey(tp));
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,0", "false,100", "true,0", "true,100"})
+    public void testCommitSyncExposesAlreadySelectedBoundaryError(boolean authorization, long timeoutMs) {
+        consumer = newConsumer();
+        KafkaException selected = authorization ? new GroupAuthorizationException("group") :
+            new TimeoutException("event reaper selected timeout");
+        completeCommitSyncApplicationEventExceptionally(selected);
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("topic", 0), new OffsetAndMetadata(1));
+
+        // This verifies facade propagation, not how the background loop selects the winner.
+        assertSame(selected, assertThrows(selected.getClass(),
+            () -> consumer.commitSync(offsets, Duration.ofMillis(timeoutMs))));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testCommitAsyncDeliversSelectedBoundaryErrorOnlyWhenCallbacksAreDrained(boolean authorization) {
+        consumer = newConsumer();
+        markOffsetsReadyForCommitEvent();
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("topic", 0), new OffsetAndMetadata(1));
+        MockCommitCallback callback = new MockCommitCallback();
+        String applicationThread = Thread.currentThread().getName();
+        consumer.commitAsync(offsets, callback);
+        ArgumentCaptor<AsyncCommitEvent> captured = ArgumentCaptor.forClass(AsyncCommitEvent.class);
+        verify(applicationEventHandler).add(captured.capture());
+        KafkaException selected = authorization ? new GroupAuthorizationException("group") :
+            new TimeoutException("selected operation failure");
+
+        assertEquals(0, callback.invoked);
+        assertTrue(captured.getValue().future().completeExceptionally(selected));
+        assertEquals(0, callback.invoked, "future completion only queues the user callback");
+        consumer.commitAsync(Collections.emptyMap(), null);
+        assertEquals(1, callback.invoked);
+        assertSame(selected, callback.exception);
+        assertEquals(applicationThread, callback.completionThread);
+        consumer.commitAsync(Collections.emptyMap(), null);
+        assertEquals(1, callback.invoked);
+    }
+
     private static Stream<Exception> commitExceptionSupplier() {
         return Stream.of(
                 new KafkaException("Test exception"),

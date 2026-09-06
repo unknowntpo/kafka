@@ -98,6 +98,41 @@ the architecture. Continue the full behavior inventory even if G1 passes.
 
 ## Current validation receipt
 
+### Follow-up: application-facing propagation, not an integrated race proof
+
+`ApplicationEventProcessor.process(SyncCommitEvent/AsyncCommitEvent)` connects the
+Commit RM result to the event future after marking offsets ready.
+`AsyncKafkaConsumer.commitSync` waits on that event future through
+`ConsumerUtils.getResult`; `commitAsync` enqueues the user callback when the event
+future completes. Future completion does not directly invoke user code on the
+network thread.
+
+Six new `AsyncKafkaConsumerTest` cases verify the facade seam:
+
+- `testCommitSyncExposesAlreadySelectedBoundaryError`: an already completed
+  authorization or timeout failure is propagated with the same exception identity,
+  with both zero and positive public timeout. Zero timeout does not replace an
+  already selected authorization result in this fixture.
+- `testCommitAsyncDeliversSelectedBoundaryErrorOnlyWhenCallbacksAreDrained`:
+  completing the event exceptionally queues but does not immediately invoke the
+  callback; a subsequent empty-offset commit drains it on the application test
+  thread, exactly once, retaining error identity.
+
+The async timeout case tests generic failure delivery only: it does not assert
+that an AsyncCommitEvent has the same reaper deadline as a SyncCommitEvent.
+These tests deliberately mock ApplicationEventHandler and supply the selected
+event outcome. They do not run the network loop, real broker, or competing
+application waiter. Together with the boundary tests they show a plausible
+application-visible consequence, not an end-to-end reproduction of that race.
+An integrated public call plus controlled real loop and a full historical
+baseline comparison remain open. No timeout priority or production policy changes
+are selected from this evidence.
+
+Validation: the six new cases plus the 47-case boundary suite passed first;
+then both complete suites passed: **190 tests, zero failures/errors/skips**,
+retries disabled, JDK 17 / Gradle 9.7.1 offline. The new cases therefore passed
+twice; the full 190-case selection ran once. Production files were unchanged.
+
 ### Follow-up: controlled decision-boundary comparison
 
 Three parameterized tests in `ConsumerBatchedDecisionTest` add eight cases:
