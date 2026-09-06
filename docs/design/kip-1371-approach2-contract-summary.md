@@ -1,5 +1,9 @@
 # KIP-1371 Approach 2: contract assessment
 
+Complete original-issue acceptance scope: [Issue coverage inventory](kip-1371-issue-coverage.md).
+This includes the original lifecycle follow-ups; partial component evidence does
+not establish that Approach 2 has solved every historical issue.
+
 Latest correctness criterion: [Callback safety contract](kip-1371-callback-safety-contract.md).
 Inline callbacks remain the default; the response-phase prototype is an opt-in
 comparison, not a selected prerequisite for correct owner transitions.
