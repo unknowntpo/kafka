@@ -288,12 +288,24 @@ public class FetchCollectorTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testPublicPollWaitsForAutoCommitCaptureBeforeCollection(boolean captureDuringCollection) throws Exception {
+        verifyPublicPollCapture(captureDuringCollection, false);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testPublicPollRebalanceRetryCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
+        verifyPublicPollCapture(captureDuringCollection, true);
+    }
+
+    // Keep the four schedules on one identical runtime fixture so only capture timing/path varies.
+    @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity"})
+    private void verifyPublicPollCapture(boolean captureDuringCollection, boolean rebalanceRetry) throws Exception {
         buildDependencies(DEFAULT_RECORD_COUNT + 1);
         assignAndSeek(topicAPartition0);
         Properties properties = consumerProps();
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, "public-snapshot-group");
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
-        properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 100);
+        properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, rebalanceRetry ? Integer.MAX_VALUE : 100);
         ConsumerConfig config = new ConsumerConfig(properties);
         Node node = new Node(1, "localhost", 9092);
         CoordinatorRequestManager coordinator = mock(CoordinatorRequestManager.class);
@@ -303,6 +315,7 @@ public class FetchCollectorTest {
         FetchRequestManager fetchRequests = mock(FetchRequestManager.class);
         for (RequestManager manager : List.of(offsets, topics, fetchRequests, coordinator)) {
             when(manager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+            when(manager.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
             when(manager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
         }
         when(offsets.updateFetchPositions(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
@@ -334,16 +347,38 @@ public class FetchCollectorTest {
                 .get(5, TimeUnit.SECONDS);
             assertTrue(validator.canSkipUpdateFetchPositions(), "exercise a previously validated position");
             AtomicLong offsetBeforePollReturns = new AtomicLong(-1);
-            client.prepareResponse(request -> {
+            Runnable prepareSuccess = () -> client.prepareResponse(request -> {
                 OffsetCommitRequestData data = ((OffsetCommitRequest) request).data();
                 offsetBeforePollReturns.set(data.topics().get(0).partitions().get(0).committedOffset());
                 return true;
             }, new OffsetCommitResponse(0, Map.of(topicAPartition0, Errors.NONE)));
+            Runnable retryAndInspect = () -> {
+                client.respond(request -> {
+                    OffsetCommitRequestData data = ((OffsetCommitRequest) request).data();
+                    assertEquals(0, data.topics().get(0).partitions().get(0).committedOffset());
+                    return true;
+                }, new OffsetCommitResponse(0,
+                    Map.of(topicAPartition0, Errors.REQUEST_TIMED_OUT)));
+                loop.runOnce();
+                time.sleep(1000);
+                prepareSuccess.run();
+                loop.runOnce();
+            };
+            if (!rebalanceRetry)
+                prepareSuccess.run();
             doAnswer(invocation -> {
                 ApplicationEvent event = invocation.getArgument(0);
                 inputs.add(event);
-                if (event instanceof AsyncPollEvent && !captureDuringCollection)
-                    background.submit(loop::runOnce).get(5, TimeUnit.SECONDS);
+                if (event instanceof AsyncPollEvent && (rebalanceRetry || !captureDuringCollection)) {
+                    background.submit(() -> {
+                        // Setup seam: admit a rebalance commit for a retained partition. This does not simulate group join.
+                        if (rebalanceRetry)
+                            commits.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+                        loop.runOnce();
+                        if (rebalanceRetry && !captureDuringCollection)
+                            retryAndInspect.run();
+                    }).get(5, TimeUnit.SECONDS);
+                }
                 return null;
             }).when(handler).add(any());
             consumer = new AsyncKafkaConsumer<>(logContext, "public-snapshot-client", deserializers,
@@ -352,11 +387,19 @@ public class FetchCollectorTest {
                 new LinkedBlockingQueue<>(), new CompletableEventReaper(logContext),
                 mock(ConsumerRebalanceListenerInvoker.class), commitMetrics, subscriptions, metadata,
                 100, 30000, 1000, "public-snapshot-group", true, validator);
-            CompletedFetch completed = completedFetchBuilder.recordCount(DEFAULT_RECORD_COUNT).build();
+            CompletedFetch completed = spy(completedFetchBuilder.recordCount(DEFAULT_RECORD_COUNT).build());
+            if (rebalanceRetry && captureDuringCollection) {
+                doAnswer(invocation -> {
+                    assertEquals(DEFAULT_RECORD_COUNT, subscriptions.position(topicAPartition0).offset);
+                    background.submit(retryAndInspect).get(5, TimeUnit.SECONDS);
+                    invocation.callRealMethod();
+                    return null;
+                }).when(completed).drain();
+            }
             fetchBuffer.add(completed);
             time.sleep(100);
 
-            if (captureDuringCollection) {
+            if (captureDuringCollection && !rebalanceRetry) {
                 assertTrue(consumer.poll(Duration.ZERO).isEmpty(),
                     "an unprocessed auto-commit checkpoint must prevent collection, even on the validation fast path");
                 assertEquals(0, subscriptions.position(topicAPartition0).offset);
@@ -367,7 +410,8 @@ public class FetchCollectorTest {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ZERO);
 
             assertEquals(DEFAULT_RECORD_COUNT, records.count());
-            assertEquals(0, offsetBeforePollReturns.get());
+            assertEquals(rebalanceRetry && captureDuringCollection ? DEFAULT_RECORD_COUNT : 0,
+                offsetBeforePollReturns.get());
         } finally {
             background.shutdownNow();
             assertTrue(background.awaitTermination(5, TimeUnit.SECONDS));

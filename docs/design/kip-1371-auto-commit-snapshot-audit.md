@@ -323,3 +323,49 @@ test passed together, then the full commit and consumer-membership suites passed
 244 tests (151 + 93), with zero failures, errors, or skips and retries disabled.
 The new test therefore ran twice. Spotless Java and test Checkstyle passed in
 the focused run. This slice changes tests and documentation only.
+
+## Public poll with an admitted rebalance retry
+
+`testPublicPollRebalanceRetryCaptureBeforeOrDuringCollection` extends the same
+public-poll runtime fixture used for the periodic-capture checkpoint. It uses
+real `AsyncKafkaConsumer.poll`, `FetchCollector`, subscription state,
+`ApplicationEventProcessor`, `CommitRequestManager`, `ConsumerNetworkThread.runOnce`,
+and `NetworkClientDelegate`, with `MockClient` replacing broker transport.
+
+The controlled setup directly admits a rebalance commit on the background
+executor; it does not simulate group join or a real membership assignment.
+The partition remains fetchable, representing the retained-partition case.
+The initial request is verified to contain offset 0. The application-event
+checkpoint is processed before collection, so the previous repair is active.
+
+Two schedules distinguish capture timing:
+
+- Before collection: deliver a retriable response, run the background loop,
+  advance mock time past backoff, then send the retry. The retry contains 0.
+- During collection: after the real collector advances position to 10, pause
+  it at `CompletedFetch.drain`, before `poll` returns. On the separate background
+  executor deliver the retriable response through `MockClient.respond` and
+  `runOnce`, then send the retry after backoff. The retry contains 10 and receives
+  simulated success while the application is still inside collection.
+
+Both schedules then return ten records. This proves that the public-poll
+collection path and an admitted rebalance retry can overlap despite the initial
+checkpoint. It does not prove complete membership-driven reachability or durable
+broker commit followed by crash/restart loss. Those are separate evidence gates.
+
+The architectural conclusion is narrow: the safe-capture contract must cover
+recapture on retry, not just initial admission. This does not yet choose between
+deferring retry capture to an application-safe boundary and supplying a safe
+application offset view. Freezing the original snapshot would change the existing
+latest-offset retry behavior and must not be silently presented as equivalent.
+
+Initial fixture failures (style checks and preparing a response for a future
+request instead of responding to the already in-flight request) were corrected
+before the successful schedules; they are not product regressions. Mock managers
+also return empty close-poll results so teardown does not generate spurious errors.
+
+Validation on 2026-09-06: all four public-poll schedules passed, then the five
+affected suites passed 674 tests with zero failures/errors/skips and retries
+disabled. The new schedules ran in both runs. Spotless Java and test Checkstyle
+passed. Production code remains unchanged; these passing characterization tests
+record the unsafe-capture possibility, not a repair or a safety acceptance gate.
