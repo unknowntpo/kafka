@@ -192,6 +192,61 @@ class ConsumerBatchedDecisionTest {
         assertEquals(queueInput ? 1 : 0, applicationEvents.size(), "response delivery must not drain new input");
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testInFlightHeartbeatDoesNotSpinConfiguredLoop(boolean postIoPass) {
+        useDecisionBoundary(postIoPass);
+        List<Long> networkWaits = new ArrayList<>();
+        doAnswer(invocation -> {
+            networkWaits.add(invocation.getArgument(0));
+            return invocation.callRealMethod();
+        }).when(delegate).poll(anyLong(), anyLong());
+        thread.runOnce();
+        ClientRequest firstHeartbeat = request(ApiKeys.CONSUMER_GROUP_HEARTBEAT);
+        networkWaits.clear();
+        for (int i = 0; i < 10; i++) {
+            time.sleep(1);
+            thread.runOnce();
+            assertTrue(thread.maximumTimeToWait() > 0);
+            assertSame(firstHeartbeat, request(ApiKeys.CONSUMER_GROUP_HEARTBEAT));
+        }
+        assertEquals(10, networkWaits.size(), "exactly one network poll per iteration");
+        assertTrue(networkWaits.stream().allMatch(wait -> wait > 0));
+        client.respondToRequest(firstHeartbeat, new ConsumerGroupHeartbeatResponse(
+            new ConsumerGroupHeartbeatResponseData().setErrorCode(Errors.NONE.code())
+                .setMemberId("member").setMemberEpoch(1).setHeartbeatIntervalMs(1000)));
+        thread.runOnce();
+        time.sleep(1000);
+        thread.runOnce();
+        assertEquals(1, client.requests().stream()
+            .filter(r -> r.requestBuilder().apiKey() == ApiKeys.CONSUMER_GROUP_HEARTBEAT).count());
+        assertFalse(firstHeartbeat == request(ApiKeys.CONSUMER_GROUP_HEARTBEAT));
+    }
+
+    @Test
+    void testManualAssignmentDoesNotSpinConfiguredLoopAndCanResumeHeartbeats() {
+        subscriptions.assignFromUser(Set.of(PARTITION));
+        when(membership.state()).thenReturn(MemberState.UNSUBSCRIBED);
+        when(membership.shouldSkipHeartbeat()).thenReturn(true);
+        List<Long> networkWaits = new ArrayList<>();
+        doAnswer(invocation -> {
+            networkWaits.add(invocation.getArgument(0));
+            return invocation.callRealMethod();
+        }).when(delegate).poll(anyLong(), anyLong());
+        for (int i = 0; i < 10; i++) {
+            thread.runOnce();
+            assertEquals(Long.MAX_VALUE, thread.maximumTimeToWait());
+            assertTrue(client.requests().isEmpty());
+        }
+        assertEquals(10, networkWaits.size());
+        assertTrue(networkWaits.stream().allMatch(wait -> wait > 0));
+        // Model the membership input separately; this is not a public subscribe() integration test.
+        when(membership.state()).thenReturn(MemberState.STABLE);
+        when(membership.shouldSkipHeartbeat()).thenReturn(false);
+        thread.runOnce();
+        assertEquals(ApiKeys.CONSUMER_GROUP_HEARTBEAT, request(ApiKeys.CONSUMER_GROUP_HEARTBEAT).requestBuilder().apiKey());
+    }
+
     private <T extends RequestManager> T idleManager(Class<T> type) {
         T manager = mock(type);
         when(manager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
@@ -879,7 +934,10 @@ class ConsumerBatchedDecisionTest {
             client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, error)));
             delegate.poll(0, time.milliseconds());
 
-            if (mode == CommitMode.SYNC && error == Errors.COORDINATOR_LOAD_IN_PROGRESS) {
+            if ((mode == CommitMode.SYNC || mode == CommitMode.BEFORE_REBALANCE)
+                    && error == Errors.COORDINATOR_LOAD_IN_PROGRESS) {
+                // Assignment loss does not enlarge or silently discard this admitted commit.
+                // Retry the captured offsets with the current identity, as for an explicit sync commit.
                 assertFalse(operation.isDone());
                 assertTrue(localCommits.poll(time.milliseconds()).unsentRequests.isEmpty());
                 time.sleep(100);
@@ -893,10 +951,6 @@ class ConsumerBatchedDecisionTest {
                 delegate.poll(0, time.milliseconds());
                 client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
                 delegate.poll(0, time.milliseconds());
-                assertTrue(operation.isDone());
-                assertFalse(operation.isCompletedExceptionally());
-            } else if (mode == CommitMode.BEFORE_REBALANCE && error == Errors.COORDINATOR_LOAD_IN_PROGRESS) {
-                // Retry refreshes offsets after assignment loss; empty work completes without another send.
                 assertTrue(operation.isDone());
                 assertFalse(operation.isCompletedExceptionally());
             } else {

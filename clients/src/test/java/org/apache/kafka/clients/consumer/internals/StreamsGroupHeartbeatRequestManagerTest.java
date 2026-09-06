@@ -421,13 +421,11 @@ class StreamsGroupHeartbeatRequestManagerTest {
     @ParameterizedTest
     @EnumSource(value = MemberState.class, names = {"JOINING", "ACKNOWLEDGING"})
     public void testNotSendingHeartbeatIfMemberIsJoiningOrAcknowledgingWhenHeartbeatInFlight(final MemberState memberState) {
-        final long timeToNextHeartbeatMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> heartbeatRequestStateMockedConstruction = mockConstruction(
                 HeartbeatRequestState.class,
                 (mock, context) -> {
                     when(mock.canSendRequest(time.milliseconds())).thenReturn(false);
-                    when(mock.timeToNextHeartbeatMs(time.milliseconds())).thenReturn(timeToNextHeartbeatMs);
                     when(mock.requestInFlight()).thenReturn(true);
                 });
             final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(Timer.class)
@@ -440,7 +438,8 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(timeToNextHeartbeatMs, result.timeUntilNextPollMs);
+            assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+            assertEquals(NextPollCondition.Input.NETWORK_COMPLETION, result.nextPollCondition().input());
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -2497,6 +2496,24 @@ class StreamsGroupHeartbeatRequestManagerTest {
         when(membershipManager.state()).thenReturn(MemberState.JOINING);
         when(membershipManager.shouldNotWaitForHeartbeatInterval()).thenReturn(true);
         assertEquals(0, manager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+    }
+
+    @Test
+    public void testInFlightHeartbeatAwaitsCompletionAfterIntervalExpires() {
+        StreamsGroupHeartbeatRequestManager manager = createStreamsGroupHeartbeatRequestManager();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        when(membershipManager.state()).thenReturn(MemberState.JOINING);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        time.sleep(1);
+        NetworkClientDelegate.PollResult blocked = manager.poll(time.milliseconds());
+        assertTrue(blocked.unsentRequests.isEmpty());
+        assertTrue(blocked.timeUntilNextPollMs > 0,
+            "the in-flight initial heartbeat needs a response, not another immediate poll");
+        assertEquals(NextPollCondition.Input.NETWORK_COMPLETION, blocked.nextPollCondition().input());
+        assertTrue(manager.maximumTimeToWait(time.milliseconds()) > 0);
+        first.unsentRequests.get(0).handler().onComplete(buildClientResponse());
         assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
     }
 

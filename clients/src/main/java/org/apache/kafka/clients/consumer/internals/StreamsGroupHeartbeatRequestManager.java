@@ -481,6 +481,10 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
             return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
         } else {
+            if (heartbeatRequestState.requestInFlight()) {
+                return new NetworkClientDelegate.PollResult(
+                    NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION));
+            }
             return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
         }
     }
@@ -541,6 +545,11 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         }
         if (membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
+        }
+        if (heartbeatRequestState.requestInFlight() && !shouldSendLeaveHeartbeat()) {
+            long refreshMs = Math.max(1L, pollTimer.remainingMs() / 2);
+            long intervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            return intervalMs > 0 ? Math.min(intervalMs, refreshMs) : refreshMs;
         }
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }

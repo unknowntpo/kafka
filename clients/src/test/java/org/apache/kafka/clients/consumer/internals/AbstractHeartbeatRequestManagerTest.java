@@ -30,6 +30,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.Arrays;
@@ -98,6 +99,29 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         time.sleep(1);
         assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()),
             "actual poll-timer expiry keeps its existing immediate refresh contract");
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {0, DEFAULT_HEARTBEAT_INTERVAL_MS})
+    public void testInFlightHeartbeatAwaitsCompletionAfterIntervalExpires(long intervalMs) {
+        heartbeatRequestState.updateHeartbeatIntervalMs(intervalMs);
+        time.sleep(intervalMs);
+        NetworkClientDelegate.PollResult first = heartbeatRequestManager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        time.sleep(intervalMs + 1);
+
+        NetworkClientDelegate.PollResult blocked = heartbeatRequestManager.poll(time.milliseconds());
+        assertTrue(blocked.unsentRequests.isEmpty());
+        assertTrue(blocked.timeUntilNextPollMs > 0,
+            "an in-flight request cannot progress merely because the interval has expired");
+        assertEquals(NextPollCondition.Input.NETWORK_COMPLETION, blocked.nextPollCondition().input());
+        assertTrue(heartbeatRequestManager.maximumTimeToWait(time.milliseconds()) > 0);
+
+        NetworkClientDelegate.UnsentRequest request = first.unsentRequests.get(0);
+        request.handler().onComplete(createHeartbeatResponse(request, Errors.NONE));
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertEquals(1, heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.size(),
+            "completion must re-enable the next legal heartbeat");
     }
 
     @Test

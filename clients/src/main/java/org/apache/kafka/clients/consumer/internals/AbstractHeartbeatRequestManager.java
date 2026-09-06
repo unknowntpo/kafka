@@ -192,6 +192,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
 
         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
+            if (heartbeatRequestState.requestInFlight()) {
+                return new NetworkClientDelegate.PollResult(
+                    NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION));
+            }
             return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
         }
 
@@ -272,6 +276,13 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         }
         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
+        }
+        if (heartbeatRequestState.requestInFlight() && !shouldSendLeaveHeartbeatNow()) {
+            // Expiry cannot admit a second heartbeat. Keep the application poll timer refreshed
+            // while the transport completion, rather than another timer poll, enables progress.
+            long refreshMs = Math.max(1L, pollTimer.remainingMs() / 2);
+            long intervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            return intervalMs > 0 ? Math.min(intervalMs, refreshMs) : refreshMs;
         }
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
