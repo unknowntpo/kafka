@@ -403,3 +403,57 @@ making mock responses cover both requested partitions, the affected five-suite
 regression passed 674 tests with no failures/errors/skips and retries disabled.
 Spotless Java and test Checkstyle passed. Initial fixture compilation/style
 errors were corrected before test execution; they were not product failures.
+
+## Opt-in experiment: retain the admitted rebalance snapshot
+
+Acceptance order: preserve at-least-once under the documented application
+contract (finish processing a poll's records before the next poll or close),
+then prove bounded progress, then compare duplicates, freshness, and cost.
+Returning records is not itself proof that the application processed them.
+
+`CommitRequestManager.enableRetainedRebalanceRetrySnapshot()` is package-private,
+test-enabled only, and defaults off. When enabled it prevents the retry callback
+from replacing the operation's captured offsets with `subscriptions.allConsumed()`.
+No queue, application wait, public configuration, or global offset registry is
+added. Normal consumer construction retains the previous behavior.
+
+This is deliberately the minimal **initial-snapshot retention** experiment, not
+an implementation of a continuously refreshed latest-safe-offset view. The
+initial capture must already have been admitted at the safe checkpoint; retaining
+an unsafe initial snapshot would not repair anything.
+
+Evidence:
+
+- `testPublicPollMembershipRetryRetainsAdmittedSnapshot` runs the same real
+  membership/public-poll/network-loop schedules with the experiment enabled.
+  The retry sends offset 0 both before and during collection; the default-mode
+  during-collection control still sends 10. Retry progresses without another
+  application poll, and the ten records are returned.
+- `testRebalanceRetrySnapshotPolicy` compares both modes at manager level:
+  retained-partition position advances from 10 to 20, but the experiment retries
+  10 while the default retries 20. This is the explicit freshness tradeoff.
+- `testRetainedSnapshotRetriesOnRetriableAndStaleEpoch` reuses the existing error
+  matrix, including retry backoff, updated member identity/epoch, and terminal
+  non-retriable errors.
+- `testRetainedRetrySnapshotStillExpiresWithoutAnotherApplicationPoll` verifies
+  that a retriable response after the deadline fails the operation and does not
+  enqueue another attempt.
+- `testRetainedRetrySnapshotIsNotInvalidatedBySeekOrReassignment` characterizes
+  a missing validity policy: backward seek and replacement assignment do not
+  change the admitted snapshot or cancel its retry. This is not evidence that
+  either mutation is reachable in the complete membership schedule, nor proof
+  that every already-admitted commit must be cancelled on assignment change.
+
+Do not enable this as a complete fix yet. It removes the demonstrated concurrent
+recapture in a stable operation context, but does not establish all lifecycle
+semantics, broker crash/restart at-least-once, or a freshness bound. The next
+bounded question is which seek/assignment transitions may occur while this
+specific rebalance commit is pending and what their existing terminal-outcome
+contract requires. No blanket invalidation or latest-offset claim is assumed.
+
+Validation on 2026-09-06: 24 focused cases passed, followed by 800 tests across
+eight affected suites with no failures/errors/skips and retries disabled.
+The experiment cases ran in both. Spotless Java, Checkstyle main/test, and
+SpotBugs main passed. Earlier missing-import and fixture-size check failures
+were corrected before the successful runs. This remains opt-in experimental
+code, not a claim of complete KAFKA-18641 or at-least-once acceptance.

@@ -58,6 +58,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -1449,9 +1450,21 @@ public class CommitRequestManagerTest {
     @ParameterizedTest
     @MethodSource("offsetCommitExceptionSupplier")
     public void testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors error) {
+        verifyAutoCommitBeforeRevocationRetry(error, false);
+    }
+
+    @ParameterizedTest
+    @MethodSource("offsetCommitExceptionSupplier")
+    public void testRetainedSnapshotRetriesOnRetriableAndStaleEpoch(Errors error) {
+        verifyAutoCommitBeforeRevocationRetry(error, true);
+    }
+
+    private void verifyAutoCommitBeforeRevocationRetry(Errors error, boolean retainSnapshot) {
         // Enable auto-commit but with very long interval to avoid triggering auto-commits on the
         // interval and just test the auto-commits triggered before revocation
         CommitRequestManager commitRequestManager = create(true, Integer.MAX_VALUE);
+        if (retainSnapshot)
+            commitRequestManager.enableRetainedRebalanceRetrySnapshot();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
 
         TopicPartition tp = new TopicPartition("topic", 1);
@@ -1500,9 +1513,12 @@ public class CommitRequestManagerTest {
         }
     }
 
-    @Test
-    public void testRebalanceRetryRecapturesRetainedPartitionOffset() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testRebalanceRetrySnapshotPolicy(boolean retainSnapshot) {
         CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        if (retainSnapshot)
+            manager.enableRetainedRebalanceRetrySnapshot();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
         TopicPartition revoked = new TopicPartition("topic", 0);
         TopicPartition retained = new TopicPartition("topic", 1);
@@ -1534,8 +1550,55 @@ public class CommitRequestManagerTest {
             retry.unsentRequests.get(0).requestBuilder().build().data();
         Map<Integer, Long> offsets = new HashMap<>();
         retried.topics().get(0).partitions().forEach(p -> offsets.put(p.partitionIndex(), p.committedOffset()));
-        assertEquals(Map.of(revoked.partition(), 5L, retained.partition(), 20L), offsets,
-            "retry recaptures all assigned positions, not only the frozen revoked partitions");
+        assertEquals(Map.of(revoked.partition(), 5L, retained.partition(), retainSnapshot ? 10L : 20L), offsets);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testRetainedRetrySnapshotIsNotInvalidatedBySeekOrReassignment(boolean reassign) {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        manager.enableRetainedRebalanceRetrySnapshot();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition original = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(original));
+        subscriptionState.seek(original, 10);
+        manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+
+        // Deliberately characterize the experiment's missing validity rule, not an approved outcome.
+        if (reassign) {
+            TopicPartition replacement = new TopicPartition("topic", 2);
+            subscriptionState.assignFromUser(Set.of(replacement));
+            subscriptionState.seek(replacement, 0);
+        } else {
+            subscriptionState.seek(original, 0);
+        }
+        completeOffsetCommitRequestWithError(manager, Errors.REQUEST_TIMED_OUT);
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) retry.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(1, data.topics().get(0).partitions().size());
+        assertEquals(1, data.topics().get(0).partitions().get(0).partitionIndex());
+        assertEquals(10, data.topics().get(0).partitions().get(0).committedOffset(),
+            "retention alone neither fences reassignment nor adopts a backward seek");
+    }
+
+    @Test
+    public void testRetainedRetrySnapshotStillExpiresWithoutAnotherApplicationPoll() {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        manager.enableRetainedRebalanceRetrySnapshot();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(time.milliseconds() + 50);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        time.sleep(100);
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.REQUEST_TIMED_OUT));
+        assertFutureThrows(TimeoutException.class, result);
+        assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
     }
 
     @Test

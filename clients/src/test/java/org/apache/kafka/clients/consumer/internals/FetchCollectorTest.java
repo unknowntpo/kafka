@@ -291,28 +291,29 @@ public class FetchCollectorTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testPublicPollWaitsForAutoCommitCaptureBeforeCollection(boolean captureDuringCollection) throws Exception {
-        verifyPublicPollCapture(captureDuringCollection, false);
+        verifyPublicPollCapture(captureDuringCollection, false, false);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testPublicPollMembershipRetryCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
-        verifyPublicPollCapture(captureDuringCollection, true);
+        verifyPublicPollCapture(captureDuringCollection, true, false);
     }
 
-    // Keep the four schedules on one identical runtime fixture so only capture timing/path varies.
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testPublicPollMembershipRetryRetainsAdmittedSnapshot(boolean captureDuringCollection) throws Exception {
+        verifyPublicPollCapture(captureDuringCollection, true, true);
+    }
+
+    // Keep the schedules on one identical runtime fixture so only capture timing/path varies.
     @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity"})
-    private void verifyPublicPollCapture(boolean captureDuringCollection, boolean rebalanceRetry) throws Exception {
+    private void verifyPublicPollCapture(boolean captureDuringCollection, boolean rebalanceRetry, boolean retainSnapshot) throws Exception {
         buildDependencies(DEFAULT_RECORD_COUNT + 1);
         assignAndSeek(topicAPartition0);
         TopicPartition revoked = new TopicPartition(topicAPartition0.topic(), 1);
-        if (rebalanceRetry) {
-            subscriptions.unsubscribe();
-            subscriptions.subscribe(Set.of(topicAPartition0.topic()));
-            subscriptions.assignFromSubscribed(Set.of(topicAPartition0, revoked));
-            subscriptions.seek(topicAPartition0, 0);
-            subscriptions.seek(revoked, 0);
-        }
+        if (rebalanceRetry)
+            seedSubscribedAssignment(revoked);
         Properties properties = consumerProps();
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, "public-snapshot-group");
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
@@ -340,6 +341,8 @@ public class FetchCollectorTest {
             CommitRequestManager commits = new CommitRequestManager(time, logContext, subscriptions,
                 config, coordinator, mock(OffsetCommitCallbackInvoker.class), "public-snapshot-group",
                 Optional.empty(), 100, 1000, OptionalDouble.of(0), commitMetrics, metadata);
+            if (retainSnapshot)
+                commits.enableRetainedRebalanceRetrySnapshot();
             ConsumerMembershipManager membership = rebalanceRetry ? membershipForRetainedPartition(commits, commitMetrics) : null;
             RequestManagers managers = new RequestManagers(logContext, offsets, topics, fetchRequests,
                 Optional.of(coordinator), Optional.of(commits), Optional.empty(), Optional.ofNullable(membership),
@@ -430,7 +433,7 @@ public class FetchCollectorTest {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ZERO);
 
             assertEquals(DEFAULT_RECORD_COUNT, records.count());
-            assertEquals(rebalanceRetry && captureDuringCollection ? DEFAULT_RECORD_COUNT : 0,
+            assertEquals(rebalanceRetry && captureDuringCollection && !retainSnapshot ? DEFAULT_RECORD_COUNT : 0,
                 offsetBeforePollReturns.get());
         } finally {
             background.shutdownNow();
@@ -442,6 +445,14 @@ public class FetchCollectorTest {
                 networkThread.cleanup();
             }
         }
+    }
+
+    private void seedSubscribedAssignment(TopicPartition revoked) {
+        subscriptions.unsubscribe();
+        subscriptions.subscribe(Set.of(topicAPartition0.topic()));
+        subscriptions.assignFromSubscribed(Set.of(topicAPartition0, revoked));
+        subscriptions.seek(topicAPartition0, 0);
+        subscriptions.seek(revoked, 0);
     }
 
     private ConsumerMembershipManager membershipForRetainedPartition(CommitRequestManager commits, Metrics commitMetrics) {

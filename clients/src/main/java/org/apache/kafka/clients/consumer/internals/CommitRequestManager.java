@@ -106,6 +106,13 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     private final MemberInfo memberInfo;
 
+    // POC only: retain the admitted snapshot across rebalance retries. Disabled in normal construction.
+    private boolean retainRebalanceRetrySnapshot;
+
+    void enableRetainedRebalanceRetrySnapshot() {
+        retainRebalanceRetrySnapshot = true;
+    }
+
     public CommitRequestManager(
         final Time time,
         final LogContext logContext,
@@ -358,11 +365,13 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         log.debug("Auto-commit sync before rebalance failed because topic or partition were deleted");
                         result.completeExceptionally(error);
                     } else {
-                        // Make sure the auto-commit is retried with the latest offsets
-                        log.debug("Member {} will retry auto-commit of latest offsets after receiving retriable error {}",
+                        log.debug("Member {} will retry auto-commit after receiving retriable error {}",
                             memberInfo.memberId,
                             error.getMessage());
-                        requestAttempt.offsets = subscriptions.allConsumed();
+                        // The opt-in experiment avoids recapturing positions while application collection is active.
+                        // It does not yet define snapshot validity across seek or assignment changes.
+                        if (!retainRebalanceRetrySnapshot)
+                            requestAttempt.offsets = subscriptions.allConsumed();
                         requestAttempt.resetFuture();
                         autoCommitSyncBeforeRebalanceWithRetries(requestAttempt, result);
                     }
