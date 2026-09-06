@@ -48,7 +48,7 @@ import java.util.Optional;
  * subsequently invokes {@code onResponse} to handle the exception and response. Note that the coordinator node will be
  * marked {@code null} upon receiving a failure.
  */
-public class CoordinatorRequestManager implements RequestManager {
+public class CoordinatorRequestManager implements RequestManager, CoordinatorAccess {
     private static final long COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS = 60 * 1000;
     private final Logger log;
     private final String groupId;
@@ -155,16 +155,19 @@ public class CoordinatorRequestManager implements RequestManager {
     }
 
     /** Owner-local identity, unrelated to the Kafka group/member epoch. Read on the network thread. */
+    @Override
     public long coordinatorVersion() {
         return coordinatorVersion;
     }
 
+    @Override
     public void handleCoordinatorDisconnect(Throwable exception, long currentTimeMs, long observedVersion) {
         if (exception instanceof DisconnectException)
             markCoordinatorUnknownIfCurrent(exception.getMessage(), currentTimeMs, observedVersion);
     }
 
     /** Validate an observation from a captured attempt; still complete that attempt's own outcome normally. */
+    @Override
     public boolean markCoordinatorUnknownIfCurrent(String cause, long currentTimeMs, long observedVersion) {
         if (observedVersion != coordinatorVersion)
             return false;
@@ -276,6 +279,7 @@ public class CoordinatorRequestManager implements RequestManager {
      *
      * @return the current coordinator node.
      */
+    @Override
     public Optional<Node> coordinator() {
         return Optional.ofNullable(this.coordinator);
     }
@@ -286,6 +290,7 @@ public class CoordinatorRequestManager implements RequestManager {
         return fatalError;
     }
 
+    @Override
     public Optional<Throwable> fatalError() {
         return fatalError;
     }

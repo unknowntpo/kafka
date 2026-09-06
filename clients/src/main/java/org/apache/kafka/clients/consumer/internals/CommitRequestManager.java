@@ -80,7 +80,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     private final LogContext logContext;
     private final Logger log;
     private final Optional<AutoCommitState> autoCommitState;
-    private final CoordinatorRequestManager coordinatorRequestManager;
+    private final CoordinatorAccess coordinatorRequestManager;
     private final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker;
     private final OffsetCommitMetricsManager metricsManager;
     private final long retryBackoffMs;
@@ -111,7 +111,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         final LogContext logContext,
         final SubscriptionState subscriptions,
         final ConsumerConfig config,
-        final CoordinatorRequestManager coordinatorRequestManager,
+        final CoordinatorAccess coordinatorRequestManager,
         final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker,
         final String groupId,
         final Optional<String> groupInstanceId,
@@ -138,7 +138,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         final LogContext logContext,
         final SubscriptionState subscriptions,
         final ConsumerConfig config,
-        final CoordinatorRequestManager coordinatorRequestManager,
+        final CoordinatorAccess coordinatorRequestManager,
         final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker,
         final String groupId,
         final Optional<String> groupInstanceId,

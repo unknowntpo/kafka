@@ -43,10 +43,13 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -70,6 +73,10 @@ class ConsumerAdmissionContractTest {
     }
 
     private CommitRequestManager create(boolean autoCommitEnabled, long autoCommitInterval) {
+        return create(autoCommitEnabled, autoCommitInterval, coordinatorRequestManager);
+    }
+
+    private CommitRequestManager create(boolean autoCommitEnabled, long autoCommitInterval, CoordinatorAccess coordinator) {
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
@@ -77,8 +84,41 @@ class ConsumerAdmissionContractTest {
         props.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, (int) autoCommitInterval);
         return new CommitRequestManager(time, logContext,
             new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST), new ConsumerConfig(props),
-            coordinatorRequestManager, mock(OffsetCommitCallbackInvoker.class), DEFAULT_GROUP_ID, Optional.empty(),
+            coordinator, mock(OffsetCommitCallbackInvoker.class), DEFAULT_GROUP_ID, Optional.empty(),
             retryBackoffMs, retryBackoffMaxMs, OptionalDouble.of(0), metrics, metadata);
+    }
+
+    @Test
+    public void testCommitUsesNonConsumingCoordinatorCapability() {
+        CoordinatorAccess coordinator = mock(CoordinatorAccess.class);
+        RuntimeException error = new RuntimeException("discovery failed");
+        when(coordinator.coordinator()).thenReturn(Optional.empty());
+        when(coordinator.fatalError()).thenReturn(Optional.of(error));
+        CommitRequestManager manager = create(false, 100, coordinator);
+        TopicPartition tp = new TopicPartition("topic", 0);
+        var commit = manager.commitAsync(Map.of(tp, new OffsetAndMetadata(1)));
+        var fetch = manager.fetchOffsets(Set.of(tp), time.milliseconds() + defaultApiTimeoutMs);
+
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertSame(error, assertThrows(CompletionException.class, commit::join).getCause());
+        assertSame(error, assertThrows(CompletionException.class, fetch::join).getCause());
+
+        // No consuming path has run: a later operation still sees the owner's retained error.
+        // This is not the after-Heartbeat case, which is covered by ConsumerBatchedDecisionTest.
+        var later = manager.commitAsync(Map.of(tp, new OffsetAndMetadata(2)));
+        manager.poll(time.milliseconds());
+        assertSame(error, assertThrows(CompletionException.class, later::join).getCause());
+    }
+
+    @Test
+    public void testCommitCoordinatorBoundaryDoesNotGrantConsumptionOrLifecycle() throws Exception {
+        assertEquals(CoordinatorAccess.class,
+            CommitRequestManager.class.getDeclaredField("coordinatorRequestManager").getType());
+        assertThrows(NoSuchMethodException.class, () -> CoordinatorAccess.class.getMethod("getAndClearFatalError"));
+        assertThrows(NoSuchMethodException.class, () -> CoordinatorAccess.class.getMethod("poll", long.class));
+        assertThrows(NoSuchMethodException.class, () -> CoordinatorAccess.class.getMethod("close"));
+        assertThrows(NoSuchMethodException.class,
+            () -> CoordinatorAccess.class.getMethod("markCoordinatorUnknown", String.class, long.class));
     }
 
     private void discoverCoordinator() {
