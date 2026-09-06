@@ -2056,8 +2056,14 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             long timeoutMs = inflightPoll.deadlineMs() - time.milliseconds();
             if (timeoutMs > 0) {
                 try {
-                    wakeupTrigger.setActiveTask(inflightPoll.reconciliationCheckFuture());
-                    ConsumerUtils.getResult(inflightPoll.reconciliationCheckFuture(), timeoutMs);
+                    // Wakeup may complete the active future exceptionally. It must cancel only
+                    // this wait, not mark the background-owned checkpoint as completed.
+                    CompletableFuture<Void> waitFuture = inflightPoll.reconciliationCheckFuture().copy();
+                    wakeupTrigger.setActiveTask(waitFuture);
+                    ConsumerUtils.getResult(waitFuture, timeoutMs);
+                    // Failure also releases the checkpoint. Recheck the operation outcome before
+                    // collecting records; normal checkpoint completion is not proof of success.
+                    maybeClearCurrentInflightPoll(false);
                 } catch (TimeoutException e) {
                     return Fetch.empty();
                 } finally {

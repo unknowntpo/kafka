@@ -207,6 +207,44 @@ Checkstyle main/test, Spotless Java, and SpotBugs main passed. This does not clo
 the complete historical issue: positive-timeout/error-at-checkpoint races,
 rebalance variants, broker crash/restart, and performance remain explicit gates.
 
+## Capture wait cancellation and error follow-up
+
+Baseline `28614d0e3f` exposed two additional failures in deterministic tests:
+
+- `testCaptureCheckpointErrorIsNotMistakenForSuccessfulReadiness`: completing
+  the event with an error at the wait boundary released its future normally;
+  `poll()` returned records instead of throwing that error.
+- The strengthened `testWakeupWhileWaitingOnReconciliationCheck(true)` showed
+  that `WakeupTrigger` completed the owner checkpoint exceptionally. Its
+  `isDone()` readiness predicate then returned true without background capture.
+
+The repair registers a `CompletableFuture.copy()` as the cancellable active wait,
+leaving the original background-owned checkpoint untouched. After a successful
+wait return, the existing inflight-result handler checks for failure before
+collection and clears a failed event so its error is not reported twice. This
+is waiter/operation separation, not another work queue or a global effect phase.
+The extra future exists only when an application actually needs to wait.
+
+The wakeup test verifies that a second zero-duration poll still cannot collect
+until the background completes the checkpoint. The error test verifies no
+collector invocation, unchanged position, and no duplicate error on the next
+call. `testCaptureCheckpointTimeoutPreservesRecordsForNextPoll` models expiry
+of a positive-duration wait using MockTime and a deterministic getResult seam:
+position remains unchanged and the source checkpoint incomplete; after completion,
+a later zero-duration poll receives the fixture's record.
+
+Evidence limits: these error/timeout tests use a mocked collector and controlled
+wait boundary, not a real broker or wall-clock interleaving. They complement the
+real-collector public-poll tests above, rather than replacing crash/restart or
+full rebalance evidence. Thread interruption and simultaneous wakeup/error winner
+ordering still require dedicated capture-checkpoint tests.
+
+Validation on 2026-09-06: the focused four-suite run passed 447 tests, then the
+broader seven-suite run passed 682 tests, all without failures/errors/skips,
+with retries disabled. The affected error/wakeup/timeout tests ran in both.
+Checkstyle main/test, Spotless Java, and SpotBugs main passed. Both negative
+results above were observed before the repair; neither was a fixture failure.
+
 If the interleaving is reachable, compare a scoped capture handshake against an
 explicit application-provided offset snapshot. Preserve existing timeout,
 wakeup, and record-delivery outcomes before choosing a mechanism; do not restore

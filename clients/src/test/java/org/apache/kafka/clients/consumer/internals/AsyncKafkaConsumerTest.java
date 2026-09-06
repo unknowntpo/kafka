@@ -505,7 +505,9 @@ public class AsyncKafkaConsumerTest {
 
         // Do not complete the AsyncPollEvent and call wakeup().
         // The call to poll should throw WakeupException without blocking for the full timeout.
+        AtomicReference<AsyncPollEvent> admitted = new AtomicReference<>();
         doAnswer(invocation -> {
+            admitted.set(invocation.getArgument(0));
             consumer.wakeup();
             return null;
         }).when(applicationEventHandler).add(ArgumentMatchers.isA(AsyncPollEvent.class));
@@ -517,8 +519,87 @@ public class AsyncKafkaConsumerTest {
 
         assertTrue(elapsed < 500, "Wakeup should interrupt promptly, took " + elapsed + "ms");
         assertEquals(0, subscriptions.position(tp).offset);
-        if (autoCommitEnabled)
+        if (autoCommitEnabled) {
             verify(fetchCollector, never()).collectFetch(any(FetchBuffer.class));
+            assertFalse(admitted.get().isReconciliationCheckComplete(),
+                "wakeup cancels the application's wait, not the background capture operation");
+            assertTrue(consumer.poll(Duration.ZERO).isEmpty());
+            verify(fetchCollector, never()).collectFetch(any(FetchBuffer.class));
+            admitted.get().markReconciliationCheckComplete();
+            assertTrue(admitted.get().isReconciliationCheckComplete());
+        }
+    }
+
+    @Test
+    public void testCaptureCheckpointErrorIsNotMistakenForSuccessfulReadiness() {
+        FetchBuffer buffer = mock(FetchBuffer.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        consumer = newConsumer(buffer, new ConsumerInterceptors<>(Collections.emptyList(), metrics),
+            mock(ConsumerRebalanceListenerInvoker.class), subscriptions, true);
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptions.assignFromUser(singleton(partition));
+        subscriptions.seek(partition, 0);
+        doReturn(-1).when(metadata).updateVersion();
+        AtomicReference<AsyncPollEvent> admitted = new AtomicReference<>();
+        doAnswer(invocation -> {
+            admitted.set(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        doReturn(Fetch.forPartition(partition,
+            List.of(new ConsumerRecord<>("topic", 0, 0, "key", "value")), true,
+            new OffsetAndMetadata(1))).when(fetchCollector).collectFetch(buffer);
+        KafkaException error = new KafkaException("capture failed before collection");
+
+        // Deterministic scheduling seam: error arrives after the caller chose to wait, but
+        // before that wait returns. The real event publishes the error then completes its checkpoint normally.
+        try (MockedStatic<ConsumerUtils> utils = mockStatic(ConsumerUtils.class, Mockito.CALLS_REAL_METHODS)) {
+            utils.when(() -> ConsumerUtils.getResult(any(CompletableFuture.class), Mockito.anyLong()))
+                .thenAnswer(invocation -> {
+                    assertFalse(admitted.get().reconciliationCheckFuture() == invocation.getArgument(0),
+                        "the cancellable wait must not be the owner checkpoint itself");
+                    admitted.get().completeExceptionally(error);
+                    return invocation.callRealMethod();
+                });
+            assertSame(error, assertThrows(KafkaException.class, () -> consumer.poll(Duration.ofSeconds(1))));
+        }
+        verify(fetchCollector, never()).collectFetch(buffer);
+        assertEquals(0, subscriptions.position(partition).offset);
+        assertDoesNotThrow(() -> consumer.poll(Duration.ZERO), "the failed event must not report the error twice");
+    }
+
+    @Test
+    public void testCaptureCheckpointTimeoutPreservesRecordsForNextPoll() {
+        FetchBuffer buffer = mock(FetchBuffer.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        consumer = newConsumer(buffer, new ConsumerInterceptors<>(Collections.emptyList(), metrics),
+            mock(ConsumerRebalanceListenerInvoker.class), subscriptions, true);
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptions.assignFromUser(singleton(partition));
+        subscriptions.seek(partition, 0);
+        doReturn(-1).when(metadata).updateVersion();
+        AtomicReference<AsyncPollEvent> admitted = new AtomicReference<>();
+        doAnswer(invocation -> {
+            admitted.set(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        doReturn(Fetch.forPartition(partition,
+            List.of(new ConsumerRecord<>("topic", 0, 0, "key", "value")), true,
+            new OffsetAndMetadata(1))).when(fetchCollector).collectFetch(buffer);
+
+        // Model the bounded wait expiring without a wall-clock sleep or completing the source checkpoint.
+        try (MockedStatic<ConsumerUtils> utils = mockStatic(ConsumerUtils.class, Mockito.CALLS_REAL_METHODS)) {
+            utils.when(() -> ConsumerUtils.getResult(any(CompletableFuture.class), Mockito.anyLong()))
+                .thenAnswer(invocation -> {
+                    time.sleep(1000);
+                    throw new TimeoutException("capture wait expired");
+                });
+            assertTrue(consumer.poll(Duration.ofSeconds(1)).isEmpty());
+        }
+        assertFalse(admitted.get().isReconciliationCheckComplete());
+        verify(fetchCollector, never()).collectFetch(buffer);
+        assertEquals(0, subscriptions.position(partition).offset);
+        admitted.get().markReconciliationCheckComplete();
+        assertEquals(1, consumer.poll(Duration.ZERO).count(), "timed-out waiting must not discard buffered records");
     }
 
     /**
