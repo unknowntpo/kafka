@@ -1,5 +1,10 @@
 # KIP-1371 Approach 2: contract assessment
 
+Latest architectural consolidation: [Coordination design v0](kip-1371-coordination-design-v0.md).
+It selects behavior-preserving owner capabilities and explicit routing boundaries,
+not universal next-round delivery or a stronger completion promise. The assessment
+below retains the history and scope of earlier experiments.
+
 ## Verdict and scope
 
 Approach 2 has partial feasibility evidence: bounded loop ordering, narrow
