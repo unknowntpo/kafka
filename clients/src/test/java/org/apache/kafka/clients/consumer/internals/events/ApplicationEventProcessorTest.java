@@ -76,6 +76,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -297,6 +298,11 @@ public class ApplicationEventProcessorTest {
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
         when(offsetsRequestManager.updateFetchPositions(event.deadlineMs())).thenReturn(CompletableFuture.completedFuture(null));
         when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
+        doAnswer(invocation -> {
+            assertFalse(event.isReconciliationCheckComplete(),
+                "collection must remain gated until periodic auto-commit offsets have been captured");
+            return null;
+        }).when(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());
         processor.process(event);
         assertTrue(event.isComplete());
         verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());

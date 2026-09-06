@@ -260,6 +260,15 @@ public class AsyncKafkaConsumerTest {
         ConsumerInterceptors<String, String> interceptors,
         ConsumerRebalanceListenerInvoker rebalanceListenerInvoker,
         SubscriptionState subscriptions) {
+        return newConsumer(fetchBuffer, interceptors, rebalanceListenerInvoker, subscriptions, false);
+    }
+
+    private AsyncKafkaConsumer<String, String> newConsumer(
+        FetchBuffer fetchBuffer,
+        ConsumerInterceptors<String, String> interceptors,
+        ConsumerRebalanceListenerInvoker rebalanceListenerInvoker,
+        SubscriptionState subscriptions,
+        boolean autoCommitEnabled) {
         int requestTimeoutMs = 30000;
         int defaultApiTimeoutMs = 1000;
         return new AsyncKafkaConsumer<>(
@@ -283,7 +292,7 @@ public class AsyncKafkaConsumerTest {
             requestTimeoutMs,
             defaultApiTimeoutMs,
             "group-id",
-            false,
+            autoCommitEnabled,
             new PositionsValidator(new LogContext(), time, subscriptions, metadata));
     }
 
@@ -482,12 +491,13 @@ public class AsyncKafkaConsumerTest {
         assertThrows(WakeupException.class, () -> consumer.poll(Duration.ZERO));
     }
 
-    @Test
-    public void testWakeupWhileWaitingOnReconciliationCheck() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testWakeupWhileWaitingOnReconciliationCheck(boolean autoCommitEnabled) {
         FetchBuffer fetchBuffer = mock(FetchBuffer.class);
         SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
         consumer = newConsumer(fetchBuffer, mock(ConsumerInterceptors.class),
-            mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
+            mock(ConsumerRebalanceListenerInvoker.class), subscriptions, autoCommitEnabled);
 
         final TopicPartition tp = new TopicPartition("topic1", 0);
         subscriptions.assignFromUser(singleton(tp));
@@ -506,6 +516,9 @@ public class AsyncKafkaConsumerTest {
         long elapsed = System.currentTimeMillis() - startTime;
 
         assertTrue(elapsed < 500, "Wakeup should interrupt promptly, took " + elapsed + "ms");
+        assertEquals(0, subscriptions.position(tp).offset);
+        if (autoCommitEnabled)
+            verify(fetchCollector, never()).collectFetch(any(FetchBuffer.class));
     }
 
     /**

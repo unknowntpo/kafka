@@ -1,7 +1,8 @@
 # Approach 2: auto-commit snapshot audit
 
-Scope: KAFKA-18641, Approach 2 production baseline `17b05c7433`.
-This audit adds characterization tests, not a new production fix.
+Scope: KAFKA-18641, Approach 2 original audit baseline `17b05c7433`.
+The sections below preserve the characterization history; the final section
+describes a subsequent bounded production repair.
 
 ## Original repair and intent
 
@@ -151,6 +152,60 @@ Validation on 2026-09-06: 572 tests across `AsyncKafkaConsumerTest`,
 `CommitRequestManagerTest`, `FetchCollectorTest`, and `ShareFetchCollectorTest`
 passed twice, with zero failures/errors/skips and retries disabled. Final
 Checkstyle and Spotless Java checks passed. Production code remains unchanged.
+
+## Scoped capture checkpoint repair
+
+The preserved counterexample revision is `6c7a68ef59`. The subsequent repair
+uses the existing per-poll reconciliation checkpoint for both reconciliation and
+periodic auto-commit capture. It does not introduce a queue, general effect type,
+or new global publication phase:
+
+1. The event processor captures periodic auto-commit offsets before completing
+   the checkpoint, while preserving reconciliation-before-periodic-commit order.
+2. With auto-commit enabled, `collectFetch()` observes that checkpoint even if
+   no reconciliation is pending and the position-validation fast path succeeds.
+3. With no auto-commit and no pending reconciliation, the fast path stays intact.
+
+The checkpoint promises capture readiness, not successful network transmission,
+broker acknowledgement, or settlement of every manager. The existing checkpoint
+name is retained in this bounded POC rather than conflating a rename with the fix.
+
+Alternative considered: a separate snapshot of delivered progress could avoid
+this wait, but introduces another state lifecycle across seeks, reassignment,
+partial delivery, and rebalance commits. That is not selected without those
+contracts and tests. This repair instead restores an operation-specific ordering
+constraint already present in the original historical fix.
+
+Cost: when auto-commit is enabled, a newly submitted unprocessed poll event can
+delay buffered collection. A zero-duration poll may return empty until capture
+completes; a subsequent call must still retrieve those records. This is an
+explicit safety/latency trade-off, not a claim of unchanged performance. It waits
+for local capture, never the broker commit result. Current-revision performance
+and full broker/rebalance validation remain outstanding.
+
+The public test is now named
+`testPublicPollWaitsForAutoCommitCaptureBeforeCollection`. Delayed processing must
+leave position at 0 and buffered records intact after a zero-duration poll;
+after background processing, the next poll returns ten records and the transmitted
+commit remains 0. The earlier low-level counterexample remains intentionally
+unchanged: bypassing the application gate still permits unsafe capture timing.
+`ApplicationEventProcessorTest.testAsyncPollEvent` also asserts the checkpoint
+is not complete inside periodic capture. The existing wakeup test is expanded to
+auto-commit enabled, asserting interruption before collector invocation and
+unchanged position.
+
+Negative control: temporarily restoring the old `hasPendingReconciliation`-only
+collection condition caused the delayed public-poll safety assertion to fail
+(records returned instead of empty); the immediate-capture control passed.
+The new guard was restored before final validation.
+
+Final repair validation on 2026-09-06: 680 tests in seven suites passed twice,
+zero failures/errors/skips, Java 17, offline, one fork, retries disabled.
+Suites: AsyncKafkaConsumer, CommitRequestManager, regular/share FetchCollector,
+ApplicationEventProcessor, ConsumerAsyncPollMetadata, ConsumerBatchedDecision.
+Checkstyle main/test, Spotless Java, and SpotBugs main passed. This does not close
+the complete historical issue: positive-timeout/error-at-checkpoint races,
+rebalance variants, broker crash/restart, and performance remain explicit gates.
 
 If the interleaving is reachable, compare a scoped capture handshake against an
 explicit application-provided offset snapshot. Preserve existing timeout,

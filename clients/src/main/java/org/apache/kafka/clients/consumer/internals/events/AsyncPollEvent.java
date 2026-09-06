@@ -39,8 +39,9 @@ import java.util.concurrent.CompletableFuture;
  *
  * {@link AsyncKafkaConsumer#poll(Duration)} is implemented using a non-blocking design to ensure performance is
  * at the same level as {@link ClassicKafkaConsumer#poll(Duration)}. The event is submitted in {@code poll()}, but
- * there are no blocking waits for the "result" of the event. Checks are made for the result at certain points, but
- * they do not block. The logic for the previously-mentioned events is executed sequentially on the background thread.
+ * there is no blocking wait for the final network result. Before collecting records, the application may wait
+ * for the narrower reconciliation/auto-commit capture checkpoint. The logic for the previously-mentioned
+ * events is executed sequentially on the background thread.
  */
 public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNotifiableEvent {
 
@@ -96,7 +97,8 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
 
     /**
      * @return the future that completes when the background thread has checked any pending reconciliation
-     * for this poll event. Once complete, revocations have been handled (commit triggered and partitions
+     * for this poll event and captured any due periodic auto-commit offsets.
+     * Once complete, revocations have been handled (commit triggered and partitions
      * marked as pending revocation), so the app thread can safely proceed to fetch/collect records.
      */
     public CompletableFuture<Void> reconciliationCheckFuture() {
@@ -104,7 +106,7 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
     }
 
     /**
-     * @return true if the background already checked any pending reconciliation when processing this poll event.
+     * @return true if the background checked pending reconciliation and periodic auto-commit capture for this poll event.
      * If it completed the check, we know that revocations were handled (commit triggered and partitions marked as pending revocation),
      * so the app thread can safely proceed to fetch/collect records.
      */
@@ -113,8 +115,8 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
     }
 
     /**
-     * Mark that reconciliation check is complete for this poll event.
-     * This should be called after the background has checked pending reconciliations when processing this poll event
+     * Mark that reconciliation and periodic auto-commit capture are complete for this poll event.
+     * This should be called after the background has captured periodic commit offsets and checked pending reconciliations
      * (triggered commits, and marked partitions as pending revocation if needed)
      */
     public void markReconciliationCheckComplete() {

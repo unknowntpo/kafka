@@ -287,7 +287,7 @@ public class FetchCollectorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    public void testPublicPollAutoCommitCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
+    public void testPublicPollWaitsForAutoCommitCaptureBeforeCollection(boolean captureDuringCollection) throws Exception {
         buildDependencies(DEFAULT_RECORD_COUNT + 1);
         assignAndSeek(topicAPartition0);
         Properties properties = consumerProps();
@@ -352,22 +352,22 @@ public class FetchCollectorTest {
                 new LinkedBlockingQueue<>(), new CompletableEventReaper(logContext),
                 mock(ConsumerRebalanceListenerInvoker.class), commitMetrics, subscriptions, metadata,
                 100, 30000, 1000, "public-snapshot-group", true, validator);
-            CompletedFetch completed = spy(completedFetchBuilder.recordCount(DEFAULT_RECORD_COUNT).build());
-            doAnswer(invocation -> {
-                if (captureDuringCollection) {
-                    assertTrue(inputs.peek() instanceof AsyncPollEvent);
-                    background.submit(loop::runOnce).get(5, TimeUnit.SECONDS);
-                }
-                invocation.callRealMethod();
-                return null;
-            }).when(completed).drain();
+            CompletedFetch completed = completedFetchBuilder.recordCount(DEFAULT_RECORD_COUNT).build();
             fetchBuffer.add(completed);
             time.sleep(100);
 
-            ConsumerRecords<String, String> records = consumer.poll(Duration.ofSeconds(1));
+            if (captureDuringCollection) {
+                assertTrue(consumer.poll(Duration.ZERO).isEmpty(),
+                    "an unprocessed auto-commit checkpoint must prevent collection, even on the validation fast path");
+                assertEquals(0, subscriptions.position(topicAPartition0).offset);
+                assertEquals(-1, offsetBeforePollReturns.get());
+                assertTrue(inputs.peek() instanceof AsyncPollEvent);
+                background.submit(loop::runOnce).get(5, TimeUnit.SECONDS);
+            }
+            ConsumerRecords<String, String> records = consumer.poll(Duration.ZERO);
 
             assertEquals(DEFAULT_RECORD_COUNT, records.count());
-            assertEquals(captureDuringCollection ? DEFAULT_RECORD_COUNT : 0, offsetBeforePollReturns.get());
+            assertEquals(0, offsetBeforePollReturns.get());
         } finally {
             background.shutdownNow();
             assertTrue(background.awaitTermination(5, TimeUnit.SECONDS));

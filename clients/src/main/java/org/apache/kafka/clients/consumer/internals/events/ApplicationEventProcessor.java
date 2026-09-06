@@ -731,13 +731,13 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
         requestManagers.consumerMembershipManager.ifPresent(consumerMembershipManager ->
             consumerMembershipManager.maybeReconcile(true));
 
-        // We completed checking pending reconciliations (commits triggered, revoked partitions marked to prevent fetching)
-        // so the application thread poll loop can safely continue progress now (fetching)
-        event.markReconciliationCheckComplete();
-
         if (requestManagers.commitRequestManager.isPresent()) {
             CommitRequestManager commitRequestManager = requestManagers.commitRequestManager.get();
             commitRequestManager.updateTimerAndMaybeCommit(event.pollTimeMs());
+
+            // Capture periodic commit offsets before releasing collection, not just rebalance commits.
+            // This is snapshot readiness, not acknowledgement from the broker.
+            event.markReconciliationCheckComplete();
 
             requestManagers.consumerHeartbeatRequestManager.ifPresent(hrm -> {
                 ConsumerMembershipManager membershipManager = hrm.membershipManager();
@@ -751,6 +751,8 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
                 membershipManager.onConsumerPoll();
                 hrm.resetPollTimer(event.pollTimeMs());
             });
+        } else {
+            event.markReconciliationCheckComplete();
         }
 
         CompletableFuture<Void> updatePositionsFuture = requestManagers.offsetsRequestManager.updateFetchPositions(event.deadlineMs());

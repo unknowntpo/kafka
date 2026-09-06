@@ -2047,7 +2047,9 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         // This is key because partitions may need revocation, so we need to wait for the reconciliation check
         // that triggers commits and marks partitions as pending revocation, before we can
         // safely collect records from the buffer.
-        if (hasPendingReconciliation && inflightPoll != null && !inflightPoll.isReconciliationCheckComplete()) {
+        // Periodic auto-commit also captures positions here, even without pending reconciliation.
+        // Position validation alone does not authorize collection before that snapshot is captured.
+        if ((autoCommitEnabled || hasPendingReconciliation) && inflightPoll != null && !inflightPoll.isReconciliationCheckComplete()) {
             // If the background hasn't had the time to check for pending reconciliation,
             // we need to wait for that check before moving on (instead of returning empty right away,
             // which will lead to blocking on buffer data)
