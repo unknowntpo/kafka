@@ -1,5 +1,9 @@
 # KIP-1371 Approach 2: contract assessment
 
+Existing-behavior acceptance: [Coordinator / Heartbeat / Commit compatibility ledger](kip-1371-approach2-compatibility-ledger.md).
+This complements historical issue coverage and identifies the post-I/O completion
+cutoff as a priority differential-validation gate.
+
 Current decision brief at code baseline `df756cee98`:
 [Approach 2 contract and decision summary (Chinese)](kip-1371-approach2-decision-brief-zh.md).
 It consolidates the later snapshot/lifecycle evidence and pending choices;
