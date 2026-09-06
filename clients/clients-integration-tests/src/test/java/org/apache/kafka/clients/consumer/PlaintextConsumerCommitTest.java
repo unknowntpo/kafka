@@ -40,6 +40,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.apache.kafka.clients.ClientsTestUtils.awaitAssignment;
 import static org.apache.kafka.clients.ClientsTestUtils.consumeAndVerifyRecords;
@@ -95,6 +97,59 @@ public class PlaintextConsumerCommitTest {
     @ClusterTest
     public void testAsyncConsumerAutoCommitOnClose() throws InterruptedException {
         testAutoCommitOnClose(GroupProtocol.CONSUMER);
+    }
+
+    @ClusterTest
+    public void testAsyncCloseJoinsBackgroundThreadAndOffsetsSurviveBrokerRestart() throws Exception {
+        String group = "close-restart-contract";
+        Map<String, Object> config = Map.of(
+            GROUP_ID_CONFIG, group,
+            GROUP_PROTOCOL_CONFIG, "consumer",
+            ENABLE_AUTO_COMMIT_CONFIG, true,
+            ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, Integer.MAX_VALUE,
+            ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest",
+            ConsumerConfig.MAX_POLL_RECORDS_CONFIG, 10);
+        sendRecords(cluster, tp, 100);
+        Set<Thread> before = Thread.getAllStackTraces().keySet();
+        Set<Thread> ownedThreads;
+        try (Consumer<byte[], byte[]> consumer = cluster.consumer(config)) {
+            consumer.subscribe(List.of(topic));
+            List<ConsumerRecord<byte[], byte[]>> delivered = ClientsTestUtils.consumeRecords(consumer, 50, 10);
+            assertEquals(50, delivered.size());
+            for (int i = 0; i < delivered.size(); i++) {
+                assertEquals(tp, new TopicPartition(delivered.get(i).topic(), delivered.get(i).partition()));
+                assertEquals(i, delivered.get(i).offset());
+            }
+            assertEquals(50, consumer.position(tp));
+            ownedThreads = Thread.getAllStackTraces().keySet().stream()
+                .filter(thread -> !before.contains(thread) && thread.getName().equals("consumer_background_thread"))
+                .collect(Collectors.toSet());
+            assertEquals(1, ownedThreads.size(), "the consumer protocol must use the real background thread");
+            // The test treats all returned records as processed before close. No explicit commit or seek.
+            consumer.close(CloseOptions.timeout(Duration.ofSeconds(30)));
+            assertTrue(ownedThreads.stream().noneMatch(Thread::isAlive), "close must join its background thread");
+        }
+        try (var admin = cluster.admin()) {
+            assertEquals(50, admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata()
+                .get(30, TimeUnit.SECONDS).get(tp).offset());
+        }
+
+        // Restart all test-owned brokers with their existing storage; the fixture owns final cleanup.
+        cluster.brokerIds().forEach(cluster::shutdownBroker);
+        cluster.brokerIds().forEach(cluster::startBroker);
+        cluster.waitForReadyBrokers();
+        try (Consumer<byte[], byte[]> resumed = cluster.consumer(Map.of(
+            GROUP_ID_CONFIG, group, GROUP_PROTOCOL_CONFIG, "consumer", ENABLE_AUTO_COMMIT_CONFIG, false,
+            ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"))) {
+            assertEquals(50, resumed.committed(Set.of(tp)).get(tp).offset(), "offset must survive broker restart");
+            resumed.subscribe(List.of(topic));
+            List<ConsumerRecord<byte[], byte[]>> remaining = ClientsTestUtils.consumeRecords(resumed, 50);
+            assertEquals(50, remaining.size());
+            for (int i = 0; i < remaining.size(); i++) {
+                assertEquals(tp, new TopicPartition(remaining.get(i).topic(), remaining.get(i).partition()));
+                assertEquals(50 + i, remaining.get(i).offset(), "resume must neither skip nor replay the committed prefix");
+            }
+        }
     }
 
     private void testAutoCommitOnClose(GroupProtocol groupProtocol) throws InterruptedException {

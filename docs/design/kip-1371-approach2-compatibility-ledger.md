@@ -2,6 +2,16 @@
 
 Candidate normative obligations: [semantics draft](kip-1371-approach2-semantics-draft.md).
 
+## Real normal-close and broker-restart follow-up
+
+The [broker-restart evidence](kip-1371-close-broker-restart-evidence.md) now adds
+an actual consumer background thread, real public close and broker-persisted
+offset recovery in a fresh KRaft cluster. It narrows the earlier missing-shutdown
+evidence statement: normal-close termination is tested, while fault-time shutdown,
+crash/rebalance snapshot safety and exact historical lifecycle reproductions
+remain unverified. The controlled component-test limits below still apply to
+those tests; their MockClient results are not being relabelled as broker evidence.
+
 ## Public close and actual publication follow-up
 
 `ConsumerBatchedDecisionTest.testPublicCloseOrdersCommitDiscoveryAndRealMembership`
