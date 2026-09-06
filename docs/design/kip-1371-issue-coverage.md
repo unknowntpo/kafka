@@ -21,12 +21,15 @@ equivalent refactoring. No upstream, Jira, Confluence or remote publication is a
 | KAFKA-20970 | Commit unknown-coordinator/expired-auto-commit typed wait plus independent Streams startup/in-flight repairs. Commit and all three heartbeat suites validate local wait and subsequent admission. | Regular commit proof does not stand in for Streams; current-candidate performance still needs measurement. |
 | KAFKA-20397 | Pending metadata-dependent operation routing; real-buffer before/during-wait publication tests, actual public-poll latch path, deadline/error identity, wakeup and later recovery. | Controlled transport/collector seams remain; do not call this an exact old failing real-broker wire reproduction. |
 | KAFKA-18160 | Inherited acknowledgement-before-rethrow; new public-poll callback WakeupException/InterruptException tests recover and deliver records through real background thread and brokers, in both KRaft configurations. | Four integration cases passed twice; not exhaustive OS interruption timing. |
-| KAFKA-19357 | Exact inherited `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`: stopped brokers, 500 ms close budget, exactly one failed callback. It passed in the earlier broader plaintext run. | Correct result is bounded failure, not discovery until success; that broader run had a separate setup/heap failure. |
+| KAFKA-19357 | Exact inherited `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`: stopped brokers, 500 ms close budget, exactly one failed callback. It passed again in the complete 419-case integration run at this revision. | Correct result is bounded failure, not discovery until success; the earlier separate setup/heap failure remains recorded. |
 | KAFKA-18569 | Inherited close signaling; eight public-close/real-membership component combinations prove stop after dependent work and no new discovery after backoff. Separate real close proof observes background-thread termination. | No new universal terminal lifecycle semantics or abrupt broker-crash proof. |
 
 Focused receipts and failures are retained in the completion log. The broad consumer unit namespace
 passes at this revision (3,383 cases, 97 suites, no failures/errors/skips; default non-flaky selection).
-The integration invocation is still running; this table is not a fabricated all-green result.
+The full real-consumer integration invocation also passes: **419 cases in 21 suites**, no
+failures/errors/skips and no retries, with a fresh JVM per class. This includes the close/restart
+persistence test and all four new public callback-recovery cases. Streams application integration
+is a separate module; its follow-up is not included in this count.
 Existing repaired cases remain inherited evidence even when the POC adds stronger contract tests.
 
 ## Original gap checklist (historical)

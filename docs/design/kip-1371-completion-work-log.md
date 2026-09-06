@@ -181,3 +181,31 @@ Next execution order after the current broad client integration run:
    (inconclusive for performance), then the predeclared full profile if smoke is valid.
 4. Finalize local KIP evidence, archive raw receipts in a durable workspace location, and regenerate HTML.
 5. Commit locally and report actual coverage and limits. No remote publication or push.
+
+### Complete real-consumer integration receipt at `95095ac064`
+
+The combined unit/integration command finished successfully in 56m48s. The integration
+namespace reports **419 tests, 21 suites, zero failures/errors/skips**, retries disabled,
+fresh test JVM per class. Raw XML and HTML are archived at
+`/tmp/kip1371-overnight-evidence.TC1I8d/full-integration-95095ac/` and
+`/tmp/kip1371-overnight-evidence.TC1I8d/full-integration-html-95095ac/`.
+The passing set includes exact background-thread shutdown plus broker restart/resumed offsets,
+the inherited unknown-coordinator close failure, four new callback recovery cases, regular/SASL
+consumer flows and Share Consumer callback, delivery, DLQ, lag, rack, renewal and recovery tests.
+The previous shared-JVM setup/heap failure did not recur in this invocation; that observation
+does not establish its root cause or authorize erasing the failed receipt.
+
+The baseline runtime export has completed successfully. The common idle harness was copied
+unchanged and compiled against the baseline with Java 11 bytecode; source SHA-256:
+`d4cd92bd6df4643befaa4a27c14adfbbada81a9e4ccf566e885926ad3801a070`.
+Benchmark preparation now verifies the broker cluster ID before topic writes, excludes only
+absent Gradle resource outputs (not missing jars/classes), and supports separate baseline/candidate
+JFR diagnostics. These are preparation checks, not measured performance results.
+
+The explicit `kafka.test.run.flaky=true` consumer selection passed **six tests in two
+suites**, no failures/errors/skips or retries; raw receipt `flaky-unit-95095ac/` in the
+same evidence directory. The subsequent runtime export failed on the Scala-only core
+module's absent Java output, not on a test. The exporter now omits only outputs whose
+Java/resource producer demonstrably has no source, and still rejects unexpected missing
+classes/jars. Real smoke validation remains required. Streams protocol/topology integration
+is now running with its own per-class JVM isolation.

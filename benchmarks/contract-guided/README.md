@@ -58,8 +58,18 @@ counts and timing/RSS output, and stops only its owned processes. The full profi
 enabled and 500 max poll records. Start with `--records 10000 --pairs 1` to validate the
 fixture and parser, without interpreting those short results as performance acceptance.
 Optional `--idle-harness-classes` runs the separately compiled, unchanged idle harness;
-`--profile` records a separate candidate JFR after measurement.
+`--profile` records separate baseline and candidate JFRs after measurement. These are
+whole-process diagnostics, including startup and close, not timed acceptance samples
+or exact allocation-per-record counters.
 
 `test_results.py` rejects missing/ambiguous CSV, incomplete consumption despite exit 0,
 warnings, nonfinite rates and zero-rate results. It currently has five passing unit cases.
 The runner's real broker lifecycle and exported classpaths still require the smoke run.
+
+The baseline export is built successfully. Gradle's absent output for a demonstrated
+`NO-SOURCE` Java/resource task is omitted (including the Scala-only core module's Java
+output); unexpected missing jars/classes still fail.
+Before any topic mutation, the runner checks that the listener reports the unique
+cluster ID it just formatted and that its owned broker process is still alive.
+The manifest records the Java version and platform. CPU/RSS summaries explicitly
+cover the whole CLI process, not only its reported fetch interval.

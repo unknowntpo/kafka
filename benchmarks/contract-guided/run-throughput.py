@@ -27,6 +27,7 @@ import json
 import math
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 import socket
@@ -172,6 +173,7 @@ def main():
         return fingerprint
 
     manifest = {
+        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "baseline": expected_base,
         "candidate_head": git(args.candidate_worktree, "rev-parse", "HEAD"),
         "candidate_client_revision": "95095ac064",
@@ -181,6 +183,10 @@ def main():
         "auto_commit": True, "minimum_fetch_ms": 30_000, "minimum_throughput_ratio": 0.95,
         "classpath_sha256": {k: hashlib.sha256(v.encode()).hexdigest() for k, v in runtimes.items()},
         "runtime_content_sha256": {k: runtime_fingerprint(v) for k, v in runtimes.items()},
+        "environment": {"system": platform.system(), "release": platform.release(),
+                        "machine": platform.machine(), "python": platform.python_version(),
+                        "java_version": subprocess.check_output(
+                            [str(args.java), "-version"], stderr=subprocess.STDOUT, text=True).strip()},
     }
     if args.idle_harness_classes:
         manifest["idle_harness_sha256"] = runtime_fingerprint(str(args.idle_harness_classes))
@@ -210,6 +216,10 @@ def main():
                 if time.monotonic() >= deadline:
                     raise RuntimeError("broker listener did not become ready")
                 time.sleep(0.2)
+        identity = run("verify-owned-cluster", java("candidate", "org.apache.kafka.tools.ClusterTool",
+                                                   "cluster-id", "--bootstrap-server", address))
+        if f"Cluster ID: {cluster_id}" not in identity.splitlines() or broker.poll() is not None:
+            raise RuntimeError("listener is not the live task-owned cluster; refusing topic writes")
         run("create-topic", java("candidate", "org.apache.kafka.tools.TopicCommand", "--bootstrap-server", address,
                                  "--create", "--topic", topic, "--partitions", "4", "--replication-factor", "1"))
         topic_created = True
@@ -251,6 +261,14 @@ def main():
                    "sufficient_duration": all(r["fetch_ms"] >= 30_000 for r in results)}
         summary["gate"] = "inconclusive-short" if not summary["sufficient_duration"] else (
             "inconclusive-pairs" if args.pairs < 5 else ("pass" if ratio >= 0.95 else "regression"))
+        # Whole CLI process costs include startup/close; do not label them fetch-only CPU.
+        summary["whole_process_resources"] = {
+            role: {
+                metric: {"median": median([r[metric] for r in results if r["role"] == role]),
+                         "mad": mad([r[metric] for r in results if r["role"] == role])}
+                for metric in ("process_cpu_seconds", "maximum_resident_bytes")
+            } for role in ("baseline", "candidate")
+        }
         (root / "summary.json").write_text(json.dumps(summary, indent=2))
         print(f"SUMMARY {json.dumps(summary)}", flush=True)
         if args.idle_harness_classes:
@@ -297,12 +315,17 @@ def main():
             (root / "idle-first-record-summary.json").write_text(json.dumps(small_summary, indent=2))
             print(f"IDLE_LATENCY_SUMMARY {json.dumps(small_summary)}", flush=True)
         if args.profile:
-            command = java("candidate", "org.apache.kafka.tools.ConsumerPerformance", "--bootstrap-server", address,
-                           "--topic", topic, "--num-records", str(min(args.records, 5_000_000)),
-                           "--group", topic + "-profile", "--command-config", str(consumer_config), "--timeout", "60000")
-            command.insert(1, f"-XX:StartFlightRecording=filename={root / 'candidate.jfr'},settings=profile,dumponexit=true")
-            run("candidate-profile", command)
-            run("jfr-summary", [str(args.java.with_name("jfr")), "summary", str(root / "candidate.jfr")])
+            for role in ("baseline", "candidate"):
+                profile_records = min(args.records, 5_000_000)
+                recording = root / f"{role}.jfr"
+                command = java(role, "org.apache.kafka.tools.ConsumerPerformance", "--bootstrap-server", address,
+                               "--topic", topic, "--num-records", str(profile_records),
+                               "--group", topic + "-profile-" + role,
+                               "--command-config", str(consumer_config), "--timeout", "60000")
+                command.insert(1, f"-XX:StartFlightRecording=filename={recording},settings=profile,dumponexit=true")
+                output = run(f"{role}-profile", command)
+                parse_result(f"{role}-profile", output, profile_records)
+                run(f"jfr-summary-{role}", [str(args.java.with_name("jfr")), "summary", str(recording)])
     finally:
         try:
             if topic_created and broker.poll() is None:

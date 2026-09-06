@@ -34,9 +34,31 @@ gradle.projectsEvaluated {
         doLast {
             def output = file(providers.gradleProperty('contractGuidedOutput').get())
             output.mkdirs()
+            def noSourceOutputs = []
+            rootProject.allprojects.each { dependency ->
+                def compileJava = dependency.tasks.findByName('compileJava')
+                if (compileJava instanceof org.gradle.api.tasks.compile.JavaCompile && compileJava.source.files.empty) {
+                    noSourceOutputs.add(compileJava.destinationDirectory.get().asFile.canonicalPath)
+                }
+                def resources = dependency.tasks.findByName('processResources')
+                if (resources instanceof org.gradle.language.jvm.tasks.ProcessResources && resources.source.files.empty) {
+                    noSourceOutputs.add(resources.destinationDir.canonicalPath)
+                }
+            }
             selected.each { label, project ->
+                def runtimeFiles = project.sourceSets.main.runtimeClasspath.files.findAll { path ->
+                    if (path.exists()) {
+                        return true
+                    }
+                    // Gradle also lists Java output for the Scala-only core project.
+                    // Omit only an output whose producing task demonstrably has NO-SOURCE.
+                    if (noSourceOutputs.contains(path.canonicalPath)) {
+                        return false
+                    }
+                    throw new GradleException("Missing runtime entry: ${path}")
+                }
                 new File(output, "${label}-classpath.txt").text =
-                    project.sourceSets.main.runtimeClasspath.files.collect { it.canonicalPath }.join(File.pathSeparator)
+                    runtimeFiles.collect { it.canonicalPath }.join(File.pathSeparator)
             }
         }
     }
