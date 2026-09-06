@@ -1,5 +1,53 @@
 # Approach 2: existing-behavior compatibility ledger
 
+## Current contract after discussion
+
+Keep `RequestManager.poll()`; do not introduce `preIO()` / `postIO()` methods.
+The loop owns invocation timing. The working discovery-error contract is:
+
+1. When Commit RM processes a coordinator error while the coordinator is unknown,
+   it fails the currently waiting unsent operations selected by its owner logic.
+   This is a processing-time boundary, not a snapshot of operations at response
+   arrival and not cancellation of requests already sent to the broker.
+2. Heartbeat's configured delivery path consumes the error after Commit has read
+   it. Later operations do not inherit this consumed error; they await subsequent
+   discovery and remain subject to their own result/timeout/close rules.
+3. Repeated polls without a new discovery failure must not repeat that ErrorEvent
+   handoff or rewrite already completed outcomes. A genuinely new discovery
+   failure is a new observation and may be delivered again.
+
+**Correction to the earlier recommendation below:** a different error audience
+under an earlier processing boundary does not by itself justify removing the
+post-I/O pass. Both invocation strategies can satisfy this contract. Retain the
+comparison and its observed outcomes, but do not label the extra pass incorrect
+or select its removal solely because those outcomes differ. Necessity, cost,
+other ordering obligations and public API compatibility still need independent
+evaluation. No production behavior or retry-snapshot policy is changed here.
+
+The shared tests already cover queued-input cutoffs, callback-enqueued subsequent
+operations, error identity, single ErrorEvent handoff, and public async recovery.
+`testOperationAfterConsumedDiscoveryErrorUsesOwnTimeoutOrClose` adds four cases:
+both invocation strategies, each with the later sync event either expiring or
+encountering Commit RM's close signal while coordinator is unknown. The later
+operation first remains pending, then receives its own TimeoutException or
+CommitFailedException, not the consumed authorization failure. Additional polling
+does not change either operation's selected outcome or repeat the ErrorEvent.
+
+These are real-loop in-memory tests with controlled transport. The close cases
+call `CommitRequestManager.signalClose()`; they do not prove complete consumer
+close, in-flight request cancellation, or every offset-fetch/lifecycle path.
+The timeout assertion concerns the application event's terminal outcome, not a
+claim that every internal request was removed or could never reach the broker.
+Historical receipts and recommendations below are retained as the audit trail;
+this section supersedes their earlier default-boundary recommendation.
+
+Validation for this contract follow-up: **239 tests in three suites passed twice**
+(ConsumerBatchedDecisionTest, CommitRequestManagerTest, CoordinatorRequestManagerTest),
+zero failures/errors/skips, retries disabled, JDK 17 / Gradle 9.7.1 offline.
+Checkstyle and Spotless Java checks passed on the first run. This validates the
+named processing-time cases; it is not a new benchmark or closure of the full KIP
+issue inventory.
+
 ## Scope and verdict
 
 2026-09-06. Candidate code: `0234b4f8fe` (production code unchanged since

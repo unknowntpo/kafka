@@ -324,6 +324,45 @@ class ConsumerBatchedDecisionTest {
 
     @ParameterizedTest
     @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void testOperationAfterConsumedDiscoveryErrorUsesOwnTimeoutOrClose(boolean postIoPass, boolean closing) {
+        useDecisionBoundary(postIoPass);
+        var first = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+        thread.runOnce();
+        if (!postIoPass)
+            thread.runOnce();
+        Throwable discoveryError = assertThrows(CompletionException.class, first::join).getCause();
+        assertInstanceOf(GroupAuthorizationException.class, discoveryError);
+        assertTrue(coordinator.fatalError().isEmpty());
+
+        SyncCommitEvent later = new SyncCommitEvent(
+            Optional.of(Map.of(PARTITION, new OffsetAndMetadata(2))), time.milliseconds() + 10);
+        applicationEvents.add(later);
+        thread.runOnce();
+        assertTrue(later.offsetsReady().isDone());
+        assertFalse(later.future().isDone(), "a later operation must not inherit a consumed error");
+        if (closing)
+            commits.signalClose();
+        else
+            time.sleep(10); // MockTime: expire only this operation, not discovery backoff.
+        thread.runOnce();
+
+        Throwable outcome = assertThrows(CompletionException.class, later.future()::join).getCause();
+        if (closing)
+            assertInstanceOf(CommitFailedException.class, outcome);
+        else
+            assertInstanceOf(org.apache.kafka.common.errors.TimeoutException.class, outcome);
+        thread.runOnce();
+        assertSame(outcome, assertThrows(CompletionException.class, later.future()::join).getCause());
+        assertSame(discoveryError, assertThrows(CompletionException.class, first::join).getCause());
+        ArgumentCaptor<ErrorEvent> delivered = ArgumentCaptor.forClass(ErrorEvent.class);
+        verify(background).add(delivered.capture());
+        assertSame(discoveryError, delivered.getValue().error());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
     void testDecisionBoundaryChangesLaterCommitErrorAudience(boolean postIoPass, boolean queuedDuringIo) {
         useDecisionBoundary(postIoPass);
         var operationA = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
