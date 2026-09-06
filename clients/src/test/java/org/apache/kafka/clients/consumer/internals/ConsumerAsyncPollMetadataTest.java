@@ -45,7 +45,9 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -174,6 +176,37 @@ class ConsumerAsyncPollMetadataTest {
     }
 
     @Test
+    void testExpiredAndLivePollsDoNotShareErrorLifetime() {
+        AsyncPollEvent expired = admit(time.milliseconds() + 100);
+        AsyncPollEvent live = admit(time.milliseconds() + 60_000);
+        time.sleep(100);
+        metadataFailureInNextPoll();
+        assertTrue(expired.error().isEmpty());
+        assertSame(error, live.error().orElseThrow());
+        assertEquals(1, notifications.get());
+        assertTrue(delegate.getAndClearMetadataError().isEmpty());
+    }
+
+    @Test
+    void testFreshPollCanSucceedWithoutRevivingFailedPoll() {
+        AsyncPollEvent failed = admit(time.milliseconds() + 60_000);
+        metadataFailureInNextPoll();
+        CompletableFuture<Void> nextPositions = new CompletableFuture<>();
+        when(offsets.updateFetchPositions(anyLong())).thenReturn(nextPositions);
+        AsyncPollEvent next = admit(time.milliseconds() + 60_000);
+
+        positions.complete(null);
+        verify(fetch, never()).createFetchRequests();
+        assertFalse(next.isComplete(), "the old operation must not complete its replacement");
+        nextPositions.complete(null);
+        assertTrue(next.isComplete());
+        assertTrue(next.error().isEmpty());
+        assertSame(error, failed.error().orElseThrow());
+        verify(fetch).createFetchRequests();
+        assertEquals(1, notifications.get(), "successful preparation alone is not another error notification");
+    }
+
+    @Test
     void testFailedPollDoesNotStartAnotherStageWhenPositionsFinishLater() {
         AsyncPollEvent event = admit(time.milliseconds() + 60_000);
         metadataFailureInNextPoll();
@@ -226,6 +259,64 @@ class ConsumerAsyncPollMetadataTest {
                 assertFalse(waiter.isAlive(), "the error must release the wait, not rely on its timeout");
                 assertNull(failure.get());
             } finally {
+                buffer.wakeup();
+                waiter.interrupt();
+                waiter.join(2_000);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testAdmissionErrorCanBeObservedBeforeAggregatePublication(boolean alreadyWaiting) throws Exception {
+        // With no eligible event, the real delegate retains the error for the next input boundary.
+        metadataFailureInNextPoll();
+        assertEquals(Long.MAX_VALUE, thread.maximumTimeToWait());
+        when(fetch.maximumTimeToWait(anyLong())).thenReturn(42L);
+        try (FetchBuffer buffer = new FetchBuffer(logContext)) {
+            CountDownLatch observedError = new CountDownLatch(1);
+            CountDownLatch enterWait = new CountDownLatch(alreadyWaiting ? 0 : 1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 60_000, time.milliseconds(), () -> {
+                buffer.wakeup();
+                enterWait.countDown();
+                try {
+                    assertTrue(observedError.await(2, TimeUnit.SECONDS), "error observation waited for the aggregate");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(e);
+                }
+            });
+            Thread waiter = new Thread(() -> {
+                try {
+                    assertTrue(enterWait.await(2, TimeUnit.SECONDS));
+                    buffer.awaitWakeup(Time.SYSTEM.timer(30_000));
+                    assertTrue(event.isComplete());
+                    assertSame(error, event.error().orElseThrow());
+                    // This error outcome needs its event state, not the later manager-wait projection.
+                    assertEquals(Long.MAX_VALUE, thread.maximumTimeToWait());
+                } catch (Throwable t) {
+                    failure.set(t);
+                } finally {
+                    observedError.countDown();
+                }
+            }, "pre-publication-error-observer");
+            try {
+                waiter.start();
+                if (alreadyWaiting)
+                    TestUtils.waitForCondition(() -> waiter.getState() == Thread.State.TIMED_WAITING,
+                            2_000, "application did not enter buffer wait");
+                inputs.add(event);
+                thread.runOnce();
+                waiter.join(2_000);
+                assertFalse(waiter.isAlive());
+                assertNull(failure.get());
+                assertEquals(42L, thread.maximumTimeToWait());
+                assertSame(error, event.error().orElseThrow());
+                verify(offsets, never()).updateFetchPositions(anyLong());
+            } finally {
+                observedError.countDown();
+                enterWait.countDown();
                 buffer.wakeup();
                 waiter.interrupt();
                 waiter.join(2_000);

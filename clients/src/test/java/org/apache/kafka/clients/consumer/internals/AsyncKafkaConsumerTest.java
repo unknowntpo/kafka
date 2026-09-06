@@ -101,6 +101,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -617,13 +618,15 @@ public class AsyncKafkaConsumerTest {
         assertEquals(error, assertThrows(KafkaException.class, () -> consumer.poll(Duration.ofSeconds(60))));
     }
 
-    @Test
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "true,true"})
     @org.junit.jupiter.api.Timeout(10)
-    public void testMetadataErrorFromDelegateAfterAdmissionSurfacesThroughPoll() {
+    public void testMetadataErrorFromDelegateAfterAdmissionSurfacesThroughPoll(boolean userWakeup, boolean wakeupBeforeError) {
         LogContext logContext = new LogContext();
         FetchBuffer buffer = mock(FetchBuffer.class);
         SubscriptionState subscriptions = new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST);
-        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class), mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
+        consumer = newConsumer(buffer, new ConsumerInterceptors<>(Collections.emptyList(), metrics),
+                mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
         TopicPartition tp = new TopicPartition("topic", 0);
         subscriptions.assignFromUser(singleton(tp));
         subscriptions.seek(tp, 0);
@@ -661,13 +664,35 @@ public class AsyncKafkaConsumerTest {
             doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
             KafkaException error = new KafkaException("metadata failure after async admission");
             doAnswer(invocation -> {
+                if (userWakeup && wakeupBeforeError)
+                    consumer.wakeup();
                 doThrow(error).doNothing().when(metadata).maybeThrowAnyException();
                 loop.runOnce();
-                verify(buffer).wakeup();
+                if (userWakeup && !wakeupBeforeError)
+                    consumer.wakeup();
                 return null;
             }).when(buffer).awaitWakeup(any());
+            if (userWakeup) {
+                // The public wakeup takes precedence at the next loop entry, without consuming the
+                // separately published metadata error. This does not cancel the underlying owner work.
+                assertThrows(WakeupException.class, () -> consumer.poll(Duration.ofSeconds(60)));
+            }
             assertSame(error, assertThrows(KafkaException.class, () -> consumer.poll(Duration.ofSeconds(60))));
             assertTrue(delegate.getAndClearMetadataError().isEmpty());
+
+            // The failed event must not poison a later public poll. The collector is a controlled seam;
+            // this checks error retirement and result routing, not actual broker fetch recovery.
+            when(offsets.updateFetchPositions(org.mockito.ArgumentMatchers.anyLong()))
+                    .thenReturn(CompletableFuture.completedFuture(null));
+            when(fetch.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
+            doReturn(false).when(buffer).isEmpty();
+            ConsumerRecord<String, String> record = new ConsumerRecord<>("topic", 0, 0, "key", "value");
+            doReturn(Fetch.forPartition(tp, List.of(record), true, new OffsetAndMetadata(1)))
+                    .when(fetchCollector).collectFetch(any(FetchBuffer.class));
+            ConsumerRecords<String, String> recovered = consumer.poll(Duration.ZERO);
+            assertEquals(List.of(record), recovered.records(tp));
+            verify(applicationEventHandler, times(2)).add(isA(AsyncPollEvent.class));
+            verify(buffer, times(userWakeup ? 2 : 1)).wakeup();
         } finally {
             loop.close(Duration.ZERO);
             loop.cleanup();

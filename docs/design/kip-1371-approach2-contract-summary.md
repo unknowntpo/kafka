@@ -110,6 +110,9 @@ benchmark submission or performance claim is part of this assessment.
 
 ## Evidence and validation boundary
 
+- [Effect-specific observation validation](kip-1371-effect-observation-validation.md):
+  per-effect prerequisites, pre-aggregate error observation, and public-poll
+  error/wakeup/recovery schedules; no new production barrier is introduced.
 - [React/Vue publication lessons](kip-1371-react-vue-publication-lessons.md):
   subsequent discussion distinguishes per-effect observation requirements from
   a global batch barrier; selective staging remains an unselected alternative.
