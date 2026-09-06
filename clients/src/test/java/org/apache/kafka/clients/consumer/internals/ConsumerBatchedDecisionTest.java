@@ -209,6 +209,92 @@ class ConsumerBatchedDecisionTest {
         return client.requests().stream().filter(r -> r.requestBuilder().apiKey() == apiKey).findFirst().orElseThrow();
     }
 
+    // Controlled boundary comparison, not a complete historical binary: retain current managers
+    // and I/O, but suppress only the extra manager pass to reproduce next-iteration delivery.
+    private void useDecisionBoundary(boolean postIoPass) {
+        if (!postIoPass)
+            when(delegate.completedRequestsInLastPoll()).thenReturn(false);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDecisionBoundaryChangesTimeoutWinner(boolean postIoPass) {
+        useDecisionBoundary(postIoPass);
+        SyncCommitEvent operation = new SyncCommitEvent(
+            Optional.of(Map.of(PARTITION, new OffsetAndMetadata(1))), time.milliseconds());
+        applicationEvents.add(operation);
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+
+        thread.runOnce();
+        Throwable outcome = assertThrows(CompletionException.class, operation.future()::join).getCause();
+        if (postIoPass)
+            assertInstanceOf(GroupAuthorizationException.class, outcome);
+        else
+            assertInstanceOf(org.apache.kafka.common.errors.TimeoutException.class, outcome);
+        assertEquals(!postIoPass, coordinator.fatalError().isPresent());
+
+        thread.runOnce();
+        assertSame(outcome, assertThrows(CompletionException.class, operation.future()::join).getCause());
+        assertTrue(coordinator.fatalError().isEmpty());
+        verify(background).add(any(ErrorEvent.class));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void testDecisionBoundaryChangesLaterCommitErrorAudience(boolean postIoPass, boolean queuedDuringIo) {
+        useDecisionBoundary(postIoPass);
+        var operationA = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        AsyncCommitEvent operationB = new AsyncCommitEvent(Optional.of(Map.of(PARTITION, new OffsetAndMetadata(2))));
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(request -> {
+            if (queuedDuringIo)
+                applicationEvents.add(operationB);
+            return true;
+        }, FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+
+        thread.runOnce();
+        boolean consumedDuringFirstRound = postIoPass && !queuedDuringIo;
+        assertEquals(consumedDuringFirstRound, operationA.isDone());
+        if (!queuedDuringIo)
+            applicationEvents.add(operationB);
+        thread.runOnce();
+
+        Throwable failure = assertThrows(CompletionException.class, operationA::join).getCause();
+        assertInstanceOf(GroupAuthorizationException.class, failure);
+        assertEquals(!consumedDuringFirstRound, operationB.future().isCompletedExceptionally());
+        if (!consumedDuringFirstRound)
+            assertSame(failure, assertThrows(CompletionException.class, operationB.future()::join).getCause());
+        else
+            assertFalse(operationB.future().isDone());
+        ArgumentCaptor<ErrorEvent> delivered = ArgumentCaptor.forClass(ErrorEvent.class);
+        verify(background).add(delivered.capture());
+        assertSame(failure, delivered.getValue().error());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testDecisionBoundaryPreservesContinuationErrorCutoff(boolean postIoPass) {
+        useDecisionBoundary(postIoPass);
+        var operationA = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        AsyncCommitEvent operationB = new AsyncCommitEvent(Optional.of(Map.of(PARTITION, new OffsetAndMetadata(2))));
+        var continuation = operationA.whenComplete((result, error) -> applicationEvents.add(operationB));
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+
+        thread.runOnce();
+        assertEquals(postIoPass, continuation.isDone());
+        if (!postIoPass)
+            thread.runOnce();
+        assertTrue(continuation.isCompletedExceptionally());
+        assertEquals(1, applicationEvents.size());
+        assertTrue(coordinator.fatalError().isEmpty());
+        thread.runOnce();
+        assertTrue(operationB.offsetsReady().isDone());
+        assertFalse(operationB.future().isDone());
+        verify(background).add(any(ErrorEvent.class));
+    }
+
     @Test
     void testFailureContinuationQueuesAnInputAfterTheCurrentErrorConsumption() {
         var operationA = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));

@@ -98,6 +98,43 @@ the architecture. Continue the full behavior inventory even if G1 passes.
 
 ## Current validation receipt
 
+### Follow-up: controlled decision-boundary comparison
+
+Three parameterized tests in `ConsumerBatchedDecisionTest` add eight cases:
+`testDecisionBoundaryChangesTimeoutWinner`,
+`testDecisionBoundaryChangesLaterCommitErrorAudience`, and
+`testDecisionBoundaryPreservesContinuationErrorCutoff`.
+
+Both modes use identical current production managers, real `runOnce`, MockTime,
+MockClient responses and application inputs. The control stubs only
+`completedRequestsInLastPoll()` to false, suppressing the extra manager pass.
+Actual transport callbacks still execute inline. This isolates the effect of the
+post-I/O decision boundary; it is NOT execution of the complete pinned historical
+binary, nor a public-consumer or real-broker test.
+
+| Same controlled schedule | Next-iteration control | Post-I/O pass enabled |
+| --- | --- | --- |
+| Sync event deadline equals round start; discovery authorization error arrives during I/O | Operation ends with TimeoutException; fatal error remains for next pass | Operation ends with GroupAuthorizationException; error consumed this round |
+| Second commit is queued after the first round returns | Both pending commits receive the discovery error on next pass | First commit fails; second stays pending because error was already consumed |
+| Second commit is queued during I/O | Both commits receive the error next round | Same: queued input suppresses post-I/O pass |
+| First failure callback queues the second commit | Failure delivery is one round later; second commit does not inherit the consumed error | Same error audience, earlier failure delivery |
+
+The tests check stable timeout/failure outcome after another iteration, exact
+shared error identity where applicable, and one ErrorEvent handoff. They do not
+prove broker recovery of the pending second commit; existing configured-loop
+recovery coverage is a separate test, not a paired recovery result.
+
+Conclusion: the added pass is observably significant at the component boundary,
+not merely a performance optimization. This establishes the causal boundary
+difference, not a public API violation. Local `KafkaConsumer.commitSync(Duration)`
+documentation lists authorization and timeout outcomes, but is not by itself a
+proof of which must win this controlled race. A real public API path and full
+pinned-baseline comparison remain necessary before deciding compatibility.
+No production fix or changed completion priority is selected here.
+
+The focused suite passed with all eight new cases, retries disabled; the previous
+614-case receipt below predates these additions and is not a current combined run.
+
 On candidate `0234b4f8fe`, **614 tests across nine suites passed**, with zero
 failures, errors or skips and retries disabled. Suites: CoordinatorRequestManager,
 CommitRequestManager, ConsumerHeartbeatRequestManager, ShareHeartbeatRequestManager,
