@@ -72,11 +72,16 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Component tests: real managers and transport delegate, no broker or real clock. */
+// This fixture deliberately includes the production RequestManagers wiring, not just isolated managers.
+@SuppressWarnings("ClassDataAbstractionCoupling")
 class ConsumerBatchedDecisionTest {
     private static final String GROUP_ID = "batch-group";
     private static final TopicPartition PARTITION = new TopicPartition("topic", 0);
@@ -126,12 +131,26 @@ class ConsumerBatchedDecisionTest {
             new HeartbeatRequestState(logContext, time, 0, 100, 1000, 0), background, metrics);
         client = new MockClient(time, List.of(coordinator.coordinator().orElseThrow()));
         delegate = new NetworkClientDelegate(time, config, logContext, client, metadata, background, false, asyncMetrics);
-        RequestManagers managers = mock(RequestManagers.class);
-        when(managers.entries()).thenReturn(List.of(coordinator, commits, heartbeat));
+        when(membership.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(membership.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(membership.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
+        // Use production configuration, not a test-authored list that could hide an order regression.
+        RequestManagers managers = new RequestManagers(logContext,
+            idleManager(OffsetsRequestManager.class), idleManager(TopicMetadataRequestManager.class),
+            idleManager(FetchRequestManager.class), Optional.of(coordinator), Optional.of(commits),
+            Optional.of(heartbeat), Optional.of(membership), Optional.empty(), Optional.empty(), Optional.empty());
         thread = new ConsumerNetworkThread(logContext, time, new LinkedBlockingQueue<>(),
             new CompletableEventReaper(logContext), () -> mock(ApplicationEventProcessor.class),
             () -> delegate, () -> managers, asyncMetrics);
         thread.initializeResources();
+    }
+
+    private <T extends RequestManager> T idleManager(Class<T> type) {
+        T manager = mock(type);
+        when(manager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(manager.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(manager.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
+        return manager;
     }
 
     @AfterEach
@@ -151,6 +170,60 @@ class ConsumerBatchedDecisionTest {
 
     private ClientRequest request(ApiKeys apiKey) {
         return client.requests().stream().filter(r -> r.requestBuilder().apiKey() == apiKey).findFirst().orElseThrow();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testConfiguredLoopPreservesFatalErrorReadBeforeClear(boolean failureDuringIo) {
+        var operation = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        var offsets = commits.fetchOffsets(Set.of(PARTITION), time.milliseconds() + 60_000);
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        var failure = FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE);
+        if (failureDuringIo) {
+            // The discovery callback runs inside delegate.poll; the full post-I/O pass must deliver it.
+            client.prepareResponse(failure);
+        } else {
+            // The fact is already present when the next pre-I/O pass starts.
+            var discovery = coordinator.poll(time.milliseconds()).unsentRequests.get(0);
+            discovery.handler().onComplete(new ClientResponse(
+                new RequestHeader(ApiKeys.FIND_COORDINATOR, discovery.requestBuilder().build().version(), "test", 2),
+                discovery.handler(), NODE.idString(), time.milliseconds(), time.milliseconds(), false, null, null, failure));
+        }
+        doAnswer(invocation -> {
+            // The application error must not overtake the already pending operations' error delivery.
+            assertTrue(operation.isCompletedExceptionally());
+            assertTrue(offsets.isCompletedExceptionally());
+            assertTrue(coordinator.fatalError().isEmpty());
+            return null;
+        }).when(background).add(any(ErrorEvent.class));
+
+        thread.runOnce();
+        assertTrue(operation.isCompletedExceptionally());
+        assertTrue(offsets.isCompletedExceptionally());
+        ArgumentCaptor<ErrorEvent> delivered = ArgumentCaptor.forClass(ErrorEvent.class);
+        verify(background).add(delivered.capture());
+        Throwable fatal = delivered.getValue().error();
+        assertSame(fatal, assertThrows(CompletionException.class, operation::join).getCause());
+        assertSame(fatal, assertThrows(CompletionException.class, offsets::join).getCause());
+        assertTrue(coordinator.fatalError().isEmpty());
+
+        // Preserve the original lifecycle: a later operation does not inherit the consumed error.
+        var later = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(2)));
+        thread.runOnce();
+        assertFalse(later.isDone());
+        verify(background).add(any(ErrorEvent.class));
+
+        time.sleep(1000);
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.NONE, GROUP_ID, NODE));
+        thread.runOnce();
+        assertFalse(later.isDone());
+        thread.runOnce();
+        client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
+        thread.runOnce();
+        assertTrue(later.isDone());
+        assertFalse(later.isCompletedExceptionally());
+        assertSame(fatal, assertThrows(CompletionException.class, operation::join).getCause());
+        verify(background).add(any(ErrorEvent.class));
     }
 
     @ParameterizedTest

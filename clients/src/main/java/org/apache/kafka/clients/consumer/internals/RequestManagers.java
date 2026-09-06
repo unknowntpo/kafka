@@ -93,6 +93,8 @@ public class RequestManagers implements Closeable {
 
         List<RequestManager> list = new ArrayList<>();
         coordinatorRequestManager.ifPresent(list::add);
+        // This order is part of the polling contract: commit/offset-fetch must read a
+        // coordinator fatal error before either heartbeat implementation reads and clears it.
         commitRequestManager.ifPresent(list::add);
         heartbeatRequestManager.ifPresent(list::add);
         membershipManager.ifPresent(list::add);
@@ -133,6 +135,12 @@ public class RequestManagers implements Closeable {
         entries = Collections.unmodifiableList(list);
     }
 
+    /**
+     * The immutable execution order used by each full manager pass. This is not an
+     * unordered registry: reordering or selectively polling its entries can change behavior.
+     * In particular, dependent operation readers precede the heartbeat fatal-error consumer.
+     * The network loop executes this order; the managers retain their domain decisions.
+     */
     public List<RequestManager> entries() {
         return entries;
     }

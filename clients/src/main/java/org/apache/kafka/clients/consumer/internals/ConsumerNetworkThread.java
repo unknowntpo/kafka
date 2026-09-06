@@ -274,6 +274,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
 
     private long pollAndStageRequests(long currentTimeMs) {
         long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
+        // Execute the configured order in both pre- and post-I/O passes. It carries
+        // read-before-consume contracts; a completion is not permission to poll only its owner.
         for (RequestManager rm : requestManagers.entries()) {
             NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
             long timeoutMs = networkClientDelegate.addAll(pollResult);

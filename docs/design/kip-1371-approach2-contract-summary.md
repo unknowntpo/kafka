@@ -116,6 +116,11 @@ benchmark submission or performance claim is part of this assessment.
   two-order fatal-error probe demonstrates read-before-clear coupling: the
   existing order delivers both results, while the reverse leaves operation
   futures pending. This is a characterization, not a production-order bug fix.
+  The [behavior-preserving follow-up](kip-1371-behavior-preserving-order-contract.md)
+  makes the existing configured order an explicit loop contract and tests real
+  configuration through pre/post-I/O error delivery, later operations, and recovery.
+  The retained-error experiment `1f8486eefc` was reverted by `5e09508617` because
+  its new-operation behavior exceeded the architecture-only objective.
 - [Actor/Future lessons](kip-1371-actor-future-lessons.md): distinguishes an
   operation-result handle from a state/behavior boundary; borrowing actor
   capabilities does not select a mailbox, runtime, or global publication rule.
