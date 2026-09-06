@@ -839,7 +839,7 @@ public class AsyncKafkaConsumerTest {
     @org.junit.jupiter.api.Timeout(10)
     public void testMetadataErrorFromDelegateAfterAdmissionSurfacesThroughPoll(boolean userWakeup, boolean wakeupBeforeError) {
         LogContext logContext = new LogContext();
-        FetchBuffer buffer = mock(FetchBuffer.class);
+        FetchBuffer buffer = spy(new FetchBuffer(logContext));
         SubscriptionState subscriptions = new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST);
         consumer = newConsumer(buffer, new ConsumerInterceptors<>(Collections.emptyList(), metrics),
                 mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
@@ -886,7 +886,8 @@ public class AsyncKafkaConsumerTest {
                 loop.runOnce();
                 if (userWakeup && !wakeupBeforeError)
                     consumer.wakeup();
-                return null;
+                // Exercise the real lock/condition and latched notification, not a mocked wait return.
+                return invocation.callRealMethod();
             }).when(buffer).awaitWakeup(any());
             if (userWakeup) {
                 // The public wakeup takes precedence at the next loop entry, without consuming the

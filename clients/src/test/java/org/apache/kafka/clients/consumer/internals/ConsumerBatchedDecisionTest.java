@@ -29,10 +29,15 @@ import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProces
 import org.apache.kafka.clients.consumer.internals.events.AsyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.CommitEvent;
+import org.apache.kafka.clients.consumer.internals.events.CommitOnCloseEvent;
+import org.apache.kafka.clients.consumer.internals.events.CompletableApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
+import org.apache.kafka.clients.consumer.internals.events.LeaveGroupOnCloseEvent;
+import org.apache.kafka.clients.consumer.internals.events.StopFindCoordinatorOnCloseEvent;
 import org.apache.kafka.clients.consumer.internals.events.SyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
+import org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.GroupAuthorizationException;
@@ -60,6 +65,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -239,6 +245,128 @@ class ConsumerBatchedDecisionTest {
             (context, consumerMetadata, state, fetchConfig, deserializers, fetchMetrics, clock) -> mock(FetchCollector.class),
             (consumerConfig, state, context, listeners) -> metadata,
             new LinkedBlockingQueue<>(), Optional.empty());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false,false", "false,true,false", "true,false,false", "true,true,false",
+        "false,false,true", "false,true,true", "true,false,true", "true,true,true"})
+    @org.junit.jupiter.api.Timeout(10)
+    @SuppressWarnings("unchecked")
+    void testPublicCloseOrdersCommitDiscoveryAndRealMembership(boolean postIoPass, boolean commitTimesOut, boolean needsDiscovery) {
+        thread.close(Duration.ZERO);
+        try (Metrics membershipMetrics = new Metrics(time)) {
+            Properties closeProperties = new Properties();
+            closeProperties.putAll(config.originals());
+            closeProperties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
+            closeProperties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, Integer.MAX_VALUE);
+            config = new ConsumerConfig(closeProperties);
+            commits = new CommitRequestManager(time, logContext, subscriptions, config, coordinator,
+                mock(OffsetCommitCallbackInvoker.class), GROUP_ID, Optional.empty(), 100, 1000,
+                OptionalDouble.of(0), membershipMetrics, metadata);
+            ConsumerMembershipManager realMembership = new ConsumerMembershipManager(GROUP_ID, Optional.empty(),
+                Optional.empty(), 30_000, Optional.empty(), subscriptions, commits, metadata, logContext,
+                background, time, membershipMetrics, true);
+            realMembership.registerStateListener(commits);
+            subscriptions.subscribe(Set.of(PARTITION.topic()));
+            subscriptions.assignFromSubscribed(Set.of(PARTITION));
+            subscriptions.seek(PARTITION, 7);
+            realMembership.transitionToJoining();
+            ConsumerHeartbeatRequestManager realHeartbeat = new ConsumerHeartbeatRequestManager(logContext, time,
+                config, coordinator, subscriptions, realMembership, background, membershipMetrics);
+            RequestManagers managers = new RequestManagers(logContext,
+                idleManager(OffsetsRequestManager.class), idleManager(TopicMetadataRequestManager.class),
+                idleManager(FetchRequestManager.class), Optional.of(coordinator), Optional.of(commits),
+                Optional.of(realHeartbeat), Optional.of(realMembership), Optional.empty(), Optional.empty(), Optional.empty());
+            thread = new ConsumerNetworkThread(logContext, time, applicationEvents,
+                new CompletableEventReaper(logContext), () -> new ApplicationEventProcessor(logContext, managers, metadata, subscriptions),
+                () -> delegate, () -> managers, mock(AsyncConsumerMetrics.class));
+            thread.initializeResources();
+            useDecisionBoundary(postIoPass);
+            ApplicationEventHandler bridge = mock(ApplicationEventHandler.class);
+            List<Class<?>> admitted = new ArrayList<>();
+            AtomicReference<SyncCommitEvent> closeCommit = new AtomicReference<>();
+            AtomicReference<CompletableFuture<Void>> publicationCheck = new AtomicReference<>();
+            doAnswer(invocation -> {
+                ApplicationEvent event = invocation.getArgument(0);
+                admitted.add(event.getClass());
+                if (event instanceof SyncCommitEvent) {
+                    closeCommit.set((SyncCommitEvent) event);
+                    prepareCloseCommitResponses(needsDiscovery, commitTimesOut, realMembership);
+                } else if (event instanceof StopFindCoordinatorOnCloseEvent) {
+                    assertTrue(closeCommit.get().future().isDone(), "discovery must remain available while close waits for commit");
+                } else if (event instanceof LeaveGroupOnCloseEvent) {
+                    publicationCheck.set(((LeaveGroupOnCloseEvent) event).future().thenRun(() -> {
+                        assertEquals(MemberState.UNSUBSCRIBED, realMembership.state());
+                        assertTrue(subscriptions.assignedPartitions().isEmpty(), "assignment must be cleared before leave completion is observed");
+                    }));
+                    client.prepareResponse(request -> request instanceof ConsumerGroupHeartbeatRequest,
+                        new ConsumerGroupHeartbeatResponse(new ConsumerGroupHeartbeatResponseData()
+                            .setMemberId(realMembership.memberId()).setMemberEpoch(-1)));
+                }
+                applicationEvents.add(event);
+                thread.runOnce();
+                if (event instanceof SyncCommitEvent && needsDiscovery)
+                    thread.runOnce();
+                if (event instanceof SyncCommitEvent && commitTimesOut) {
+                    time.sleep(200);
+                    thread.runOnce();
+                    assertTrue(closeCommit.get().future().isCompletedExceptionally());
+                }
+                return null;
+            }).when(bridge).add(any(ApplicationEvent.class));
+            when(bridge.addAndGet(any())).thenAnswer(invocation -> {
+                CompletableApplicationEvent<?> event = invocation.getArgument(0);
+                bridge.add(event);
+                assertTrue(event.future().isDone(), "controlled loop must finish leave without a wall-clock wait");
+                return event.future().join();
+            });
+            if (needsDiscovery) {
+                coordinator.markCoordinatorUnknown("close must rediscover before committing", time.milliseconds());
+                time.sleep(1000);
+            }
+            try (AsyncKafkaConsumer<String, String> consumer = new AsyncKafkaConsumer<>(logContext, "close-contract",
+                new Deserializers<>(new StringDeserializer(), new StringDeserializer(), metrics), new FetchBuffer(logContext),
+                mock(FetchCollector.class), mock(FetchMetricsManager.class), mock(RebalanceCallbackMetricsManager.class),
+                new ConsumerInterceptors<>(List.of(), metrics), time, bridge, new LinkedBlockingQueue<>(),
+                new CompletableEventReaper(logContext), mock(ConsumerRebalanceListenerInvoker.class), metrics,
+                subscriptions, metadata, 100, 30_000, 1000, GROUP_ID, true,
+                new PositionsValidator(logContext, time, subscriptions, metadata))) {
+                consumer.close(Duration.ofMillis(100));
+                publicationCheck.get().join();
+                assertEquals(List.of(SyncCommitEvent.class, CommitOnCloseEvent.class,
+                    StopFindCoordinatorOnCloseEvent.class, LeaveGroupOnCloseEvent.class), admitted);
+                verify(bridge).close(Duration.ofMillis(commitTimesOut ? 0 : 100));
+                assertEquals(commitTimesOut, closeCommit.get().future().isCompletedExceptionally());
+                if (commitTimesOut) {
+                    assertInstanceOf(org.apache.kafka.common.errors.TimeoutException.class,
+                        assertThrows(CompletionException.class, () -> closeCommit.get().future().join()).getCause());
+                } else {
+                    assertEquals(Map.of(PARTITION, new OffsetAndMetadata(7)), closeCommit.get().future().join());
+                }
+                assertTrue(commits.pendingRequests.unsentOffsetCommits.isEmpty());
+                assertTrue(applicationEvents.isEmpty());
+                coordinator.markCoordinatorUnknown("no dependent close work remains", time.milliseconds());
+                time.sleep(1000);
+                assertTrue(coordinator.poll(time.milliseconds()).unsentRequests.isEmpty(),
+                    "the consumed stop-discovery event must prevent new discovery even after backoff");
+            }
+        }
+    }
+
+    private void prepareCloseCommitResponses(boolean needsDiscovery, boolean commitTimesOut, ConsumerMembershipManager realMembership) {
+        if (needsDiscovery) {
+            client.prepareResponse(request -> request.apiKey() == ApiKeys.FIND_COORDINATOR,
+                FindCoordinatorResponse.prepareResponse(Errors.NONE, GROUP_ID, NODE));
+        }
+        client.prepareResponse(request -> {
+            if (!(request instanceof OffsetCommitRequest))
+                return false;
+            assertEquals(7, ((OffsetCommitRequest) request).data().topics().get(0).partitions().get(0).committedOffset());
+            return true;
+        }, new OffsetCommitResponse(0, Map.of(PARTITION, commitTimesOut ? Errors.REQUEST_TIMED_OUT : Errors.NONE)));
+        client.prepareResponse(request -> request instanceof ConsumerGroupHeartbeatRequest,
+            new ConsumerGroupHeartbeatResponse(new ConsumerGroupHeartbeatResponseData()
+                .setMemberId(realMembership.memberId()).setMemberEpoch(1).setHeartbeatIntervalMs(1000)));
     }
 
     @ParameterizedTest

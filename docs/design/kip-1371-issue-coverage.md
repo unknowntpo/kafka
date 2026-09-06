@@ -31,6 +31,13 @@ producer supplies that condition. Test counts alone never close an issue.
 
 ## Historical issue matrix
 
+Later evidence update: the [public-close/publication follow-up](kip-1371-approach2-compatibility-ledger.md#public-close-and-actual-publication-follow-up)
+adds real membership/commit/discovery routing from public close and replaces the
+named public metadata test's mocked wait return with the actual FetchBuffer latch.
+This supersedes the mocked-public-wait qualifier below for that test. Close-related
+rows now have additional component evidence, but their exact historical trigger,
+callback acknowledgement, real handler shutdown and broker proof remain unclosed.
+
 | Evidence / original failure claim | Required correctness or progress property | Approach 2 protection and current evidence | Remaining acceptance gate |
 | --- | --- | --- | --- |
 | [KAFKA-17066 / PR 16885](https://github.com/apache/kafka/pull/16885): position initialization split across threads | One operation owns its initialization workflow; no unsafe split between assignment/offset work and position update | **Inherited / partial.** Existing background initialization retained; newer response staging is not its original fix | Trace the actual initialization workflow and historical repair; exercise assignment changes and delayed success/failure through the real application-event path |

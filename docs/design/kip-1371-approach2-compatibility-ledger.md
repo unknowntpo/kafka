@@ -1,5 +1,59 @@
 # Approach 2: existing-behavior compatibility ledger
 
+Candidate normative obligations: [semantics draft](kip-1371-approach2-semantics-draft.md).
+
+## Public close and actual publication follow-up
+
+`ConsumerBatchedDecisionTest.testPublicCloseOrdersCommitDiscoveryAndRealMembership`
+connects public `AsyncKafkaConsumer.close(Duration)` to real ApplicationEventProcessor,
+ConsumerNetworkThread, Coordinator/Commit/Heartbeat/ConsumerMembership managers and
+MockClient. Auto-commit is enabled; its periodic interval is kept out of the test
+window. Eight cases compare both full-pass schedules, with coordinator initially
+known or requiring actual FindCoordinator recovery, and close commit succeeding
+or receiving a retriable error then exhausting its budget.
+
+Assertions cover the captured offset sent, commit terminal outcome before the
+stop-discovery input, CommitOnClose/StopFindCoordinator/LeaveGroup event order,
+the real leave future, and assignment cleared/member UNSUBSCRIBED before an
+observer of that future runs. Both commit outcomes allow close to continue;
+the existing public close logs the auto-commit error rather than returning it.
+The remaining budget passed to handler shutdown is checked. After the stop input
+has been applied, an unknown coordinator and elapsed backoff cannot produce a new
+discovery request.
+
+Boundary: the input bridge is a deterministic scheduling seam, not a running
+ApplicationEventHandler/background thread. Its shutdown call is verified, not
+executed against the real thread. Unrelated request managers, application rebalance
+listener and metadata are controlled. Membership and leave completion are real,
+but this is not an exact historical reproduction, interrupted callback-ack test,
+or broker-backed shutdown/offset-durability proof. The close commit is the public
+SyncCommitEvent path, not the distinct pre-rebalance retry-snapshot operation.
+
+`AsyncKafkaConsumerTest.testMetadataErrorFromDelegateAfterAdmissionSurfacesThroughPoll`
+now uses a real FetchBuffer (spied for controlled scheduling) and actually enters
+its awaitWakeup implementation. The real loop/delegate error route publishes the
+event error and latches the wake before wait entry. Public poll exposes the error;
+the two user-wakeup order variants preserve it for the subsequent poll. A later
+controlled fetch result checks recovery. Collector/payload and unrelated managers
+remain mocked; the notification no longer depends on a mocked wait returning.
+`ConsumerPublicationContractTest` separately tests an already-waiting real buffer
+thread. These are complementary schedules, not a claim of one complete concurrent
+public-consumer/broker run.
+
+This follow-up supports S4's effect-specific prerequisite and S5's ordered close
+contract. It does not establish a universal schedule-before-all-effects barrier,
+select retained snapshots, or change production behavior.
+
+Validation: **505 tests in six suites passed twice**, zero failures/errors/skips,
+retries disabled. Suites: ConsumerBatchedDecisionTest, AsyncKafkaConsumerTest,
+ConsumerPublicationContractTest, ConsumerMembershipManagerTest,
+CoordinatorRequestManagerTest and CommitRequestManagerTest. JDK 17 / Gradle 9.7.1,
+offline, two workers and one test fork; Checkstyle and Spotless passed. The added
+close matrix contains eight cases; three existing public metadata cases now use
+the real buffer wait. Initial test setup had a MockClient response-order mismatch;
+correcting that fixture required no production change. Historical counts are not
+added to this receipt.
+
 ## Current contract after discussion
 
 Keep `RequestManager.poll()`; do not introduce `preIO()` / `postIO()` methods.

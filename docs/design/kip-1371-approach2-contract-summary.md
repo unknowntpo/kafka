@@ -1,5 +1,10 @@
 # KIP-1371 Approach 2: contract assessment
 
+Current candidate semantics: [Approach 2 semantics draft](kip-1371-approach2-semantics-draft.md).
+It distinguishes safe observation from required-state-before-effect, and makes
+operation-specific lifecycle and cross-manager routing obligations explicit.
+It does not promote the historical assessment below to full acceptance.
+
 Existing-behavior acceptance: [Coordinator / Heartbeat / Commit compatibility ledger](kip-1371-approach2-compatibility-ledger.md).
 This complements historical issue coverage and identifies the post-I/O completion
 cutoff as a priority differential-validation gate.
