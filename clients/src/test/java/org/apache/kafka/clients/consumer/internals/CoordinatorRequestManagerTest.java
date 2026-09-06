@@ -47,6 +47,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -279,6 +280,41 @@ public class CoordinatorRequestManagerTest {
         // receiving a successful response should clear the fatal error
         expectFindCoordinatorRequest(coordinatorManager, error);
         assertTrue(coordinatorManager.fatalError().isEmpty());
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = Errors.class, names = {"NONE", "COORDINATOR_NOT_AVAILABLE"})
+    public void testNewDiscoveryOutcomeSupersedesFactAndNotification(Errors nextOutcome) {
+        for (boolean notificationTaken : new boolean[] {false, true}) {
+            CoordinatorRequestManager manager = setupCoordinatorManager(GROUP_ID);
+            expectFindCoordinatorRequest(manager, Errors.GROUP_AUTHORIZATION_FAILED);
+            Throwable fatal = manager.fatalError().orElseThrow();
+            if (notificationTaken) {
+                assertSame(fatal, manager.takeFatalErrorForApplication().orElseThrow());
+                assertTrue(manager.takeFatalErrorForApplication().isEmpty());
+            }
+            assertSame(fatal, manager.fatalError().orElseThrow());
+            time.sleep(RETRY_BACKOFF_MS);
+            NetworkClientDelegate.UnsentRequest retry = manager.poll(time.milliseconds()).unsentRequests.get(0);
+            // Starting a retry is not recovery; the last outcome still applies while it is in flight.
+            assertSame(fatal, manager.fatalError().orElseThrow());
+            retry.handler().onComplete(buildResponse(retry, nextOutcome));
+            assertTrue(manager.fatalError().isEmpty());
+            assertTrue(manager.takeFatalErrorForApplication().isEmpty());
+        }
+    }
+
+    @Test
+    public void testEachFatalDiscoveryOutcomeCanNotifyOnce() {
+        CoordinatorRequestManager manager = setupCoordinatorManager(GROUP_ID);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            expectFindCoordinatorRequest(manager, Errors.GROUP_AUTHORIZATION_FAILED);
+            Throwable fatal = manager.fatalError().orElseThrow();
+            assertSame(fatal, manager.takeFatalErrorForApplication().orElseThrow());
+            assertTrue(manager.takeFatalErrorForApplication().isEmpty());
+            assertSame(fatal, manager.fatalError().orElseThrow());
+            time.sleep(60_000);
+        }
     }
 
     private void expectFindCoordinatorRequest(

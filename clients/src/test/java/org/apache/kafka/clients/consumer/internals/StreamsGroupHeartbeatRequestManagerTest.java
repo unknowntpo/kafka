@@ -306,7 +306,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
         final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
         final Throwable fatalError = new RuntimeException("KABOOM");
-        when(coordinatorRequestManager.getAndClearFatalError()).thenReturn(Optional.of(fatalError));
+        when(coordinatorRequestManager.takeFatalErrorForApplication()).thenReturn(Optional.of(fatalError));
 
         final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 

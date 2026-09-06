@@ -115,7 +115,12 @@ benchmark submission or performance claim is part of this assessment.
   rescheduling from global priority. Twenty existing cases were rerun. A later
   two-order fatal-error probe demonstrates read-before-clear coupling: the
   existing order delivers both results, while the reverse leaves operation
-  futures pending. This is a characterization, not a production-order bug fix.
+  futures pending. That characterization is preserved at `971a163277`.
+  The subsequent [fatal fact/notification experiment](kip-1371-fatal-fact-notification-poc.md)
+  separates the notification marker from the retained fact without a generic event
+  framework. It tests both reader orders, notification deduplication and discovery
+  recovery. New operations also see a still-current error; adopting that candidate
+  behavior requires a separate compatibility decision, not merely green tests.
 - [Actor/Future lessons](kip-1371-actor-future-lessons.md): distinguishes an
   operation-result handle from a state/behavior boundary; borrowing actor
   capabilities does not select a mailbox, runtime, or global publication rule.

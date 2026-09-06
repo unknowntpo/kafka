@@ -595,7 +595,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     }
 
     private void maybePropagateCoordinatorFatalErrorEvent() {
-        coordinatorRequestManager.getAndClearFatalError()
+        coordinatorRequestManager.takeFatalErrorForApplication()
             .ifPresent(fatalError -> backgroundEventHandler.add(new ErrorEvent(fatalError)));
     }
 

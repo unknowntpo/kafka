@@ -290,7 +290,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
     }
 
     private void maybePropagateCoordinatorFatalErrorEvent() {
-        coordinatorRequestManager.getAndClearFatalError()
+        coordinatorRequestManager.takeFatalErrorForApplication()
                 .ifPresent(fatalError -> backgroundEventHandler.add(new ErrorEvent(fatalError)));
     }
 
