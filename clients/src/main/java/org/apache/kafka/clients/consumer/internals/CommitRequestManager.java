@@ -796,7 +796,20 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             this.future = new CompletableFuture<>();
         }
 
-        public NetworkClientDelegate.UnsentRequest toUnsentRequest() {
+        /**
+         * Normal-operation admission for both initial attempts and retries. Keep the local
+         * eligibility check, reservation, and request construction together. Coordinator and
+         * expiration handling remain with poll/drain; this does not add membership policy.
+         */
+        Optional<NetworkClientDelegate.UnsentRequest> tryAdmit(long currentTimeMs) {
+            if (!canSendRequest(currentTimeMs))
+                return Optional.empty();
+            onSendAttempt(currentTimeMs);
+            return Optional.of(buildRequestWithoutAdmission());
+        }
+
+        // Only normal admission and the existing close-time drain may build commit requests.
+        private NetworkClientDelegate.UnsentRequest buildRequestWithoutAdmission() {
             Map<String, Uuid> topicIds = metadata.topicIds();
             boolean canUseTopicIds = true;
             Map<String, OffsetCommitRequestData.OffsetCommitRequestTopic> requestTopicDataMap = new HashMap<>();
@@ -1453,9 +1466,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
 
             // Add all unsent offset commit requests to the unsentRequests list
             List<NetworkClientDelegate.UnsentRequest> unsentRequests = unsentOffsetCommits.stream()
-                .filter(request -> request.canSendRequest(currentTimeMs))
-                .peek(request -> request.onSendAttempt(currentTimeMs))
-                .map(OffsetCommitRequestState::toUnsentRequest)
+                .flatMap(request -> request.tryAdmit(currentTimeMs).stream())
                 .collect(Collectors.toCollection(ArrayList::new));
 
             // Partition the unsent offset fetch requests into sendable and non-sendable lists
@@ -1493,8 +1504,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         }
 
         private List<NetworkClientDelegate.UnsentRequest> drainPendingCommits() {
+            // Preserve the existing shutdown policy, which does not wait for normal retry backoff.
             List<NetworkClientDelegate.UnsentRequest> res = unsentOffsetCommits.stream()
-                .map(OffsetCommitRequestState::toUnsentRequest)
+                .map(OffsetCommitRequestState::buildRequestWithoutAdmission)
                 .collect(Collectors.toCollection(ArrayList::new));
             clearAll();
             return res;

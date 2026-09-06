@@ -19,8 +19,10 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.ClientRequest;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.MockClient;
+import org.apache.kafka.clients.consumer.CommitFailedException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.RetriableCommitFailedException;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
@@ -46,6 +48,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
@@ -54,12 +57,17 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -196,6 +204,176 @@ class ConsumerBatchedDecisionTest {
             assertTrue(operation.isDone());
             assertFalse(operation.isCompletedExceptionally());
         }
+    }
+
+    private enum CommitMode { ASYNC, SYNC, PERIODIC, BEFORE_REBALANCE }
+
+    @Test
+    void testCommitAdmissionReservesOnceAndRechecksRetryState() {
+        commits.onMemberEpochUpdated(Optional.of(7), "member");
+        var operation = commits.commitSync(Map.of(PARTITION, new OffsetAndMetadata(10)), time.milliseconds() + 10_000);
+        var attempt = commits.unsentOffsetCommitRequests().element();
+        var initial = commits.poll(time.milliseconds());
+        assertEquals(1, initial.unsentRequests.size());
+        assertTrue(attempt.requestInFlight());
+        assertTrue(attempt.tryAdmit(time.milliseconds()).isEmpty(), "An in-flight attempt cannot be admitted twice");
+        delegate.addAll(initial);
+        delegate.poll(0, time.milliseconds());
+        OffsetCommitRequest first = (OffsetCommitRequest) request(ApiKeys.OFFSET_COMMIT).requestBuilder().build();
+        assertEquals(7, first.data().generationIdOrMemberEpoch());
+
+        client.respondToRequest(request(ApiKeys.OFFSET_COMMIT),
+                new OffsetCommitResponse(0, Map.of(PARTITION, Errors.COORDINATOR_LOAD_IN_PROGRESS)));
+        delegate.poll(0, time.milliseconds());
+        assertFalse(operation.isDone());
+        assertFalse(attempt.requestInFlight());
+        assertTrue(attempt.tryAdmit(time.milliseconds()).isEmpty(), "Retry admission must respect backoff");
+        assertFalse(attempt.requestInFlight(), "Rejected admission must not reserve an attempt");
+        assertTrue(commits.poll(time.milliseconds()).unsentRequests.isEmpty());
+
+        commits.onMemberEpochUpdated(Optional.of(8), "member");
+        time.sleep(100);
+        var retry = commits.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        assertTrue(attempt.requestInFlight());
+        assertTrue(attempt.tryAdmit(time.milliseconds()).isEmpty());
+        OffsetCommitRequest second = (OffsetCommitRequest) retry.unsentRequests.get(0).requestBuilder().build();
+        assertEquals(8, second.data().generationIdOrMemberEpoch());
+        assertEquals(7, first.data().generationIdOrMemberEpoch());
+        delegate.addAll(retry);
+        delegate.poll(0, time.milliseconds());
+        client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
+        delegate.poll(0, time.milliseconds());
+        assertTrue(operation.isDone());
+        assertFalse(operation.isCompletedExceptionally());
+        assertTrue(commits.unsentOffsetCommitRequests().isEmpty());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "ASYNC, STALE_MEMBER_EPOCH", "ASYNC, UNKNOWN_MEMBER_ID", "ASYNC, COORDINATOR_LOAD_IN_PROGRESS",
+        "SYNC, STALE_MEMBER_EPOCH", "SYNC, UNKNOWN_MEMBER_ID", "SYNC, COORDINATOR_LOAD_IN_PROGRESS",
+        "PERIODIC, STALE_MEMBER_EPOCH", "PERIODIC, UNKNOWN_MEMBER_ID", "PERIODIC, COORDINATOR_LOAD_IN_PROGRESS",
+        "BEFORE_REBALANCE, STALE_MEMBER_EPOCH", "BEFORE_REBALANCE, UNKNOWN_MEMBER_ID", "BEFORE_REBALANCE, COORDINATOR_LOAD_IN_PROGRESS"
+    })
+    void testCommitFailureAfterPollTimeout(CommitMode mode, Errors error) {
+        try (Metrics transitionMetrics = new Metrics(time)) {
+            Map<String, Object> properties = new java.util.HashMap<>(config.originals());
+            properties.put(ConsumerConfig.GROUP_ID_CONFIG, GROUP_ID);
+            properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
+            properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 1000);
+            ConsumerConfig autoConfig = new ConsumerConfig(properties);
+            CommitRequestManager localCommits = new CommitRequestManager(time, logContext,
+                    subscriptions, autoConfig, coordinator, mock(OffsetCommitCallbackInvoker.class),
+                    GROUP_ID, Optional.empty(), 100, 1000, OptionalDouble.of(0), transitionMetrics, metadata);
+            ConsumerMembershipManager realMembership = new ConsumerMembershipManager(GROUP_ID,
+                    Optional.empty(), Optional.empty(), 30_000, Optional.empty(), subscriptions,
+                    localCommits, metadata, logContext, background, time, transitionMetrics, true);
+            realMembership.registerStateListener(localCommits);
+            realMembership.transitionToJoining();
+            realMembership.updateMemberEpoch(7);
+            // Controlled assignment with no user rebalance listener: loss releases it synchronously.
+            subscriptions.subscribe(Set.of(PARTITION.topic()));
+            subscriptions.assignFromSubscribed(Set.of(PARTITION));
+            subscriptions.seek(PARTITION, 10);
+            ConsumerHeartbeatRequestManager realHeartbeat = new ConsumerHeartbeatRequestManager(
+                    logContext, time, autoConfig, coordinator, subscriptions, realMembership, background, transitionMetrics);
+            time.sleep(autoConfig.getInt(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG) + 1L);
+
+            CompletableFuture<?> operation;
+            switch (mode) {
+                case ASYNC:
+                    operation = localCommits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(10)));
+                    break;
+                case SYNC:
+                    operation = localCommits.commitSync(Map.of(PARTITION, new OffsetAndMetadata(10)), time.milliseconds() + 10_000);
+                    break;
+                case BEFORE_REBALANCE:
+                    operation = localCommits.maybeAutoCommitSyncBeforeRebalance(time.milliseconds() + 10_000);
+                    break;
+                case PERIODIC:
+                    localCommits.updateTimerAndMaybeCommit(time.milliseconds());
+                    operation = localCommits.unsentOffsetCommitRequests().element().future();
+                    break;
+                default:
+                    throw new AssertionError(mode);
+            }
+            var admitted = localCommits.poll(time.milliseconds());
+            assertEquals(1, admitted.unsentRequests.size());
+            delegate.addAll(admitted);
+            delegate.addAll(realHeartbeat.poll(time.milliseconds()));
+            assertEquals(MemberState.STALE, realMembership.state());
+            assertTrue(subscriptions.allConsumed().isEmpty());
+            delegate.poll(0, time.milliseconds());
+            OffsetCommitRequest first = (OffsetCommitRequest) request(ApiKeys.OFFSET_COMMIT).requestBuilder().build();
+            assertEquals(7, first.data().generationIdOrMemberEpoch());
+            client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, error)));
+            delegate.poll(0, time.milliseconds());
+
+            if (mode == CommitMode.SYNC && error == Errors.COORDINATOR_LOAD_IN_PROGRESS) {
+                assertFalse(operation.isDone());
+                assertTrue(localCommits.poll(time.milliseconds()).unsentRequests.isEmpty());
+                time.sleep(100);
+                var retry = localCommits.poll(time.milliseconds());
+                assertEquals(1, retry.unsentRequests.size());
+                OffsetCommitRequest retried = (OffsetCommitRequest) retry.unsentRequests.get(0).requestBuilder().build();
+                assertEquals(-1, retried.data().generationIdOrMemberEpoch());
+                assertEquals(10, retried.data().topics().get(0).partitions().get(0).committedOffset());
+                assertEquals(7, first.data().generationIdOrMemberEpoch());
+                delegate.addAll(retry);
+                delegate.poll(0, time.milliseconds());
+                client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
+                delegate.poll(0, time.milliseconds());
+                assertTrue(operation.isDone());
+                assertFalse(operation.isCompletedExceptionally());
+            } else if (mode == CommitMode.BEFORE_REBALANCE && error == Errors.COORDINATOR_LOAD_IN_PROGRESS) {
+                // Retry refreshes offsets after assignment loss; empty work completes without another send.
+                assertTrue(operation.isDone());
+                assertFalse(operation.isCompletedExceptionally());
+            } else {
+                assertTrue(operation.isCompletedExceptionally());
+                Throwable cause = assertThrows(CompletionException.class, operation::join).getCause();
+                if (error == Errors.UNKNOWN_MEMBER_ID || (mode == CommitMode.SYNC && error == Errors.STALE_MEMBER_EPOCH))
+                    assertInstanceOf(CommitFailedException.class, cause);
+                else if (mode == CommitMode.ASYNC && error == Errors.COORDINATOR_LOAD_IN_PROGRESS)
+                    assertInstanceOf(RetriableCommitFailedException.class, cause);
+                else
+                    assertInstanceOf(error.exception().getClass(), cause);
+            }
+            assertTrue(localCommits.poll(time.milliseconds()).unsentRequests.isEmpty());
+            assertTrue(localCommits.unsentOffsetCommitRequests().isEmpty());
+            if (mode == CommitMode.PERIODIC) {
+                time.sleep(1000);
+                localCommits.updateTimerAndMaybeCommit(time.milliseconds());
+                assertTrue(localCommits.poll(time.milliseconds()).unsentRequests.isEmpty());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testCompletionObserverIsNotABatchSnapshot(boolean heartbeatFirst) {
+        var commit = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        AtomicReference<Boolean> coordinatorKnownAtCompletion = new AtomicReference<>();
+        var observer = commit.thenRun(() -> coordinatorKnownAtCompletion.set(coordinator.coordinator().isPresent()));
+        thread.runOnce();
+        ClientRequest commitRequest = request(ApiKeys.OFFSET_COMMIT);
+        ClientRequest heartbeatRequest = request(ApiKeys.CONSUMER_GROUP_HEARTBEAT);
+        var commitResponse = new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE));
+        var heartbeatResponse = new ConsumerGroupHeartbeatResponse(new ConsumerGroupHeartbeatResponseData()
+                .setErrorCode(Errors.NOT_COORDINATOR.code()));
+        if (heartbeatFirst) {
+            client.respondToRequest(heartbeatRequest, heartbeatResponse);
+            client.respondToRequest(commitRequest, commitResponse);
+        } else {
+            client.respondToRequest(commitRequest, commitResponse);
+            client.respondToRequest(heartbeatRequest, heartbeatResponse);
+        }
+        thread.runOnce();
+        observer.join();
+        assertEquals(!heartbeatFirst, coordinatorKnownAtCompletion.get());
+        assertTrue(coordinator.coordinator().isEmpty());
+        assertFalse(commit.isCompletedExceptionally());
     }
 
     @ParameterizedTest

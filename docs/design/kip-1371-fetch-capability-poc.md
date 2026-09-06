@@ -286,3 +286,88 @@ the preceding 807-test selection plus the two admission-order cases. Checkstyle
 main/test and Spotless Java passed; production sources are unchanged, and their
 previous passing SpotBugs main result remains up-to-date. This follow-up changes
 only the characterization test and this evidence record.
+
+## Follow-up: failed commit attempts after poll timeout
+
+`ConsumerBatchedDecisionTest.testCommitFailureAfterPollTimeout` adds twelve
+component cases: four commit modes crossed with `STALE_MEMBER_EPOCH`,
+`UNKNOWN_MEMBER_ID`, and `COORDINATOR_LOAD_IN_PROGRESS`. Each builds an attempt
+with epoch 7 before the real heartbeat timeout path moves membership to STALE.
+The controlled subscribed assignment has offset 10 and no user rebalance
+listener, so the loss path clears the assignment synchronously. MockClient then
+delivers the selected error to the real request handler.
+
+| Operation | Stale epoch / unknown member | Coordinator loading (retriable) |
+| --- | --- | --- |
+| Explicit async commit | Future fails; no automatic retry. | Future fails with `RetriableCommitFailedException`; no automatic retry. |
+| Explicit sync commit | Future fails with `CommitFailedException`; no retry. | After backoff, retries offset 10 with epoch -1. A supplied success completes the operation. |
+| Periodic auto-commit | Attempt future fails. | Attempt future fails. |
+| Auto-commit before rebalance | Future fails; cleared epoch does not qualify for stale-epoch retry. | Refreshes current consumed offsets; they are empty, so the operation completes normally without another request. |
+
+For periodic auto-commit, invoking the timer update after another complete
+interval produces no request because the assignment is empty. This does not
+establish its behavior while an application rebalance callback is pending.
+The before-rebalance normal completion means no remaining offsets were selected
+by that retry path; it is **not** evidence that the original offset 10 was
+committed successfully. The original epoch-7 request is not rewritten by sync
+retry construction.
+
+The strongest unresolved case is explicit sync commit: retry reads the latest
+member information, but an empty epoch becomes -1 rather than automatically
+revoking the original operation's permission to commit. Consequently, "use the
+latest snapshot on retry" is weaker than "revalidate operation authority on
+retry." Any stronger contract must distinguish group-managed commits from
+manual-assignment/admin-like commits and preserve their existing semantics.
+This result does not by itself prove a production defect or justify changing
+manager order.
+
+Scope: real manager/owner/transport-delegate code with MockTime and MockClient;
+controlled membership/assignment setup, not a real group join or public-consumer
+runOnce scenario. Broker acceptance, concurrent reassignment, delayed callback
+completion, coordinator rediscovery, retry-deadline exhaustion, and static
+membership remain outside these twelve cases. No production behavior was changed.
+
+Validation: **969 tests across 18 suites passed twice** on identical final Java
+sources, zero failures/errors/skips, retries disabled, and a forced `--rerun` for
+the second execution. This extends the preceding 809-test selection with twelve
+new cases and `CommitRequestManagerTest` (148 cases). Checkstyle main/test and
+Spotless Java passed; production SpotBugs main remains unchanged and up-to-date.
+The first focused test invocation failed during fixture construction because
+auto-commit requires a configured group ID; that setup was corrected before the
+twelve focused cases and both expanded runs passed. This was a test-fixture
+error, not a production regression or evidence of a fixed consumer defect.
+
+## Small structural experiment: one normal commit admission entry
+
+Initial commits and retries already shared the normal pending-request drain.
+The experiment makes its implicit check/reserve/build sequence an explicit
+`OffsetCommitRequestState.tryAdmit(now)` operation. It checks existing in-flight
+and backoff eligibility, reserves the attempt, and builds the request with
+current member information. Raw construction is now private and explicitly
+named `buildRequestWithoutAdmission`; the existing close-time drain retains
+that exceptional route and its existing no-backoff behavior.
+
+`testCommitAdmissionReservesOnceAndRechecksRetryState` exercises the real normal
+poll path for initial admission and retry. Repeated entry while in flight cannot
+create another request; entry during retry backoff does not reserve anything;
+after backoff, retry captures epoch 8 while the original request remains epoch 7.
+A supplied successful response completes the operation. No new membership rule,
+reactor phase, or global policy type is introduced. The twelve leave/failure
+characterizations remain applicable, including the unresolved epoch -1 retry.
+
+Architectural result: a small RM-local entry can bind a mechanical eligibility
+check to reservation/construction. It does not prove that eligibility is
+semantically complete. Coordinator/expiration handling still belongs to the
+surrounding normal poll/drain, and this entry is for queued live attempts, not
+arbitrary retained request-state objects. The enclosing Java class can still
+call its nested private builder, and shutdown deliberately does; this is not
+a compile-time proof against every future bypass. The gain is a smaller review
+surface, not a new global correctness guarantee. No performance claim is made
+for the per-attempt Optional/stream change.
+
+Validation: **970 tests across 18 suites passed twice** on identical final Java
+sources (the prior 969-case selection plus the admission-entry test), with zero
+failures/errors/skips, retries disabled, and a forced second execution. Checkstyle
+main/test, Spotless Java, and SpotBugs main passed. The close-path regression
+coverage remains in `CommitRequestManagerTest`; it is not a proof of complete
+consumer shutdown semantics.
