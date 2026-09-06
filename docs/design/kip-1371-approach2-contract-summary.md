@@ -110,6 +110,13 @@ benchmark submission or performance claim is part of this assessment.
 
 ## Evidence and validation boundary
 
+- [Actor/Future lessons](kip-1371-actor-future-lessons.md): distinguishes an
+  operation-result handle from a state/behavior boundary; borrowing actor
+  capabilities does not select a mailbox, runtime, or global publication rule.
+- [RM boundary dry run](kip-1371-rm-boundary-dry-run.md): contrasts preserving
+  the current manager order with a candidate shared protocol decision entry.
+  Fifteen existing cases were rerun; timeout-first admission remains a policy
+  decision, not a semantics-preserving manager merge or a new implementation.
 - [Operation-result contract reuse](kip-1371-operation-result-contract-reuse.md):
   three existing fetch/commit input routes handle 38 result and observer-lifecycle
   schedules without another production adapter; this is not a cross-owner or
