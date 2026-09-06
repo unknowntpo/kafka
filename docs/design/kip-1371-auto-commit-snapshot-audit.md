@@ -2,8 +2,51 @@
 
 Scope: KAFKA-18641, Approach 2 original audit baseline `17b05c7433`.
 The sections below preserve the characterization, repair, opt-in experiment,
-and lifecycle-audit history. For the current verdict and remaining decisions,
-see the [one-page decision brief](kip-1371-approach2-decision-brief-zh.md).
+and lifecycle-audit history. The decision below supersedes the older default-off
+experiment verdict; historical receipts still apply only to their named revisions.
+
+## Current decision: retry the safely admitted offsets
+
+Under the user's autonomous-design authorization on 2026-09-06, the candidate now
+retains the initial offset map for the complete pre-rebalance commit operation.
+There is no runtime toggle: the unsafe recapture mode remains reproducible in git
+at `45e9cc7275`, rather than as a production option. Duplicate two-mode tests are
+collapsed; the public-poll test now requires retention under normal construction.
+
+The initial capture is authorized by `AbstractMembershipManager.maybeReconcile(true)`
+from `AsyncPollEvent`, before its reconciliation-check completion releases public
+record collection. A subsequent network response is not another such safe point.
+It may update owner-local retry bookkeeping and use the latest legal identity and
+coordinator, but it must not recapture positions concurrently with collection.
+
+This deliberately changes retry freshness, not the operation's completion meaning:
+success still means the broker accepted that operation's offsets, and retry expiry,
+fatal errors, close draining, identity refresh and obsolete reconciliation guards
+retain their separate contracts. A later safe auto-commit can capture newer offsets.
+Until then, replay after failure may increase. We prefer this to committing records
+which the current `poll()` has not returned. There is no new latest-offset guarantee
+or requirement to wait for another application poll before retrying.
+
+A seek changes the next fetch position; it does not retroactively cancel an admitted
+commit or durably rewind a group offset. Leave/rejoin guards reject an obsolete
+assignment continuation separately from the admitted commit's outcome. No generic
+snapshot-invalidation registry or global publication barrier is added.
+
+This prevents the demonstrated *concurrent recapture* failure. It does not make
+auto-commit safe for applications that continue polling before processing previous
+records, nor guarantee exactly-once effects, fsync under power loss, or every
+ownership-change broker interleaving. Those claims require separate evidence.
+
+Validation of this amendment: **415 tests across CommitRequestManagerTest (158),
+FetchCollectorTest (161), and ConsumerMembershipManagerTest (96) passed twice**,
+zero failures/errors/skips, retries disabled. The first invocation also included
+two intentionally failing new heartbeat-startup tests; those failures concern
+an independent unmodified heartbeat path, not this snapshot receipt. The second
+invocation selected only these three unit suites and passed. The reduced count
+removes duplicate experimental-mode variants, not coverage of distinct schedules.
+Java formatting, main/test Checkstyle and main SpotBugs passed in the first run.
+Raw receipts: `/tmp/kip1371-overnight-evidence.TC1I8d/zero-heartbeat-red/` and
+`/tmp/kip1371-overnight-evidence.TC1I8d/snapshot-selected-second/`.
 
 ## Original repair and intent
 

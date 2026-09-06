@@ -291,24 +291,18 @@ public class FetchCollectorTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testPublicPollWaitsForAutoCommitCaptureBeforeCollection(boolean captureDuringCollection) throws Exception {
-        verifyPublicPollCapture(captureDuringCollection, false, false);
-    }
-
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    public void testPublicPollMembershipRetryCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
-        verifyPublicPollCapture(captureDuringCollection, true, false);
+        verifyPublicPollCapture(captureDuringCollection, false);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testPublicPollMembershipRetryRetainsAdmittedSnapshot(boolean captureDuringCollection) throws Exception {
-        verifyPublicPollCapture(captureDuringCollection, true, true);
+        verifyPublicPollCapture(captureDuringCollection, true);
     }
 
     // Keep the schedules on one identical runtime fixture so only capture timing/path varies.
     @SuppressWarnings({"checkstyle:CyclomaticComplexity", "checkstyle:NPathComplexity"})
-    private void verifyPublicPollCapture(boolean captureDuringCollection, boolean rebalanceRetry, boolean retainSnapshot) throws Exception {
+    private void verifyPublicPollCapture(boolean captureDuringCollection, boolean rebalanceRetry) throws Exception {
         buildDependencies(DEFAULT_RECORD_COUNT + 1);
         assignAndSeek(topicAPartition0);
         TopicPartition revoked = new TopicPartition(topicAPartition0.topic(), 1);
@@ -341,8 +335,6 @@ public class FetchCollectorTest {
             CommitRequestManager commits = new CommitRequestManager(time, logContext, subscriptions,
                 config, coordinator, mock(OffsetCommitCallbackInvoker.class), "public-snapshot-group",
                 Optional.empty(), 100, 1000, OptionalDouble.of(0), commitMetrics, metadata);
-            if (retainSnapshot)
-                commits.enableRetainedRebalanceRetrySnapshot();
             ConsumerMembershipManager membership = rebalanceRetry ? membershipForRetainedPartition(commits, commitMetrics) : null;
             RequestManagers managers = new RequestManagers(logContext, offsets, topics, fetchRequests,
                 Optional.of(coordinator), Optional.of(commits), Optional.empty(), Optional.ofNullable(membership),
@@ -433,8 +425,8 @@ public class FetchCollectorTest {
             ConsumerRecords<String, String> records = consumer.poll(Duration.ZERO);
 
             assertEquals(DEFAULT_RECORD_COUNT, records.count());
-            assertEquals(rebalanceRetry && captureDuringCollection && !retainSnapshot ? DEFAULT_RECORD_COUNT : 0,
-                offsetBeforePollReturns.get());
+            assertEquals(0, offsetBeforePollReturns.get(),
+                "a retry must not commit records collected but not yet returned by poll");
         } finally {
             background.shutdownNow();
             assertTrue(background.awaitTermination(5, TimeUnit.SECONDS));

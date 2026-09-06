@@ -73,9 +73,12 @@ Non-guarantees: immutable does not mean captured at a safe time; buffer insertio
 does not mean records have been returned or processed by the application.
 
 Kafka evidence: FetchBuffer synchronization, position-before-consumed-marker
-regression, and public-poll capture checkpoint tests. Rebalance retry capture
-and real-broker crash/restart safety remain open. Retained-first-snapshot retry
-is an opt-in comparison, not the selected production offset policy.
+regression, and public-poll capture checkpoint tests. The current candidate
+retains the safely admitted offsets across pre-rebalance retries, rather than
+recapturing during a callback. This intentionally sacrifices retry freshness;
+see the snapshot audit. Real normal-close and graceful broker-restart evidence
+exists at `45e9cc7275`, but arbitrary crash safety and every rebalance failure
+schedule remain separate claims. New policy validation is recorded separately.
 
 ## S3. Useful next activation and enabling-input delivery
 
