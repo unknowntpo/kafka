@@ -499,3 +499,43 @@ Validation on 2026-09-06: the two affected suites passed 217 tests (170 commit,
 rerun. No failures/errors/skips, retries disabled. Test Checkstyle and Spotless
 Java passed. A missing assertion import was corrected before these successful
 runs. Only tests and this evidence note changed.
+
+## Leave/rejoin: commit outcome and reconciliation continuation are separate
+
+`testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins` now covers
+four combinations: explicit leave-group versus fencing, crossed with old commit
+success versus failure. Real membership state transitions are exercised with
+mock subscription state and a controlled commit future. The leave path includes
+the leave-heartbeat progression before joining again. All combinations reject
+the obsolete reconciliation continuation: they do not apply its assignment or
+acknowledge it, and the new target can start reconciliation on the next pass.
+
+The old controlled commit future remains incomplete through leave/rejoin; its
+later outcome is delivered explicitly by the test. This establishes the owner
+continuation guard, not cancellation or transport behavior.
+
+At the commit-manager boundary, `onMemberEpochUpdated` updates identity rather
+than cancelling pending operations. The new
+`testPendingRebalanceCommitCanRetryWithNewMemberIdentity` exercises a real manager
+with an admitted commit, an empty epoch notification, and then a new member ID
+and epoch. A simulated stale-epoch response permits retry using the new identity,
+and simulated success completes the original future. This is checked with both
+default and retained-snapshot modes, with assignment/offsets held fixed. It is
+not a complete unsubscribe/rejoin broker exchange or proof that every old scope
+is valid under a new member identity.
+
+Conclusion: preserving a pending operation's terminal outcome and rejecting an
+obsolete assignment continuation are different responsibilities. Existing owner
+guards already cover the latter in these schedules. Do not introduce a global
+snapshot-invalidating rule to conflate them. Whether an old offset scope should
+be retried after an actual ownership change remains a separate compatibility
+question; broker rejection and identity refresh alone are not a scope proof.
+The retained-snapshot experiment stays default-off; no production change is
+made in this slice.
+
+Validation on 2026-09-06: four membership schedules passed a focused run; all
+three affected suites then passed 315 tests (172 commit, 96 membership, 47 event
+processor). The two new commit identity cases passed an additional focused
+rerun. Zero failures/errors/skips, retries disabled; Spotless Java and test
+Checkstyle passed. All newly covered schedules ran twice. These are component
+and unit receipts, not broker acceptance or an end-to-end unsubscribe proof.

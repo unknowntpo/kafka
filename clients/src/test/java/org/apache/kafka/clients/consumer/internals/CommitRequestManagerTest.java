@@ -1623,6 +1623,40 @@ public class CommitRequestManagerTest {
         assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testPendingRebalanceCommitCanRetryWithNewMemberIdentity(boolean retainSnapshot) {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        if (retainSnapshot)
+            manager.enableRetainedRebalanceRetrySnapshot();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        manager.onMemberEpochUpdated(Optional.of(1), "old-member");
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+
+        // Exercise identity notifications, not a full unsubscribe/rejoin exchange with a broker.
+        manager.onMemberEpochUpdated(Optional.empty(), "old-member");
+        assertFalse(result.isDone());
+        manager.onMemberEpochUpdated(Optional.of(8), "new-member");
+        assertFalse(result.isDone());
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.STALE_MEMBER_EPOCH));
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) retry.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals("new-member", data.memberId());
+        assertEquals(8, data.generationIdOrMemberEpoch());
+        assertEquals(10, data.topics().get(0).partitions().get(0).committedOffset());
+        retry.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE));
+        assertDoesNotThrow(result::join);
+    }
+
     @Test
     public void testLastEpochSentOnCommit() {
         // Enable auto-commit but with very long interval to avoid triggering auto-commits on the
