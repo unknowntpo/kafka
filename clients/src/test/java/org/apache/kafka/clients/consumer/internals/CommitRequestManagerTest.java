@@ -1501,6 +1501,44 @@ public class CommitRequestManagerTest {
     }
 
     @Test
+    public void testRebalanceRetryRecapturesRetainedPartitionOffset() {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition revoked = new TopicPartition("topic", 0);
+        TopicPartition retained = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(revoked, retained));
+        subscriptionState.seek(revoked, 5);
+        subscriptionState.seek(retained, 10);
+
+        // Membership stops delivery only for partitions being revoked, before the initial capture.
+        subscriptionState.markPendingRevocation(Set.of(revoked));
+        assertFalse(subscriptionState.isFetchable(revoked));
+        assertTrue(subscriptionState.isFetchable(retained));
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        OffsetCommitRequestData initial = (OffsetCommitRequestData)
+            first.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(10, initial.topics().get(0).partitions().stream()
+            .filter(p -> p.partitionIndex() == retained.partition()).findFirst().orElseThrow().committedOffset());
+
+        // Characterize a position change; this fixture does not prove a public-poll interleaving.
+        subscriptionState.seek(retained, 20);
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.REQUEST_TIMED_OUT));
+        assertFalse(result.isDone());
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData retried = (OffsetCommitRequestData)
+            retry.unsentRequests.get(0).requestBuilder().build().data();
+        Map<Integer, Long> offsets = new HashMap<>();
+        retried.topics().get(0).partitions().forEach(p -> offsets.put(p.partitionIndex(), p.committedOffset()));
+        assertEquals(Map.of(revoked.partition(), 5L, retained.partition(), 20L), offsets,
+            "retry recaptures all assigned positions, not only the frozen revoked partitions");
+    }
+
+    @Test
     public void testLastEpochSentOnCommit() {
         // Enable auto-commit but with very long interval to avoid triggering auto-commits on the
         // interval and just test the auto-commits triggered before revocation

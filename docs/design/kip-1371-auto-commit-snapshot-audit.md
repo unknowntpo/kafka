@@ -279,7 +279,47 @@ zero failures, errors, or skips. Both runs disabled retries and used Java 17,
 offline dependencies, and one test fork. Spotless Java and test Checkstyle passed
 in the focused run. No production code changed for this verification slice.
 
-If the interleaving is reachable, compare a scoped capture handshake against an
-explicit application-provided offset snapshot. Preserve existing timeout,
-wakeup, and record-delivery outcomes before choosing a mechanism; do not restore
-a universal effect queue solely for this case.
+## Rebalance: initial capture versus retry capture
+
+The next bounded question is whether the scoped capture contract also covers
+rebalance commits. This is not a proposal for a global dependency graph or a
+universal callback queue.
+
+Existing protections in `AbstractMembershipManager.maybeReconcile`:
+
+- Background `maybeReconcile(false)` cannot start reconciliation involving
+  revocation or auto-commit. The application-event path supplies `true`.
+- Revoked partitions are marked pending revocation before the initial commit
+  capture. `SubscriptionState.isFetchable` then excludes those partitions.
+- This restriction does not pause retained partitions.
+
+`testReconcilePartitionsRevokedWithSuccessfulAutoCommitNoCallbacks` already
+checks the initial mark-before-commit order. The new manager-level unit test
+`testRebalanceRetryRecapturesRetainedPartitionOffset` uses real subscription
+state and commit manager, with a simulated transport response. It establishes:
+
+1. Revoked partition 0 has offset 5 and is not fetchable; retained partition 1
+   has offset 10 and remains fetchable.
+2. The initial rebalance commit captures retained offset 10.
+3. After a controlled position change to 20 and a retriable response, the next
+   built commit contains revoked offset 5 and retained offset 20.
+
+Thus `autoCommitSyncBeforeRebalanceWithRetries` is a new capture boundary:
+it reads `subscriptions.allConsumed()` in the completion callback, rather than
+retaining the first capture. The per-poll initial checkpoint is not by itself
+proof that this later capture is safe.
+
+Evidence limit: the unit test uses `seek` to supply the changed position. It
+does not establish that public `poll` can produce this position while delivery
+is unfinished, nor that a broker durably commits it. The next experiment must
+check that exact retained-partition/public-poll interleaving before calling it
+a regression or choosing a repair. If reachable, compare scoped retry capture
+against an application-provided safe offset view while preserving existing
+rebalance retry semantics. Do not restore a universal effect queue solely for
+this case.
+
+Validation on 2026-09-06: the new characterization and existing membership-order
+test passed together, then the full commit and consumer-membership suites passed
+244 tests (151 + 93), with zero failures, errors, or skips and retries disabled.
+The new test therefore ran twice. Spotless Java and test Checkstyle passed in
+the focused run. This slice changes tests and documentation only.
