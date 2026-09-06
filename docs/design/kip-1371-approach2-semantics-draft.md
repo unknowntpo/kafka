@@ -1,4 +1,18 @@
-# Approach 2: candidate coordination and observation semantics
+# Contract-Guided Coordination: candidate consumer semantics
+
+## Design names
+
+- **Contract-Guided Coordination** (formerly Approach 2): local state owners,
+  narrow capabilities, explicit loop/routing contracts and effect-specific
+  observation guarantees, without requiring a universal effect barrier.
+- **Centralized Coordination and Publication** (formerly Approach 3): the
+  original design's explicit cross-manager fact/command routing and shared
+  publication-before-effect boundary. Domain state still has local owners.
+
+These names describe emphasis, not exclusive capabilities: both designs need
+contracts and coordination. They are working design names, not new class names,
+public APIs or replacements for the published KIP title. Historical filenames,
+branch names and numbered references remain intact for traceability.
 
 Status: working draft, not a published KIP or proof of complete migration.
 Code baseline: `8ab58b303c`, plus the public-close/publication tests introduced
