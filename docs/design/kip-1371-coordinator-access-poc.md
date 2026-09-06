@@ -60,3 +60,26 @@ be removed from the dependent capability.
 Do not make error retention permanent, move all effects to the next iteration,
 or change the winner between error delivery and application-event reaping as part
 of this migration.
+
+## Follow-up: separate value application from lookup
+
+The next slice extracts `CommitRequestManager.failUnsentRequestsOnCoordinatorError`.
+Its argument is the delivered error value; the receiving owner still selects and
+fails its current unsent commit/offset-fetch operations. It does not look up,
+consume, or retain coordinator state. The existing coordinator-unknown branch of
+`poll` remains the caller, so this extraction changes no delivery boundary.
+
+The new test supplies an error independently of `CoordinatorAccess`, checks that
+the handler makes no coordinator calls, and verifies both operation futures retain
+the identical error. A later operation remains pending when the subsequent poll
+has no new error. This establishes a receiver seam, not a complete event route.
+
+The handler is intentionally package-scoped. It is not safe for arbitrary delayed
+replay: a caller must preserve the coordinator-unknown poll cutoff. Moving it into
+the reactor without that proof would merely relocate the knowledge burden. The
+legacy read-before-clear dependency therefore remains until routing is migrated.
+
+Validation for this follow-up: the same five-suite selection now contains **196
+tests**, passed twice with zero failures/errors/skips and retries disabled.
+Checkstyle main/test, SpotBugs main, and Spotless Java checks passed. This count
+replaces, rather than adds to, the previous 195-case selection for this slice.

@@ -181,7 +181,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         // poll when the coordinator node is known and fatal error is not present
         if (coordinatorRequestManager.coordinator().isEmpty()) {
-            pendingRequests.maybeFailOnCoordinatorFatalError();
+            coordinatorRequestManager.fatalError().ifPresent(this::failUnsentRequestsOnCoordinatorError);
 
             if (closing && pendingRequests.hasUnsentRequests()) {
                 CommitFailedException exception = new CommitFailedException(
@@ -1512,15 +1512,21 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             return res;
         }
 
-        private void maybeFailOnCoordinatorFatalError() {
-            coordinatorRequestManager.fatalError().ifPresent(error -> {
-                    log.warn("Failing all unsent commit requests and offset fetches because of coordinator fatal error. ", error);
-                    unsentOffsetCommits.forEach(request -> request.future.completeExceptionally(error));
-                    unsentOffsetFetches.forEach(request -> request.future.completeExceptionally(error));
-                    clearAll();
-                }
-            );
+        private void failOnCoordinatorError(Throwable error) {
+            log.warn("Failing all unsent commit requests and offset fetches because of coordinator fatal error. ", error);
+            unsentOffsetCommits.forEach(request -> request.future.completeExceptionally(error));
+            unsentOffsetFetches.forEach(request -> request.future.completeExceptionally(error));
+            clearAll();
         }
+    }
+
+    /**
+     * Apply a coordinator error to operations currently waiting to be sent. The caller must
+     * deliver it at the coordinator-unknown poll boundary, not replay it after later inputs.
+     * This owner selects the operations; the error is neither retained nor consumed here.
+     */
+    void failUnsentRequestsOnCoordinatorError(Throwable error) {
+        pendingRequests.failOnCoordinatorError(Objects.requireNonNull(error));
     }
 
     /**

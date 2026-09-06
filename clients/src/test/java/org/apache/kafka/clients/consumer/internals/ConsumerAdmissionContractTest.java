@@ -51,7 +51,9 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ConsumerAdmissionContractTest {
@@ -119,6 +121,30 @@ class ConsumerAdmissionContractTest {
         assertThrows(NoSuchMethodException.class, () -> CoordinatorAccess.class.getMethod("close"));
         assertThrows(NoSuchMethodException.class,
             () -> CoordinatorAccess.class.getMethod("markCoordinatorUnknown", String.class, long.class));
+    }
+
+    @Test
+    public void testCoordinatorErrorValueIsAppliedWithoutLookupOrRetention() {
+        CoordinatorAccess coordinator = mock(CoordinatorAccess.class);
+        CommitRequestManager manager = create(false, 100, coordinator);
+        TopicPartition tp = new TopicPartition("topic", 0);
+        var commit = manager.commitAsync(Map.of(tp, new OffsetAndMetadata(1)));
+        var fetch = manager.fetchOffsets(Set.of(tp), time.milliseconds() + defaultApiTimeoutMs);
+        RuntimeException error = new RuntimeException("discovery failed");
+        clearInvocations(coordinator);
+
+        manager.failUnsentRequestsOnCoordinatorError(error);
+
+        verifyNoInteractions(coordinator);
+        assertSame(error, assertThrows(CompletionException.class, commit::join).getCause());
+        assertSame(error, assertThrows(CompletionException.class, fetch::join).getCause());
+        var later = manager.commitAsync(Map.of(tp, new OffsetAndMetadata(2)));
+        assertFalse(later.isDone());
+        // With no error delivered on the next poll, the earlier value must not affect later work.
+        when(coordinator.coordinator()).thenReturn(Optional.empty());
+        when(coordinator.fatalError()).thenReturn(Optional.empty());
+        manager.poll(time.milliseconds());
+        assertFalse(later.isDone());
     }
 
     private void discoverCoordinator() {
