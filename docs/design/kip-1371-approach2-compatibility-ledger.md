@@ -93,6 +93,42 @@ NetworkClientDelegateTest). JDK 17 / Gradle 9.7.1 offline; Checkstyle and Spotle
 Java passed on the first run. Four new cases provide the controlled comparison.
 No production source or external benchmark was changed.
 
+## Owner-version safety across decision boundaries
+
+The existing `testLateHeartbeatInvalidationCannotClearRediscoveredOwner` is
+expanded from two cases to eight: inline/deferred response application,
+next-pass/extra-pass decision timing, and heartbeat-first/commit-first response
+order. A heartbeat attempt captures the old coordinator version; the fixture
+invalidates and rediscovers the owner before that heartbeat returns NOT_COORDINATOR.
+A concurrent successful commit registers a followup operation.
+
+All matrix cases assert the newer coordinator version survives, no replacement
+FindCoordinator is staged from the stale observation, the original commit success
+remains valid, and the followup is sent and completes successfully without a
+duplicate commit. Only admission timing differs across decision boundaries.
+
+`CoordinatorRequestManager.markCoordinatorUnknownIfCurrent` supplies the matching
+mechanism: reject an observed version different from the owner's current version.
+The test does not establish that arbitrary callbacks are safe, that all response
+errors are fenced, or that a general operation-generation scheme is unnecessary.
+Rediscovery is injected through the fixture's discovery helper, not a real broker
+failover. The eight-way recovery matrix uses regular heartbeat; rerunning share
+and Streams suites does not make their coverage identical to this matrix.
+
+Design implication: this named cross-owner protection works with either decision
+boundary and with inline callbacks; extra polling is not its prerequisite.
+Continue to retain owner checks and captured request context regardless of the
+event-loop scheduling choice. No new RM method, production queue or callback
+deferral requirement is selected by these tests.
+
+Validation: **607 tests in six suites passed twice**, zero failures/errors/skips,
+retries disabled: ConsumerBatchedDecisionTest, CommitRequestManagerTest,
+CoordinatorRequestManagerTest, ConsumerHeartbeatRequestManagerTest,
+ShareHeartbeatRequestManagerTest and StreamsGroupHeartbeatRequestManagerTest.
+JDK 17 / Gradle 9.7.1 offline; Checkstyle and Spotless Java passed on the first
+run. The expanded matrix adds six cases to the prior two-case characterization.
+Production source and external resources were unchanged.
+
 ## Scope and verdict
 
 2026-09-06. Candidate code: `0234b4f8fe` (production code unchanged since

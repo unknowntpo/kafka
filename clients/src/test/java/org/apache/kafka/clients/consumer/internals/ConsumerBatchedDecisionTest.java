@@ -942,8 +942,12 @@ class ConsumerBatchedDecisionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testLateHeartbeatInvalidationCannotClearRediscoveredOwner(boolean deferred) {
+    @CsvSource({
+        "false,false,false", "false,false,true", "false,true,false", "false,true,true",
+        "true,false,false", "true,false,true", "true,true,false", "true,true,true"
+    })
+    void testLateHeartbeatInvalidationCannotClearRediscoveredOwner(boolean deferred, boolean postIoPass, boolean heartbeatFirst) {
+        useDecisionBoundary(postIoPass);
         if (deferred)
             delegate.enableResponseBatching();
         var first = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
@@ -955,16 +959,41 @@ class ConsumerBatchedDecisionTest {
         discoverCoordinator();
         long currentVersion = coordinator.coordinatorVersion();
         assertTrue(currentVersion > capturedVersion);
-        client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
-        client.respondToRequest(oldHeartbeat, new ConsumerGroupHeartbeatResponse(new ConsumerGroupHeartbeatResponseData()
-            .setErrorCode(Errors.NOT_COORDINATOR.code())));
+        ClientRequest oldCommit = request(ApiKeys.OFFSET_COMMIT);
+        var commitResponse = new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE));
+        var heartbeatResponse = new ConsumerGroupHeartbeatResponse(new ConsumerGroupHeartbeatResponseData()
+            .setErrorCode(Errors.NOT_COORDINATOR.code()));
+        if (heartbeatFirst) {
+            client.respondToRequest(oldHeartbeat, heartbeatResponse);
+            client.respondToRequest(oldCommit, commitResponse);
+        } else {
+            client.respondToRequest(oldCommit, commitResponse);
+            client.respondToRequest(oldHeartbeat, heartbeatResponse);
+        }
 
         thread.runOnce();
+        assertTrue(first.isDone());
         assertFalse(first.isCompletedExceptionally());
         assertFalse(followup.isDone());
         assertTrue(coordinator.coordinator().isPresent());
         assertEquals(currentVersion, coordinator.coordinatorVersion());
-        assertTrue(delegate.unsentRequests().stream().anyMatch(r -> r.requestBuilder().apiKey() == ApiKeys.OFFSET_COMMIT),
-            "owner-side version fencing remains necessary even with an ordered completion batch");
+        assertEquals(postIoPass,
+            delegate.unsentRequests().stream().anyMatch(r -> r.requestBuilder().apiKey() == ApiKeys.OFFSET_COMMIT));
+        assertFalse(delegate.unsentRequests().stream().anyMatch(r -> r.requestBuilder().apiKey() == ApiKeys.FIND_COORDINATOR),
+            "a stale observation must not start another discovery");
+
+        thread.runOnce();
+        ClientRequest nextCommit = request(ApiKeys.OFFSET_COMMIT);
+        assertEquals(2, ((OffsetCommitRequest) nextCommit.requestBuilder().build()).data()
+            .topics().get(0).partitions().get(0).committedOffset());
+        assertEquals(currentVersion, coordinator.coordinatorVersion());
+        client.respondToRequest(nextCommit, commitResponse);
+        thread.runOnce();
+        assertTrue(followup.isDone());
+        assertFalse(followup.isCompletedExceptionally());
+        assertTrue(coordinator.coordinator().isPresent());
+        assertEquals(currentVersion, coordinator.coordinatorVersion());
+        assertFalse(client.requests().stream().anyMatch(r -> r.requestBuilder().apiKey() == ApiKeys.OFFSET_COMMIT));
+        assertFalse(delegate.unsentRequests().stream().anyMatch(r -> r.requestBuilder().apiKey() == ApiKeys.OFFSET_COMMIT));
     }
 }
