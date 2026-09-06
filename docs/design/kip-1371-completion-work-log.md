@@ -143,3 +143,41 @@ The selected suite now passes, including three new configured-loop cases: in-fli
 recovery with/without the extra pass, plus manual-assignment no-spin and membership recovery.
 Those use real managers and a real delegate with mocked membership/transport, not real brokers.
 Raw first green: `/tmp/kip1371-overnight-evidence.TC1I8d/inflight-first-green/`.
+
+### Full unit receipt at `95095ac064`
+
+The full consumer unit/component namespace passed: **97 suites, 3,383 cases,
+zero failures/errors/skips**, retries disabled. Raw XML is archived in
+`/tmp/kip1371-overnight-evidence.TC1I8d/full-unit-95095ac/`.
+This reruns all 443 selected heartbeat/loop cases, providing their second passing execution.
+The count differs from the initial 3,392 because obsolete policy-toggle combinations were
+removed and selected-policy cases added; counts from the different revisions must not be summed.
+The default Kafka discovery filter excludes explicitly flaky tests before execution; zero XML
+skips does not mean those excluded cases ran. A separate flaky selection remains to be run.
+The real consumer integration namespace is now executing on the same pinned revision with
+fresh test JVMs per class. Streams application-level tests are a separate module and require
+an explicit follow-up; their manager-unit coverage must not be described as that integration run.
+
+## Local performance preparation (not a result)
+
+Created sibling baseline worktree `kip-1371-acceptance-baseline` on
+`codex/kip-1371-acceptance-baseline`, pinned to `820533b870106cc0e0ac60e2076b8644d68bd85f`,
+using the guarded worktree alias. It is clean and correctly anchored in `trunk/.git`.
+No old worktree was moved or modified. Compilation/measurement are not yet complete.
+
+`benchmarks/contract-guided/` contains a runtime exporter and a task-owned loopback-broker
+runner for the shipped ConsumerPerformance CLI. Five parser tests passed; real fixture smoke
+must pass before full measurement. The predeclared full workload and thresholds are in its README.
+The runner fingerprints runtime content, rejects dirty/mismatched measured source and short reads,
+uses independent AB/BA JVMs, and retains raw results. A separate JFR may be captured after timing.
+It never accepts an existing broker address or submits a Jenkins job.
+
+Next execution order after the current broad client integration run:
+
+1. Archive both result sets and diagnose any failed case; do not overwrite or retry away a failure.
+2. Run the explicitly flaky consumer unit selection and Streams topology/protocol migration integration
+   tests in their own module, with no automatic retries. These are separate from the main namespace.
+3. Export baseline/candidate runtime classpaths offline. Run the 10,000-record, one-pair fixture smoke
+   (inconclusive for performance), then the predeclared full profile if smoke is valid.
+4. Finalize local KIP evidence, archive raw receipts in a durable workspace location, and regenerate HTML.
+5. Commit locally and report actual coverage and limits. No remote publication or push.

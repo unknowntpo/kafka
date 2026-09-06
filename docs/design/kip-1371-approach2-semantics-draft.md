@@ -14,10 +14,12 @@ contracts and coordination. They are working design names, not new class names,
 public APIs or replacements for the published KIP title. Historical filenames,
 branch names and numbered references remain intact for traceability.
 
-Status: working draft, not a published KIP or proof of complete migration.
-Code baseline: `8ab58b303c`, plus the public-close/publication tests introduced
-with this document. Scope: the independent Approach 2 worktree. Approach 3,
-the separate DOC branch, remote PRs and Confluence remain unchanged.
+Status: local candidate semantics, not a published KIP or proof of every execution.
+Current implementation: `95095ac064`; the original draft baseline was `8ab58b303c`.
+The separate DOC branch now contains the complete replacement-direction narrative:
+`docs/design/kip-1371-contract-guided-coordination.md` and matching HTML.
+See the completion work log for selected snapshot/activation amendments and exact receipts.
+The old design, remote PRs, Jira and Confluence remain unchanged by this work.
 
 ## Intent, forces and choice
 

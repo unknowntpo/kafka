@@ -1,0 +1,43 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Applied without changing the baseline checkout. Export exact resolved classpaths;
+// do not let a wildcard silently load a client jar from another worktree.
+gradle.projectsEvaluated {
+    def toolsProject = rootProject.findProject(':tools')
+    if (toolsProject == null) {
+        return
+    }
+    rootProject.tasks.register('contractGuidedRuntime') {
+        def selected = [clients: rootProject.project(':clients'), tools: toolsProject]
+        if (providers.gradleProperty('contractGuidedBroker').orElse('false').get() == 'true') {
+            selected.broker = rootProject.project(':core')
+        }
+        selected.each { label, project ->
+            dependsOn project.tasks.named('classes')
+            dependsOn project.sourceSets.main.runtimeClasspath
+        }
+        doLast {
+            def output = file(providers.gradleProperty('contractGuidedOutput').get())
+            output.mkdirs()
+            selected.each { label, project ->
+                new File(output, "${label}-classpath.txt").text =
+                    project.sourceSets.main.runtimeClasspath.files.collect { it.canonicalPath }.join(File.pathSeparator)
+            }
+        }
+    }
+}

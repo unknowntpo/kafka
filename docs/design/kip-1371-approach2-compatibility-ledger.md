@@ -1,4 +1,20 @@
-# Approach 2: existing-behavior compatibility ledger
+# Contract-Guided Coordination: existing-behavior compatibility ledger
+
+## Current amendments (supersede historical unresolved-policy descriptions below)
+
+Candidate `95095ac064` selects retained safe pre-rebalance offsets (D1), fixes zero-initial-interval
+heartbeat waiting (D2), and awaits in-flight heartbeat completion instead of immediate empty polls
+(D3). See [completion work log](kip-1371-completion-work-log.md),
+[snapshot audit](kip-1371-auto-commit-snapshot-audit.md) and
+[heartbeat evidence](kip-1371-heartbeat-activation-evidence.md).
+References below to a default recapture mode or an unselected retained-snapshot toggle are historical,
+not descriptions of this candidate. Callback batching remains optional and off by default;
+RequestManager.poll() and the configured full-pass error-consumption order remain.
+
+Real background-thread close, graceful broker restart, and public callback-exception recovery now
+have named integration evidence. See [historical provenance](kip-1371-historical-regression-provenance.md).
+This does not upgrade old broad-suite failures to passes or imply abrupt-crash durability.
+The final acceptance index is [issue coverage](kip-1371-issue-coverage.md).
 
 Candidate normative obligations: [semantics draft](kip-1371-approach2-semantics-draft.md).
 

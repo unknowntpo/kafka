@@ -1,4 +1,35 @@
-# Approach 2: complete original-KIP issue acceptance inventory
+# Contract-Guided Coordination: original-KIP issue acceptance inventory
+
+## Current evidence update at `95095ac064`
+
+The inventory below is retained as the original gap checklist; its "unverified" and pending-policy
+labels must be read with this newer source-audited update. Full historical source provenance is in
+[regression provenance](kip-1371-historical-regression-provenance.md), including the exact baseline
+ancestor for each inherited repair. The current user authorizes autonomous design decisions;
+the selected decisions and any observable behavior change are recorded, not silently treated as
+equivalent refactoring. No upstream, Jira, Confluence or remote publication is authorized here.
+
+| Original evidence | Current protection and executable coverage | Limit on the claim |
+| --- | --- | --- |
+| KAFKA-17066 | Inherited background position initialization; OffsetsRequestManager and ApplicationEventProcessor regression suites exercise initialization and error propagation. | No claim that this POC introduced background ownership; old pre-fix binary not rerun. |
+| KAFKA-17674 | Inherited captured partition scope; `testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition` and `testUpdatePositionsDoesNotApplyOffsetsIfPartitionNotInitializingAnymore`. | An assignment does not authorize expanding an older request; not a global generation mechanism. |
+| KAFKA-18641 | Safe public-poll checkpoint plus D1 retained retry offsets. Real Collector/public-poll schedules protect against recapture before return; cancellation/error/wakeup, seek, leave/rejoin and retry identity are covered. | Intentional freshness/replay tradeoff. Graceful close/restart proof is separate from a forced broker-wire retry/crash reproduction. |
+| PR 21476 / KAFKA-15529 | Inherited position update before volatile consumed marker; `testPositionUpdatedBeforeDrainOnExhaustedFetch` and the full Collector suite. | Buffer notification alone would not establish this data-ordering property. |
+| KAFKA-20426 | Inherited UNSUBSCRIBED wait; new real-RM/configured-loop manual-assignment no-spin and enabling-membership-input test. | Membership transition is controlled, not a public subscribe() end-to-end test. |
+| KAFKA-20253 | Existing feasibility guard plus D2 zero-startup-interval and D3 in-flight completion repair across regular/share/Streams. Real loop no-spin/recovery checks both invocation strategies. | Deterministic no-zero-wait evidence, not an idle CPU percentage or exact reauthentication wire replay. |
+| KAFKA-20854 | Inherited no-progress classification plus narrow producer capability. FetchRequestManager tests exercise no-fetchable/backoff no-wake, in-flight completion, empty incremental responses, disconnect/session errors, pause/resume and enabling retries with real buffer waiters. | Empty *response* may legitimately wake; empty *preparation* is not progress. Not every notification is a data-available signal. |
+| KAFKA-20970 | Commit unknown-coordinator/expired-auto-commit typed wait plus independent Streams startup/in-flight repairs. Commit and all three heartbeat suites validate local wait and subsequent admission. | Regular commit proof does not stand in for Streams; current-candidate performance still needs measurement. |
+| KAFKA-20397 | Pending metadata-dependent operation routing; real-buffer before/during-wait publication tests, actual public-poll latch path, deadline/error identity, wakeup and later recovery. | Controlled transport/collector seams remain; do not call this an exact old failing real-broker wire reproduction. |
+| KAFKA-18160 | Inherited acknowledgement-before-rethrow; new public-poll callback WakeupException/InterruptException tests recover and deliver records through real background thread and brokers, in both KRaft configurations. | Four integration cases passed twice; not exhaustive OS interruption timing. |
+| KAFKA-19357 | Exact inherited `testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`: stopped brokers, 500 ms close budget, exactly one failed callback. It passed in the earlier broader plaintext run. | Correct result is bounded failure, not discovery until success; that broader run had a separate setup/heap failure. |
+| KAFKA-18569 | Inherited close signaling; eight public-close/real-membership component combinations prove stop after dependent work and no new discovery after backoff. Separate real close proof observes background-thread termination. | No new universal terminal lifecycle semantics or abrupt broker-crash proof. |
+
+Focused receipts and failures are retained in the completion log. The broad consumer unit namespace
+passes at this revision (3,383 cases, 97 suites, no failures/errors/skips; default non-flaky selection).
+The integration invocation is still running; this table is not a fabricated all-green result.
+Existing repaired cases remain inherited evidence even when the POC adds stronger contract tests.
+
+## Original gap checklist (historical)
 
 ## Scope and evidence rules
 

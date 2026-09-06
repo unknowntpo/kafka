@@ -28,6 +28,29 @@ disabled. JDK 17, offline Gradle 9.7.1, one fork. Java formatting, main/test Che
 SpotBugs passed. Raw receipts are `/tmp/kip1371-overnight-evidence.TC1I8d/heartbeat-first-green/`
 and `heartbeat-second-green/`; failing controls are in `zero-heartbeat-red/`.
 
-This closes the demonstrated startup waiting defect only. In-flight heartbeat activation and
-complete loop/public-consumer no-spin recovery need their own assertions; positive waiting
-before discovery alone is not complete KAFKA-20253/20970 performance acceptance.
+## In-flight completion, not an expired interval
+
+At `95095ac064`, a second correction covers an already in-flight heartbeat. Five new cases
+(regular/share with zero and negotiated intervals, plus Streams startup) failed before the change:
+request admission refused duplicate work, but the result requested another immediate timer poll.
+The result now explicitly awaits network completion. The application wait remains bounded by its
+poll-timer refresh and, when available, the negotiated heartbeat interval. Actual poll timeout
+and urgent leave retain their existing priority. The final live millisecond is not rounded to zero.
+
+`ConsumerBatchedDecisionTest.testInFlightHeartbeatDoesNotSpinConfiguredLoop` checks ten consecutive
+iterations through real RequestManagers configuration and NetworkClientDelegate, one positive
+network wait per iteration, no duplicate request, and another heartbeat after completion/interval.
+It passes with and without the extra post-I/O manager pass; batching is not the no-spin protection.
+`testManualAssignmentDoesNotSpinConfiguredLoopAndCanResumeHeartbeats` checks the actual aggregate
+Long.MAX_VALUE application wait while unsubscribed, then request production after a membership input.
+Membership and KafkaClient are mocked in these loop tests; they are not public-consumer benchmarks.
+
+First green: **443 tests in four suites, zero failures/errors/skips**, including the three heartbeat
+suites and ConsumerBatchedDecisionTest. Formatting, Checkstyle and main SpotBugs passed.
+Raw reports: `/tmp/kip1371-overnight-evidence.TC1I8d/inflight-first-green/`.
+Failing control: `inflight-heartbeat-red/` (440 tests, five new failures).
+An intermediate run also exposed two old Streams assertions expecting a timer while in flight;
+their reports remain in `inflight-streams-old-timer-assertions/`. These now assert the typed condition.
+
+These are correctness/progress receipts, not measured CPU or throughput improvements.
+The final broad regression must be reported separately rather than inferred from these counts.
