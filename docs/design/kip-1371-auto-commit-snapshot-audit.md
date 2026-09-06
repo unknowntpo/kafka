@@ -369,3 +369,37 @@ affected suites passed 674 tests with zero failures/errors/skips and retries
 disabled. The new schedules ran in both runs. Spotless Java and test Checkstyle
 passed. Production code remains unchanged; these passing characterization tests
 record the unsafe-capture possibility, not a repair or a safety acceptance gate.
+
+## Membership-driven admission of the same retry
+
+The test is now named
+`testPublicPollMembershipRetryCaptureBeforeOrDuringCollection`. It replaces
+direct commit admission with a real `ConsumerMembershipManager` in the shared
+`RequestManagers`. The fixture seeds a subscribed assignment of partitions 0
+and 1, both at offset 0, then supplies a heartbeat assignment retaining only 0.
+Topic-ID/name lookup is mocked; membership transitions and reconciliation are not.
+
+The actual application-event processor invokes `maybeReconcile(true)` during
+`runOnce`. Membership marks partition 1 pending revocation and starts the commit
+through its real reconciliation hook. Assertions confirm reconciliation is in
+progress, partition 1 is no longer fetchable, and retained partition 0 remains
+fetchable. There is no direct call to `maybeAutoCommitSyncBeforeRebalance` in
+this fixture anymore. Both partitions receive explicit simulated commit results.
+
+The same before/during-collection controls still produce retry offsets 0 and 10,
+respectively. Therefore membership-driven admission does not by itself close the
+retry-capture window. The earlier initial-capture checkpoint remains active.
+
+Scope: this is a component-level reachability result from a seeded subscribed
+assignment and a supplied heartbeat response, not an end-to-end group join.
+The background event handler is mocked; callback completion, final assignment
+installation, broker durability, and crash/restart remain outside this test.
+No production behavior is changed. The next repair experiment should protect
+recapture specifically, without silently replacing latest-offset retry semantics
+with a frozen initial snapshot or introducing a universal effect queue.
+
+Validation on 2026-09-06: the four focused public-poll schedules passed. After
+making mock responses cover both requested partitions, the affected five-suite
+regression passed 674 tests with no failures/errors/skips and retries disabled.
+Spotless Java and test Checkstyle passed. Initial fixture compilation/style
+errors were corrected before test execution; they were not product failures.

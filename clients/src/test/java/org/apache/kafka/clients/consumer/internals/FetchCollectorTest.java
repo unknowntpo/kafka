@@ -34,9 +34,11 @@ import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
+import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.message.OffsetCommitRequestData;
 import org.apache.kafka.common.metrics.Metrics;
@@ -49,6 +51,7 @@ import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.record.internal.Records;
 import org.apache.kafka.common.record.internal.SimpleRecord;
+import org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse;
 import org.apache.kafka.common.requests.OffsetCommitRequest;
 import org.apache.kafka.common.requests.OffsetCommitResponse;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -293,7 +296,7 @@ public class FetchCollectorTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
-    public void testPublicPollRebalanceRetryCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
+    public void testPublicPollMembershipRetryCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
         verifyPublicPollCapture(captureDuringCollection, true);
     }
 
@@ -302,6 +305,14 @@ public class FetchCollectorTest {
     private void verifyPublicPollCapture(boolean captureDuringCollection, boolean rebalanceRetry) throws Exception {
         buildDependencies(DEFAULT_RECORD_COUNT + 1);
         assignAndSeek(topicAPartition0);
+        TopicPartition revoked = new TopicPartition(topicAPartition0.topic(), 1);
+        if (rebalanceRetry) {
+            subscriptions.unsubscribe();
+            subscriptions.subscribe(Set.of(topicAPartition0.topic()));
+            subscriptions.assignFromSubscribed(Set.of(topicAPartition0, revoked));
+            subscriptions.seek(topicAPartition0, 0);
+            subscriptions.seek(revoked, 0);
+        }
         Properties properties = consumerProps();
         properties.put(ConsumerConfig.GROUP_ID_CONFIG, "public-snapshot-group");
         properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
@@ -329,8 +340,9 @@ public class FetchCollectorTest {
             CommitRequestManager commits = new CommitRequestManager(time, logContext, subscriptions,
                 config, coordinator, mock(OffsetCommitCallbackInvoker.class), "public-snapshot-group",
                 Optional.empty(), 100, 1000, OptionalDouble.of(0), commitMetrics, metadata);
+            ConsumerMembershipManager membership = rebalanceRetry ? membershipForRetainedPartition(commits, commitMetrics) : null;
             RequestManagers managers = new RequestManagers(logContext, offsets, topics, fetchRequests,
-                Optional.of(coordinator), Optional.of(commits), Optional.empty(), Optional.empty(),
+                Optional.of(coordinator), Optional.of(commits), Optional.empty(), Optional.ofNullable(membership),
                 Optional.empty(), Optional.empty(), Optional.empty());
             AsyncConsumerMetrics asyncMetrics = mock(AsyncConsumerMetrics.class);
             MockClient client = new MockClient(time, List.of(node));
@@ -349,16 +361,22 @@ public class FetchCollectorTest {
             AtomicLong offsetBeforePollReturns = new AtomicLong(-1);
             Runnable prepareSuccess = () -> client.prepareResponse(request -> {
                 OffsetCommitRequestData data = ((OffsetCommitRequest) request).data();
-                offsetBeforePollReturns.set(data.topics().get(0).partitions().get(0).committedOffset());
+                offsetBeforePollReturns.set(data.topics().get(0).partitions().stream()
+                    .filter(p -> p.partitionIndex() == topicAPartition0.partition())
+                    .findFirst().orElseThrow().committedOffset());
                 return true;
-            }, new OffsetCommitResponse(0, Map.of(topicAPartition0, Errors.NONE)));
+            }, new OffsetCommitResponse(0, rebalanceRetry
+                ? Map.of(topicAPartition0, Errors.NONE, revoked, Errors.NONE)
+                : Map.of(topicAPartition0, Errors.NONE)));
             Runnable retryAndInspect = () -> {
                 client.respond(request -> {
                     OffsetCommitRequestData data = ((OffsetCommitRequest) request).data();
-                    assertEquals(0, data.topics().get(0).partitions().get(0).committedOffset());
+                    assertEquals(0, data.topics().get(0).partitions().stream()
+                        .filter(p -> p.partitionIndex() == topicAPartition0.partition())
+                        .findFirst().orElseThrow().committedOffset());
                     return true;
                 }, new OffsetCommitResponse(0,
-                    Map.of(topicAPartition0, Errors.REQUEST_TIMED_OUT)));
+                    Map.of(topicAPartition0, Errors.REQUEST_TIMED_OUT, revoked, Errors.NONE)));
                 loop.runOnce();
                 time.sleep(1000);
                 prepareSuccess.run();
@@ -371,10 +389,12 @@ public class FetchCollectorTest {
                 inputs.add(event);
                 if (event instanceof AsyncPollEvent && (rebalanceRetry || !captureDuringCollection)) {
                     background.submit(() -> {
-                        // Setup seam: admit a rebalance commit for a retained partition. This does not simulate group join.
-                        if (rebalanceRetry)
-                            commits.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
                         loop.runOnce();
+                        if (rebalanceRetry) {
+                            assertFalse(subscriptions.isFetchable(revoked));
+                            assertTrue(subscriptions.isFetchable(topicAPartition0));
+                            assertTrue(managers.consumerMembershipManager.orElseThrow().reconciliationInProgress());
+                        }
                         if (rebalanceRetry && !captureDuringCollection)
                             retryAndInspect.run();
                     }).get(5, TimeUnit.SECONDS);
@@ -422,6 +442,22 @@ public class FetchCollectorTest {
                 networkThread.cleanup();
             }
         }
+    }
+
+    private ConsumerMembershipManager membershipForRetainedPartition(CommitRequestManager commits, Metrics commitMetrics) {
+        Uuid topicId = Uuid.randomUuid();
+        ConsumerMetadata membershipMetadata = mock(ConsumerMetadata.class);
+        when(membershipMetadata.topicNames()).thenReturn(Map.of(topicId, topicAPartition0.topic()));
+        ConsumerMembershipManager membership = new ConsumerMembershipManager("public-snapshot-group", Optional.empty(),
+            Optional.empty(), 30000, Optional.empty(), subscriptions, commits, membershipMetadata,
+            logContext, mock(BackgroundEventHandler.class), time, commitMetrics, true);
+        membership.transitionToJoining();
+        membership.onHeartbeatSuccess(new ConsumerGroupHeartbeatResponse(new ConsumerGroupHeartbeatResponseData()
+            .setMemberId(membership.memberId()).setMemberEpoch(1)
+            .setAssignment(new ConsumerGroupHeartbeatResponseData.Assignment().setTopicPartitions(List.of(
+                new ConsumerGroupHeartbeatResponseData.TopicPartitions().setTopicId(topicId).setPartitions(List.of(0)))))));
+        assertEquals(MemberState.RECONCILING, membership.state());
+        return membership;
     }
 
     @Test
