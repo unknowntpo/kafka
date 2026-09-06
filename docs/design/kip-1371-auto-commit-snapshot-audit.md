@@ -1,8 +1,9 @@
 # Approach 2: auto-commit snapshot audit
 
 Scope: KAFKA-18641, Approach 2 original audit baseline `17b05c7433`.
-The sections below preserve the characterization history; the final section
-describes a subsequent bounded production repair.
+The sections below preserve the characterization, repair, opt-in experiment,
+and lifecycle-audit history. For the current verdict and remaining decisions,
+see the [one-page decision brief](kip-1371-approach2-decision-brief-zh.md).
 
 ## Original repair and intent
 

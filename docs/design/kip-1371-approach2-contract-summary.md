@@ -1,5 +1,10 @@
 # KIP-1371 Approach 2: contract assessment
 
+Current decision brief at code baseline `df756cee98`:
+[Approach 2 contract and decision summary (Chinese)](kip-1371-approach2-decision-brief-zh.md).
+It consolidates the later snapshot/lifecycle evidence and pending choices;
+the assessment below remains a historical record of its named revision.
+
 Complete original-issue acceptance scope: [Issue coverage inventory](kip-1371-issue-coverage.md).
 This includes the original lifecycle follow-ups; partial component evidence does
 not establish that Approach 2 has solved every historical issue.
