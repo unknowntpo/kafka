@@ -119,7 +119,7 @@ retries 關閉。真實 manager／loop／delegate 與 MockClient 混合；member
 或 payload 部分為受控 seam。沒有真實 broker、全部 variants、效能、任意 RM
 排序或 fatal-error fan-out 的完整證明。本次 focused report 已覆寫原報告位置。
 
-## 下一個有界驗證
+## 下一個有界驗證（初始假設，後續結果見下節）
 
 正常 coordinator recovery 不需要再引入優先級或先合併 RM。
 一個更有辨識力的 interface probe 是 fatal-error delivery：
@@ -131,3 +131,71 @@ error 的終態是否保持必要語意。這是已存在的依賴面，不是�
 若證明消耗權限造成問題，先比較 owner 保留事實／接收者獨立 delivery 契約，
 再考慮擴大 protocol 邊界。timeout／membership／commit 的政策問題仍依
 [RM 邊界 dry run](kip-1371-rm-boundary-dry-run.md) 另行處理，不混入此探針。
+
+## Follow-up：fatal error 的 read-before-clear 依賴
+
+基準為 `ca5fd8650a` 的 production code；本次只新增 characterization 測試。
+先提出可否證的假設：「同一個 discovery failure 在 Commit／Heartbeat
+兩種處理順序下，都能傳遞給待處理 commit 與 background error 路徑」。
+第一輪兩個案例得到一過一失敗：Heartbeat 先處理時，commit future 未完成。
+這反駁順序獨立的假設，不代表 production 順序目前錯誤。
+
+最終測試 `testCoordinatorFatalErrorDeliveryDependsOnReadBeforeClear`
+加入已排隊的 offset fetch，明確記錄兩種結果：
+
+| 處理順序 | Commit future | Offset-fetch future | Background error |
+| --- | --- | --- | --- |
+| Commit → Heartbeat（既有順序） | 同一 fatal exception | 同一 fatal exception | 一次、同一 exception |
+| Heartbeat → Commit（比較順序） | 仍 pending | 仍 pending | 一次、同一 exception |
+
+原因是 Heartbeat 的 `getAndClearFatalError()` 清掉共用 error slot；
+Commit 後來的非消耗讀取只能看到 empty。沒有新 discovery response 時，
+再 poll 一次 Commit 也不能恢復這次錯誤；Heartbeat 重複 poll 不重複發布 error。
+本次不宣稱 future 永遠不會完成：後續 discovery、deadline 或 cleanup 仍可能
+改變結果，這些不在探針時間窗內。
+
+探針使用真實 coordinator、Commit、Heartbeat error-handling code，透過
+真實 request completion handler 注入 `GROUP_AUTHORIZATION_FAILED` response。
+Membership／heartbeat payload 是 fixture seam；background handler 是 mock，
+驗證的是 ErrorEvent 交接，不是 application 已收到。兩種 manager slice 順序
+由測試直接呼叫，未改 production `RequestManagers` list，亦未模擬完整 public poll。
+最終綠色測試表示「可重複觀察這項限制」，不是「反向順序已修好」。
+
+### 架構結論與後續選擇
+
+此處需要的不是 coordinator 永遠優先，而是所有必要 error readers 必須在
+清除前讀取。既有 list 順序目前在此 slice 提供保護，但作者若新增 reader 或
+重新切分模組，就必須知道這項 read-before-clear 規則。這是知識負擔的具體證據。
+
+最小保守方案是保留並明確測試固定順序；若目標要求 reader 可獨立擴充，
+應再評估分離「owner 保留 fatal fact」與「application error 已交接」的狀態。
+不能只把 `getAndClear` 換成 `get`，否則可能每輪重複發布；也不能永遠保留
+舊錯誤而忽略 recovery。需界定哪些 operation 屬於該 failure、何時失效／清除、
+新 admission 如何處理，以及 close 的終態。
+
+本次沒有選定新的 fatal-error retention 政策，沒有新增 queue、actor 或全域
+fan-out framework，也沒有宣稱需要合併所有 RM。較大的 production 改動應先
+有上述 delivery 契約，而不是以讓反向順序測試通過為唯一目標。
+
+### Follow-up 驗證方式
+
+使用 JDK 17／Gradle 9.7.1，選定五個 suites：
+
+```sh
+./gradlew :clients:test --rerun \
+  --tests '*ConsumerBatchedDecisionTest' \
+  --tests '*CoordinatorRequestManagerTest' \
+  --tests '*CommitRequestManagerTest' \
+  --tests '*ConsumerHeartbeatRequestManagerTest' \
+  --tests '*ConsumerNetworkThreadTest' \
+  :clients:spotlessJavaCheck --offline --max-workers=2 \
+  -PmaxParallelForks=1 -PmaxTestRetries=0 -PtestLoggingEvents=failed
+```
+
+最終測試會先斷言 future 已 exceptional completion 才呼叫 join，避免
+回歸時測試無限等待。每次測試使用獨立 fixture、MockTime 和 in-memory requests，
+無 broker／wall-clock sleeps。未執行完整 1,535-case selection 或 benchmark。
+
+最終相同 Java sources 的 278 個案例／5 suites 連續通過兩次，零
+failures／errors／skips，retries 關閉。Checkstyle main/test、Spotless Java
+通過或維持 up-to-date；未變更 production 的 SpotBugs main 為 up-to-date。

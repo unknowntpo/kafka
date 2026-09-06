@@ -26,6 +26,7 @@ import org.apache.kafka.clients.consumer.RetriableCommitFailedException;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
+import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
@@ -50,6 +51,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Duration;
 import java.util.List;
@@ -67,9 +69,11 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** Component tests: real managers and transport delegate, no broker or real clock. */
@@ -83,6 +87,7 @@ class ConsumerBatchedDecisionTest {
     private final ConsumerMembershipManager membership = mock(ConsumerMembershipManager.class);
     private CoordinatorRequestManager coordinator;
     private CommitRequestManager commits;
+    private ConsumerHeartbeatRequestManager heartbeat;
     private MockClient client;
     private NetworkClientDelegate delegate;
     private ConsumerNetworkThread thread;
@@ -116,7 +121,7 @@ class ConsumerBatchedDecisionTest {
         ConsumerHeartbeatRequestManager.HeartbeatState heartbeatState = mock(ConsumerHeartbeatRequestManager.HeartbeatState.class);
         when(heartbeatState.buildRequestData()).thenAnswer(ignored -> new ConsumerGroupHeartbeatRequestData()
             .setGroupId(GROUP_ID).setMemberId("member").setMemberEpoch(1));
-        ConsumerHeartbeatRequestManager heartbeat = new ConsumerHeartbeatRequestManager(logContext,
+        heartbeat = new ConsumerHeartbeatRequestManager(logContext,
             time.timer(300_000), config, coordinator, membership, heartbeatState,
             new HeartbeatRequestState(logContext, time, 0, 100, 1000, 0), background, metrics);
         client = new MockClient(time, List.of(coordinator.coordinator().orElseThrow()));
@@ -146,6 +151,48 @@ class ConsumerBatchedDecisionTest {
 
     private ClientRequest request(ApiKeys apiKey) {
         return client.requests().stream().filter(r -> r.requestBuilder().apiKey() == apiKey).findFirst().orElseThrow();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testCoordinatorFatalErrorDeliveryDependsOnReadBeforeClear(boolean heartbeatFirst) {
+        var operation = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        var offsets = commits.fetchOffsets(Set.of(PARTITION), time.milliseconds() + 60_000);
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        var discovery = coordinator.poll(time.milliseconds()).unsentRequests.get(0);
+        discovery.handler().onComplete(new ClientResponse(
+            new RequestHeader(ApiKeys.FIND_COORDINATOR, discovery.requestBuilder().build().version(), "test", 2),
+            discovery.handler(), NODE.idString(), time.milliseconds(), time.milliseconds(), false, null, null,
+            FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE)));
+        Throwable fatal = coordinator.fatalError().orElseThrow();
+
+        // Existing order is commit first. The reverse is an extension probe, not production scheduling.
+        if (heartbeatFirst) {
+            heartbeat.poll(time.milliseconds());
+            commits.poll(time.milliseconds());
+        } else {
+            commits.poll(time.milliseconds());
+            heartbeat.poll(time.milliseconds());
+        }
+        // A later pass without another discovery response cannot recover the consumed failure.
+        assertTrue(commits.poll(time.milliseconds()).unsentRequests.isEmpty());
+        heartbeat.poll(time.milliseconds());
+        ArgumentCaptor<ErrorEvent> delivered = ArgumentCaptor.forClass(ErrorEvent.class);
+        verify(background).add(delivered.capture());
+        assertSame(fatal, delivered.getValue().error());
+        assertTrue(coordinator.fatalError().isEmpty());
+        if (heartbeatFirst) {
+            // Characterization, not an endorsed contract: the alternative order loses operation error delivery.
+            assertFalse(operation.isDone());
+            assertFalse(offsets.isDone());
+            assertEquals(1, commits.unsentOffsetCommitRequests().size());
+        } else {
+            assertTrue(operation.isCompletedExceptionally());
+            assertTrue(offsets.isCompletedExceptionally());
+            assertSame(fatal, assertThrows(CompletionException.class, operation::join).getCause());
+            assertSame(fatal, assertThrows(CompletionException.class, offsets::join).getCause());
+            assertTrue(commits.unsentOffsetCommitRequests().isEmpty());
+        }
     }
 
     @ParameterizedTest

@@ -112,8 +112,10 @@ benchmark submission or performance claim is part of this assessment.
 
 - [Coordinator decision dependencies](kip-1371-coordinator-decision-dependencies.md):
   separates prerequisite reads, versioned invalidation, result delivery, and
-  rescheduling from global priority. Twenty existing cases were rerun; fatal
-  error read/clear ownership is identified as an unverified extension probe.
+  rescheduling from global priority. Twenty existing cases were rerun. A later
+  two-order fatal-error probe demonstrates read-before-clear coupling: the
+  existing order delivers both results, while the reverse leaves operation
+  futures pending. This is a characterization, not a production-order bug fix.
 - [Actor/Future lessons](kip-1371-actor-future-lessons.md): distinguishes an
   operation-result handle from a state/behavior boundary; borrowing actor
   capabilities does not select a mailbox, runtime, or global publication rule.
