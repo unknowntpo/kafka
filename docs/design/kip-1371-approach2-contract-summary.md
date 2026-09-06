@@ -1,5 +1,9 @@
 # KIP-1371 Approach 2: contract assessment
 
+Latest correctness criterion: [Callback safety contract](kip-1371-callback-safety-contract.md).
+Inline callbacks remain the default; the response-phase prototype is an opt-in
+comparison, not a selected prerequisite for correct owner transitions.
+
 Latest architectural consolidation: [Coordination design v0](kip-1371-coordination-design-v0.md).
 First capability migration: [Coordinator access POC](kip-1371-coordinator-access-poc.md).
 It selects behavior-preserving owner capabilities and explicit routing boundaries,

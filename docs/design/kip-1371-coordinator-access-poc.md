@@ -1,5 +1,7 @@
 # Coordinator access capability: first migration slice
 
+Follow-up experiment: [ordered response application](kip-1371-ordered-response-application-poc.md).
+
 Baseline and rollback point: `checkpoint/kip-1371-design-v0-2026-09-06`
 (`efb59de3873a761f8d3e3338e1c942293e229830`).
 

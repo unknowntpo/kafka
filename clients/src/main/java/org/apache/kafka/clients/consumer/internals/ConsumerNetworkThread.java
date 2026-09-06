@@ -229,11 +229,18 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
 
         long pollWaitTimeMs = pollAndStageRequests(currentTimeMs);
 
-        // Completion callbacks finish their owner updates as one I/O batch. They may queue new
-        // operations, but must not build/send follow-up requests recursively inside the batch.
+        // Capture transport results in observed order; apply owner response logic after I/O returns.
+        // Continuations may queue operations, but must not build/send follow-up requests recursively.
         // Requests admitted before this batch retain their captured attempt context; do not discard
         // transport work after its manager has reserved an in-flight attempt.
-        networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
+        networkClientDelegate.beginResponseBatch();
+        try {
+            networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
+        } finally {
+            // Response application is not the optional post-I/O request-building pass below.
+            // Already observed results must run even with queued application inputs or shutdown.
+            networkClientDelegate.completeResponseBatch();
+        }
 
         final long afterIoTimeMs = time.milliseconds();
         if (running && applicationEventQueue.isEmpty() && networkClientDelegate.completedRequestsInLastPoll()) {

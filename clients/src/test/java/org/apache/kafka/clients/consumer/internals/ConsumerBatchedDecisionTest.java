@@ -80,6 +80,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -135,7 +136,7 @@ class ConsumerBatchedDecisionTest {
             time.timer(300_000), config, coordinator, membership, heartbeatState,
             new HeartbeatRequestState(logContext, time, 0, 100, 1000, 0), background, metrics);
         client = new MockClient(time, List.of(coordinator.coordinator().orElseThrow()));
-        delegate = new NetworkClientDelegate(time, config, logContext, client, metadata, background, false, asyncMetrics);
+        delegate = spy(new NetworkClientDelegate(time, config, logContext, client, metadata, background, false, asyncMetrics));
         when(membership.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(membership.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(membership.maximumTimeToWait(anyLong())).thenReturn(Long.MAX_VALUE);
@@ -148,6 +149,37 @@ class ConsumerBatchedDecisionTest {
             new CompletableEventReaper(logContext), () -> new ApplicationEventProcessor(logContext, managers, metadata, subscriptions),
             () -> delegate, () -> managers, asyncMetrics);
         thread.initializeResources();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void testCommitResponseAppliedAfterIoEvenWithQueuedInput(boolean queueInput, boolean throwAfterIo) {
+        delegate.enableResponseBatching();
+        var commit = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        AtomicReference<Boolean> ioReturned = new AtomicReference<>(false);
+        AtomicReference<Boolean> observerSawIoReturn = new AtomicReference<>();
+        var observer = commit.thenRun(() -> observerSawIoReturn.set(ioReturned.get()));
+        RuntimeException transportFailure = new RuntimeException("failure after observing response");
+        client.prepareResponse(new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            assertFalse(commit.isDone(), "transport callback must only capture the response");
+            if (queueInput)
+                applicationEvents.add(new AsyncCommitEvent(Optional.of(Map.of(PARTITION, new OffsetAndMetadata(2)))));
+            ioReturned.set(true);
+            if (throwAfterIo)
+                throw transportFailure;
+            return null;
+        }).when(delegate).poll(anyLong(), anyLong());
+
+        if (throwAfterIo)
+            assertSame(transportFailure, assertThrows(RuntimeException.class, thread::runOnce));
+        else
+            thread.runOnce();
+
+        observer.join();
+        assertEquals(Boolean.TRUE, observerSawIoReturn.get());
+        assertEquals(queueInput ? 1 : 0, applicationEvents.size(), "response delivery must not drain new input");
     }
 
     private <T extends RequestManager> T idleManager(Class<T> type) {
@@ -553,8 +585,10 @@ class ConsumerBatchedDecisionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testCompletionObserverIsNotABatchSnapshot(boolean heartbeatFirst) {
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void testCompletionObserverIsNotABatchSnapshot(boolean heartbeatFirst, boolean deferred) {
+        if (deferred)
+            delegate.enableResponseBatching();
         var commit = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
         AtomicReference<Boolean> coordinatorKnownAtCompletion = new AtomicReference<>();
         var observer = commit.thenRun(() -> coordinatorKnownAtCompletion.set(coordinator.coordinator().isPresent()));
@@ -579,8 +613,10 @@ class ConsumerBatchedDecisionTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testHeartbeatInvalidationPrecedesFollowupAdmissionInEitherResponseOrder(boolean heartbeatFirst) {
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void testHeartbeatInvalidationPrecedesFollowupAdmissionInEitherResponseOrder(boolean heartbeatFirst, boolean deferred) {
+        if (deferred)
+            delegate.enableResponseBatching();
         var first = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
         var followup = first.thenCompose(ignored -> commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(2))));
         thread.runOnce();
@@ -660,8 +696,11 @@ class ConsumerBatchedDecisionTest {
         assertEquals(1, delegate.unsentRequests().size(), "only the next attempt is staged, not recursively executed");
     }
 
-    @Test
-    void testLateHeartbeatInvalidationCannotClearRediscoveredOwner() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testLateHeartbeatInvalidationCannotClearRediscoveredOwner(boolean deferred) {
+        if (deferred)
+            delegate.enableResponseBatching();
         var first = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
         var followup = first.thenCompose(ignored -> commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(2))));
         thread.runOnce();

@@ -64,10 +64,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 public class NetworkClientDelegateTest {
@@ -107,6 +111,44 @@ public class NetworkClientDelegateTest {
         this.metadata = mock(Metadata.class);
         this.backgroundEventHandler = mock(BackgroundEventHandler.class);
         this.client = new MockClient(time, Collections.singletonList(mockNode()));
+    }
+
+    @Test
+    void testCapturedSendTimeoutDoesNotBlockAndRetainsObservationTime() throws Exception {
+        client = spy(client);
+        try (NetworkClientDelegate delegate = newNetworkClientDelegate(false)) {
+            delegate.enableResponseBatching();
+            var request = new NetworkClientDelegate.UnsentRequest(
+                new FindCoordinatorRequest.Builder(new FindCoordinatorRequestData().setKey(GROUP_ID)), Optional.empty());
+            delegate.add(request);
+            time.sleep(REQUEST_TIMEOUT_MS + DEFAULT_REQUEST_TIMEOUT_MS + 1);
+            long observedAt = time.milliseconds();
+            doAnswer(invocation -> {
+                assertEquals(0L, (long) invocation.getArgument(0), "ready timeout must not wait behind network polling");
+                assertFalse(request.future().isDone());
+                return invocation.callRealMethod();
+            }).when(client).poll(anyLong(), anyLong());
+            delegate.beginResponseBatch();
+            try {
+                delegate.poll(10_000, observedAt);
+                assertFalse(request.future().isDone());
+                time.sleep(37);
+            } finally {
+                delegate.completeResponseBatch();
+            }
+            assertTrue(request.future().isCompletedExceptionally());
+            assertInstanceOf(TimeoutException.class,
+                assertThrows(java.util.concurrent.CompletionException.class, request.future()::join).getCause());
+            assertEquals(observedAt, request.handler().completionTimeMs());
+
+            var next = new NetworkClientDelegate.UnsentRequest(
+                new FindCoordinatorRequest.Builder(new FindCoordinatorRequestData().setKey(GROUP_ID)), Optional.empty());
+            delegate.add(next);
+            RuntimeException error = new RuntimeException("outside batch");
+            next.handler().onFailure(time.milliseconds(), error);
+            assertSame(error,
+                assertThrows(java.util.concurrent.CompletionException.class, next.future()::join).getCause());
+        }
     }
 
     @Test

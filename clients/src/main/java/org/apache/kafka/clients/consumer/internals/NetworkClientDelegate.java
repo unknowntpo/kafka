@@ -54,6 +54,7 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
@@ -76,6 +77,8 @@ public class NetworkClientDelegate implements AutoCloseable {
     private final boolean notifyMetadataErrorsViaErrorQueue;
     private boolean bootstrapErrorPropagated = false;
     private boolean completedRequestsInLastPoll;
+    private Queue<ResponseCompletion> responseBatch;
+    private boolean responseBatchingEnabled;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
     public NetworkClientDelegate(
@@ -167,6 +170,9 @@ public class NetworkClientDelegate implements AutoCloseable {
         if (!unsentRequests.isEmpty()) {
             pollTimeoutMs = Math.min(retryBackoffMs, pollTimeoutMs);
         }
+        // A send-time failure is already a ready result. Do not block before returning it to its owner.
+        if (responseBatch != null && !responseBatch.isEmpty())
+            pollTimeoutMs = 0;
         if (!this.client.poll(pollTimeoutMs, currentTimeMs).isEmpty())
             completedRequestsInLastPoll = true;
         maybePropagateMetadataError();
@@ -335,9 +341,66 @@ public class NetworkClientDelegate implements AutoCloseable {
 
     public void add(final UnsentRequest r) {
         Objects.requireNonNull(r);
+        r.handler.completionDelivery = this::deliverResponse;
         r.setTimer(this.time, this.requestTimeoutMs);
         r.setEnqueueTimeMs(time.milliseconds());
         unsentRequests.add(r);
+    }
+
+    /** Network-thread-local capture for one normal reactor transport call. */
+    void beginResponseBatch() {
+        if (!responseBatchingEnabled)
+            return;
+        if (responseBatch != null)
+            throw new IllegalStateException("Response batch already active");
+        responseBatch = new ArrayDeque<>();
+    }
+
+    /** Local POC comparison seam, not a public consumer configuration. Inline delivery is the default. */
+    void enableResponseBatching() {
+        responseBatchingEnabled = true;
+    }
+
+    /** Invoke the existing owner callbacks in observed order, without another network poll. */
+    void completeResponseBatch() {
+        Queue<ResponseCompletion> completed = responseBatch;
+        responseBatch = null;
+        if (completed != null) {
+            for (ResponseCompletion response : completed)
+                response.apply();
+        }
+    }
+
+    private void deliverResponse(ResponseCompletion completion) {
+        if (responseBatch == null)
+            completion.apply();
+        else
+            responseBatch.add(completion);
+    }
+
+    private static final class ResponseCompletion {
+        private final FutureCompletionHandler handler;
+        private final ClientResponse response;
+        private final RuntimeException error;
+        private final long completionTimeMs;
+
+        private ResponseCompletion(FutureCompletionHandler handler, ClientResponse response,
+                                   RuntimeException error, long completionTimeMs) {
+            this.handler = handler;
+            this.response = response;
+            this.error = error;
+            this.completionTimeMs = completionTimeMs;
+        }
+
+        private void apply() {
+            // A completed response may outlive the client. Do not retain the delegate through its handler.
+            handler.completionDelivery = ResponseCompletion::apply;
+            handler.responseCompletionTimeMs = completionTimeMs;
+            if (error == null)
+                handler.future.complete(response);
+            else
+                handler.future.completeExceptionally(error);
+        }
     }
 
     public static class PollResult {
@@ -466,18 +529,15 @@ public class NetworkClientDelegate implements AutoCloseable {
 
         private long responseCompletionTimeMs;
         private final CompletableFuture<ClientResponse> future;
+        private Consumer<ResponseCompletion> completionDelivery = ResponseCompletion::apply;
 
         FutureCompletionHandler() {
             future = new CompletableFuture<>();
         }
 
         public void onFailure(final long currentTimeMs, final RuntimeException e) {
-            this.responseCompletionTimeMs = currentTimeMs;
-            if (e != null) {
-                this.future.completeExceptionally(e);
-            } else {
-                this.future.completeExceptionally(DisconnectException.INSTANCE);
-            }
+            completionDelivery.accept(new ResponseCompletion(this, null,
+                e == null ? DisconnectException.INSTANCE : e, currentTimeMs));
         }
 
         public long completionTimeMs() {
@@ -494,8 +554,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             } else if (response.versionMismatch() != null) {
                 onFailure(completionTimeMs, response.versionMismatch());
             } else {
-                responseCompletionTimeMs = completionTimeMs;
-                this.future.complete(response);
+                completionDelivery.accept(new ResponseCompletion(this, response, null, completionTimeMs));
             }
         }
 
