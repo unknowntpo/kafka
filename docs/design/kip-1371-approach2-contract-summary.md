@@ -110,6 +110,9 @@ benchmark submission or performance claim is part of this assessment.
 
 ## Evidence and validation boundary
 
+- [React/Vue publication lessons](kip-1371-react-vue-publication-lessons.md):
+  subsequent discussion distinguishes per-effect observation requirements from
+  a global batch barrier; selective staging remains an unselected alternative.
 - [Parent contract evidence](kip-1371-contracts-poc-evidence.md): inherited
   activation, captured ownership, and selected publication results.
 - [Bounded completion-batch experiment](kip-1371-batched-decisions-poc.md):
