@@ -90,6 +90,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -1581,6 +1582,27 @@ public class CommitRequestManagerTest {
         assertEquals(1, data.topics().get(0).partitions().get(0).partitionIndex());
         assertEquals(10, data.topics().get(0).partitions().get(0).committedOffset(),
             "retention alone neither fences reassignment nor adopts a backward seek");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testSubscribedAssignmentCannotBeManuallyReplacedDuringRebalanceCommit(boolean retainSnapshot) {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        if (retainSnapshot)
+            manager.enableRetainedRebalanceRetrySnapshot();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition original = new TopicPartition("topic", 1);
+        subscriptionState.subscribe(Set.of("topic"));
+        subscriptionState.assignFromSubscribed(Set.of(original));
+        subscriptionState.seek(original, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+
+        assertThrows(IllegalStateException.class,
+            () -> subscriptionState.assignFromUser(Set.of(new TopicPartition("topic", 2))));
+        assertEquals(Set.of(original), subscriptionState.assignedPartitions());
+        assertFalse(result.isDone());
+        completeOffsetCommitRequestWithError(manager, Errors.NONE);
+        assertDoesNotThrow(result::join);
     }
 
     @Test

@@ -457,3 +457,45 @@ The experiment cases ran in both. Spotless Java, Checkstyle main/test, and
 SpotBugs main passed. Earlier missing-import and fixture-size check failures
 were corrected before the successful runs. This remains opt-in experimental
 code, not a claim of complete KAFKA-18641 or at-least-once acceptance.
+
+## Narrowing the seek and assignment validity question
+
+Inspection of the current public paths corrects an over-broad interpretation of
+the previous mutation tests:
+
+- `AsyncKafkaConsumer.assign` sends `AssignmentChangeEvent`; its processor calls
+  `SubscriptionState.assignFromUser`. A nonempty manual assignment is rejected
+  while a subscribed mode is active by `setSubscriptionType`. The prior test
+  replaced one **manual** assignment with another; that is not the same as a
+  subscribed consumer directly replacing its assignment during rebalance.
+  `testSubscribedAssignmentCannotBeManuallyReplacedDuringRebalanceCommit` now
+  checks rejection, unchanged assignment, and completion of the admitted commit
+  in both default and retained-snapshot modes. It tests the shared state gate,
+  not the complete public assign/unsubscribe lifecycle.
+- `AsyncKafkaConsumer.seek` sends a `SeekUnvalidatedEvent` and waits for its
+  result. Processing that event changes the assigned position but does not
+  invoke the commit manager. `testSeekUnvalidatedEvent` checks this with and
+  without a group/commit manager. The public seek documentation describes the
+  next fetch position; it does not promise cancellation of a commit already
+  sent to the broker or persistence of the new position as a committed offset.
+- `maybeAbortReconciliation` checks member state/rejoin before continuing the
+  reconciliation after commit completion. This is a continuation guard, not
+  proof that the commit request or its retry was cancelled on unsubscribe.
+
+Consequently, the mere survival of an admitted snapshot after seek or a synthetic
+assignment mutation does not establish an at-least-once bug. In particular,
+backward seek requests a new read position; it does not itself durably rewind
+the group's committed offset. Do not add blanket cancellation or a global
+generation mechanism based only on those earlier low-level tests.
+
+Remaining compatibility questions are narrower: unsubscribe/rejoin while the
+rebalance commit is pending, and the intentional difference between frozen
+admitted offsets and the legacy retry's refreshed offsets after a legal seek.
+The retained-snapshot experiment stays default-off. No new production rule is
+introduced by this audit, and it does not close broker recovery evidence.
+
+Validation on 2026-09-06: the two affected suites passed 217 tests (170 commit,
+47 event processor); the four changed parameterized cases then passed a focused
+rerun. No failures/errors/skips, retries disabled. Test Checkstyle and Spotless
+Java passed. A missing assertion import was corrected before these successful
+runs. Only tests and this evidence note changed.

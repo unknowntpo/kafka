@@ -84,6 +84,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @SuppressWarnings({"ClassDataAbstractionCoupling", "ClassFanOutComplexity"})
@@ -258,21 +259,24 @@ public class ApplicationEventProcessorTest {
         verify(subscriptionState).requestOffsetReset(event.topicPartitions(), event.offsetResetStrategy());
     }
 
-    @Test
-    public void testSeekUnvalidatedEvent() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testSeekUnvalidatedEvent(boolean withGroupId) {
         TopicPartition tp = new TopicPartition("topic", 0);
         Optional<Integer> offsetEpoch = Optional.of(1);
         SubscriptionState.FetchPosition position = new SubscriptionState.FetchPosition(
                 0, offsetEpoch, Metadata.LeaderAndEpoch.noLeaderOrEpoch());
         SeekUnvalidatedEvent event = new SeekUnvalidatedEvent(12345, tp, 0, offsetEpoch);
 
-        setupProcessor(false);
+        setupProcessor(withGroupId);
+        clearInvocations(commitRequestManager);
         doReturn(Metadata.LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(tp);
         doNothing().when(subscriptionState).seekUnvalidated(eq(tp), any());
         processor.process(event);
         verify(metadata).updateLastSeenEpochIfNewer(tp, offsetEpoch.get());
         verify(metadata).currentLeader(tp);
         verify(subscriptionState).seekUnvalidated(tp, position);
+        verifyNoInteractions(commitRequestManager);
         assertDoesNotThrow(() -> event.future().get());
     }
 
