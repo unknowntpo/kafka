@@ -882,6 +882,44 @@ class ConsumerBatchedDecisionTest {
         assertEquals(ApiKeys.OFFSET_COMMIT, delegate.unsentRequests().peek().requestBuilder().apiKey());
     }
 
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void testExtraPassChangesAdmissionButNotFollowupTransportPoll(boolean postIoPass, boolean updateMemberBetweenRounds) {
+        useDecisionBoundary(postIoPass);
+        commits.onMemberEpochUpdated(Optional.of(7), "member");
+        var first = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        var followup = first.thenCompose(ignored -> commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(2))));
+        thread.runOnce();
+        client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
+        thread.runOnce();
+
+        assertTrue(first.isDone());
+        assertFalse(followup.isDone());
+        assertEquals(1, client.inFlightRequestCount(), "only the unrelated heartbeat has reached the client");
+        assertEquals(postIoPass ? 1 : 0, delegate.unsentRequests().size());
+        verify(delegate, org.mockito.Mockito.times(2)).poll(anyLong(), anyLong());
+
+        // Controlled owner notification, not a full membership/rejoin or application-input fixture.
+        // It isolates which identity is captured if the owner changes after this admission cutoff.
+        if (updateMemberBetweenRounds)
+            commits.onMemberEpochUpdated(Optional.of(8), "member");
+        thread.runOnce();
+        verify(delegate, org.mockito.Mockito.times(3)).poll(anyLong(), anyLong());
+        verify(membership, org.mockito.Mockito.times(postIoPass ? 4 : 3)).poll(anyLong());
+        assertEquals(2, client.inFlightRequestCount(), "both modes send the followup on the third network poll");
+        OffsetCommitRequest sent = (OffsetCommitRequest) request(ApiKeys.OFFSET_COMMIT).requestBuilder().build();
+        assertEquals(updateMemberBetweenRounds && !postIoPass ? 8 : 7, sent.data().generationIdOrMemberEpoch());
+        assertEquals(2, sent.data().topics().get(0).partitions().get(0).committedOffset());
+        assertTrue(delegate.unsentRequests().isEmpty());
+
+        client.respondToRequest(request(ApiKeys.OFFSET_COMMIT), new OffsetCommitResponse(0, Map.of(PARTITION, Errors.NONE)));
+        thread.runOnce();
+        assertTrue(followup.isDone());
+        assertFalse(followup.isCompletedExceptionally());
+        assertEquals(1, client.inFlightRequestCount(), "no duplicate followup was generated");
+        assertTrue(delegate.unsentRequests().isEmpty());
+    }
+
     @Test
     void testImmediateFollowupResponseDoesNotRecursivelyDrainAnotherBatch() {
         var first = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));

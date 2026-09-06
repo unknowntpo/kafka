@@ -48,6 +48,51 @@ Checkstyle and Spotless Java checks passed on the first run. This validates the
 named processing-time cases; it is not a new benchmark or closure of the full KIP
 issue inventory.
 
+## Extra-pass benefit and admission-cost probe
+
+`testExtraPassChangesAdmissionButNotFollowupTransportPoll` compares both
+invocation strategies, with and without a controlled owner epoch update between
+the completion round and the next round. It uses an internal future continuation
+to register the followup, not a user callback executed on the network thread.
+
+| Observation | Next-pass control | Extra post-I/O pass |
+| --- | --- | --- |
+| Followup built after first commit response in network poll 2 | No; waits in Commit RM | Yes; staged in delegate queue |
+| Followup reaches MockClient | Network poll 3 | Network poll 3 |
+| Full manager passes through round 3 in this fixture | 3 | 4 |
+| Epoch changes from 7 to 8 between rounds 2 and 3 | Followup captures 8 at admission | Previously admitted followup retains 7 |
+| Successful followup response | Completes its operation without duplicate request | Same |
+
+Thus earlier admission does not save a network poll in this schedule. The new
+pass performs another full manager traversal and extends the period during which
+a built attempt may precede a subsequent owner change. The unchanged-epoch pair
+is the control: both send the same offset and epoch. The changed-epoch pair
+demonstrates captured-context timing, not an invalid request or data-loss proof.
+It invokes `onMemberEpochUpdated` directly; it does not prove a full membership
+transition or application command can produce every such interleaving. MockClient
+send admission is not a measured socket write or broker acknowledgement latency.
+
+The known positive effect remains earlier processing of manager-local results
+and errors, as verified by the public commit/error tests. It is not a new guarantee
+that user callbacks run immediately, nor proof of faster broker progress.
+The loop's final aggregate-wait publication/latched notification also exists with
+the extra pass suppressed; some state-dependent wait values may differ because
+the managers have advanced, so this does not assert identical wait behavior.
+
+Conclusion: both modes remain viable under the processing-time error contract.
+Do not add `preIO` / `postIO` methods or another queue to explain this difference.
+Adoption of the extra pass needs a concrete benefit beyond "one round earlier"
+(for example, a required observation deadline or measured application-response
+latency), weighed against extra manager work and earlier context capture. These
+tests establish neither CPU cost magnitude nor a workload-level performance win.
+The current experiment remains enabled as before; no default is changed here.
+
+Validation: **103 tests in three suites passed twice**, zero failures/errors/skips,
+retries disabled (ConsumerBatchedDecisionTest, ConsumerNetworkThreadTest,
+NetworkClientDelegateTest). JDK 17 / Gradle 9.7.1 offline; Checkstyle and Spotless
+Java passed on the first run. Four new cases provide the controlled comparison.
+No production source or external benchmark was changed.
+
 ## Scope and verdict
 
 2026-09-06. Candidate code: `0234b4f8fe` (production code unchanged since
