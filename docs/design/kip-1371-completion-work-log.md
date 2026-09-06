@@ -50,7 +50,7 @@ Preserve this failure even if isolated reruns pass. Further isolation should use
 the same heap rather than quietly raising memory or enabling retry.
 Raw failure log: `/tmp/kip1371-overnight-evidence.TC1I8d/plaintext-subscription-heap-failure.log`.
 
-## Current work
+## Initial work plan (historical; later receipts supersede it)
 
 - Original 1,192-line KIP fully read, including migration targets, lifecycle issues and historical evidence caveats.
 - Next: inherited lifecycle regression provenance and real integration coverage; safe rebalance snapshot retry
@@ -209,3 +209,133 @@ module's absent Java output, not on a test. The exporter now omits only outputs 
 Java/resource producer demonstrably has no source, and still rejects unexpected missing
 classes/jars. Real smoke validation remains required. Streams protocol/topology integration
 is now running with its own per-class JVM isolation.
+
+### Streams supplement and runtime preparation completed
+
+The first Streams invocation stopped before testing because offline Gradle lacked
+`org.apache.logging.log4j:log4j-1.2-api:2.25.5`. Dependencies were then resolved with
+`--no-scan` (no build-scan publication), not by changing test assertions or retrying failures.
+The selected `*TopologyDescription*` and `*RebalanceProtocolMigrationIntegrationTest`
+tests passed: **nine cases in four suites**, zero failures/errors/skips and retries,
+in 3m23s including preparation. XML/HTML receipts are in `streams-integration-95095ac/`
+and `streams-integration-html-95095ac/`. This is the relevant protocol/topology supplement,
+not the full Streams application-processing suite. Candidate/broker runtime export also passed.
+
+The local measurement host is an Apple M1 Pro, eight logical CPUs and 32 GiB RAM.
+It is not exclusive: desktop/VM processes remain active and were not stopped. The benchmark
+manifest records this limitation, platform/JDK, load average, runtime and runner hashes.
+No old benchmark percentage is reused as current-candidate evidence.
+
+### Real fixture smokes and bounded throughput measurement
+
+The task-owned broker fixture succeeded twice, including exact seed/end-offset/consumed counts,
+cluster identity, cleanup and separate JFR invocations. Receipts:
+`/private/tmp/kip1371-throughput-kxyfahgw/` (10,000 records) and
+`/private/tmp/kip1371-throughput-gsrzcjz_/` (1,000,000 records). Both are short/inconclusive.
+
+A proposed 200,000,000-record / 51.2 GB run was rejected by the safety reviewer for excessive
+shared-desktop resource impact; it did not start and was not bypassed. The approved alternative
+uses the original 50,000,000-record / 12.8 GB dataset, with unchanged five pairs and acceptance
+thresholds. Receipt: `/private/tmp/kip1371-throughput-birb15ka/`; its pinned `runner.py` copy
+matches the manifest SHA-256 even though later profiling-privacy improvements are being prepared.
+
+All ten throughput JVMs consumed exactly 50,000,000 records. Median fetch throughput is
+2,054,062.94 -> 1,979,022.36 records/s (**-3.65%**), MAD 35,736.53 -> 17,782.75.
+Whole-process CPU median is 15.09 -> 16.51 seconds (**+9.41%**); peak RSS median is
+1,111,392,256 -> 1,126,858,752 bytes. These costs must be disclosed, not hidden by the idle gate.
+Each fetch interval was only 23.697–26.438 seconds, below the predeclared 30-second minimum;
+the throughput gate is therefore **inconclusive-short**, not pass. The separate idle/first-record
+workloads subsequently completed all five pairs.
+
+The JDK's built-in profile configuration also records environment variables and unrelated process
+metadata. No such values were printed or published. A performance-only `profile.jfc` now disables
+those events for future diagnostics. Early default-profile recordings must remain private and
+must not be put into the evidence bundle; only allowlisted performance-event extracts may be shared.
+
+### Measurement corrections and completion of the first local run
+
+The 50-million-record run's idle CPU median was 2.339168% -> 2.485197%
+(+0.146029 percentage points; MAD 0.033110 -> 0.021262). Median per-JVM
+first-record p99 was 17.463 -> 20.719 ms (+3.256 ms; MAD 0.386 -> 1.185).
+Both are inside their predeclared allowances, not evidence of improvement.
+First-record latency is producer-send-to-consume end-to-end, not consumer-only time.
+
+The script finally failed only in its diagnostic profile parser: ConsumerPerformance
+requested 5,000,000 records but finished its last poll batch at 5,000,214. This is
+legal for a partial-dataset target. The corrected parser permits at most 499 excess
+records only for partial profiling; the ten complete-throughput counts remain exact.
+Nine parser/export tests pass. Baseline profiling completed; candidate profiling did
+not start. Preserve that incomplete diagnostic receipt rather than inventing a pair.
+
+The initial runtime exporter omitted distribution `releaseOnly` logging jars, so
+these measurements used the same NOP logger in both arms. The exporter now includes
+the normal release logging implementation; both resolved exports succeed offline.
+NOP-runtime results stay separate from subsequent release-logging measurements.
+
+`37c6603a99` clarifies two comment lines without changing behavior. After recompilation,
+SHA-256 manifests of every client class are byte-for-byte identical to the pre-comment
+`95095ac064` classes. Checkstyle and Spotless also pass. Test receipts remain pinned to
+the functional revision rather than pretending that a new full test invocation occurred.
+
+The performance-only JFC probe contains zero initial-environment, system-property,
+system-process, JVM-information or process-start events. Safe allowlisted extracts of
+the earlier recordings were generated separately; raw default JFRs remain private.
+The task-owned 50-million-record broker was stopped, its unique topic deleted, and its
+validated 12.8 GB generated broker-data directory removed after shutdown. All reports
+remain. The next bounded run uses 70,000,000 records (17.92 GB) with unchanged gates,
+3 GB combined broker/client heap cap and 145 GiB initially free; safety review allowed it.
+It uses standard release logging and profiles the full dataset separately from timing.
+Receipt: `/private/tmp/kip1371-throughput-sfcdl1ks/`.
+
+### No speculative scheduling rewrite
+
+Source inspection considered whether a previous zero application-wait cache can remain
+visible during a blocking network poll. The baseline also publishes this cache after
+network I/O; this inspection did not establish a new regression or its real public-poll
+trigger. Do not label D2/D3 a proof against every transient scheduling interleaving, or
+remove the post-I/O pass based on a conjectured CPU cause. The selected contract and
+tested implementation remain unchanged. A future change needs a failing production-path
+schedule and its own correctness/performance receipts.
+
+### Normal-logging acceptance complete
+
+The bounded 70-million-record run finished successfully with all ten throughput
+counts exact, five complete idle/latency pairs, and two complete full-dataset profiles.
+All fetch intervals exceed 30 seconds. Median throughput is 2,041,351.96 ->
+2,001,544.05 records/s (-1.95%, inside the unchanged 5% allowance). Whole-process
+CPU rises 20.73 -> 22.12 seconds (+6.71%); this cost is disclosed, not called an
+improvement. Idle CPU increases 0.080726 percentage points, within +0.2; median
+per-JVM first-record p99 decreases 1.815 ms, within +10 ms. Full MADs, paired ratios,
+profiles, scope limits and commands are in [local acceptance](kip-1371-local-acceptance.md).
+
+Both profiles consumed exactly 70,000,000 records. JFR summaries verify zero
+environment/system-property/system-process/JVM-information/process-start events.
+Their allowlisted JSON and Java folded stacks were generated successfully. Most Java
+execution samples concern record parsing/traversal; the profiles do not establish
+the cause of the measured CPU increase. No speculative production rewrite was made.
+
+The runner stopped its own broker; a separate PID check confirmed it no longer
+existed. Only `/private/tmp/kip1371-throughput-sfcdl1ks/broker-data` was removed after
+its exact configuration and ownership were checked. This frees 17.92 GB of generated
+payload; reports remain. No existing cluster or unrelated process was touched.
+
+### Local handoff
+
+The independent KIP Markdown and embedded-style HTML now include all five semantics,
+the preserved-design comparison, migration sequence, current correctness receipts and
+the complete normal-logging performance result. Pandoc plain-text roundtrips are identical;
+code/anchor balance, local/fragment links and encoding checks pass. Browser visual review
+remains unperformed because its debugging approval is unavailable while the user sleeps;
+static validation is not described as a screenshot review.
+
+The durable evidence package lives under the thread's visualization directory as
+`kip-1371-acceptance-95095ac064`, outside Gradle build output. It preserves failed controls,
+successful reports, profiles, raw results and a hashed inventory, excluding generated
+broker payload and the early default-profile raw JFRs. All changes are kept in local
+commits on the existing implementation/DOC branches. No remote push or CI submission,
+upstream/Jira/Confluence publication, worktree deletion or history rewrite occurred.
+
+Method: pattern-language connected forces to the smallest supported contracts and
+explicit consequences; isolated-demo-tests shaped fresh cluster/JVM evidence and
+task-owned benchmark cleanup. The ascii-diagram skill kept the runtime explanation
+as text. These methods do not substitute for the executable receipts above.

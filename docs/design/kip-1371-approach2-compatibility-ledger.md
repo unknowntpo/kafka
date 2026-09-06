@@ -16,6 +16,18 @@ have named integration evidence. See [historical provenance](kip-1371-historical
 This does not upgrade old broad-suite failures to passes or imply abrupt-crash durability.
 The final acceptance index is [issue coverage](kip-1371-issue-coverage.md).
 
+The complete consumer integration namespace now passes 419 cases at this revision; the separate
+Streams topology/protocol migration selection passes nine, and six explicitly flaky consumer unit
+cases pass without retries. The detailed receipts and non-exclusive-host performance results belong
+to the completion log, not to the older counts below.
+
+Current share fetch/acknowledgement logic is in `ShareConsumeRequestManager` (older entries below
+use the historical `ShareFetchRequestManager` name). It still holds the synchronized
+`ShareFetchBuffer` and uses `bufferedNodes()`, `add(...)` and `isEmpty()`, not an equivalent
+`FetchBufferProducer` capability. The structural no-raw-buffer guard applies to regular/Streams
+`FetchRequestManager`; passing share behavior tests do not prove that same future-author restriction
+has already been imposed on Share Consume. This boundary is explicit in the new KIP.
+
 Candidate normative obligations: [semantics draft](kip-1371-approach2-semantics-draft.md).
 
 ## Real normal-close and broker-restart follow-up

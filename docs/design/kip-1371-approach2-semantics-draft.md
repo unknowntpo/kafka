@@ -19,6 +19,7 @@ Current implementation: `95095ac064`; the original draft baseline was `8ab58b303
 The separate DOC branch now contains the complete replacement-direction narrative:
 `docs/design/kip-1371-contract-guided-coordination.md` and matching HTML.
 See the completion work log for selected snapshot/activation amendments and exact receipts.
+The consolidated current status is in [local acceptance](kip-1371-local-acceptance.md).
 The old design, remote PRs, Jira and Confluence remain unchanged by this work.
 
 ## Intent, forces and choice
@@ -50,6 +51,9 @@ Guarantee: each managed mutable domain has an identified owner. Cross-owner
 observations are validated by that owner against the affected operation's scope
 and, where relevant, captured identity/version before mutation is applied.
 Request construction must use the admission rules for that operation and phase.
+This identifies mutation authority; it does not claim every legacy SubscriptionState
+field already has one physical-thread writer. Existing collection/initialization
+coordination still requires the exclusions and observation rules in S2.
 
 Non-guarantees: a single thread, immutable map, or current member epoch alone
 does not authorize an old response. Not every state needs a version, nor does
@@ -95,8 +99,10 @@ Non-guarantees: a typed wait alone proves neither liveness nor absence of spin.
 It does not imply a dependency graph, targeted subscription framework, or
 repeated polling to a fixed point. Raw-delay compatibility paths remain partial.
 
-Kafka evidence: blocked coordinator/commit activation and scheduling-latch tests.
-All applicable regular/share/Streams wait-and-recovery paths still need coverage.
+Kafka evidence: blocked coordinator/commit activation and scheduling-latch tests,
+plus the regular/share/Streams startup and in-flight wait/recovery cases recorded
+in the heartbeat evidence. Raw-delay adapters remain; these cases do not establish
+a complete typed migration of every producer.
 
 ## S4. Required state before its effect
 
@@ -135,8 +141,9 @@ universal prohibition on processing responses or draining commits.
 
 Non-guarantees: a local timeout cannot prove a sent request had no broker effect.
 Successful public close does not prove all offsets committed: existing close
-auto-commit errors are logged rather than propagated. Full callback-acknowledgement,
-transport shutdown and historical close regressions remain separate gates.
+auto-commit errors are logged rather than propagated. Named real callback-recovery,
+background-thread shutdown and graceful broker-restart cases now have passing
+evidence. They do not establish arbitrary interruption or abrupt-crash durability.
 
 ## Cross-manager contract and extension review
 

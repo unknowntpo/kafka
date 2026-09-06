@@ -20,6 +20,9 @@ import unittest
 spec = importlib.util.spec_from_file_location("throughput", Path(__file__).with_name("run-throughput.py"))
 throughput = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(throughput)
+jfr_spec = importlib.util.spec_from_file_location("jfr_summary", Path(__file__).with_name("summarize-jfr.py"))
+jfr_summary = importlib.util.module_from_spec(jfr_spec)
+jfr_spec.loader.exec_module(jfr_summary)
 
 
 class ResultTest(unittest.TestCase):
@@ -34,6 +37,13 @@ class ResultTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             throughput.parse_result("case", self.ROW, 1000001)
 
+    def test_partial_profile_allows_only_one_poll_overshoot(self):
+        result = throughput.parse_result("profile", self.ROW, 999786, max_excess=499)
+        self.assertEqual(1000000, result["records"])
+        for target in (1000001, 999500):
+            with self.assertRaises(RuntimeError):
+                throughput.parse_result("profile", self.ROW, target, max_excess=499)
+
     def test_warning(self):
         with self.assertRaises(RuntimeError):
             throughput.parse_result("case", self.ROW + "\nWARNING: Exiting before consuming", 1000000)
@@ -47,6 +57,27 @@ class ResultTest(unittest.TestCase):
         for value in ("NaN", "Infinity", "0", "-1"):
             with self.assertRaises(RuntimeError):
                 throughput.parse_result("case", self.ROW.replace("16949.15", value), 1000000)
+
+
+class JfrSummaryTest(unittest.TestCase):
+    def test_rejects_unrelated_metadata(self):
+        with self.assertRaises(ValueError):
+            jfr_summary.summarize([{"type": "jdk.InitialEnvironmentVariable", "values": {}}])
+
+    def test_duration(self):
+        self.assertAlmostEqual(0.012, jfr_summary.seconds("PT0.012S"))
+        self.assertEqual(62, jfr_summary.seconds("PT1M2S"))
+
+    def test_cpu_allocation_and_gc(self):
+        stack = {"stackTrace": {"frames": [{"method": {"type": {"name": "owner/Type"}, "name": "work"}}]}}
+        summary, folded = jfr_summary.summarize([
+            {"type": "jdk.ExecutionSample", "values": stack},
+            {"type": "jdk.ObjectAllocationSample", "values": {**stack, "weight": 128}},
+            {"type": "jdk.GarbageCollection", "values": {"sumOfPauses": "PT0.002S"}},
+        ])
+        self.assertEqual(1, folded["owner.Type.work"])
+        self.assertEqual(128, summary["total_allocation_sample_weight_bytes"])
+        self.assertAlmostEqual(0.002, summary["gc_pause_seconds"])
 
 
 if __name__ == "__main__":

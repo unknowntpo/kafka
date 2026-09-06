@@ -2,6 +2,10 @@
 
 ## Current evidence update at `95095ac064`
 
+The consolidated [local acceptance record](kip-1371-local-acceptance.md) provides
+current counts, commands, autonomous decisions and performance limits. Older gap
+tables below are retained audit history, not the current completion summary.
+
 The inventory below is retained as the original gap checklist; its "unverified" and pending-policy
 labels must be read with this newer source-audited update. Full historical source provenance is in
 [regression provenance](kip-1371-historical-regression-provenance.md), including the exact baseline

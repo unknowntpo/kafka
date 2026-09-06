@@ -38,6 +38,9 @@ import time
 import uuid
 
 
+CANDIDATE_REVISION = "37c6603a99"  # Same client behavior as 95095ac064; response-delivery comment clarified.
+
+
 def free_ports():
     with socket.socket() as first, socket.socket() as second:
         first.bind(("127.0.0.1", 0))
@@ -45,14 +48,14 @@ def free_ports():
         return first.getsockname()[1], second.getsockname()[1]
 
 
-def parse_result(label, output, expected_records):
+def parse_result(label, output, expected_records, max_excess=0):
     rows = [row for row in csv.reader(output.splitlines())
             if len(row) == 10 and re.match(r"\d{4}-", row[0])]
     if len(rows) != 1:
         raise RuntimeError(f"missing unambiguous ConsumerPerformance summary for {label}")
     row = rows[0]
-    if int(row[4].strip()) != expected_records or "WARNING: Exiting before" in output:
-        raise RuntimeError(f"incomplete consumption in {label}")
+    if not expected_records <= int(row[4].strip()) <= expected_records + max_excess or "WARNING: Exiting before" in output:
+        raise RuntimeError(f"consumed count outside the required range in {label}")
     result = {"records": int(row[4]), "fetch_ms": float(row[7]), "fetch_mib_s": float(row[8]),
               "fetch_records_s": float(row[9]), "overall_records_s": float(row[5])}
     if any(not math.isfinite(value) or value <= 0 for value in result.values()):
@@ -72,9 +75,10 @@ def main():
     parser.add_argument("--candidate-worktree", type=Path, required=True)
     parser.add_argument("--idle-harness-classes", type=Path)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--profile-records", type=int, default=5_000_000)
     args = parser.parse_args()
-    if min(args.records, args.record_size, args.pairs) <= 0:
-        parser.error("records, record-size and pairs must be positive")
+    if min(args.records, args.record_size, args.pairs, args.profile_records) <= 0:
+        parser.error("records, record-size, pairs and profile-records must be positive")
     if not args.java.is_file():
         parser.error("java executable not found")
 
@@ -82,7 +86,7 @@ def main():
         return subprocess.check_output(["git", "-C", str(worktree), *options], text=True).strip()
 
     expected_base = "820533b870106cc0e0ac60e2076b8644d68bd85f"
-    expected_candidate_tree = git(args.candidate_worktree, "rev-parse", "95095ac064:clients/src/main")
+    expected_candidate_tree = git(args.candidate_worktree, "rev-parse", f"{CANDIDATE_REVISION}:clients/src/main")
     if git(args.baseline_worktree, "rev-parse", "HEAD") != expected_base:
         parser.error("baseline revision differs from the predeclared baseline")
     if git(args.candidate_worktree, "rev-parse", "HEAD:clients/src/main") != expected_candidate_tree:
@@ -176,7 +180,8 @@ def main():
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "baseline": expected_base,
         "candidate_head": git(args.candidate_worktree, "rev-parse", "HEAD"),
-        "candidate_client_revision": "95095ac064",
+        "candidate_client_revision": CANDIDATE_REVISION,
+        "candidate_behavior_revision": "95095ac064",
         "candidate_client_tree": expected_candidate_tree,
         "records": args.records, "record_size": args.record_size, "pairs": args.pairs,
         "partitions": 4, "broker_address": address, "topic": topic,
@@ -195,6 +200,17 @@ def main():
         manifest["first_record_idle_ms"] = 250
         manifest["first_record_p99_allowance_ms"] = 10
         manifest["idle_cpu_allowance_percentage_points"] = 0.2
+    manifest["environment"]["load_average_at_start"] = list(os.getloadavg())
+    manifest["environment"]["exclusive_host"] = False
+    if args.profile:
+        manifest["profile_settings_sha256"] = hashlib.sha256(
+            Path(__file__).with_name("profile.jfc").read_bytes()).hexdigest()
+    if platform.system() == "Darwin":
+        hardware = subprocess.check_output(
+            ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string", "hw.memsize", "hw.logicalcpu"], text=True).splitlines()
+        manifest["environment"]["cpu"] = hardware[0]
+        manifest["environment"]["physical_memory_bytes"] = int(hardware[1])
+        manifest["environment"]["logical_cpus"] = int(hardware[2])
     (root / "manifest.json").write_text(json.dumps(manifest, indent=2))
     cluster_id = run("cluster-id", java("broker", "kafka.tools.StorageTool", "random-uuid")).strip()
     run("format", java("broker", "kafka.tools.StorageTool", "format", "-t", cluster_id, "-c", str(config)))
@@ -315,16 +331,24 @@ def main():
             (root / "idle-first-record-summary.json").write_text(json.dumps(small_summary, indent=2))
             print(f"IDLE_LATENCY_SUMMARY {json.dumps(small_summary)}", flush=True)
         if args.profile:
+            profile_results = []
             for role in ("baseline", "candidate"):
-                profile_records = min(args.records, 5_000_000)
+                profile_records = min(args.records, args.profile_records)
                 recording = root / f"{role}.jfr"
                 command = java(role, "org.apache.kafka.tools.ConsumerPerformance", "--bootstrap-server", address,
                                "--topic", topic, "--num-records", str(profile_records),
                                "--group", topic + "-profile-" + role,
                                "--command-config", str(consumer_config), "--timeout", "60000")
-                command.insert(1, f"-XX:StartFlightRecording=filename={recording},settings=profile,dumponexit=true")
+                settings = Path(__file__).with_name("profile.jfc").resolve()
+                command.insert(1, f"-XX:StartFlightRecording=filename={recording},settings={settings},dumponexit=true")
                 output = run(f"{role}-profile", command)
-                parse_result(f"{role}-profile", output, profile_records)
+                # ConsumerPerformance finishes a poll batch, so a partial-dataset target
+                # can be exceeded by at most max.poll.records - 1 (configured above as 500).
+                # Whole-dataset throughput measurements remain exact-count checks.
+                profile_results.append({"role": role, "requested_records": profile_records,
+                                        **parse_result(f"{role}-profile", output, profile_records,
+                                                       min(499, args.records - profile_records))})
+                (root / "profile-results.json").write_text(json.dumps(profile_results, indent=2))
                 run(f"jfr-summary-{role}", [str(args.java.with_name("jfr")), "summary", str(recording)])
     finally:
         try:

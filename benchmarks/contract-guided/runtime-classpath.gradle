@@ -30,6 +30,10 @@ gradle.projectsEvaluated {
         selected.each { label, project ->
             dependsOn project.tasks.named('classes')
             dependsOn project.sourceSets.main.runtimeClasspath
+            def releaseLibraries = project.configurations.findByName('releaseOnly')
+            if (releaseLibraries != null) {
+                dependsOn releaseLibraries
+            }
         }
         doLast {
             def output = file(providers.gradleProperty('contractGuidedOutput').get())
@@ -46,7 +50,11 @@ gradle.projectsEvaluated {
                 }
             }
             selected.each { label, project ->
-                def runtimeFiles = project.sourceSets.main.runtimeClasspath.files.findAll { path ->
+                // The distribution supplies the SLF4J binding through releaseOnly, not
+                // runtimeClasspath. Match that runtime rather than silently measuring NOP logging.
+                def releaseLibraries = project.configurations.findByName('releaseOnly')
+                def runtimeFiles = (project.sourceSets.main.runtimeClasspath.files +
+                    (releaseLibraries == null ? [] : releaseLibraries.files)).toSet().findAll { path ->
                     if (path.exists()) {
                         return true
                     }
