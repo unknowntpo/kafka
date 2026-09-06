@@ -23,13 +23,17 @@ import org.apache.kafka.clients.consumer.CommitFailedException;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.RetriableCommitFailedException;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.AsyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
+import org.apache.kafka.clients.consumer.internals.events.SyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.GroupAuthorizationException;
 import org.apache.kafka.common.message.ConsumerGroupHeartbeatRequestData;
 import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
 import org.apache.kafka.common.metrics.Metrics;
@@ -100,6 +104,7 @@ class ConsumerBatchedDecisionTest {
     private ConsumerMetadata metadata;
     private BackgroundEventHandler background;
     private SubscriptionState subscriptions;
+    private final LinkedBlockingQueue<ApplicationEvent> applicationEvents = new LinkedBlockingQueue<>();
 
     @BeforeEach
     void setUp() {
@@ -139,8 +144,8 @@ class ConsumerBatchedDecisionTest {
             idleManager(OffsetsRequestManager.class), idleManager(TopicMetadataRequestManager.class),
             idleManager(FetchRequestManager.class), Optional.of(coordinator), Optional.of(commits),
             Optional.of(heartbeat), Optional.of(membership), Optional.empty(), Optional.empty(), Optional.empty());
-        thread = new ConsumerNetworkThread(logContext, time, new LinkedBlockingQueue<>(),
-            new CompletableEventReaper(logContext), () -> mock(ApplicationEventProcessor.class),
+        thread = new ConsumerNetworkThread(logContext, time, applicationEvents,
+            new CompletableEventReaper(logContext), () -> new ApplicationEventProcessor(logContext, managers, metadata, subscriptions),
             () -> delegate, () -> managers, asyncMetrics);
         thread.initializeResources();
     }
@@ -170,6 +175,83 @@ class ConsumerBatchedDecisionTest {
 
     private ClientRequest request(ApiKeys apiKey) {
         return client.requests().stream().filter(r -> r.requestBuilder().apiKey() == apiKey).findFirst().orElseThrow();
+    }
+
+    @Test
+    void testFailureContinuationQueuesAnInputAfterTheCurrentErrorConsumption() {
+        var operationA = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        AsyncCommitEvent operationB = new AsyncCommitEvent(Optional.of(Map.of(PARTITION, new OffsetAndMetadata(2))));
+        var continuation = operationA.whenComplete((result, error) -> applicationEvents.add(operationB));
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+        thread.runOnce();
+        assertTrue(operationA.isCompletedExceptionally());
+        assertTrue(continuation.isCompletedExceptionally());
+        assertEquals(1, applicationEvents.size());
+        assertTrue(coordinator.fatalError().isEmpty());
+        thread.runOnce();
+        assertTrue(operationB.offsetsReady().isDone());
+        assertFalse(operationB.future().isDone());
+        verify(background).add(any(ErrorEvent.class));
+    }
+
+    @Test
+    void testPostIoFatalDeliveryPrecedesEndOfRoundApplicationTimeout() {
+        SyncCommitEvent operation = new SyncCommitEvent(
+            Optional.of(Map.of(PARTITION, new OffsetAndMetadata(1))), time.milliseconds());
+        applicationEvents.add(operation);
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+        thread.runOnce();
+        assertTrue(operation.future().isCompletedExceptionally());
+        Throwable result = assertThrows(CompletionException.class, operation.future()::join).getCause();
+        assertInstanceOf(GroupAuthorizationException.class, result);
+        ArgumentCaptor<ErrorEvent> delivered = ArgumentCaptor.forClass(ErrorEvent.class);
+        verify(background).add(delivered.capture());
+        assertSame(result, delivered.getValue().error());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testQueuedInputCutoffDeterminesWhichCommitsSeeDiscoveryFailure(boolean queuedDuringIo) {
+        var operationA = commits.commitAsync(Map.of(PARTITION, new OffsetAndMetadata(1)));
+        AsyncCommitEvent operationB = new AsyncCommitEvent(Optional.of(Map.of(PARTITION, new OffsetAndMetadata(2))));
+        coordinator.markCoordinatorUnknown("force discovery", time.milliseconds());
+        client.prepareResponse(request -> {
+            if (queuedDuringIo)
+                applicationEvents.add(operationB);
+            return true;
+        }, FindCoordinatorResponse.prepareResponse(Errors.GROUP_AUTHORIZATION_FAILED, GROUP_ID, NODE));
+
+        thread.runOnce();
+        assertFalse(operationB.future().isDone());
+        if (queuedDuringIo) {
+            // A queued input suppresses the post-I/O pass. The error and operation A remain pending.
+            assertFalse(operationA.isDone());
+            assertTrue(coordinator.fatalError().isPresent());
+        } else {
+            // With no queued input, the post-I/O pass handles and clears the error before B arrives.
+            assertTrue(operationA.isCompletedExceptionally());
+            assertTrue(coordinator.fatalError().isEmpty());
+            applicationEvents.add(operationB);
+        }
+
+        thread.runOnce();
+        assertTrue(operationB.offsetsReady().isDone());
+        assertTrue(operationA.isCompletedExceptionally());
+        ArgumentCaptor<ErrorEvent> delivered = ArgumentCaptor.forClass(ErrorEvent.class);
+        verify(background).add(delivered.capture());
+        Throwable failure = delivered.getValue().error();
+        assertSame(failure, assertThrows(CompletionException.class, operationA::join).getCause());
+        assertTrue(coordinator.fatalError().isEmpty());
+        if (queuedDuringIo) {
+            // Existing next-round order is application input, then the full manager pass.
+            assertTrue(operationB.future().isCompletedExceptionally());
+            assertSame(failure, assertThrows(CompletionException.class, operationB.future()::join).getCause());
+        } else {
+            assertFalse(operationB.future().isDone());
+            assertEquals(1, commits.unsentOffsetCommitRequests().size());
+        }
     }
 
     @ParameterizedTest

@@ -110,6 +110,11 @@ benchmark submission or performance claim is part of this assessment.
 
 ## Evidence and validation boundary
 
+- [Cross-round error dry run](kip-1371-cross-round-error-dry-run.md): real application
+  input routing demonstrates that the existing queued-input cutoff changes which
+  commits receive a discovery failure. Callback-generated input and a due sync-commit
+  deadline identify additional boundaries. Cross-round dispatch remains a candidate,
+  not implemented or proven behavior-equivalent by these characterization tests.
 - [Coordinator decision dependencies](kip-1371-coordinator-decision-dependencies.md):
   separates prerequisite reads, versioned invalidation, result delivery, and
   rescheduling from global priority. Twenty existing cases were rerun. A later
