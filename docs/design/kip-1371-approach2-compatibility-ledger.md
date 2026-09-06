@@ -48,6 +48,46 @@ Checkstyle and Spotless Java checks passed on the first run. This validates the
 named processing-time cases; it is not a new benchmark or closure of the full KIP
 issue inventory.
 
+## Rebalance retry snapshot versus lifecycle probe
+
+Three parameterized `CommitRequestManagerTest` tests cover both the default
+position-recapture policy and the opt-in retained-first-snapshot experiment:
+
+- `testRetrySnapshotStillExpiresWithoutAnotherApplicationPoll`: a retriable
+  response after the retry deadline selects TimeoutException, captures no second
+  snapshot, and leaves no queued retry. A second completion attempt cannot replace
+  that outcome.
+- `testRebalanceRetryDeadlineDoesNotRejectLateSuccess`: this RM result remains
+  pending after time advances without a response. A subsequently successful
+  response is accepted without recapture or another request. This deadline bounds
+  retries; it is not an independently reaped application-event deadline.
+- `testCloseSignalAllowsRebalanceRetryWithKnownCoordinator`: close is signalled
+  while the first request is in flight. A retriable response before expiry still
+  queues a retry. With the coordinator known, the close drain emits it without
+  waiting for normal backoff. Default mode recaptures position 20; retained mode
+  sends its original position 10. Both can complete successfully and leave no
+  further queued request.
+
+These are isolated RM tests using MockTime and controlled response completion,
+not full public close or broker persistence tests. The position change is a
+controlled input, not proof that a public close/collector interleaving is legal.
+They preserve production behavior and leave the snapshot experiment disabled.
+
+Design consequence: neither deadline expiry nor `signalClose()` can be treated
+as universal cancellation of all callbacks. Owner validity checks must respect
+the particular operation's retry and completion contract. Retaining a snapshot
+avoids recapture in the tested retry, but does not establish initial capture
+safety, assignment validity, or the complete at-least-once delivery contract.
+Next integration gate: trace public close and membership reconciliation deadlines
+to these RM futures, including coordinator loss and in-flight completion, before
+claiming the original close-related issues are covered.
+
+Validation: **242 tests in two suites passed twice**, zero failures/errors/skips,
+with retries disabled: CommitRequestManagerTest and ConsumerBatchedDecisionTest.
+JDK 17 / Gradle 9.7.1 offline; Checkstyle and Spotless passed. This replaces one
+retained-only expiration case with two policy cases and adds four success/close
+cases; historical suite totals are not added to this receipt.
+
 ## Extra-pass benefit and admission-cost probe
 
 `testExtraPassChangesAdmissionButNotFollowupTransportPoll` compares both

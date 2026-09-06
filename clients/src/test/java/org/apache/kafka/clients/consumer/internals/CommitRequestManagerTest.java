@@ -1605,10 +1605,13 @@ public class CommitRequestManagerTest {
         assertDoesNotThrow(result::join);
     }
 
-    @Test
-    public void testRetainedRetrySnapshotStillExpiresWithoutAnotherApplicationPoll() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testRetrySnapshotStillExpiresWithoutAnotherApplicationPoll(boolean retainSnapshot) {
+        subscriptionState = spy(subscriptionState);
         CommitRequestManager manager = create(true, Integer.MAX_VALUE);
-        manager.enableRetainedRebalanceRetrySnapshot();
+        if (retainSnapshot)
+            manager.enableRetainedRebalanceRetrySnapshot();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
         TopicPartition partition = new TopicPartition("topic", 1);
         subscriptionState.assignFromUser(Set.of(partition));
@@ -1621,6 +1624,68 @@ public class CommitRequestManagerTest {
             mockOffsetCommitResponse("topic", 1, (short) 1, Errors.REQUEST_TIMED_OUT));
         assertFutureThrows(TimeoutException.class, result);
         assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
+        verify(subscriptionState, times(1)).allConsumed();
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertFalse(first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE)));
+        assertFutureThrows(TimeoutException.class, result);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testRebalanceRetryDeadlineDoesNotRejectLateSuccess(boolean retainSnapshot) {
+        subscriptionState = spy(subscriptionState);
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        if (retainSnapshot)
+            manager.enableRetainedRebalanceRetrySnapshot();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(time.milliseconds() + 50);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        time.sleep(100);
+        // This RM future has no independent deadline reaper: expiry bounds retries, not a received success.
+        assertFalse(result.isDone());
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE));
+        assertDoesNotThrow(result::join);
+        verify(subscriptionState, times(1)).allConsumed();
+        assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testCloseSignalAllowsRebalanceRetryWithKnownCoordinator(boolean retainSnapshot) {
+        subscriptionState = spy(subscriptionState);
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        if (retainSnapshot)
+            manager.enableRetainedRebalanceRetrySnapshot();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        manager.signalClose();
+        subscriptionState.seek(partition, 20);
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.REQUEST_TIMED_OUT));
+        assertFalse(result.isDone());
+        verify(subscriptionState, times(retainSnapshot ? 1 : 2)).allConsumed();
+        // The existing close drain bypasses normal backoff. No simulated time advances here.
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) retry.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(retainSnapshot ? 10 : 20, data.topics().get(0).partitions().get(0).committedOffset());
+        retry.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE));
+        assertDoesNotThrow(result::join);
+        assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
     }
 
     @ParameterizedTest
