@@ -110,6 +110,10 @@ benchmark submission or performance claim is part of this assessment.
 
 ## Evidence and validation boundary
 
+- [Operation-result contract reuse](kip-1371-operation-result-contract-reuse.md):
+  three existing fetch/commit input routes handle 38 result and observer-lifecycle
+  schedules without another production adapter; this is not a cross-owner or
+  global effect-ordering proof.
 - [RM extension contract probe](kip-1371-rm-extension-contract-probe.md):
   a synchronous preparation rejection could disappear in a future continuation;
   a scoped adapter removes that caller-detail dependency, not all author burden.
