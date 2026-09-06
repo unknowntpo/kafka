@@ -85,6 +85,22 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.UnsentRequest request, Errors error, int heartbeatIntervalMs);
 
     @Test
+    public void testUnknownCoordinatorWithZeroIntervalUsesPollTimerBound() {
+        heartbeatRequestState.updateHeartbeatIntervalMs(0);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        when(membershipManager.state()).thenReturn(MemberState.JOINING);
+        assertTrue(heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertEquals(DEFAULT_MAX_POLL_INTERVAL_MS / 2,
+            heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS - 1);
+        assertEquals(1, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()),
+            "integer division must not turn a live timer into a zero wait");
+        time.sleep(1);
+        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()),
+            "actual poll-timer expiry keeps its existing immediate refresh contract");
+    }
+
+    @Test
     public void testTimerNotDue() {
         time.sleep(100); // before heartbeatInterval, no heartbeat should be sent
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());

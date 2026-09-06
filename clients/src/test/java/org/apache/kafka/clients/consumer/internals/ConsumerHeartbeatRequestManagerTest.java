@@ -327,6 +327,23 @@ public class ConsumerHeartbeatRequestManagerTest
     }
 
     @Test
+    public void testZeroInitialHeartbeatIntervalAwaitsCoordinatorAndRecovers() {
+        createHeartbeatRequestStateWithZeroHeartbeatInterval();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        when(membershipManager.state()).thenReturn(MemberState.JOINING);
+        for (int i = 0; i < 10; i++) {
+            assertTrue(heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.isEmpty());
+            assertTrue(heartbeatRequestManager.maximumTimeToWait(time.milliseconds()) > 0,
+                "the initial zero heartbeat interval is not a useful retry before discovery");
+            time.sleep(1);
+        }
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mock(Node.class)));
+        when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
+        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(1, heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.size());
+    }
+
+    @Test
     public void testHeartbeatNotSentIfAnotherOneInFlight() {
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
 

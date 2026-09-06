@@ -265,7 +265,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         // poll() returns EMPTY, so falling through to the timer-based branches below would return 0 (the
         // heartbeat timer is left permanently expired) and busy-spin both the application and network threads.
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
-            return heartbeatRequestState.heartbeatIntervalMs();
+            long heartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            // Before the first response the interval is zero, not permission to spin while discovery
+            // is pending. Preserve the application poll-timer refresh even without a negotiated interval.
+            return heartbeatIntervalMs > 0 ? heartbeatIntervalMs : Math.max(1L, pollTimer.remainingMs() / 2);
         }
         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
             return 0L;

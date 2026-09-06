@@ -530,9 +530,16 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
         pollTimer.update(currentTimeMs);
-        if (pollTimer.isExpired() ||
-            membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
-
+        if (pollTimer.isExpired()) {
+            return 0L;
+        }
+        // Match the admission guard in poll(). Joining urgency cannot produce a heartbeat before
+        // discovery. The initial zero interval is not a useful retry timer in that blocked state.
+        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
+            long heartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            return heartbeatIntervalMs > 0 ? heartbeatIntervalMs : Math.max(1L, pollTimer.remainingMs() / 2);
+        }
+        if (membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
         }
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
