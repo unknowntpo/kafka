@@ -18,13 +18,17 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.message.FetchResponseData;
+import org.apache.kafka.common.message.OffsetCommitRequestData;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.TimestampType;
@@ -46,6 +50,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 
@@ -55,8 +60,13 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
@@ -71,6 +81,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -190,6 +201,71 @@ public class FetchCollectorTest {
 
         // Verify that when drain() was invoked, the position had already been advanced.
         assertEquals(DEFAULT_RECORD_COUNT, positionAtDrainTime.get());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testAutoCommitCaptureBeforeOrDuringCollection(boolean captureDuringCollection) throws Exception {
+        buildDependencies(DEFAULT_RECORD_COUNT + 1);
+        assignAndSeek(topicAPartition0);
+        Properties properties = consumerProps();
+        properties.put(ConsumerConfig.GROUP_ID_CONFIG, "snapshot-group");
+        properties.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
+        properties.put(ConsumerConfig.AUTO_COMMIT_INTERVAL_MS_CONFIG, 100);
+        ConsumerConfig config = new ConsumerConfig(properties);
+        CoordinatorRequestManager coordinator = mock(CoordinatorRequestManager.class);
+        when(coordinator.coordinator()).thenReturn(Optional.of(new Node(1, "localhost", 9092)));
+        OffsetsRequestManager offsets = mock(OffsetsRequestManager.class);
+        when(offsets.updateFetchPositions(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+        FetchRequestManager fetchRequests = mock(FetchRequestManager.class);
+        when(fetchRequests.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
+
+        ExecutorService background = Executors.newSingleThreadExecutor();
+        try (Metrics commitMetrics = new Metrics(time)) {
+            CommitRequestManager commits = new CommitRequestManager(time, logContext, subscriptions,
+                config, coordinator, mock(OffsetCommitCallbackInvoker.class), "snapshot-group",
+                Optional.empty(), 100, 1000, OptionalDouble.of(0), commitMetrics, metadata);
+            RequestManagers managers = new RequestManagers(logContext, offsets,
+                mock(TopicMetadataRequestManager.class), fetchRequests, Optional.of(coordinator),
+                Optional.of(commits), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty());
+            ApplicationEventProcessor processor = new ApplicationEventProcessor(
+                logContext, managers, metadata, subscriptions);
+            time.sleep(100);
+            AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 1000,
+                time.milliseconds(), () -> { });
+            AtomicLong offsetBeforeCollectorReturns = new AtomicLong(-1);
+            Runnable processAndInspect = () -> {
+                processor.process(event);
+                NetworkClientDelegate.PollResult result = commits.poll(time.milliseconds());
+                assertEquals(1, result.unsentRequests.size());
+                OffsetCommitRequestData data = (OffsetCommitRequestData)
+                    result.unsentRequests.get(0).requestBuilder().build().data();
+                assertEquals(topicAPartition0.topic(), data.topics().get(0).name());
+                offsetBeforeCollectorReturns.set(data.topics().get(0).partitions().get(0).committedOffset());
+            };
+            CompletedFetch completed = spy(completedFetchBuilder.recordCount(DEFAULT_RECORD_COUNT).build());
+            // Deterministic scheduling seam: run the operation on a separate background thread after the real collector
+            // advances position, while collectFetch has not returned. No broker persistence is asserted.
+            doAnswer(invocation -> {
+                if (captureDuringCollection)
+                    background.submit(processAndInspect).get(5, TimeUnit.SECONDS);
+                invocation.callRealMethod();
+                return null;
+            }).when(completed).drain();
+            fetchBuffer.add(completed);
+            if (!captureDuringCollection)
+                background.submit(processAndInspect).get(5, TimeUnit.SECONDS);
+
+            Fetch<String, String> collected = fetchCollector.collectFetch(fetchBuffer);
+
+            assertEquals(DEFAULT_RECORD_COUNT, collected.numRecords());
+            assertEquals(captureDuringCollection ? DEFAULT_RECORD_COUNT : 0,
+                offsetBeforeCollectorReturns.get());
+        } finally {
+            background.shutdownNow();
+            assertTrue(background.awaitTermination(5, TimeUnit.SECONDS));
+        }
     }
 
     @Test

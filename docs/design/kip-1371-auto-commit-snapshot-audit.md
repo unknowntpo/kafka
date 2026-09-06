@@ -67,13 +67,50 @@ The current code no longer has the original blocking `PollEvent` protocol:
 - `testPollDoesNotWaitForReconciliationCheckIfNoPendingReconciliation` explicitly
   exercises collection with an unprocessed event, using a mocked collector.
 
-This is an ordering-proof gap, not yet a demonstrated record-loss execution.
-The next test must combine actual commit capture with collection paused after
-position advancement but before record return, with auto-commit enabled, and
-check whether the snapshot can include the undelivered position. It must also
-cover the reconciliation/revocation path separately. Passing a snapshot-retention
-test cannot close this gap, and simply moving the reconciliation marker is not
-sufficient if a no-reconciliation fast path bypasses it.
+The component experiment below establishes that capture can include the advanced
+position while collection has not returned. It is not a demonstrated public-poll
+record-loss execution. The reconciliation/revocation path must also be covered
+separately. Passing a snapshot-retention test cannot close this gap, and simply
+moving the reconciliation marker is not sufficient if a no-reconciliation fast
+path bypasses it.
+
+## Controlled two-thread interleaving
+
+`FetchCollectorTest.testAutoCommitCaptureBeforeOrDuringCollection` uses a real
+collector, buffer, subscription state, event processor, and commit manager.
+Offsets/fetch request work is stubbed; the coordinator is known. Auto-commit is
+enabled and its interval expires on a mock clock. A separate executor runs event
+processing and request construction, with a bounded join and explicit shutdown.
+
+Two schedules share the same data, positions, and commit configuration:
+
+- Process the async poll event before collection: request offset is 0.
+- Pause at the real exhausted-fetch `drain()` boundary, after the collector has
+  advanced position but before it returns; process that event on the background
+  executor: request offset is 10, for the ten records still inside collection.
+
+The executor can complete capture at this boundary; synchronization of individual
+state accesses does not make the entire collection/delivery operation atomic.
+The test asserts existing behavior, including the unsafe-under-early-delivery
+ordering, rather than representing a production fix. No fabricated position
+update replaces the collector's real update.
+
+Limits: event delivery is explicitly scheduled, not driven by a real
+`AsyncKafkaConsumer.poll()` plus `ConsumerNetworkThread.runOnce()` fixture. There
+is no broker acknowledgement, injected process crash, or restart/offset readback.
+Thus the result demonstrates the component hazard; it does not on its own prove
+that every public-poll gate permits this schedule or that records were lost.
+The initial run omitted the test group's configuration and failed before reaching
+the scenario; correcting that fixture is not a production red-to-green result.
+
+Next gate: reproduce this schedule through actual public poll admission, including
+the collection fast path, then choose the smallest repair if reachable. Preserve
+the two schedules as a counterexample/control pair.
+
+Two-thread validation on 2026-09-06: 439 tests across `FetchCollectorTest`,
+`ShareFetchCollectorTest`, and `CommitRequestManagerTest` passed twice, with no
+failures/errors/skips and retries disabled. Checkstyle and Spotless Java checks
+passed. The new test characterizes the hazard; a passing run is not a safety fix.
 
 If the interleaving is reachable, compare a scoped capture handshake against an
 explicit application-provided offset snapshot. Preserve existing timeout,
