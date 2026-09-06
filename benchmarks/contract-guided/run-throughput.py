@@ -30,15 +30,18 @@ from pathlib import Path
 import platform
 import re
 import signal
+import shutil
 import socket
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
 
 
 CANDIDATE_REVISION = "37c6603a99"  # Same client behavior as 95095ac064; response-delivery comment clarified.
+EXPECTED_CANDIDATE_CLIENT_TREE = 'be98bbf057dff6da04de6529c9146b4ea19f5051'
 
 
 def free_ports():
@@ -63,7 +66,17 @@ def parse_result(label, output, expected_records, max_excess=0):
     return result
 
 
+def parse_resources(data):
+    cpu, rss = data['process_cpu_seconds'], data['maximum_resident_bytes']
+    if not math.isfinite(cpu) or cpu <= 0 or not isinstance(rss, int) or rss <= 0:
+        raise RuntimeError('Invalid process CPU/RSS measurement')
+    return dict(process_cpu_seconds=cpu, maximum_resident_bytes=rss)
+
+
 def main():
+    def terminate(signum, frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, terminate)
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-runtime", type=Path, required=True)
     parser.add_argument("--candidate-runtime", type=Path, required=True)
@@ -76,6 +89,9 @@ def main():
     parser.add_argument("--idle-harness-classes", type=Path)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-records", type=int, default=5_000_000)
+    parser.add_argument("--artifact-parent", type=Path, default=Path(tempfile.gettempdir()))
+    parser.add_argument("--remove-owned-data", action="store_true",
+                        help="After stopping the owned broker, remove only its generated broker-data")
     args = parser.parse_args()
     if min(args.records, args.record_size, args.pairs, args.profile_records) <= 0:
         parser.error("records, record-size, pairs and profile-records must be positive")
@@ -86,7 +102,8 @@ def main():
         return subprocess.check_output(["git", "-C", str(worktree), *options], text=True).strip()
 
     expected_base = "820533b870106cc0e0ac60e2076b8644d68bd85f"
-    expected_candidate_tree = git(args.candidate_worktree, "rev-parse", f"{CANDIDATE_REVISION}:clients/src/main")
+    # Jenkins uses depth=1. Validate the pinned tree without requiring old commit objects.
+    expected_candidate_tree = EXPECTED_CANDIDATE_CLIENT_TREE
     if git(args.baseline_worktree, "rev-parse", "HEAD") != expected_base:
         parser.error("baseline revision differs from the predeclared baseline")
     if git(args.candidate_worktree, "rev-parse", "HEAD:clients/src/main") != expected_candidate_tree:
@@ -95,7 +112,7 @@ def main():
         if git(worktree, "status", "--porcelain", "--untracked-files=all", "--", "clients/src/main", "tools/src/main"):
             parser.error(f"uncommitted measured source: {worktree}")
 
-    root = Path(tempfile.mkdtemp(prefix="kip1371-throughput-", dir="/private/tmp"))
+    root = Path(tempfile.mkdtemp(prefix="kip1371-throughput-", dir=args.artifact_parent))
     print(f"ARTIFACTS {root}", flush=True)
     runtimes = {
         "baseline": (args.baseline_runtime / "tools-classpath.txt").read_text().strip(),
@@ -254,15 +271,24 @@ def main():
                 command = java(role, "org.apache.kafka.tools.ConsumerPerformance", "--bootstrap-server", address,
                                "--topic", topic, "--num-records", str(args.records), "--group", topic + "-" + label,
                                "--command-config", str(consumer_config), "--timeout", "60000", "--print-metrics")
-                # macOS time reports process CPU and maximum resident set; not only Java heap usage.
-                output = run(label, ["/usr/bin/time", "-l", *command], timeout=1800)
+                if platform.system() == 'Linux':
+                    resource_file = root / f'{label}.resources.json'
+                    output = run(label, [sys.executable, str(Path(__file__).with_name('resource-time.py')),
+                                         str(resource_file), *command], timeout=1800)
+                    resources = parse_resources(json.loads(resource_file.read_text()))
+                elif platform.system() == 'Darwin':
+                    output = run(label, ["/usr/bin/time", "-l", *command], timeout=1800)
+                    timing = (root / f"{label}.stderr").read_text()
+                    cpu = re.search(r"([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys", timing)
+                    rss = re.search(r"(\d+)\s+maximum resident set size", timing)
+                    if not cpu or not rss:
+                        raise RuntimeError(f"missing macOS process timing/RSS in {label}")
+                    resources = parse_resources(dict(process_cpu_seconds=float(cpu[2]) + float(cpu[3]),
+                                                     maximum_resident_bytes=int(rss[1])))
+                else:
+                    raise RuntimeError('Only Linux and macOS resource measurement is supported')
                 result = {"pair": pair + 1, "role": role, **parse_result(label, output, args.records)}
-                timing = (root / f"{label}.stderr").read_text()
-                cpu = re.search(r"([\d.]+) real\s+([\d.]+) user\s+([\d.]+) sys", timing)
-                rss = re.search(r"(\d+)\s+maximum resident set size", timing)
-                if not cpu or not rss:
-                    raise RuntimeError(f"missing macOS process timing/RSS in {label}")
-                result.update(process_cpu_seconds=float(cpu[2]) + float(cpu[3]), maximum_resident_bytes=int(rss[1]))
+                result.update(resources)
                 results.append(result)
                 (root / "results.json").write_text(json.dumps(results, indent=2))
                 print(f"RESULT {json.dumps(result)}", flush=True)
@@ -363,6 +389,8 @@ def main():
                 broker.kill()
                 broker.wait(timeout=10)
             broker_log.close()
+            if args.remove_owned_data and (root / 'broker-data').exists():
+                shutil.rmtree(root / 'broker-data')
             print(f"STOPPED task-owned broker {broker.pid}; artifacts retained at {root}", flush=True)
 
 

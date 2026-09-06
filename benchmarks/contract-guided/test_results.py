@@ -16,6 +16,10 @@
 import importlib.util
 from pathlib import Path
 import unittest
+import subprocess
+import sys
+import tempfile
+import json
 
 spec = importlib.util.spec_from_file_location("throughput", Path(__file__).with_name("run-throughput.py"))
 throughput = importlib.util.module_from_spec(spec)
@@ -57,6 +61,25 @@ class ResultTest(unittest.TestCase):
         for value in ("NaN", "Infinity", "0", "-1"):
             with self.assertRaises(RuntimeError):
                 throughput.parse_result("case", self.ROW.replace("16949.15", value), 1000000)
+
+    def test_process_resources(self):
+        self.assertEqual(22.12, throughput.parse_resources({
+            'process_cpu_seconds': 22.12, 'maximum_resident_bytes': 1048576})['process_cpu_seconds'])
+        for cpu, rss in [(float('nan'), 1), (-1, 1), (0, 1), (1, 0), (1, '1024')]:
+            with self.assertRaises(RuntimeError):
+                throughput.parse_resources({'process_cpu_seconds': cpu, 'maximum_resident_bytes': rss})
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Linux wait4 RSS conversion')
+    def test_real_linux_child_resources_and_exit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / 'resources.json'
+            helper = str(Path(__file__).with_name('resource-time.py'))
+            result = subprocess.run([sys.executable, helper, str(output), sys.executable, '-c',
+                                     'import sys; sum(range(1000000)); sys.exit(7)'])
+            self.assertEqual(7, result.returncode)
+            usage = json.loads(output.read_text())
+            self.assertEqual(7, usage['exit_code'])
+            self.assertGreater(throughput.parse_resources(usage)['maximum_resident_bytes'], 1024 * 1024)
 
 
 class JfrSummaryTest(unittest.TestCase):

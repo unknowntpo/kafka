@@ -5,7 +5,8 @@ Implementation candidate: `37c6603a99` (behavior from `95095ac064`, comment-only
 baseline: `820533b870106cc0e0ac60e2076b8644d68bd85f`.
 Both use Java 17 on the same machine, with separate clean implementation classpaths.
 The baseline worktree is `kip-1371-acceptance-baseline`; only generated build outputs
-are written there. Do not publish or submit a remote benchmark from this workflow.
+are written there. The local runner never publishes or submits a remote benchmark.
+The separately authorized Jenkins entry point is described below.
 
 ## Predeclared measurement method
 
@@ -99,3 +100,44 @@ throughput/idle/first-record allowances passed. Throughput is nevertheless 1.95%
 lower and whole-process CPU time 6.71% higher; passing an allowance is not proof
 of no cost or statistical equivalence. Earlier NOP-logging/short results are kept
 separate. Full-dataset baseline/candidate profiles also completed successfully.
+
+## Authorized Jenkins paired throughput entry point
+
+`tests/kafkatest/tests/client/consumer_contract_benchmark_test.py::ConsumerContractBenchmarkTest.test_paired_throughput`
+is one Ducktape test, allocating one worker for both variants and its own loopback
+combined-KRaft broker. It does not use the old reactor A/B test or an existing cluster.
+The job revision must contain this entry point; candidate behavior remains pinned
+by the runner's client source-tree check. Baseline is the full SHA given above.
+`jenkins-entry.py` clones two isolated local checkouts from `/opt/kafka-dev`, builds
+both runtimes sequentially with UTF-8 and Java 17, and finishes compilation before timing.
+It requires 35 GiB free disk. Because Jenkins uses a shallow checkout, the baseline
+clone fetches only the pinned baseline SHA from `https://github.com/unknowntpo/kafka.git`.
+Candidate source is copied locally from the submitted checkout and checked against
+the pinned production tree hash. No push, retry or job mutation is performed by the
+entry point. Gradle may download its normal build dependencies.
+
+The fixed workload is 70,000,000 records × 256 bytes, four partitions, five alternating
+AB/BA pairs, subscription with `group.protocol=consumer`, auto-commit enabled, and
+the shipped `ConsumerPerformance` CLI. Two additional full-dataset JFR executions
+are diagnostic only. They are not added to the ten timed samples. This run targets
+the healthy-throughput CPU regression, not idle CPU, fault-triggered spin, or latency.
+
+Linux `resource-time.py` uses `wait4` on each individual Java child: user + system
+CPU seconds and maximum RSS (KiB converted to bytes). It excludes the Python wrapper,
+does not accumulate earlier JVMs, and propagates unsuccessful CLI exits. CPU still
+includes JVM startup, JIT and close; it is not fetch-only utilization. macOS retains
+its original `/usr/bin/time -l` path. Compare variants within one platform, not raw
+Linux and macOS CPU times as if interchangeable.
+
+The same duration/count/throughput gates apply. Short runs are inconclusive, not
+passes. There is no predeclared CPU acceptance gate: always report CPU deltas even
+if throughput is within 5%. One worker is not proof of exclusive physical-host use.
+Raw commands, classpath-content hashes, results, medians/MAD, RSS/CPU, JFR and safe
+folded stacks are collected by Ducktape. Only owned broker data and isolated build
+copies are removed after their processes stop; failed and partial receipts remain.
+
+Use `--test-runner-timeout 14400000` (four hours) in `TC_PATHS` so Ducktape's default
+30-minute watchdog cannot truncate preparation/measurement. Internal limits are
+one hour per runtime build and 90 minutes for workload/profiling. Do not change a
+Jenkins job-level timeout automatically if it is shorter; report that infrastructure
+limit. Submission requires its own exact preview and confirmation, exactly once.
