@@ -212,8 +212,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      *         retrieve any available responses
      *     </li>
      *     <li>
-     *         After a completed I/O batch, run one more full manager decision pass and stage its requests
-     *         for the next transport poll. Publish the application wait after these decisions.
+     *         Publish the application wait after response application. This ablation leaves follow-up
+     *         request admission to the next iteration's ordinary manager pass.
      *     </li>
      * </ol>
      */
@@ -243,16 +243,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         }
 
         final long afterIoTimeMs = time.milliseconds();
-        if (running && applicationEventQueue.isEmpty() && networkClientDelegate.completedRequestsInLastPoll()) {
-            // Exactly one full pass, after ALL callbacks return. Do not poll only the completing owner:
-            // a coordinator update may enable heartbeat and commit. Do not run I/O again or drain to a
-            // fixed point: follow-up completions belong to a subsequent batch. Transport attempts built
-            // here are retained with their captured context, even if a later input changes owner state.
-            // If close was observed at this boundary, leave further work to the existing cleanup path.
-            // Already queued application commands keep priority at the next input boundary. Commands
-            // arriving after this check belong to the next iteration, not an unbounded input drain.
-            pollAndStageRequests(afterIoTimeMs);
-        }
+        // Ablation experiment: admit follow-up work in the next ordinary manager pass.
+        // Keep response application and aggregate-wait publication unchanged.
         long maxTimeToWaitMs = Long.MAX_VALUE;
 
         for (RequestManager rm : requestManagers.entries()) {
