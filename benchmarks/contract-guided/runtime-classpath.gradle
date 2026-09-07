@@ -52,7 +52,6 @@ gradle.projectsEvaluated {
                 output.mkdirs()
                 // The distribution supplies the SLF4J binding through releaseOnly, not
                 // runtimeClasspath. Match that runtime rather than silently measuring NOP logging.
-                def releaseLibraries = project.configurations.findByName('releaseOnly')
                 def runtimeFiles = (project.sourceSets.main.runtimeClasspath.files +
                     (releaseLibraries == null ? [] : releaseLibraries.files)).toSet().findAll { path ->
                     if (path.exists()) {
