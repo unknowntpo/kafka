@@ -331,6 +331,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                     requestManagersSupplier,
                     asyncConsumerMetrics);
 
+            this.applicationEventHandler.setScheduleWakeup(fetchBuffer::wakeup);
             this.acknowledgementEventProcessor = new ShareAcknowledgementEventProcessor();
             this.backgroundEventProcessor = new BackgroundEventProcessor();
             this.backgroundEventReaper = backgroundEventReaperFactory.build(logContext);
@@ -442,6 +443,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                 requestManagersSupplier,
                 asyncConsumerMetrics);
 
+        this.applicationEventHandler.setScheduleWakeup(fetchBuffer::wakeup);
         this.acknowledgementEventProcessor = new ShareAcknowledgementEventProcessor();
         this.backgroundEventProcessor = new BackgroundEventProcessor();
         this.backgroundEventReaper = new CompletableEventReaper(logContext);

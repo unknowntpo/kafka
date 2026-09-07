@@ -1,0 +1,90 @@
+# Jenkins benchmark preparation (2026-09-07)
+
+## Submission gate correction after Jenkins 929
+
+Build 929 failed before tests at `:rat` because 26 Markdown files lacked ASF
+license headers. Its benchmark never ran. The checks recorded below were partial
+and were insufficient to establish submission readiness.
+
+The repair adds the missing headers and a bounded smoke profile to the actual
+source-preparation entry. Formal remains 70,000,000 records and five pairs; smoke
+uses 10,000 records and one pair, with separate JFR runs. Smoke validates plumbing,
+not performance acceptance.
+
+For the Ducktape smoke, keep the same test selector and use
+`--globals '{"contract_benchmark_profile":"smoke"}'`. Do not use `--parameters`
+for this switch: local discovery demonstrated that injection added a second case
+alongside the default formal case. Verify exactly one case and its preparation
+receipt's `profile` before proceeding. Without this global, formal remains default.
+
+Required local gates are an executed license audit in a normal disposable checkout,
+the Linux outer build, and the real Java 17 Ducktape/SSH entry through fresh baseline
+and candidate builds, broker I/O, artifact collection and cleanup. A linked Git
+worktree can skip `rat`; `BUILD SUCCESSFUL` alone is not proof of license validation.
+Receipts for this repair are under `/tmp/kip1371-local-ci-readiness`.
+No new Jenkins submission is authorized by these local checks.
+
+Fresh-source smoke also exposed a Gradle 9.7 configuration-ownership failure:
+the root export task tried to resolve `:tools:runtimeClasspath` without the owning
+project's lock. Runtime export now runs in one task per owning project; the root
+task only aggregates those tasks. This failure was not visible in the earlier
+smoke that reused compiled runtime classpaths.
+
+User authorized preparing the entry point, pushing only to `unknowntpo/kafka`, and
+one benchmark submission following an exact preview. No upstream, Jira or Confluence
+publication is part of this change. No Jenkins build has been submitted by this commit.
+
+## Validation
+
+- Existing local Linux image: `ducker-ak-docker.io/library/eclipse-temurin-17-jdk-jammy:latest`.
+- Network-disabled, read-only source mount: all 11 parser/JFR/resource tests passed.
+  The Linux test executes a real child, verifies nonzero RSS/CPU, and preserves exit 7.
+- Ducktape loads the new module and `--collect-only` selects exactly one Linux-worker
+  test using the proposed selector and `--test-runner-timeout 14400000` argument.
+  Initial discovery from a read-only working directory failed while creating
+  `.ducktape`; discovery from a writable temporary directory passed. No tests ran
+  during discovery.
+- Actual Linux fixture smoke: 10,000 records, one baseline/candidate JVM pair, two
+  separate JFR executions. Both timed JVMs read exactly 10,000 records; process CPU
+  and RSS were captured; profile result parsing and JFR summaries passed. The owned
+  topic was deleted, broker stopped, generated broker-data removed, receipts retained.
+  Receipt directory: `/tmp/kip1371-jenkins-preflight.JWRQo5/kip1371-throughput-1leatleb`.
+  `inconclusive-short` is the expected classification, not performance evidence.
+- Smoke reused existing compiled classpaths; it does NOT prove the fresh Linux
+  Gradle-build wrapper end to end. That preparation is part of the Jenkins execution.
+- Prior Jenkins build 926 console confirms depth=1 checkout. The new entry fetches
+  only the immutable baseline into its disposable clone and validates candidate
+  source by the pinned Git tree hash; it does not assume ancestor objects exist.
+- Reviewed pipeline revision `0341b9cdb923c604353334da451d4cbf6de72ca1` from
+  `opensource4you/clip`, `kafka/kafka_e2e.pipeline`: Java 17 worker image, throttle
+  category `kafka_one_per_node`, no explicit job timeout in that historical source.
+  Current job configuration API returned 403; do not claim that historical source
+  establishes the current global timeout. Build failures/limits must remain visible.
+- Final parser arguments contain a plain test selector plus a numeric timeout, no
+  nested JSON. Reviewed `run_tests.sh` and `ducker-ak` forwarding: selector and option
+  reach Ducktape in the same form verified by its real collector.
+
+## Interpretation
+
+This is the same healthy subscribed auto-commit workload as the local +6.71% CPU
+observation. It measures the cost, not the root cause. Additional polling, allocation,
+JIT or host contention remain hypotheses until supported by the new profiles or a
+controlled follow-up. A throughput gate pass must not hide a CPU increase.
+The single job contains five paired baseline/candidate runs on one worker, not two
+separate Jenkins jobs and not the old centralized-reactor benchmark.
+<!--
+Licensed to the Apache Software Foundation (ASF) under one or more
+contributor license agreements. See the NOTICE file distributed with
+this work for additional information regarding copyright ownership.
+The ASF licenses this file to You under the Apache License, Version 2.0
+(the "License"); you may not use this file except in compliance with
+the License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->

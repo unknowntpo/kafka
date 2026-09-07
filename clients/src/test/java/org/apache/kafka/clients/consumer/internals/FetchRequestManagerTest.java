@@ -144,6 +144,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -375,6 +376,73 @@ public class FetchRequestManagerTest {
         fetcher.fetchBuffer.wakeup();
         blockedOnBuffer.join(2_000);
         assertFalse(blockedOnBuffer.isAlive());
+    }
+
+    @Test
+    public void testCancellingPreparationWaitDoesNotCancelSharedWork() {
+        assertPreparationObserverMutationIsLocal(future -> future.cancel(false));
+    }
+
+    @Test
+    public void testTimingOutPreparationWaitDoesNotFailSharedWork() {
+        // Model the completion performed by orTimeout without a scheduler/timing race.
+        assertPreparationObserverMutationIsLocal(future -> future.completeExceptionally(
+                new java.util.concurrent.TimeoutException("this caller stopped waiting")));
+    }
+
+    @Test
+    public void testCompletingPreparationWaitCannotCompleteOtherWaiters() {
+        assertPreparationObserverMutationIsLocal(future -> future.complete(null));
+    }
+
+    private void assertPreparationObserverMutationIsLocal(java.util.function.Consumer<CompletableFuture<Void>> mutate) {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        CompletableFuture<Void> first = fetcher.createFetchRequests();
+        CompletableFuture<Void> second = fetcher.createFetchRequests();
+        mutate.accept(first);
+        CompletableFuture<Void> third = fetcher.createFetchRequests();
+
+        assertTrue(first.isDone());
+        assertFalse(second.isDone(), "one caller must not settle another caller's preparation wait");
+        assertFalse(third.isDone(), "a later caller must still wait for actual preparation");
+        assertEquals(1, sendFetches(false));
+        second.join();
+        third.join();
+        assertEquals(0, sendFetches(false), "the shared work is prepared only once");
+    }
+
+    @Test
+    public void testPreparationObserversReceiveOriginalOwnerError() {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        AuthenticationException error = new AuthenticationException("preparation failure");
+        fetcher.setAuthenticationException(error);
+        CompletableFuture<Throwable> firstError = fetcher.createFetchRequests().handle((ignored, failure) -> failure);
+        CompletableFuture<Throwable> secondError = fetcher.createFetchRequests().handle((ignored, failure) -> failure);
+
+        assertEquals(0, sendFetches(false));
+        assertSame(error, firstError.join());
+        assertSame(error, secondError.join());
+    }
+
+    @Test
+    public void testReentrantPreparationRemainsANewOperation() {
+        buildFetcher();
+        var first = fetcher.createFetchRequests();
+        var next = first.thenApply(ignored -> fetcher.createFetchRequests());
+        var failedObserver = first.thenRun(() -> {
+            throw new IllegalStateException("observer failed");
+        });
+        fetcher.poll(time.milliseconds());
+        assertTrue(first.isDone());
+        assertFalse(first.isCompletedExceptionally());
+        assertTrue(failedObserver.isCompletedExceptionally(), "a failed dependent must not lose another operation");
+        assertFalse(next.join().isDone(), "a request submitted by completion must not inherit the already completed operation");
+        fetcher.poll(time.milliseconds());
+        assertTrue(next.join().isDone());
     }
 
     @Test
@@ -4386,6 +4454,7 @@ public class FetchRequestManagerTest {
     private class TestableFetchRequestManager<K, V> extends FetchRequestManager {
 
         private final FetchCollector<K, V> fetchCollector;
+        private final FetchBuffer fetchBuffer;
         private AuthenticationException authenticationException;
 
         public TestableFetchRequestManager(LogContext logContext,
@@ -4399,7 +4468,8 @@ public class FetchRequestManagerTest {
                                            FetchCollector<K, V> fetchCollector,
                                            ApiVersions apiVersions,
                                            long retryBackoffMs) {
-            super(logContext, time, metadata, subscriptions, fetchConfig, fetchBuffer, metricsManager, networkClientDelegate, apiVersions, retryBackoffMs);
+            super(logContext, time, metadata, subscriptions, fetchConfig, new FetchBufferProducer(fetchBuffer), metricsManager, networkClientDelegate, apiVersions, retryBackoffMs);
+            this.fetchBuffer = fetchBuffer;
             this.fetchCollector = fetchCollector;
         }
 

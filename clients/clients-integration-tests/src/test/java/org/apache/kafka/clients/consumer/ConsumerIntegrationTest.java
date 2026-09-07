@@ -26,8 +26,10 @@ import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
+import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -52,11 +54,88 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class ConsumerIntegrationTest {
+
+    @ClusterTest(serverProperties = {
+        @ClusterConfigProperty(key = "offsets.topic.num.partitions", value = "1"),
+        @ClusterConfigProperty(key = "offsets.topic.replication.factor", value = "1")
+    })
+    public void testAsyncConsumerAcknowledgesWakeupFromAssignmentCallback(ClusterInstance cluster) throws Exception {
+        verifyCallbackFailureAcknowledged(cluster, WakeupException::new);
+    }
+
+    @ClusterTest(serverProperties = {
+        @ClusterConfigProperty(key = "offsets.topic.num.partitions", value = "1"),
+        @ClusterConfigProperty(key = "offsets.topic.replication.factor", value = "1")
+    })
+    public void testAsyncConsumerAcknowledgesInterruptFromAssignmentCallback(ClusterInstance cluster) throws Exception {
+        verifyCallbackFailureAcknowledged(cluster, () -> new InterruptException("injected callback interruption"));
+    }
+
+    private static void verifyCallbackFailureAcknowledged(ClusterInstance cluster, Supplier<KafkaException> failureFactory) throws Exception {
+        String topic = "callback-acknowledgement";
+        cluster.createTopic(topic, 1, (short) 1);
+        try (var producer = cluster.producer(Map.of(
+            ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class,
+            ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class))) {
+            producer.send(new ProducerRecord<>(topic, new byte[] {1}, new byte[] {2})).get(10, TimeUnit.SECONDS);
+        }
+        AtomicInteger assignmentCallbacks = new AtomicInteger();
+        AtomicBoolean failureObserved = new AtomicBoolean();
+        AtomicReference<KafkaException> injectedFailure = new AtomicReference<>();
+        try (var consumer = cluster.consumer(Map.of(
+            ConsumerConfig.GROUP_ID_CONFIG, "callback-acknowledgement-group",
+            ConsumerConfig.GROUP_PROTOCOL_CONFIG, GroupProtocol.CONSUMER.name(),
+            ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest",
+            ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false))) {
+            consumer.subscribe(List.of(topic), new ConsumerRebalanceListener() {
+                @Override
+                public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+                }
+
+                @Override
+                public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+                    if (assignmentCallbacks.incrementAndGet() == 1) {
+                        // Construct here: InterruptException sets the current thread's interrupt flag.
+                        KafkaException failure = failureFactory.get();
+                        injectedFailure.set(failure);
+                        throw failure;
+                    }
+                }
+            });
+            // A failed callback must be acknowledged before poll throws. Otherwise the real membership
+            // manager stays in reconciliation and this later public poll cannot recover and deliver data.
+            TestUtils.waitForCondition(() -> {
+                try {
+                    var records = consumer.poll(Duration.ofMillis(100));
+                    if (records.isEmpty())
+                        return false;
+                    assertTrue(failureObserved.get(), "no delivery before the failed callback is observed");
+                    assertEquals(1, records.count());
+                    assertEquals(0, records.iterator().next().offset());
+                    return true;
+                } catch (WakeupException | InterruptException error) {
+                    // The application explicitly handles the interruption before choosing to poll again.
+                    if (error instanceof InterruptException)
+                        Thread.interrupted();
+                    assertSame(injectedFailure.get(), error);
+                    assertTrue(failureObserved.compareAndSet(false, true), "the injected failure is surfaced once");
+                    return false;
+                }
+            }, 30_000, "failed callback acknowledgement must allow reconciliation and delivery to resume");
+            assertTrue(assignmentCallbacks.get() >= 2, "assignment callback is retried successfully");
+        }
+    }
 
     @ClusterTests({
         @ClusterTest(serverProperties = {

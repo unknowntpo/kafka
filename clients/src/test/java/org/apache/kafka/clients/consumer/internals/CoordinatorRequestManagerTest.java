@@ -255,9 +255,14 @@ public class CoordinatorRequestManagerTest {
 
         NetworkClientDelegate.PollResult res2 = coordinatorManager.poll(time.milliseconds());
         assertEquals(0, res2.unsentRequests.size(), "no new request should be sent while one is in flight");
+        assertEquals(NextPollCondition.Input.NETWORK_COMPLETION, res.nextPollCondition().input());
+        assertEquals(NextPollCondition.Input.NETWORK_COMPLETION, res2.nextPollCondition().input());
         assertTrue(res2.timeUntilNextPollMs > 0,
             "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got "
                 + res2.timeUntilNextPollMs);
+        res.unsentRequests.get(0).handler().onComplete(buildResponse(res.unsentRequests.get(0), Errors.NONE));
+        assertEquals(NextPollCondition.Input.COORDINATOR_CHANGE,
+            coordinatorManager.poll(time.milliseconds()).nextPollCondition().input());
     }
 
     @ParameterizedTest
@@ -297,6 +302,23 @@ public class CoordinatorRequestManagerTest {
             RETRY_BACKOFF_MS,
             groupId
         );
+    }
+
+    @Test
+    public void testDelayedObservationCannotInvalidateRediscoveredSameNode() {
+        CoordinatorRequestManager owner = setupCoordinatorManager(GROUP_ID);
+        expectFindCoordinatorRequest(owner, Errors.NONE);
+        long capturedVersion = owner.coordinatorVersion();
+        Node capturedNode = owner.coordinator().orElseThrow();
+        assertTrue(owner.markCoordinatorUnknownIfCurrent("current observation", time.milliseconds(), capturedVersion));
+        time.sleep(RETRY_BACKOFF_MS);
+        expectFindCoordinatorRequest(owner, Errors.NONE);
+        assertEquals(capturedNode, owner.coordinator().orElseThrow(), "even rediscovery of the same node is a new attempt context");
+        assertTrue(owner.coordinatorVersion() > capturedVersion);
+        assertFalse(owner.markCoordinatorUnknownIfCurrent("late observation", time.milliseconds(), capturedVersion));
+        assertTrue(owner.coordinator().isPresent());
+        assertTrue(owner.markCoordinatorUnknownIfCurrent("new observation", time.milliseconds(), owner.coordinatorVersion()));
+        assertTrue(owner.coordinator().isEmpty());
     }
 
     private ClientResponse buildResponse(

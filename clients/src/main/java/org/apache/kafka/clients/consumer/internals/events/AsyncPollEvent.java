@@ -24,6 +24,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.utils.Time;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -38,13 +39,15 @@ import java.util.concurrent.CompletableFuture;
  *
  * {@link AsyncKafkaConsumer#poll(Duration)} is implemented using a non-blocking design to ensure performance is
  * at the same level as {@link ClassicKafkaConsumer#poll(Duration)}. The event is submitted in {@code poll()}, but
- * there are no blocking waits for the "result" of the event. Checks are made for the result at certain points, but
- * they do not block. The logic for the previously-mentioned events is executed sequentially on the background thread.
+ * there is no blocking wait for the final network result. Before collecting records, the application may wait
+ * for the narrower reconciliation/auto-commit capture checkpoint. The logic for the previously-mentioned
+ * events is executed sequentially on the background thread.
  */
 public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNotifiableEvent {
 
     private final long deadlineMs;
     private final long pollTimeMs;
+    private final Runnable errorNotification;
     private volatile KafkaException error;
     private volatile boolean isComplete;
     private volatile boolean isValidatePositionsComplete;
@@ -58,9 +61,14 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
      * @param pollTimeMs        Time, in milliseconds, at which point the event was created
      */
     public AsyncPollEvent(long deadlineMs, long pollTimeMs) {
+        this(deadlineMs, pollTimeMs, () -> { });
+    }
+
+    public AsyncPollEvent(long deadlineMs, long pollTimeMs, Runnable errorNotification) {
         super(Type.ASYNC_POLL);
         this.deadlineMs = deadlineMs;
         this.pollTimeMs = pollTimeMs;
+        this.errorNotification = Objects.requireNonNull(errorNotification);
     }
 
     public long deadlineMs() {
@@ -89,7 +97,8 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
 
     /**
      * @return the future that completes when the background thread has checked any pending reconciliation
-     * for this poll event. Once complete, revocations have been handled (commit triggered and partitions
+     * for this poll event and captured any due periodic auto-commit offsets.
+     * Once complete, revocations have been handled (commit triggered and partitions
      * marked as pending revocation), so the app thread can safely proceed to fetch/collect records.
      */
     public CompletableFuture<Void> reconciliationCheckFuture() {
@@ -97,7 +106,7 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
     }
 
     /**
-     * @return true if the background already checked any pending reconciliation when processing this poll event.
+     * @return true if the background checked pending reconciliation and periodic auto-commit capture for this poll event.
      * If it completed the check, we know that revocations were handled (commit triggered and partitions marked as pending revocation),
      * so the app thread can safely proceed to fetch/collect records.
      */
@@ -106,8 +115,8 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
     }
 
     /**
-     * Mark that reconciliation check is complete for this poll event.
-     * This should be called after the background has checked pending reconciliations when processing this poll event
+     * Mark that reconciliation and periodic auto-commit capture are complete for this poll event.
+     * This should be called after the background has captured periodic commit offsets and checked pending reconciliations
      * (triggered commits, and marked partitions as pending revocation if needed)
      */
     public void markReconciliationCheckComplete() {
@@ -119,17 +128,19 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
     }
 
     public void completeSuccessfully() {
+        isComplete = true;
         // Complete reconciliation future as safety net in case it wasn't already marked complete
         reconciliationCheckFuture.complete(null);
-        isComplete = true;
     }
 
     public void completeExceptionally(KafkaException e) {
-        // Complete reconciliation future to unblock any waiters - the error will be surfaced
-        // through the normal checkInflightPoll() mechanism via the error field
-        reconciliationCheckFuture.complete(null);
         error = e;
         isComplete = true;
+        // Complete reconciliation future to unblock any waiters - the error will be surfaced
+        // through checkInflightPoll(). Publish before completing: future dependents can run inline.
+        reconciliationCheckFuture.complete(null);
+        // The application may already have crossed into its buffer wait. The buffer owns latching.
+        errorNotification.run();
     }
 
     @Override

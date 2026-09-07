@@ -731,13 +731,13 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
         requestManagers.consumerMembershipManager.ifPresent(consumerMembershipManager ->
             consumerMembershipManager.maybeReconcile(true));
 
-        // We completed checking pending reconciliations (commits triggered, revoked partitions marked to prevent fetching)
-        // so the application thread poll loop can safely continue progress now (fetching)
-        event.markReconciliationCheckComplete();
-
         if (requestManagers.commitRequestManager.isPresent()) {
             CommitRequestManager commitRequestManager = requestManagers.commitRequestManager.get();
             commitRequestManager.updateTimerAndMaybeCommit(event.pollTimeMs());
+
+            // Capture periodic commit offsets before releasing collection, not just rebalance commits.
+            // This is snapshot readiness, not acknowledgement from the broker.
+            event.markReconciliationCheckComplete();
 
             requestManagers.consumerHeartbeatRequestManager.ifPresent(hrm -> {
                 ConsumerMembershipManager membershipManager = hrm.membershipManager();
@@ -751,22 +751,40 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
                 membershipManager.onConsumerPoll();
                 hrm.resetPollTimer(event.pollTimeMs());
             });
+        } else {
+            event.markReconciliationCheckComplete();
         }
 
         CompletableFuture<Void> updatePositionsFuture = requestManagers.offsetsRequestManager.updateFetchPositions(event.deadlineMs());
         event.markValidatePositionsComplete();
 
         updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
+            // A metadata error may have already ended this event while position work was pending.
+            if (event.isComplete())
+                return;
             if (maybeCompleteAsyncPollEventExceptionally(event, updatePositionsError))
                 return;
 
-            requestManagers.fetchRequestManager.createFetchRequests().whenComplete((___, fetchError) -> {
+            createFetchRequestsForAsyncPoll().whenComplete((___, fetchError) -> {
+                if (event.isComplete())
+                    return;
                 if (maybeCompleteAsyncPollEventExceptionally(event, fetchError))
                     return;
 
                 event.completeSuccessfully();
             });
         });
+    }
+
+    private CompletableFuture<Void> createFetchRequestsForAsyncPoll() {
+        try {
+            return requestManagers.fetchRequestManager.createFetchRequests();
+        } catch (Throwable t) {
+            // This call runs inside a future continuation. A synchronous rejection must follow the
+            // same error/publication path as an exceptional result, not disappear into an ignored
+            // dependent future. Preserve the original cause for the existing timeout classification.
+            return CompletableFuture.failedFuture(t);
+        }
     }
 
     /**

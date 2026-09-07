@@ -20,6 +20,7 @@ import org.apache.kafka.clients.KafkaClient;
 import org.apache.kafka.clients.NetworkClient;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
@@ -83,7 +84,12 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
     private volatile long cachedMaximumTimeToWait = MAX_POLL_TIMEOUT_MS;
+    private volatile Runnable scheduleWakeup = () -> { };
+    private long applicationWaitDeadlineMs = Long.MAX_VALUE;
     private long lastPollTimeMs = 0L;
+    // AsyncPollEvent is not a CompletableEvent, but still needs metadata errors after admission.
+    // Network-thread confined; retain each live dependent, never only the latest event.
+    private final List<AsyncPollEvent> pendingAsyncPolls = new ArrayList<>();
 
     public ConsumerNetworkThread(LogContext logContext,
                                  Time time,
@@ -205,6 +211,10 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      *         Poll the client via {@link KafkaClient#poll(long, long)} to send the requests, as well as
      *         retrieve any available responses
      *     </li>
+     *     <li>
+     *         After a completed I/O batch, run one more full manager decision pass and stage its requests
+     *         for the next transport poll. Publish the application wait after these decisions.
+     *     </li>
      * </ol>
      */
     void runOnce() {
@@ -217,28 +227,72 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         }
         lastPollTimeMs = currentTimeMs;
 
-        long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
+        long pollWaitTimeMs = pollAndStageRequests(currentTimeMs);
 
+        // Inline delivery is the default; the optional batch delivers owner responses after I/O.
+        // In either mode, continuations must not build/send follow-up requests recursively.
+        // Requests admitted before this batch retain their captured attempt context; do not discard
+        // transport work after its manager has reserved an in-flight attempt.
+        networkClientDelegate.beginResponseBatch();
+        try {
+            networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
+        } finally {
+            // Response application is not the optional post-I/O request-building pass below.
+            // Already observed results must run even with queued application inputs or shutdown.
+            networkClientDelegate.completeResponseBatch();
+        }
+
+        final long afterIoTimeMs = time.milliseconds();
+        if (running && applicationEventQueue.isEmpty() && networkClientDelegate.completedRequestsInLastPoll()) {
+            // Exactly one full pass, after ALL callbacks return. Do not poll only the completing owner:
+            // a coordinator update may enable heartbeat and commit. Do not run I/O again or drain to a
+            // fixed point: follow-up completions belong to a subsequent batch. Transport attempts built
+            // here are retained with their captured context, even if a later input changes owner state.
+            // If close was observed at this boundary, leave further work to the existing cleanup path.
+            // Already queued application commands keep priority at the next input boundary. Commands
+            // arriving after this check belong to the next iteration, not an unbounded input drain.
+            pollAndStageRequests(afterIoTimeMs);
+        }
+        long maxTimeToWaitMs = Long.MAX_VALUE;
+
+        for (RequestManager rm : requestManagers.entries()) {
+            long waitMs = rm.maximumTimeToWait(afterIoTimeMs);
+            maxTimeToWaitMs = Math.min(maxTimeToWaitMs, waitMs);
+        }
+
+        cachedMaximumTimeToWait = maxTimeToWaitMs;
+        long nextDeadlineMs = maxTimeToWaitMs > Long.MAX_VALUE - afterIoTimeMs
+            ? Long.MAX_VALUE : afterIoTimeMs + maxTimeToWaitMs;
+        boolean earlierDeadline = nextDeadlineMs < applicationWaitDeadlineMs;
+        applicationWaitDeadlineMs = nextDeadlineMs;
+        // A waiter may already have entered its old wait. Publish first, then latch a notification
+        // only when an input moves the bound earlier, not on every unchanged manager poll.
+        if (earlierDeadline)
+            scheduleWakeup.run();
+
+        reapExpiredApplicationEvents(currentTimeMs);
+        pendingAsyncPolls.removeIf(event -> event.isComplete() ||
+                (event.isValidatePositionsComplete() && event.isExpired(time)));
+        List<Object> uncompletedEvents = new ArrayList<>(applicationEventReaper.uncompletedEvents());
+        uncompletedEvents.addAll(pendingAsyncPolls);
+        maybeFailOnMetadataError(uncompletedEvents);
+        pendingAsyncPolls.removeIf(AsyncPollEvent::isComplete);
+    }
+
+    private long pollAndStageRequests(long currentTimeMs) {
+        long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
+        // Execute the configured order in both pre- and post-I/O passes. It carries
+        // read-before-consume contracts; a completion is not permission to poll only its owner.
         for (RequestManager rm : requestManagers.entries()) {
             NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
             long timeoutMs = networkClientDelegate.addAll(pollResult);
             pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
         }
+        return pollWaitTimeMs;
+    }
 
-        networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
-
-        long maxTimeToWaitMs = Long.MAX_VALUE;
-
-        for (RequestManager rm : requestManagers.entries()) {
-            long waitMs = rm.maximumTimeToWait(currentTimeMs);
-            maxTimeToWaitMs = Math.min(maxTimeToWaitMs, waitMs);
-        }
-
-        cachedMaximumTimeToWait = maxTimeToWaitMs;
-
-        reapExpiredApplicationEvents(currentTimeMs);
-        List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
-        maybeFailOnMetadataError(uncompletedEvents);
+    public void setScheduleWakeup(Runnable scheduleWakeup) {
+        this.scheduleWakeup = Objects.requireNonNull(scheduleWakeup);
     }
 
     /**
@@ -265,11 +319,15 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
                     if (maybeFailOnMetadataError(List.of(event)))
                         continue;
                 }
+                if (event instanceof AsyncPollEvent)
+                    pendingAsyncPolls.add((AsyncPollEvent) event);
                 applicationEventProcessor.process(event);
             } catch (Throwable t) {
                 log.error("Error processing event {}", t.getMessage(), t);
                 if (event instanceof CompletableEvent) {
                     ((CompletableEvent<?>) event).future().completeExceptionally(t);
+                } else if (event instanceof AsyncPollEvent) {
+                    ((AsyncPollEvent) event).completeExceptionally(ConsumerUtils.maybeWrapAsKafkaException(t));
                 }
             }
         }
@@ -431,6 +489,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
 
             closeQuietly(requestManagers, "request managers");
             closeQuietly(networkClientDelegate, "network client delegate");
+            pendingAsyncPolls.clear();
             log.debug("Closed the consumer network thread");
         }
     }

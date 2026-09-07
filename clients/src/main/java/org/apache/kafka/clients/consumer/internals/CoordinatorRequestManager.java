@@ -30,10 +30,10 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.slf4j.Logger;
 
+import java.util.Collections;
 import java.util.Objects;
 import java.util.Optional;
 
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
  * This is responsible for timing to send the next {@link FindCoordinatorRequest} based on the following criteria:
@@ -48,7 +48,7 @@ import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.
  * subsequently invokes {@code onResponse} to handle the exception and response. Note that the coordinator node will be
  * marked {@code null} upon receiving a failure.
  */
-public class CoordinatorRequestManager implements RequestManager {
+public class CoordinatorRequestManager implements RequestManager, CoordinatorAccess {
     private static final long COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS = 60 * 1000;
     private final Logger log;
     private final String groupId;
@@ -58,6 +58,7 @@ public class CoordinatorRequestManager implements RequestManager {
     private long totalDisconnectedMin = 0;
     private boolean closing = false;
     private Node coordinator;
+    private long coordinatorVersion;
     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
     // appropriate actions. 
     // For example:
@@ -99,22 +100,22 @@ public class CoordinatorRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
-        if (closing || this.coordinator != null)
-            return EMPTY;
+        NextPollCondition activation = nextPollCondition(currentTimeMs);
+        if (activation.kind() == NextPollCondition.Kind.AWAIT_INPUT || activation.delayMs() > 0)
+            return new NetworkClientDelegate.PollResult(activation);
 
-        if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
-            NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(request);
-        }
+        NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
+        return new NetworkClientDelegate.PollResult(nextPollCondition(currentTimeMs), Collections.singletonList(request));
+    }
 
-        // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
-        // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
-        // backoff
-        if (coordinatorRequestState.requestInFlight()) {
-            return EMPTY;
-        }
-
-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+    private NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (closing)
+            return NextPollCondition.awaitInput(NextPollCondition.Input.SHUTDOWN);
+        if (coordinator != null)
+            return NextPollCondition.awaitInput(NextPollCondition.Input.COORDINATOR_CHANGE);
+        if (coordinatorRequestState.requestInFlight())
+            return NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION);
+        return NextPollCondition.retryAfter(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {
@@ -153,6 +154,27 @@ public class CoordinatorRequestManager implements RequestManager {
         }
     }
 
+    /** Owner-local identity, unrelated to the Kafka group/member epoch. Read on the network thread. */
+    @Override
+    public long coordinatorVersion() {
+        return coordinatorVersion;
+    }
+
+    @Override
+    public void handleCoordinatorDisconnect(Throwable exception, long currentTimeMs, long observedVersion) {
+        if (exception instanceof DisconnectException)
+            markCoordinatorUnknownIfCurrent(exception.getMessage(), currentTimeMs, observedVersion);
+    }
+
+    /** Validate an observation from a captured attempt; still complete that attempt's own outcome normally. */
+    @Override
+    public boolean markCoordinatorUnknownIfCurrent(String cause, long currentTimeMs, long observedVersion) {
+        if (observedVersion != coordinatorVersion)
+            return false;
+        markCoordinatorUnknown(cause, currentTimeMs);
+        return true;
+    }
+
     /**
      * Mark the coordinator as "unknown" (i.e. {@code null}) when a disconnect is detected. This detection can occur
      * in one of two paths:
@@ -178,6 +200,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 cause
             );
             coordinator = null;
+            coordinatorVersion++;
         } else {
             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
             long currDisconnectMin = durationOfOngoingDisconnectMs / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
@@ -192,10 +215,13 @@ public class CoordinatorRequestManager implements RequestManager {
         final long currentTimeMs,
         final FindCoordinatorResponseData.Coordinator coordinator
     ) {
-        this.coordinator = new GroupCoordinatorNode(
+        Node discovered = new GroupCoordinatorNode(
                 coordinator.nodeId(),
                 coordinator.host(),
                 coordinator.port());
+        if (!discovered.equals(this.coordinator))
+            coordinatorVersion++;
+        this.coordinator = discovered;
         log.info("Discovered group coordinator {}", coordinator);
         coordinatorRequestState.onSuccessfulAttempt(currentTimeMs);
     }
@@ -253,6 +279,7 @@ public class CoordinatorRequestManager implements RequestManager {
      *
      * @return the current coordinator node.
      */
+    @Override
     public Optional<Node> coordinator() {
         return Optional.ofNullable(this.coordinator);
     }
@@ -263,6 +290,7 @@ public class CoordinatorRequestManager implements RequestManager {
         return fatalError;
     }
 
+    @Override
     public Optional<Throwable> fatalError() {
         return fatalError;
     }

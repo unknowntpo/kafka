@@ -52,12 +52,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                         final ConsumerMetadata metadata,
                         final SubscriptionState subscriptions,
                         final FetchConfig fetchConfig,
-                        final FetchBuffer fetchBuffer,
+                        final FetchBufferProducer bufferProducer,
                         final FetchMetricsManager metricsManager,
                         final NetworkClientDelegate networkClientDelegate,
                         final ApiVersions apiVersions,
                         final long retryBackoffMs) {
-        super(logContext, metadata, subscriptions, fetchConfig, fetchBuffer, metricsManager, time, apiVersions);
+        super(logContext, metadata, subscriptions, fetchConfig, bufferProducer, metricsManager, time, apiVersions);
         this.networkClientDelegate = networkClientDelegate;
         this.retryBackoffMs = retryBackoffMs;
     }
@@ -81,34 +81,32 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return nodesWithPendingFetchRequests.isEmpty() ? retryBackoffMs : Long.MAX_VALUE;
+        return hasPendingFetchRequests() ? Long.MAX_VALUE : retryBackoffMs;
     }
 
     /**
      * Signals the {@link Consumer} wants requests be created for the broker nodes to fetch the next
      * batch of records.
+     * Each caller gets its own observation future. Cancelling or completing that future only ends that
+     * caller's wait; it does not cancel the shared preparation or settle another caller's future.
      *
      * @see CreateFetchRequestsEvent
      * @return Future on which the caller can wait to ensure that the requests have been created
      */
     public CompletableFuture<Void> createFetchRequests() {
-        CompletableFuture<Void> future = new CompletableFuture<>();
+        if (pendingFetchRequestFuture == null)
+            pendingFetchRequestFuture = new CompletableFuture<>();
 
-        if (pendingFetchRequestFuture != null) {
-            // In this case, we have an outstanding fetch request, so chain the newly created future to be
-            // completed when the "pending" future is completed.
-            pendingFetchRequestFuture.whenComplete((value, exception) -> {
-                if (exception != null) {
-                    future.completeExceptionally(exception);
-                } else {
-                    future.complete(value);
-                }
-            });
-        } else {
-            pendingFetchRequestFuture = future;
-        }
-
-        return future;
+        // Never expose the owner future, including to the first caller. Relay the original exception
+        // unchanged: some application-event paths classify timeouts before unwrapping CompletionException.
+        CompletableFuture<Void> observer = new CompletableFuture<>();
+        pendingFetchRequestFuture.whenComplete((value, exception) -> {
+            if (exception != null)
+                observer.completeExceptionally(exception);
+            else
+                observer.complete(value);
+        });
+        return observer;
     }
 
     /**
@@ -157,18 +155,18 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             return PollResult.EMPTY;
         }
 
+        // Detach the selected operation before releasing any completion. An inline dependent may
+        // submit another preparation; it must neither inherit this result nor be cleared afterwards.
+        CompletableFuture<Void> completion = pendingFetchRequestFuture;
+        pendingFetchRequestFuture = null;
+
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
 
             if (fetchRequests.isEmpty()) {
-                if (result.canWakeBufferIfNoFetchRequestsToSend()) {
-                    // If there's nothing to fetch because every fetchable partition already has buffered data,
-                    // wake up the FetchBuffer so it doesn't needlessly wait for a wakeup that won't come until
-                    // the data in the fetch buffer is consumed.
-                    fetchBuffer.wakeup();
-                }
-                pendingFetchRequestFuture.complete(null);
+                finishFetchPreparation(result);
+                completion.complete(null);
                 return PollResult.EMPTY;
             }
 
@@ -186,16 +184,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
             }).collect(Collectors.toList());
 
-            pendingFetchRequestFuture.complete(null);
+            completion.complete(null);
             return new PollResult(requests);
         } catch (Throwable t) {
             // A "dummy" poll result is returned here rather than rethrowing the error because any error
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
-            pendingFetchRequestFuture.completeExceptionally(t);
+            completion.completeExceptionally(t);
             return PollResult.EMPTY;
-        } finally {
-            pendingFetchRequestFuture = null;
         }
     }
 

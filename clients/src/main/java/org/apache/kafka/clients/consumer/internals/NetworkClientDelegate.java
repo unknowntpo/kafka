@@ -54,6 +54,7 @@ import java.util.Optional;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
@@ -75,6 +76,9 @@ public class NetworkClientDelegate implements AutoCloseable {
     private Optional<Exception> metadataError;
     private final boolean notifyMetadataErrorsViaErrorQueue;
     private boolean bootstrapErrorPropagated = false;
+    private boolean completedRequestsInLastPoll;
+    private Queue<ResponseCompletion> responseBatch;
+    private boolean responseBatchingEnabled;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
     public NetworkClientDelegate(
@@ -159,16 +163,30 @@ public class NetworkClientDelegate implements AutoCloseable {
      * @param onClose       True when the network thread is closing.
      */
     public void poll(final long timeoutMs, final long currentTimeMs, boolean onClose) {
+        completedRequestsInLastPoll = false;
         trySend(currentTimeMs);
 
         long pollTimeoutMs = timeoutMs;
         if (!unsentRequests.isEmpty()) {
             pollTimeoutMs = Math.min(retryBackoffMs, pollTimeoutMs);
         }
-        this.client.poll(pollTimeoutMs, currentTimeMs);
+        // A send-time failure is already a ready result. Do not block before returning it to its owner.
+        if (responseBatch != null && !responseBatch.isEmpty())
+            pollTimeoutMs = 0;
+        if (!this.client.poll(pollTimeoutMs, currentTimeMs).isEmpty())
+            completedRequestsInLastPoll = true;
         maybePropagateMetadataError();
         checkDisconnects(currentTimeMs, onClose);
         asyncConsumerMetrics.recordUnsentRequestsQueueSize(unsentRequests.size(), currentTimeMs);
+    }
+
+    /**
+     * Whether the last poll delivered responses or failed queued requests. Read only after poll returns:
+     * synchronous completion callbacks must finish before the next manager decision pass. This is a
+     * network-thread-local batch marker, not a count, event queue, or subscription to individual owners.
+     */
+    boolean completedRequestsInLastPoll() {
+        return completedRequestsInLastPoll;
     }
 
     private void maybePropagateMetadataError() {
@@ -213,6 +231,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             unsent.timer.update(currentTimeMs);
             if (unsent.timer.isExpired()) {
                 iterator.remove();
+                completedRequestsInLastPoll = true;
                 asyncConsumerMetrics.recordUnsentRequestsQueueTime(time.milliseconds() - unsent.enqueueTimeMs());
                 unsent.handler.onFailure(currentTimeMs, new TimeoutException(
                     "Failed to send request after " + unsent.timer.timeoutMs() + " ms."));
@@ -252,12 +271,14 @@ public class NetworkClientDelegate implements AutoCloseable {
             UnsentRequest u = iter.next();
             if (u.node.isPresent() && client.connectionFailed(u.node.get())) {
                 iter.remove();
+                completedRequestsInLastPoll = true;
                 asyncConsumerMetrics.recordUnsentRequestsQueueTime(time.milliseconds() - u.enqueueTimeMs());
                 AuthenticationException authenticationException = client.authenticationException(u.node.get());
                 u.handler.onFailure(currentTimeMs, authenticationException);
             } else if (u.node.isEmpty() && onClose) {
                 log.debug("Removing unsent request {} because the client is closing", u);
                 iter.remove();
+                completedRequestsInLastPoll = true;
                 asyncConsumerMetrics.recordUnsentRequestsQueueTime(time.milliseconds() - u.enqueueTimeMs());
                 u.handler.onFailure(currentTimeMs, Errors.NETWORK_EXCEPTION.exception());
             }
@@ -308,7 +329,7 @@ public class NetworkClientDelegate implements AutoCloseable {
     public long addAll(PollResult pollResult) {
         Objects.requireNonNull(pollResult);
         addAll(pollResult.unsentRequests);
-        return pollResult.timeUntilNextPollMs;
+        return pollResult.nextPollCondition().delayMs();
     }
 
     public void addAll(final List<UnsentRequest> requests) {
@@ -320,9 +341,66 @@ public class NetworkClientDelegate implements AutoCloseable {
 
     public void add(final UnsentRequest r) {
         Objects.requireNonNull(r);
+        r.handler.completionDelivery = this::deliverResponse;
         r.setTimer(this.time, this.requestTimeoutMs);
         r.setEnqueueTimeMs(time.milliseconds());
         unsentRequests.add(r);
+    }
+
+    /** Network-thread-local capture for one normal reactor transport call. */
+    void beginResponseBatch() {
+        if (!responseBatchingEnabled)
+            return;
+        if (responseBatch != null)
+            throw new IllegalStateException("Response batch already active");
+        responseBatch = new ArrayDeque<>();
+    }
+
+    /** Local POC comparison seam, not a public consumer configuration. Inline delivery is the default. */
+    void enableResponseBatching() {
+        responseBatchingEnabled = true;
+    }
+
+    /** Invoke the existing owner callbacks in observed order, without another network poll. */
+    void completeResponseBatch() {
+        Queue<ResponseCompletion> completed = responseBatch;
+        responseBatch = null;
+        if (completed != null) {
+            for (ResponseCompletion response : completed)
+                response.apply();
+        }
+    }
+
+    private void deliverResponse(ResponseCompletion completion) {
+        if (responseBatch == null)
+            completion.apply();
+        else
+            responseBatch.add(completion);
+    }
+
+    private static final class ResponseCompletion {
+        private final FutureCompletionHandler handler;
+        private final ClientResponse response;
+        private final RuntimeException error;
+        private final long completionTimeMs;
+
+        private ResponseCompletion(FutureCompletionHandler handler, ClientResponse response,
+                                   RuntimeException error, long completionTimeMs) {
+            this.handler = handler;
+            this.response = response;
+            this.error = error;
+            this.completionTimeMs = completionTimeMs;
+        }
+
+        private void apply() {
+            // A completed response may outlive the client. Do not retain the delegate through its handler.
+            handler.completionDelivery = ResponseCompletion::apply;
+            handler.responseCompletionTimeMs = completionTimeMs;
+            if (error == null)
+                handler.future.complete(response);
+            else
+                handler.future.completeExceptionally(error);
+        }
     }
 
     public static class PollResult {
@@ -330,10 +408,29 @@ public class NetworkClientDelegate implements AutoCloseable {
         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
         public final long timeUntilNextPollMs;
         public final List<UnsentRequest> unsentRequests;
+        private final NextPollCondition nextPollCondition;
 
+        // Compatibility adapter: a legacy zero is not proof that output was produced.
         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
-            this.timeUntilNextPollMs = timeUntilNextPollMs;
-            this.unsentRequests = Collections.unmodifiableList(unsentRequests);
+            this(timeUntilNextPollMs == WAIT_FOREVER
+                    ? NextPollCondition.awaitInput(NextPollCondition.Input.LEGACY_UNSPECIFIED)
+                    : NextPollCondition.retryAfter(timeUntilNextPollMs), unsentRequests);
+        }
+
+        public PollResult(final NextPollCondition nextPollCondition, final List<UnsentRequest> unsentRequests) {
+            this.nextPollCondition = Objects.requireNonNull(nextPollCondition);
+            if (nextPollCondition.kind() == NextPollCondition.Kind.POLL_IMMEDIATELY && unsentRequests.isEmpty())
+                throw new IllegalArgumentException("An empty result cannot request immediate polling");
+            this.timeUntilNextPollMs = nextPollCondition.delayMs();
+            this.unsentRequests = List.copyOf(unsentRequests);
+        }
+
+        public PollResult(final NextPollCondition nextPollCondition) {
+            this(nextPollCondition, Collections.emptyList());
+        }
+
+        public NextPollCondition nextPollCondition() {
+            return nextPollCondition;
         }
 
         public PollResult(final List<UnsentRequest> unsentRequests) {
@@ -432,18 +529,15 @@ public class NetworkClientDelegate implements AutoCloseable {
 
         private long responseCompletionTimeMs;
         private final CompletableFuture<ClientResponse> future;
+        private Consumer<ResponseCompletion> completionDelivery = ResponseCompletion::apply;
 
         FutureCompletionHandler() {
             future = new CompletableFuture<>();
         }
 
         public void onFailure(final long currentTimeMs, final RuntimeException e) {
-            this.responseCompletionTimeMs = currentTimeMs;
-            if (e != null) {
-                this.future.completeExceptionally(e);
-            } else {
-                this.future.completeExceptionally(DisconnectException.INSTANCE);
-            }
+            completionDelivery.accept(new ResponseCompletion(this, null,
+                e == null ? DisconnectException.INSTANCE : e, currentTimeMs));
         }
 
         public long completionTimeMs() {
@@ -460,8 +554,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             } else if (response.versionMismatch() != null) {
                 onFailure(completionTimeMs, response.versionMismatch());
             } else {
-                responseCompletionTimeMs = completionTimeMs;
-                this.future.complete(response);
+                completionDelivery.accept(new ResponseCompletion(this, response, null, completionTimeMs));
             }
         }
 

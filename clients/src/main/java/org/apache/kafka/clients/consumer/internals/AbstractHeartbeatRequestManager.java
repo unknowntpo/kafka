@@ -192,6 +192,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
 
         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
+            if (heartbeatRequestState.requestInFlight()) {
+                return new NetworkClientDelegate.PollResult(
+                    NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION));
+            }
             return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
         }
 
@@ -265,10 +269,20 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         // poll() returns EMPTY, so falling through to the timer-based branches below would return 0 (the
         // heartbeat timer is left permanently expired) and busy-spin both the application and network threads.
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
-            return heartbeatRequestState.heartbeatIntervalMs();
+            long heartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            // Before the first response the interval is zero, not permission to spin while discovery
+            // is pending. Preserve the application poll-timer refresh even without a negotiated interval.
+            return heartbeatIntervalMs > 0 ? heartbeatIntervalMs : Math.max(1L, pollTimer.remainingMs() / 2);
         }
         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
+        }
+        if (heartbeatRequestState.requestInFlight() && !shouldSendLeaveHeartbeatNow()) {
+            // Expiry cannot admit a second heartbeat. Keep the application poll timer refreshed
+            // while the transport completion, rather than another timer poll, enables progress.
+            long refreshMs = Math.max(1L, pollTimer.remainingMs() / 2);
+            long intervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            return intervalMs > 0 ? Math.min(intervalMs, refreshMs) : refreshMs;
         }
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
@@ -305,6 +319,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
 
     @SuppressWarnings("unchecked")
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequest(final boolean ignoreResponse) {
+        final long observedVersion = coordinatorRequestManager.coordinatorVersion();
         NetworkClientDelegate.UnsentRequest request = buildHeartbeatRequest();
         if (ignoreResponse)
             return logResponse(request);
@@ -313,9 +328,9 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                 long completionTimeMs = request.handler().completionTimeMs();
                 if (response != null) {
                     metricsManager.recordRequestLatency(response.requestLatencyMs());
-                    onResponse((R) response.responseBody(), completionTimeMs);
+                    onResponse((R) response.responseBody(), completionTimeMs, observedVersion);
                 } else {
-                    onFailure(exception, completionTimeMs);
+                    onFailure(exception, completionTimeMs, observedVersion);
                 }
             });
     }
@@ -336,11 +351,11 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         });
     }
 
-    private void onFailure(final Throwable exception, final long responseTimeMs) {
+    private void onFailure(final Throwable exception, final long responseTimeMs, final long observedVersion) {
         this.heartbeatRequestState.onFailedAttempt(responseTimeMs);
         resetHeartbeatState();
         if (exception instanceof RetriableException) {
-            coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+            coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs, observedVersion);
             String message = String.format("%s failed because of the retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestName(),
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),
@@ -354,7 +369,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         membershipManager().onHeartbeatFailure(exception instanceof RetriableException);
     }
 
-    private void onResponse(final R response, final long currentTimeMs) {
+    private void onResponse(final R response, final long currentTimeMs, final long observedVersion) {
         if (errorForResponse(response) == Errors.NONE) {
             long previousHeartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
             long heartbeatIntervalMs = heartbeatIntervalForResponse(response);
@@ -368,10 +383,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             membershipManager().onHeartbeatSuccess(response);
             return;
         }
-        onErrorResponse(response, currentTimeMs);
+        onErrorResponse(response, currentTimeMs, observedVersion);
     }
 
-    private void onErrorResponse(final R response, final long currentTimeMs) {
+    private void onErrorResponse(final R response, final long currentTimeMs, final long observedVersion) {
         Errors error = errorForResponse(response);
         String errorMessage = errorMessageForResponse(response);
         String message;
@@ -386,7 +401,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                                 "Will attempt to find the coordinator again and retry",
                         heartbeatRequestName(), coordinatorRequestManager.coordinator());
                 logInfo(message, response, currentTimeMs);
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknownIfCurrent(errorMessage, currentTimeMs, observedVersion);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -396,7 +411,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
                                 "Will attempt to find the coordinator again and retry",
                         heartbeatRequestName(), coordinatorRequestManager.coordinator());
                 logInfo(message, response, currentTimeMs);
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknownIfCurrent(errorMessage, currentTimeMs, observedVersion);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;

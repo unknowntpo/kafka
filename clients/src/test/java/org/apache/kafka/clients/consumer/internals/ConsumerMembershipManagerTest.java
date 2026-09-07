@@ -50,6 +50,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
@@ -632,8 +633,9 @@ public class ConsumerMembershipManagerTest {
      * reconciliation of A completes it should be interrupted, and it should not update the
      * assignment on the member or send ack.
      */
-    @Test
-    public void testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins() {
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    public void testDelayedReconciliationResultDiscardedAfterCommitIfMemberRejoins(boolean unsubscribe, boolean commitFails) {
         ConsumerMembershipManager membershipManager = createMemberInStableState();
         Uuid topicId1 = Uuid.randomUuid();
         String topic1 = "topic1";
@@ -650,7 +652,13 @@ public class ConsumerMembershipManagerTest {
 
         // Get fenced and rejoin while still reconciling. Get new assignment to reconcile after
         // rejoining.
-        testFencedMemberReleasesAssignmentAndTransitionsToJoining(membershipManager);
+        if (unsubscribe) {
+            testLeaveGroupReleasesAssignmentAndResetsEpochToSendLeaveGroup(membershipManager);
+            membershipManager.transitionToJoining();
+        } else {
+            testFencedMemberReleasesAssignmentAndTransitionsToJoining(membershipManager);
+        }
+        assertFalse(commitResult.isDone(), "leaving/rejoining does not complete the mocked pending commit");
         clearInvocations(subscriptionState);
 
         Map<Uuid, SortedSet<Integer>> assignmentAfterRejoin = receiveAssignmentAfterRejoin(
@@ -658,7 +666,10 @@ public class ConsumerMembershipManagerTest {
 
         // Reconciliation completes when the member has already re-joined the group. Should not
         // proceed with the revocation, update the subscription state or send ack.
-        commitResult.complete(null);
+        if (commitFails)
+            commitResult.completeExceptionally(new KafkaException("old rebalance commit failed"));
+        else
+            commitResult.complete(null);
         assertInitialReconciliationDiscardedAfterRejoin(membershipManager, assignmentAfterRejoin);
     }
 

@@ -76,6 +76,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -83,6 +84,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @SuppressWarnings({"ClassDataAbstractionCoupling", "ClassFanOutComplexity"})
@@ -257,21 +259,24 @@ public class ApplicationEventProcessorTest {
         verify(subscriptionState).requestOffsetReset(event.topicPartitions(), event.offsetResetStrategy());
     }
 
-    @Test
-    public void testSeekUnvalidatedEvent() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testSeekUnvalidatedEvent(boolean withGroupId) {
         TopicPartition tp = new TopicPartition("topic", 0);
         Optional<Integer> offsetEpoch = Optional.of(1);
         SubscriptionState.FetchPosition position = new SubscriptionState.FetchPosition(
                 0, offsetEpoch, Metadata.LeaderAndEpoch.noLeaderOrEpoch());
         SeekUnvalidatedEvent event = new SeekUnvalidatedEvent(12345, tp, 0, offsetEpoch);
 
-        setupProcessor(false);
+        setupProcessor(withGroupId);
+        clearInvocations(commitRequestManager);
         doReturn(Metadata.LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(tp);
         doNothing().when(subscriptionState).seekUnvalidated(eq(tp), any());
         processor.process(event);
         verify(metadata).updateLastSeenEpochIfNewer(tp, offsetEpoch.get());
         verify(metadata).currentLeader(tp);
         verify(subscriptionState).seekUnvalidated(tp, position);
+        verifyNoInteractions(commitRequestManager);
         assertDoesNotThrow(() -> event.future().get());
     }
 
@@ -297,6 +302,11 @@ public class ApplicationEventProcessorTest {
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
         when(offsetsRequestManager.updateFetchPositions(event.deadlineMs())).thenReturn(CompletableFuture.completedFuture(null));
         when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
+        doAnswer(invocation -> {
+            assertFalse(event.isReconciliationCheckComplete(),
+                "collection must remain gated until periodic auto-commit offsets have been captured");
+            return null;
+        }).when(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());
         processor.process(event);
         assertTrue(event.isComplete());
         verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());

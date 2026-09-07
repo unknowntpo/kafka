@@ -33,6 +33,7 @@ import java.util.UUID;
 
 import static org.apache.kafka.test.TestUtils.requiredConsumerConfig;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -78,6 +79,7 @@ public class RequestManagersTest {
         assertTrue(requestManagers.streamsMembershipManager.isEmpty());
         assertTrue(requestManagers.streamsGroupHeartbeatRequestManager.isEmpty());
         assertTrue(requestManagers.streamsGroupTopologyDescriptionRequestManager.isEmpty());
+        assertFatalErrorReaderOrder(requestManagers, requestManagers.consumerHeartbeatRequestManager.orElseThrow());
 
         assertEquals(2, requestManagers.consumerMembershipManager.get().stateListeners().size());
         assertTrue(requestManagers.consumerMembershipManager.get().stateListeners().stream()
@@ -127,10 +129,19 @@ public class RequestManagersTest {
         assertTrue(requestManagers.entries().stream()
             .anyMatch(rm -> rm instanceof StreamsGroupTopologyDescriptionRequestManager));
         assertTrue(requestManagers.consumerMembershipManager.isEmpty());
+        assertFatalErrorReaderOrder(requestManagers, requestManagers.streamsGroupHeartbeatRequestManager.orElseThrow());
 
         assertEquals(2, requestManagers.streamsMembershipManager.get().stateListeners().size());
         assertTrue(requestManagers.streamsMembershipManager.get().stateListeners().stream()
             .anyMatch(m -> m instanceof CommitRequestManager));
         assertTrue(requestManagers.streamsMembershipManager.get().stateListeners().contains(listener));
+    }
+    private void assertFatalErrorReaderOrder(RequestManagers managers, RequestManager heartbeat) {
+        int coordinator = managers.entries().indexOf(managers.coordinatorRequestManager.orElseThrow());
+        int commit = managers.entries().indexOf(managers.commitRequestManager.orElseThrow());
+        int notificationConsumer = managers.entries().indexOf(heartbeat);
+        assertTrue(coordinator >= 0 && coordinator < commit && commit < notificationConsumer,
+            "Coordinator publishes, commit/offset-fetch reads, then heartbeat may consume the fatal error");
+        assertThrows(UnsupportedOperationException.class, () -> managers.entries().clear());
     }
 }

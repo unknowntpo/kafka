@@ -74,11 +74,12 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
 
         logger.info("Sending topology description for group {}", data.groupId());
 
+        final long observedVersion = coordinatorRequestManager.coordinatorVersion();
         final NetworkClientDelegate.UnsentRequest unsent = new NetworkClientDelegate.UnsentRequest(
             new StreamsGroupTopologyDescriptionUpdateRequest.Builder(data),
             coordinatorRequestManager.coordinator()
         );
-        unsent.whenComplete((response, exception) -> onResponse(response, exception));
+        unsent.whenComplete((response, exception) -> onResponse(response, exception, observedVersion));
 
         pushRequestState.onSendAttempt(currentTimeMs);
         return new NetworkClientDelegate.PollResult(Collections.singletonList(unsent));
@@ -112,13 +113,13 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
         return coordinatorRequestManager.coordinator().isPresent();
     }
 
-    private void onResponse(final ClientResponse response, final Throwable exception) {
+    private void onResponse(final ClientResponse response, final Throwable exception, final long observedVersion) {
         final long responseTimeMs = time.milliseconds();
 
         if (exception != null) {
             if (exception instanceof RetriableException) {
                 pushRequestState.onFailedAttempt(responseTimeMs);
-                coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+                coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs, observedVersion);
                 logger.warn("Topology description push failed with retriable exception; will retry on next poll", exception);
             } else {
                 // Non-retriable exceptions should clear the flag and give up.
@@ -149,7 +150,7 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
             case COORDINATOR_NOT_AVAILABLE:
                 pushRequestState.onFailedAttempt(responseTimeMs);
                 logger.info("Coordinator error {} pushing topology description. Will rediscover and retry: {}", error, errorMessage);
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, responseTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknownIfCurrent(errorMessage, responseTimeMs, observedVersion);
                 break;
 
             case COORDINATOR_LOAD_IN_PROGRESS:

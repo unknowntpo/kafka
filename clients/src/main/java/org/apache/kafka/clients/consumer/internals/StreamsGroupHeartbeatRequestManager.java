@@ -481,6 +481,10 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
             return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
         } else {
+            if (heartbeatRequestState.requestInFlight()) {
+                return new NetworkClientDelegate.PollResult(
+                    NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION));
+            }
             return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
         }
     }
@@ -530,10 +534,22 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
         pollTimer.update(currentTimeMs);
-        if (pollTimer.isExpired() ||
-            membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
-
+        if (pollTimer.isExpired()) {
             return 0L;
+        }
+        // Match the admission guard in poll(). Joining urgency cannot produce a heartbeat before
+        // discovery. The initial zero interval is not a useful retry timer in that blocked state.
+        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
+            long heartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            return heartbeatIntervalMs > 0 ? heartbeatIntervalMs : Math.max(1L, pollTimer.remainingMs() / 2);
+        }
+        if (membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
+            return 0L;
+        }
+        if (heartbeatRequestState.requestInFlight() && !shouldSendLeaveHeartbeat()) {
+            long refreshMs = Math.max(1L, pollTimer.remainingMs() / 2);
+            long intervalMs = heartbeatRequestState.heartbeatIntervalMs();
+            return intervalMs > 0 ? Math.min(intervalMs, refreshMs) : refreshMs;
         }
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
@@ -615,14 +631,15 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     }
 
     private NetworkClientDelegate.UnsentRequest makeHeartbeatRequestAndHandleResponse(final long currentTimeMs) {
+        final long observedVersion = coordinatorRequestManager.coordinatorVersion();
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs);
         return request.whenComplete((response, exception) -> {
             long completionTimeMs = request.handler().completionTimeMs();
             if (response != null) {
                 metricsManager.recordRequestLatency(response.requestLatencyMs());
-                onResponse((StreamsGroupHeartbeatResponse) response.responseBody(), completionTimeMs);
+                onResponse((StreamsGroupHeartbeatResponse) response.responseBody(), completionTimeMs, observedVersion);
             } else {
-                onFailure(exception, completionTimeMs);
+                onFailure(exception, completionTimeMs, observedVersion);
             }
         });
     }
@@ -639,11 +656,11 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return request;
     }
 
-    private void onResponse(final StreamsGroupHeartbeatResponse response, long currentTimeMs) {
+    private void onResponse(final StreamsGroupHeartbeatResponse response, long currentTimeMs, long observedVersion) {
         if (Errors.forCode(response.data().errorCode()) == Errors.NONE) {
             onSuccessResponse(response, currentTimeMs);
         } else {
-            onErrorResponse(response, currentTimeMs);
+            onErrorResponse(response, currentTimeMs, observedVersion);
         }
     }
 
@@ -722,7 +739,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return value < minValid ? "not provided (older broker)" : Long.toString(value);
     }
 
-    private void onErrorResponse(final StreamsGroupHeartbeatResponse response, final long currentTimeMs) {
+    private void onErrorResponse(final StreamsGroupHeartbeatResponse response, final long currentTimeMs, final long observedVersion) {
         final Errors error = Errors.forCode(response.data().errorCode());
         final String errorMessage = response.data().errorMessage();
 
@@ -737,7 +754,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknownIfCurrent(errorMessage, currentTimeMs, observedVersion);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -749,7 +766,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
                     response,
                     currentTimeMs
                 );
-                coordinatorRequestManager.markCoordinatorUnknown(errorMessage, currentTimeMs);
+                coordinatorRequestManager.markCoordinatorUnknownIfCurrent(errorMessage, currentTimeMs, observedVersion);
                 // Skip backoff so that the next HB is sent as soon as the new coordinator is discovered
                 heartbeatRequestState.reset();
                 break;
@@ -843,11 +860,11 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             response.data().errorMessage());
     }
 
-    private void onFailure(final Throwable exception, final long responseTimeMs) {
+    private void onFailure(final Throwable exception, final long responseTimeMs, final long observedVersion) {
         heartbeatRequestState.onFailedAttempt(responseTimeMs);
         heartbeatState.reset();
         if (exception instanceof RetriableException) {
-            coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs);
+            coordinatorRequestManager.handleCoordinatorDisconnect(exception, responseTimeMs, observedVersion);
             String message = String.format("StreamsGroupHeartbeatRequest failed because of a retriable exception. Will retry in %s ms: %s",
                 heartbeatRequestState.remainingBackoffMs(responseTimeMs),
                 exception.getMessage());

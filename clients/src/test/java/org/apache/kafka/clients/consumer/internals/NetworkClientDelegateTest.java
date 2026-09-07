@@ -64,12 +64,39 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 public class NetworkClientDelegateTest {
+    @Test
+    public void testTypedActivationPreservesOutputAndWaitIndependence() {
+        NetworkClientDelegate.UnsentRequest request = new NetworkClientDelegate.UnsentRequest(
+            new FindCoordinatorRequest.Builder(new FindCoordinatorRequestData().setKey("group")), Optional.empty());
+        assertThrows(IllegalArgumentException.class, () ->
+            new NetworkClientDelegate.PollResult(NextPollCondition.pollImmediately()));
+        assertThrows(IllegalArgumentException.class, () -> NextPollCondition.retryAfter(-1));
+        for (NextPollCondition condition : java.util.List.of(NextPollCondition.pollImmediately(),
+                NextPollCondition.retryAfter(10), NextPollCondition.awaitInput(NextPollCondition.Input.NETWORK_COMPLETION))) {
+            ArrayList<NetworkClientDelegate.UnsentRequest> requests = new ArrayList<>();
+            requests.add(request);
+            NetworkClientDelegate.PollResult result = new NetworkClientDelegate.PollResult(condition, requests);
+            requests.clear();
+            assertEquals(1, result.unsentRequests.size());
+            assertEquals(condition.delayMs(), result.timeUntilNextPollMs);
+            assertEquals(condition, result.nextPollCondition());
+        }
+        assertEquals(NextPollCondition.Kind.RETRY_AFTER, new NetworkClientDelegate.PollResult(0).nextPollCondition().kind());
+        assertEquals(NextPollCondition.Kind.RETRY_AFTER, NextPollCondition.retryAfter(Long.MAX_VALUE).kind());
+        assertEquals(NextPollCondition.Kind.AWAIT_INPUT, NetworkClientDelegate.PollResult.EMPTY.nextPollCondition().kind());
+    }
+
     private static final int REQUEST_TIMEOUT_MS = 5000;
     private static final String GROUP_ID = "group";
     private static final long DEFAULT_REQUEST_TIMEOUT_MS = 500;
@@ -84,6 +111,44 @@ public class NetworkClientDelegateTest {
         this.metadata = mock(Metadata.class);
         this.backgroundEventHandler = mock(BackgroundEventHandler.class);
         this.client = new MockClient(time, Collections.singletonList(mockNode()));
+    }
+
+    @Test
+    void testCapturedSendTimeoutDoesNotBlockAndRetainsObservationTime() throws Exception {
+        client = spy(client);
+        try (NetworkClientDelegate delegate = newNetworkClientDelegate(false)) {
+            delegate.enableResponseBatching();
+            var request = new NetworkClientDelegate.UnsentRequest(
+                new FindCoordinatorRequest.Builder(new FindCoordinatorRequestData().setKey(GROUP_ID)), Optional.empty());
+            delegate.add(request);
+            time.sleep(REQUEST_TIMEOUT_MS + DEFAULT_REQUEST_TIMEOUT_MS + 1);
+            long observedAt = time.milliseconds();
+            doAnswer(invocation -> {
+                assertEquals(0L, (long) invocation.getArgument(0), "ready timeout must not wait behind network polling");
+                assertFalse(request.future().isDone());
+                return invocation.callRealMethod();
+            }).when(client).poll(anyLong(), anyLong());
+            delegate.beginResponseBatch();
+            try {
+                delegate.poll(10_000, observedAt);
+                assertFalse(request.future().isDone());
+                time.sleep(37);
+            } finally {
+                delegate.completeResponseBatch();
+            }
+            assertTrue(request.future().isCompletedExceptionally());
+            assertInstanceOf(TimeoutException.class,
+                assertThrows(java.util.concurrent.CompletionException.class, request.future()::join).getCause());
+            assertEquals(observedAt, request.handler().completionTimeMs());
+
+            var next = new NetworkClientDelegate.UnsentRequest(
+                new FindCoordinatorRequest.Builder(new FindCoordinatorRequestData().setKey(GROUP_ID)), Optional.empty());
+            delegate.add(next);
+            RuntimeException error = new RuntimeException("outside batch");
+            next.handler().onFailure(time.milliseconds(), error);
+            assertSame(error,
+                assertThrows(java.util.concurrent.CompletionException.class, next.future()::join).getCause());
+        }
     }
 
     @Test
@@ -121,6 +186,9 @@ public class NetworkClientDelegateTest {
 
             assertTrue(unsentRequest.future().isDone());
             assertNotNull(unsentRequest.future().get());
+            assertTrue(ncd.completedRequestsInLastPoll());
+            ncd.poll(0, time.milliseconds());
+            assertFalse(ncd.completedRequestsInLastPoll(), "an idle poll must not inherit the preceding batch marker");
         }
     }
 
@@ -131,9 +199,11 @@ public class NetworkClientDelegateTest {
             NetworkClientDelegate.UnsentRequest unsentRequest = newUnsentFindCoordinatorRequest();
             ncd.add(unsentRequest);
             ncd.poll(0, time.milliseconds());
+            assertFalse(ncd.completedRequestsInLastPoll());
             time.sleep(REQUEST_TIMEOUT_MS);
             ncd.poll(0, time.milliseconds());
             assertTrue(unsentRequest.future().isDone());
+            assertTrue(ncd.completedRequestsInLastPoll(), "unsent timeout callbacks also enable a decision pass");
             TestUtils.assertFutureThrows(TimeoutException.class, unsentRequest.future());
         }
     }
@@ -148,6 +218,7 @@ public class NetworkClientDelegateTest {
             ncd.poll(0, time.milliseconds());
             assertTrue(unsentRequest.future().isDone());
             TestUtils.assertFutureThrows(DisconnectException.class, unsentRequest.future());
+            assertTrue(ncd.completedRequestsInLastPoll(), "in-flight disconnect callbacks also form a completion batch");
         }
     }
 
@@ -372,6 +443,7 @@ public class NetworkClientDelegateTest {
             assertFalse(ncd.hasAnyPendingRequests());
             assertTrue(unsentRequest.future().isDone());
             TestUtils.assertFutureThrows(NetworkException.class, unsentRequest.future());
+            assertTrue(ncd.completedRequestsInLastPoll());
         }
     }
 

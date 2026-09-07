@@ -56,7 +56,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -88,6 +90,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -190,6 +193,81 @@ public class CommitRequestManagerTest {
         assertPoll(false, 0, commitRequestManager);
     }
 
+    @ParameterizedTest
+    @EnumSource(value = Errors.class, names = {"NONE", "NOT_COORDINATOR", "COORDINATOR_NOT_AVAILABLE"})
+    public void testCapturedOffsetFetchResponsePreservesNewCoordinator(Errors error) {
+        coordinatorRequestManager = new CoordinatorRequestManager(logContext, retryBackoffMs, retryBackoffMaxMs, DEFAULT_GROUP_ID);
+        discoverCoordinator();
+        CommitRequestManager manager = create(false, 100);
+        Set<TopicPartition> scope = Set.of(new TopicPartition("topic", 0));
+        var future = manager.fetchOffsets(scope, time.milliseconds() + defaultApiTimeoutMs);
+        NetworkClientDelegate.UnsentRequest request = manager.poll(time.milliseconds()).unsentRequests.get(0);
+        long capturedVersion = coordinatorRequestManager.coordinatorVersion();
+        coordinatorRequestManager.markCoordinatorUnknown("another completion", time.milliseconds());
+        time.sleep(retryBackoffMaxMs);
+        discoverCoordinator();
+        long currentVersion = coordinatorRequestManager.coordinatorVersion();
+        assertTrue(currentVersion > capturedVersion);
+        request.handler().onComplete(buildOffsetFetchClientResponse(request, scope, error));
+        assertTrue(coordinatorRequestManager.coordinator().isPresent());
+        assertEquals(currentVersion, coordinatorRequestManager.coordinatorVersion());
+        if (error == Errors.NONE) {
+            assertTrue(future.isDone(), "a still-valid captured result must not be discarded merely because owner version changed");
+            assertFalse(future.isCompletedExceptionally());
+        } else {
+            time.sleep(retryBackoffMaxMs);
+            assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size(),
+                "fencing the owner mutation must not lose the operation's retry responsibility");
+        }
+    }
+
+    private void discoverCoordinator() {
+        NetworkClientDelegate.UnsentRequest request = coordinatorRequestManager.poll(time.milliseconds()).unsentRequests.get(0);
+        request.handler().onComplete(new ClientResponse(
+            new RequestHeader(ApiKeys.FIND_COORDINATOR, request.requestBuilder().build().version(), "test", 1),
+            request.handler(), mockedNode.idString(), time.milliseconds(), time.milliseconds(), false, null, null,
+            org.apache.kafka.common.requests.FindCoordinatorResponse.prepareResponse(Errors.NONE, DEFAULT_GROUP_ID, mockedNode)));
+    }
+
+    @Test
+    public void testInflightReadyAndBackingOffOperationsRemainIndependent() {
+        CommitRequestManager manager = create(false, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition tp = new TopicPartition("topic", 0);
+        var inflight = manager.commitAsync(Map.of(tp, new OffsetAndMetadata(1)));
+        assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+        manager.fetchOffsets(Set.of(tp), time.milliseconds() + defaultApiTimeoutMs);
+        NetworkClientDelegate.UnsentRequest backingOff = manager.poll(time.milliseconds()).unsentRequests.get(0);
+        backingOff.handler().onComplete(buildOffsetFetchClientResponse(backingOff, Set.of(tp), Errors.COORDINATOR_LOAD_IN_PROGRESS));
+        manager.commitAsync(Map.of(tp, new OffsetAndMetadata(2)));
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size(), "ready B must not starve behind in-flight A or backing-off C");
+        OffsetCommitRequest request = (OffsetCommitRequest) result.unsentRequests.get(0).requestBuilder().build();
+        assertEquals(2, request.data().topics().get(0).partitions().get(0).committedOffset());
+        assertEquals(NextPollCondition.Kind.RETRY_AFTER, result.nextPollCondition().kind());
+        assertTrue(result.timeUntilNextPollMs > 0, "produced output does not require immediate polling");
+        assertFalse(inflight.isDone());
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty(), "neither A nor C may be sent again yet");
+        time.sleep(retryBackoffMaxMs);
+        assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size(), "C must become eligible after its backoff");
+    }
+
+
+    @Test
+    public void testExpiredAutoCommitAwaitsCoordinatorInsteadOfZeroApplicationWait() {
+        CommitRequestManager manager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        time.sleep(101);
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertEquals(Long.MAX_VALUE, manager.maximumTimeToWait(time.milliseconds()),
+            "an expired auto-commit cannot progress until coordinator discovery completes");
+        assertEquals(NextPollCondition.Input.COORDINATOR_CHANGE,
+            manager.poll(time.milliseconds()).nextPollCondition().input());
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(new Node(1, "localhost", 9092)));
+        assertEquals(0, manager.maximumTimeToWait(time.milliseconds()),
+            "discovery must re-enable the expired obligation without advancing the clock");
+    }
+
     @Test
     public void testAsyncCommitWhileCoordinatorUnknownIsSentOutWhenCoordinatorDiscovered() {
         CommitRequestManager commitRequestManager = create(false, 0);
@@ -233,6 +311,46 @@ public class CommitRequestManagerTest {
 
         assertEquals(0.03, (double) getMetric("commit-rate").metricValue(), 0.01);
         assertEquals(1.0, getMetric("commit-total").metricValue());
+    }
+
+    @Test
+    public void testAutoCommitRetainsAdmissionOffsetsWhenPositionsAdvanceBeforeSend() {
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptionState.assignFromUser(singleton(partition));
+        subscriptionState.seek(partition, 100);
+        CommitRequestManager manager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        time.sleep(100);
+
+        // The application-event path admits the snapshot before subsequent collection advances position.
+        manager.updateTimerAndMaybeCommit(time.milliseconds());
+        subscriptionState.seek(partition, 200);
+
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData)
+            result.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(1, data.topics().size());
+        assertEquals(partition.topic(), data.topics().get(0).name());
+        assertEquals(1, data.topics().get(0).partitions().size());
+        assertEquals(partition.partition(), data.topics().get(0).partitions().get(0).partitionIndex());
+        assertEquals(100, data.topics().get(0).partitions().get(0).committedOffset(),
+            "sending later must not recapture offsets advanced by subsequent record collection");
+        assertEquals(200, subscriptionState.position(partition).offset);
+    }
+
+    @Test
+    public void testExpiredAutoCommitIsNotAdmittedByOrdinaryManagerPoll() {
+        subscriptionState = spy(subscriptionState);
+        TopicPartition partition = new TopicPartition("topic", 0);
+        subscriptionState.assignFromUser(singleton(partition));
+        subscriptionState.seek(partition, 100);
+        CommitRequestManager manager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        time.sleep(100);
+
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        verify(subscriptionState, never()).allConsumed();
     }
 
     @Test
@@ -1139,11 +1257,11 @@ public class CommitRequestManagerTest {
     }
 
     private void assertCoordinatorDisconnectHandling() {
-        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong());
+        verify(coordinatorRequestManager).handleCoordinatorDisconnect(any(), anyLong(), anyLong());
     }
 
     private void assertCoordinatorDisconnectOnCoordinatorError() {
-        verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+        verify(coordinatorRequestManager).markCoordinatorUnknownIfCurrent(any(), anyLong(), anyLong());
     }
 
     private void assertExceptionHandling(CommitRequestManager commitRequestManager, Errors errors,
@@ -1158,7 +1276,7 @@ public class CommitRequestManagerTest {
             case NOT_COORDINATOR:
             case COORDINATOR_NOT_AVAILABLE:
             case REQUEST_TIMED_OUT:
-                verify(coordinatorRequestManager).markCoordinatorUnknown(any(), anyLong());
+                verify(coordinatorRequestManager).markCoordinatorUnknownIfCurrent(any(), anyLong(), anyLong());
                 assertPollDoesNotReturn(commitRequestManager, remainBackoffMs);
                 break;
             case UNKNOWN_TOPIC_OR_PARTITION:
@@ -1333,6 +1451,10 @@ public class CommitRequestManagerTest {
     @ParameterizedTest
     @MethodSource("offsetCommitExceptionSupplier")
     public void testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors error) {
+        verifyAutoCommitBeforeRevocationRetry(error);
+    }
+
+    private void verifyAutoCommitBeforeRevocationRetry(Errors error) {
         // Enable auto-commit but with very long interval to avoid triggering auto-commits on the
         // interval and just test the auto-commits triggered before revocation
         CommitRequestManager commitRequestManager = create(true, Integer.MAX_VALUE);
@@ -1382,6 +1504,195 @@ public class CommitRequestManagerTest {
             res = commitRequestManager.poll(time.milliseconds());
             assertEquals(0, res.unsentRequests.size());
         }
+    }
+
+    @Test
+    public void testRebalanceRetrySnapshotPolicy() {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition revoked = new TopicPartition("topic", 0);
+        TopicPartition retained = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(revoked, retained));
+        subscriptionState.seek(revoked, 5);
+        subscriptionState.seek(retained, 10);
+
+        // Membership stops delivery only for partitions being revoked, before the initial capture.
+        subscriptionState.markPendingRevocation(Set.of(revoked));
+        assertFalse(subscriptionState.isFetchable(revoked));
+        assertTrue(subscriptionState.isFetchable(retained));
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        OffsetCommitRequestData initial = (OffsetCommitRequestData)
+            first.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(10, initial.topics().get(0).partitions().stream()
+            .filter(p -> p.partitionIndex() == retained.partition()).findFirst().orElseThrow().committedOffset());
+
+        // Characterize a position change; this fixture does not prove a public-poll interleaving.
+        subscriptionState.seek(retained, 20);
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.REQUEST_TIMED_OUT));
+        assertFalse(result.isDone());
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData retried = (OffsetCommitRequestData)
+            retry.unsentRequests.get(0).requestBuilder().build().data();
+        Map<Integer, Long> offsets = new HashMap<>();
+        retried.topics().get(0).partitions().forEach(p -> offsets.put(p.partitionIndex(), p.committedOffset()));
+        assertEquals(Map.of(revoked.partition(), 5L, retained.partition(), 10L), offsets);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testRetainedRetrySnapshotIsNotInvalidatedBySeekOrReassignment(boolean reassign) {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition original = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(original));
+        subscriptionState.seek(original, 10);
+        manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+
+        // An admitted commit is not a seek: changing fetch position does not cancel its broker outcome.
+        if (reassign) {
+            TopicPartition replacement = new TopicPartition("topic", 2);
+            subscriptionState.assignFromUser(Set.of(replacement));
+            subscriptionState.seek(replacement, 0);
+        } else {
+            subscriptionState.seek(original, 0);
+        }
+        completeOffsetCommitRequestWithError(manager, Errors.REQUEST_TIMED_OUT);
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) retry.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(1, data.topics().get(0).partitions().size());
+        assertEquals(1, data.topics().get(0).partitions().get(0).partitionIndex());
+        assertEquals(10, data.topics().get(0).partitions().get(0).committedOffset(),
+            "retention alone neither fences reassignment nor adopts a backward seek");
+    }
+
+    @Test
+    public void testSubscribedAssignmentCannotBeManuallyReplacedDuringRebalanceCommit() {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition original = new TopicPartition("topic", 1);
+        subscriptionState.subscribe(Set.of("topic"));
+        subscriptionState.assignFromSubscribed(Set.of(original));
+        subscriptionState.seek(original, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+
+        assertThrows(IllegalStateException.class,
+            () -> subscriptionState.assignFromUser(Set.of(new TopicPartition("topic", 2))));
+        assertEquals(Set.of(original), subscriptionState.assignedPartitions());
+        assertFalse(result.isDone());
+        completeOffsetCommitRequestWithError(manager, Errors.NONE);
+        assertDoesNotThrow(result::join);
+    }
+
+    @Test
+    public void testRetrySnapshotStillExpiresWithoutAnotherApplicationPoll() {
+        subscriptionState = spy(subscriptionState);
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(time.milliseconds() + 50);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        time.sleep(100);
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.REQUEST_TIMED_OUT));
+        assertFutureThrows(TimeoutException.class, result);
+        assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
+        verify(subscriptionState, times(1)).allConsumed();
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertFalse(first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE)));
+        assertFutureThrows(TimeoutException.class, result);
+    }
+
+    @Test
+    public void testRebalanceRetryDeadlineDoesNotRejectLateSuccess() {
+        subscriptionState = spy(subscriptionState);
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(time.milliseconds() + 50);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        time.sleep(100);
+        // This RM future has no independent deadline reaper: expiry bounds retries, not a received success.
+        assertFalse(result.isDone());
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE));
+        assertDoesNotThrow(result::join);
+        verify(subscriptionState, times(1)).allConsumed();
+        assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+    }
+
+    @Test
+    public void testCloseSignalAllowsRebalanceRetryWithKnownCoordinator() {
+        subscriptionState = spy(subscriptionState);
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        manager.signalClose();
+        subscriptionState.seek(partition, 20);
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.REQUEST_TIMED_OUT));
+        assertFalse(result.isDone());
+        verify(subscriptionState, times(1)).allConsumed();
+        // The existing close drain bypasses normal backoff. No simulated time advances here.
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) retry.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(10, data.topics().get(0).partitions().get(0).committedOffset());
+        retry.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE));
+        assertDoesNotThrow(result::join);
+        assertTrue(manager.pendingRequests.unsentOffsetCommits.isEmpty());
+        assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+    }
+
+    @Test
+    public void testPendingRebalanceCommitCanRetryWithNewMemberIdentity() {
+        CommitRequestManager manager = create(true, Integer.MAX_VALUE);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("topic", 1);
+        subscriptionState.assignFromUser(Set.of(partition));
+        subscriptionState.seek(partition, 10);
+        manager.onMemberEpochUpdated(Optional.of(1), "old-member");
+        CompletableFuture<Void> result = manager.maybeAutoCommitSyncBeforeRebalance(Long.MAX_VALUE);
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+
+        // Exercise identity notifications, not a full unsubscribe/rejoin exchange with a broker.
+        manager.onMemberEpochUpdated(Optional.empty(), "old-member");
+        assertFalse(result.isDone());
+        manager.onMemberEpochUpdated(Optional.of(8), "new-member");
+        assertFalse(result.isDone());
+        first.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.STALE_MEMBER_EPOCH));
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) retry.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals("new-member", data.memberId());
+        assertEquals(8, data.generationIdOrMemberEpoch());
+        assertEquals(10, data.topics().get(0).partitions().get(0).committedOffset());
+        retry.unsentRequests.get(0).future().complete(
+            mockOffsetCommitResponse("topic", 1, (short) 1, Errors.NONE));
+        assertDoesNotThrow(result::join);
     }
 
     @Test
@@ -1669,7 +1980,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Group authorization exception")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(200));
+        assertTrue(commitRequestManager.poll(200).unsentRequests.isEmpty());
 
         assertEmptyPendingRequests(commitRequestManager);
     }
@@ -1694,7 +2005,7 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.fatalError())
                 .thenReturn(Optional.of(new GroupAuthorizationException("Fatal error")));
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertTrue(commitRequestManager.poll(time.milliseconds()).unsentRequests.isEmpty());
 
         assertTrue(commitFuture.isCompletedExceptionally());
 
@@ -1713,7 +2024,7 @@ public class CommitRequestManagerTest {
         commitRequestManager.signalClose();
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
-        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+        assertTrue(commitRequestManager.poll(time.milliseconds()).unsentRequests.isEmpty());
 
         assertTrue(commitFuture.isCompletedExceptionally());
 

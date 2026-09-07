@@ -1,0 +1,75 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// Applied without changing the baseline checkout. Export exact resolved classpaths;
+// do not let a wildcard silently load a client jar from another worktree.
+gradle.projectsEvaluated {
+    def toolsProject = rootProject.findProject(':tools')
+    if (toolsProject == null) {
+        return
+    }
+    def selected = [clients: rootProject.project(':clients'), tools: toolsProject]
+    if (rootProject.providers.gradleProperty('contractGuidedBroker').orElse('false').get() == 'true') {
+        selected.broker = rootProject.project(':core')
+    }
+    def noSourceOutputs = []
+    rootProject.allprojects.each { dependency ->
+        def compileJava = dependency.tasks.findByName('compileJava')
+        if (compileJava instanceof org.gradle.api.tasks.compile.JavaCompile && compileJava.source.files.empty) {
+            noSourceOutputs.add(compileJava.destinationDirectory.get().asFile.canonicalPath)
+        }
+        def resources = dependency.tasks.findByName('processResources')
+        if (resources instanceof org.gradle.language.jvm.tasks.ProcessResources && resources.source.files.empty) {
+            noSourceOutputs.add(resources.destinationDir.canonicalPath)
+        }
+    }
+    def exporters = selected.collect { label, project ->
+        // Gradle requires runtime configuration resolution under the owning project's lock.
+        // A root task must not resolve another project's runtimeClasspath in its action.
+        project.tasks.register('exportContractGuidedRuntime') {
+            dependsOn project.tasks.named('classes')
+            dependsOn project.sourceSets.main.runtimeClasspath
+            def releaseLibraries = project.configurations.findByName('releaseOnly')
+            if (releaseLibraries != null) {
+                dependsOn releaseLibraries
+            }
+            doLast {
+                def output = project.file(project.providers.gradleProperty('contractGuidedOutput').get())
+                output.mkdirs()
+                // The distribution supplies the SLF4J binding through releaseOnly, not
+                // runtimeClasspath. Match that runtime rather than silently measuring NOP logging.
+                def runtimeFiles = (project.sourceSets.main.runtimeClasspath.files +
+                    (releaseLibraries == null ? [] : releaseLibraries.files)).toSet().findAll { path ->
+                    if (path.exists()) {
+                        return true
+                    }
+                    // Gradle also lists Java output for the Scala-only core project.
+                    // Omit only an output whose producing task demonstrably has NO-SOURCE.
+                    if (noSourceOutputs.contains(path.canonicalPath)) {
+                        return false
+                    }
+                    throw new GradleException("Missing runtime entry: ${path}")
+                }
+                new File(output, "${label}-classpath.txt").text =
+                    runtimeFiles.collect { it.canonicalPath }.join(File.pathSeparator)
+            }
+        }
+    }
+    rootProject.tasks.register('contractGuidedRuntime') {
+        dependsOn exporters
+    }
+}
