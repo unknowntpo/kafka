@@ -44,6 +44,7 @@ def main():
     parser.add_argument('--repository', type=Path, required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--profile', choices=PROFILES, default='formal')
+    parser.add_argument('--mode', choices=('ablation', 'noise-aa'), default='ablation')
     args = parser.parse_args()
     profile = PROFILES[args.profile]
     args.artifacts.mkdir(parents=True, exist_ok=False)
@@ -68,7 +69,9 @@ def main():
     (args.artifacts / 'preparation.json').write_text(json.dumps({
         'baseline': BASELINE, 'candidate': revision, 'java': version,
         'build_root': str(build_root), 'profile': args.profile, **profile,
-        'host_exclusive': False, 'scope': 'healthy subscribed auto-commit throughput; not idle',
+        'host_exclusive': False, 'mode': args.mode,
+        'measured_candidate': BASELINE if args.mode == 'noise-aa' else revision,
+        'scope': 'healthy subscribed auto-commit throughput; not idle',
     }, indent=2))
 
     def run(label, command, timeout):
@@ -90,7 +93,10 @@ def main():
             raise RuntimeError('%s exited %s; see its log' % (label, code))
 
     try:
-        for role, commit in [('baseline', BASELINE), ('candidate', revision)]:
+        roles = [('baseline', BASELINE)]
+        if args.mode != 'noise-aa':
+            roles.append(('candidate', revision))
+        for role, commit in roles:
             checkout = build_root / role
             run(role + '-clone', ['git', 'clone', '--no-hardlinks', '--no-checkout',
                                   str(repository), str(checkout)], 300)
@@ -107,28 +113,33 @@ def main():
                                   '-PcontractGuidedBroker=' + ('true' if role == 'baseline' else 'false'),
                                   'contractGuidedRuntime'], 3600)
         # Hold the broker runtime fixed at the control revision in this ablation.
-        shutil.copyfile(build_root / 'baseline-runtime/broker-classpath.txt',
-                        build_root / 'candidate-runtime/broker-classpath.txt')
+        measured_candidate = 'baseline' if args.mode == 'noise-aa' else 'candidate'
+        if args.mode != 'noise-aa':
+            shutil.copyfile(build_root / 'baseline-runtime/broker-classpath.txt',
+                            build_root / 'candidate-runtime/broker-classpath.txt')
         # Compilation is finished before either timing population starts.
         run('paired-throughput', [sys.executable, str(source / 'run-throughput.py'),
                                  '--java', str(java), '--records', str(profile['records']),
                                  '--pairs', str(profile['pairs']),
+                                 '--mode', args.mode,
                                  '--baseline-worktree', str(build_root / 'baseline'),
-                                 '--candidate-worktree', str(build_root / 'candidate'),
+                                 '--candidate-worktree', str(build_root / measured_candidate),
                                  '--baseline-runtime', str(build_root / 'baseline-runtime'),
-                                 '--candidate-runtime', str(build_root / 'candidate-runtime'),
+                                 '--candidate-runtime', str(build_root / (measured_candidate + '-runtime')),
                                  '--artifact-parent', str(args.artifacts), '--remove-owned-data',
-                                 '--profile', '--profile-records', str(profile['records'])], 5400)
+                                 *([] if args.mode == 'noise-aa' else
+                                   ['--profile', '--profile-records', str(profile['records'])])], 5400)
         summaries = list(args.artifacts.glob('kip1371-throughput-*/summary.json'))
         if len(summaries) != 1:
             raise RuntimeError('Missing unambiguous paired summary')
         summary = json.loads(summaries[0].read_text())
-        for role in ('baseline', 'candidate'):
+        for role in (() if args.mode == 'noise-aa' else ('baseline', 'candidate')):
             run(role + '-profile-summary', [sys.executable, str(source / 'summarize-jfr.py'),
                                             str(summaries[0].parent / (role + '.jfr')),
                                             '--jfr', str(java.with_name('jfr')),
                                             '--output', str(summaries[0].parent / ('safe-' + role))], 180)
-        if args.profile == 'formal' and summary['gate'] != 'pass':
+        expected_gate = 'noise-measured' if args.mode == 'noise-aa' else 'pass'
+        if args.profile == 'formal' and summary['gate'] != expected_gate:
             raise RuntimeError('Benchmark not accepted: ' + summary['gate'])
         # Small runs validate plumbing, never formal performance acceptance.
         rows = json.loads((summaries[0].parent / 'results.json').read_text())
@@ -136,7 +147,9 @@ def main():
             raise RuntimeError('Incomplete paired receipt')
         (args.artifacts / 'completed.json').write_text(json.dumps({
             'profile': args.profile, 'candidate': revision,
-            'status': 'formal-accepted' if args.profile == 'formal' else 'smoke-validated',
+            'mode': args.mode, 'measured_candidate': BASELINE if args.mode == 'noise-aa' else revision,
+            'status': ('noise-measured' if args.mode == 'noise-aa' else 'formal-accepted')
+                      if args.profile == 'formal' else 'smoke-validated',
             'performance_gate': summary['gate'], 'timed_jvms': len(rows),
         }, indent=2))
     finally:

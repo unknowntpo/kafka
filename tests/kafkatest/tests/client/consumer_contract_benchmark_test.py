@@ -20,17 +20,21 @@ from ducktape.tests.test import Test
 
 
 class ContractBenchmarkService(BackgroundThreadService):
-    def __init__(self, context, profile='formal'):
+    def __init__(self, context, profile='formal', mode='ablation'):
         super(ContractBenchmarkService, self).__init__(context, 1)
         if profile not in ('formal', 'smoke'):
             raise ValueError('Unknown contract benchmark profile')
         self.profile = profile
+        if mode not in ('ablation', 'noise-aa'):
+            raise ValueError('Unknown contract benchmark mode')
+        self.mode = mode
         self.root = '/mnt/kip1371-contract-' + uuid.uuid4().hex
         self.logs = {'contract_benchmark': {'path': self.root, 'collect_default': True}}
 
     def _worker(self, idx, node):
         command = ['python3', '/opt/kafka-dev/benchmarks/contract-guided/jenkins-entry.py',
-                   '--repository', '/opt/kafka-dev', '--artifacts', self.root, '--profile', self.profile]
+                   '--repository', '/opt/kafka-dev', '--artifacts', self.root,
+                   '--profile', self.profile, '--mode', self.mode]
         for line in node.account.ssh_capture(' '.join(shlex.quote(value) for value in command)):
             self.logger.info(line.strip())
 
@@ -59,8 +63,16 @@ class ConsumerContractBenchmarkTest(Test):
     @cluster(num_nodes=1)
     def test_paired_throughput(self):
         """One job, one worker, five AB/BA JVM pairs and separate full-dataset JFRs."""
+        self._run_benchmark('ablation')
+
+    @cluster(num_nodes=1)
+    def test_paired_noise(self):
+        """Same control runtime under both labels; quantify noise, not performance acceptance."""
+        self._run_benchmark('noise-aa')
+
+    def _run_benchmark(self, mode):
         profile = self.test_context.globals.get('contract_benchmark_profile', 'formal')
-        benchmark = ContractBenchmarkService(self.test_context, profile)
+        benchmark = ContractBenchmarkService(self.test_context, profile, mode)
         benchmark.start()
         # Two one-hour build limits plus 90 minutes benchmark and teardown margin.
         try:

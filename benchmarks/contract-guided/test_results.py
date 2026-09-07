@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import json
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("throughput", Path(__file__).with_name("run-throughput.py"))
 throughput = importlib.util.module_from_spec(spec)
@@ -31,6 +32,23 @@ jfr_spec.loader.exec_module(jfr_summary)
 
 class ResultTest(unittest.TestCase):
     ROW = "2026-09-06 00:00:00:000,2026-09-06 00:01:00:000,244.14,4.07,1000000,16666.67,1000,59000,4.14,16949.15"
+
+    def test_noise_is_not_performance_acceptance(self):
+        for ratio in (0.5, 1.0, 1.5):
+            self.assertEqual('noise-measured', throughput.measurement_gate('noise-aa', True, 5, ratio))
+        self.assertEqual('inconclusive-short', throughput.measurement_gate('noise-aa', False, 5, 1))
+        self.assertEqual('inconclusive-pairs', throughput.measurement_gate('noise-aa', True, 1, 1))
+        self.assertEqual('regression', throughput.measurement_gate('ablation', True, 5, 0.9))
+        self.assertEqual('pass', throughput.measurement_gate('ablation', True, 5, 1))
+
+    def test_environment_unavailable_is_explicit(self):
+        with patch.object(throughput.platform, 'system', return_value='Linux'), \
+                patch.object(Path, 'read_text', side_effect=PermissionError), \
+                patch.object(Path, 'glob', return_value=[]):
+            snapshot = throughput.environment_snapshot()
+        self.assertGreater(snapshot['wall_time_ns'], 0)
+        self.assertEqual({'unavailable': 'PermissionError'}, snapshot['linux']['/proc/meminfo'])
+        json.dumps(snapshot)
 
     def test_complete(self):
         result = throughput.parse_result("case", "header\n" + self.ROW + "\nmetric : 42", 1000000)

@@ -44,6 +44,41 @@ CANDIDATE_REVISION = "4289215a07df6b4d2150d43b1025b75787860a50"
 EXPECTED_CANDIDATE_CLIENT_TREE = 'bc63ddf445fd624ea862bea9709f1c442f3bbdd2'
 
 
+def environment_snapshot():
+    """Best-effort host observations; missing permissions are evidence gaps, not zeros."""
+    result = {'wall_time_ns': time.time_ns(), 'monotonic_ns': time.monotonic_ns(),
+              'logical_cpus': os.cpu_count(), 'load_average': list(os.getloadavg())}
+    if platform.system() != 'Linux':
+        return result
+    if hasattr(os, 'sched_getaffinity'):
+        result['allowed_cpus'] = sorted(os.sched_getaffinity(0))
+    paths = ['/proc/meminfo', '/proc/stat', '/proc/diskstats', '/proc/net/dev',
+             '/proc/pressure/cpu', '/proc/pressure/memory', '/proc/pressure/io',
+             '/sys/fs/cgroup/cpu.max', '/sys/fs/cgroup/cpu.stat',
+             '/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory.current']
+    paths += [str(p) for pattern in ('devices/system/cpu/cpu*/cpufreq/scaling_cur_freq',
+                                     'devices/system/cpu/cpu*/cpufreq/scaling_governor',
+                                     'class/thermal/thermal_zone*/temp')
+              for p in Path('/sys').glob(pattern)]
+    result['linux'] = {}
+    for name in paths:
+        try:
+            result['linux'][name] = {'value': Path(name).read_text()}
+        except OSError as error:
+            result['linux'][name] = {'unavailable': type(error).__name__}
+    return result
+
+
+def measurement_gate(mode, sufficient_duration, pairs, ratio):
+    if not sufficient_duration:
+        return 'inconclusive-short'
+    if pairs < 5:
+        return 'inconclusive-pairs'
+    if mode == 'noise-aa':
+        return 'noise-measured'  # No equivalence or regression claim for identical code.
+    return 'pass' if ratio >= 0.95 else 'regression'
+
+
 def free_ports():
     with socket.socket() as first, socket.socket() as second:
         first.bind(("127.0.0.1", 0))
@@ -84,6 +119,7 @@ def main():
     parser.add_argument("--records", type=int, default=50_000_000)
     parser.add_argument("--record-size", type=int, default=256)
     parser.add_argument("--pairs", type=int, default=5)
+    parser.add_argument('--mode', choices=('ablation', 'noise-aa'), default='ablation')
     parser.add_argument("--baseline-worktree", type=Path, required=True)
     parser.add_argument("--candidate-worktree", type=Path, required=True)
     parser.add_argument("--idle-harness-classes", type=Path)
@@ -104,11 +140,15 @@ def main():
     # Local diagnostic: isolate removal of the extra post-I/O pass from Jenkins 930.
     expected_base = "d3c6d866adbdbb15a4c2f5223707e2ba926770fc"
     # Jenkins uses depth=1. Validate the pinned tree without requiring old commit objects.
-    expected_candidate_tree = EXPECTED_CANDIDATE_CLIENT_TREE
+    expected_candidate_tree = (git(args.baseline_worktree, 'rev-parse', 'HEAD:clients/src/main')
+                               if args.mode == 'noise-aa' else EXPECTED_CANDIDATE_CLIENT_TREE)
     if git(args.baseline_worktree, "rev-parse", "HEAD") != expected_base:
         parser.error("baseline revision differs from the predeclared baseline")
     if git(args.candidate_worktree, "rev-parse", "HEAD:clients/src/main") != expected_candidate_tree:
         parser.error("candidate production source differs from the predeclared candidate")
+    if args.mode == 'noise-aa' and (args.baseline_worktree.resolve() != args.candidate_worktree.resolve()
+                                    or args.baseline_runtime.resolve() != args.candidate_runtime.resolve()):
+        parser.error('noise-aa requires the exact same checkout and runtime for both labels')
     for worktree in (args.baseline_worktree, args.candidate_worktree):
         if git(worktree, "status", "--porcelain", "--untracked-files=all", "--", "clients/src/main", "tools/src/main"):
             parser.error(f"uncommitted measured source: {worktree}")
@@ -121,7 +161,7 @@ def main():
         "broker": (args.candidate_runtime / "broker-classpath.txt").read_text().strip(),
     }
     for role, other in (("baseline", args.candidate_worktree), ("candidate", args.baseline_worktree)):
-        if str(other.resolve()) in runtimes[role]:
+        if args.mode != 'noise-aa' and str(other.resolve()) in runtimes[role]:
             parser.error(f"{role} runtime contains the other worktree")
         if not all(Path(entry).exists() for entry in runtimes[role].split(":")):
             parser.error(f"{role} runtime contains unbuilt entries")
@@ -198,13 +238,17 @@ def main():
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "baseline": expected_base,
         "candidate_head": git(args.candidate_worktree, "rev-parse", "HEAD"),
-        "candidate_client_revision": CANDIDATE_REVISION,
-        "candidate_behavior_revision": CANDIDATE_REVISION,
-        "experiment": "post-io-pass-ablation; diagnostic, not correctness acceptance",
+        "candidate_client_revision": expected_base if args.mode == 'noise-aa' else CANDIDATE_REVISION,
+        "candidate_behavior_revision": expected_base if args.mode == 'noise-aa' else CANDIDATE_REVISION,
+        "experiment": args.mode,
+        "scope": "noise only; not equivalence evidence" if args.mode == 'noise-aa' else "ablation diagnostic",
+        "warmup_jvms": 0,
+        "cache_policy": "shared broker and OS cache; unchanged from #931; not reset between runs",
         "candidate_client_tree": expected_candidate_tree,
         "records": args.records, "record_size": args.record_size, "pairs": args.pairs,
         "partitions": 4, "broker_address": address, "topic": topic,
-        "auto_commit": True, "minimum_fetch_ms": 30_000, "minimum_throughput_ratio": 0.95,
+        "auto_commit": True, "minimum_fetch_ms": 30_000,
+        "minimum_throughput_ratio": None if args.mode == 'noise-aa' else 0.95,
         "classpath_sha256": {k: hashlib.sha256(v.encode()).hexdigest() for k, v in runtimes.items()},
         "runtime_content_sha256": {k: runtime_fingerprint(v) for k, v in runtimes.items()},
         "environment": {"system": platform.system(), "release": platform.release(),
@@ -221,6 +265,7 @@ def main():
         manifest["idle_cpu_allowance_percentage_points"] = 0.2
     manifest["environment"]["load_average_at_start"] = list(os.getloadavg())
     manifest["environment"]["exclusive_host"] = False
+    manifest['environment']['snapshot'] = environment_snapshot()
     if args.profile:
         manifest["profile_settings_sha256"] = hashlib.sha256(
             Path(__file__).with_name("profile.jfc").read_bytes()).hexdigest()
@@ -270,6 +315,8 @@ def main():
         for pair in range(args.pairs):
             for role in (("baseline", "candidate") if pair % 2 == 0 else ("candidate", "baseline")):
                 label = f"pair-{pair + 1}-{role}"
+                before = environment_snapshot()
+                (root / f'{label}.environment-before.json').write_text(json.dumps(before, indent=2))
                 command = java(role, "org.apache.kafka.tools.ConsumerPerformance", "--bootstrap-server", address,
                                "--topic", topic, "--num-records", str(args.records), "--group", topic + "-" + label,
                                "--command-config", str(consumer_config), "--timeout", "60000", "--print-metrics")
@@ -289,7 +336,10 @@ def main():
                                                      maximum_resident_bytes=int(rss[1])))
                 else:
                     raise RuntimeError('Only Linux and macOS resource measurement is supported')
+                (root / f'{label}.environment-after.json').write_text(json.dumps(environment_snapshot(), indent=2))
                 result = {"pair": pair + 1, "role": role, **parse_result(label, output, args.records)}
+                result['sequence'] = len(results) + 1
+                result['started_wall_time_ns'] = before['wall_time_ns']
                 result.update(resources)
                 results.append(result)
                 (root / "results.json").write_text(json.dumps(results, indent=2))
@@ -303,8 +353,16 @@ def main():
                    "candidate_median": median(candidate), "candidate_mad": mad(candidate),
                    "ratio": ratio, "paired_ratios": [c / b for b, c in zip(base, candidate)],
                    "sufficient_duration": all(r["fetch_ms"] >= 30_000 for r in results)}
-        summary["gate"] = "inconclusive-short" if not summary["sufficient_duration"] else (
-            "inconclusive-pairs" if args.pairs < 5 else ("pass" if ratio >= 0.95 else "regression"))
+        summary['mode'] = args.mode
+        summary['gate'] = measurement_gate(args.mode, summary['sufficient_duration'], args.pairs, ratio)
+        summary['paired_changes_percent'] = {}
+        for metric in ('fetch_records_s', 'process_cpu_seconds', 'maximum_resident_bytes'):
+            left = [r[metric] for r in results if r['role'] == 'baseline']
+            right = [r[metric] for r in results if r['role'] == 'candidate']
+            changes = [(c / b - 1) * 100 for b, c in zip(left, right)]
+            summary['paired_changes_percent'][metric] = {
+                'values': changes, 'median': median(changes),
+                'ratio_of_medians_change': (median(right) / median(left) - 1) * 100}
         # Whole CLI process costs include startup/close; do not label them fetch-only CPU.
         summary["whole_process_resources"] = {
             role: {
