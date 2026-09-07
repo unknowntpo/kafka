@@ -22,34 +22,34 @@ gradle.projectsEvaluated {
     if (toolsProject == null) {
         return
     }
-    rootProject.tasks.register('contractGuidedRuntime') {
-        def selected = [clients: rootProject.project(':clients'), tools: toolsProject]
-        if (providers.gradleProperty('contractGuidedBroker').orElse('false').get() == 'true') {
-            selected.broker = rootProject.project(':core')
+    def selected = [clients: rootProject.project(':clients'), tools: toolsProject]
+    if (rootProject.providers.gradleProperty('contractGuidedBroker').orElse('false').get() == 'true') {
+        selected.broker = rootProject.project(':core')
+    }
+    def noSourceOutputs = []
+    rootProject.allprojects.each { dependency ->
+        def compileJava = dependency.tasks.findByName('compileJava')
+        if (compileJava instanceof org.gradle.api.tasks.compile.JavaCompile && compileJava.source.files.empty) {
+            noSourceOutputs.add(compileJava.destinationDirectory.get().asFile.canonicalPath)
         }
-        selected.each { label, project ->
+        def resources = dependency.tasks.findByName('processResources')
+        if (resources instanceof org.gradle.language.jvm.tasks.ProcessResources && resources.source.files.empty) {
+            noSourceOutputs.add(resources.destinationDir.canonicalPath)
+        }
+    }
+    def exporters = selected.collect { label, project ->
+        // Gradle requires runtime configuration resolution under the owning project's lock.
+        // A root task must not resolve another project's runtimeClasspath in its action.
+        project.tasks.register('exportContractGuidedRuntime') {
             dependsOn project.tasks.named('classes')
             dependsOn project.sourceSets.main.runtimeClasspath
             def releaseLibraries = project.configurations.findByName('releaseOnly')
             if (releaseLibraries != null) {
                 dependsOn releaseLibraries
             }
-        }
-        doLast {
-            def output = file(providers.gradleProperty('contractGuidedOutput').get())
-            output.mkdirs()
-            def noSourceOutputs = []
-            rootProject.allprojects.each { dependency ->
-                def compileJava = dependency.tasks.findByName('compileJava')
-                if (compileJava instanceof org.gradle.api.tasks.compile.JavaCompile && compileJava.source.files.empty) {
-                    noSourceOutputs.add(compileJava.destinationDirectory.get().asFile.canonicalPath)
-                }
-                def resources = dependency.tasks.findByName('processResources')
-                if (resources instanceof org.gradle.language.jvm.tasks.ProcessResources && resources.source.files.empty) {
-                    noSourceOutputs.add(resources.destinationDir.canonicalPath)
-                }
-            }
-            selected.each { label, project ->
+            doLast {
+                def output = project.file(project.providers.gradleProperty('contractGuidedOutput').get())
+                output.mkdirs()
                 // The distribution supplies the SLF4J binding through releaseOnly, not
                 // runtimeClasspath. Match that runtime rather than silently measuring NOP logging.
                 def releaseLibraries = project.configurations.findByName('releaseOnly')
@@ -69,5 +69,8 @@ gradle.projectsEvaluated {
                     runtimeFiles.collect { it.canonicalPath }.join(File.pathSeparator)
             }
         }
+    }
+    rootProject.tasks.register('contractGuidedRuntime') {
+        dependsOn exporters
     }
 }
