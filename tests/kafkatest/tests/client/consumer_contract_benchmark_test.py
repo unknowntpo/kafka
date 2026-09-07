@@ -20,14 +20,17 @@ from ducktape.tests.test import Test
 
 
 class ContractBenchmarkService(BackgroundThreadService):
-    def __init__(self, context):
+    def __init__(self, context, profile='formal'):
         super(ContractBenchmarkService, self).__init__(context, 1)
+        if profile not in ('formal', 'smoke'):
+            raise ValueError('Unknown contract benchmark profile')
+        self.profile = profile
         self.root = '/mnt/kip1371-contract-' + uuid.uuid4().hex
         self.logs = {'contract_benchmark': {'path': self.root, 'collect_default': True}}
 
     def _worker(self, idx, node):
         command = ['python3', '/opt/kafka-dev/benchmarks/contract-guided/jenkins-entry.py',
-                   '--repository', '/opt/kafka-dev', '--artifacts', self.root]
+                   '--repository', '/opt/kafka-dev', '--artifacts', self.root, '--profile', self.profile]
         for line in node.account.ssh_capture(' '.join(shlex.quote(value) for value in command)):
             self.logger.info(line.strip())
 
@@ -54,9 +57,9 @@ if pidfile.exists():
 
 class ConsumerContractBenchmarkTest(Test):
     @cluster(num_nodes=1)
-    def test_paired_throughput(self):
+    def test_paired_throughput(self, contract_benchmark_profile='formal'):
         """One job, one worker, five AB/BA JVM pairs and separate full-dataset JFRs."""
-        benchmark = ContractBenchmarkService(self.test_context)
+        benchmark = ContractBenchmarkService(self.test_context, contract_benchmark_profile)
         benchmark.start()
         # Two one-hour build limits plus 90 minutes benchmark and teardown margin.
         try:

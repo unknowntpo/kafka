@@ -31,6 +31,8 @@ import tempfile
 
 BASELINE = '820533b870106cc0e0ac60e2076b8644d68bd85f'
 RECORDS = 70_000_000
+PROFILES = {'formal': {'records': RECORDS, 'pairs': 5},
+            'smoke': {'records': 10_000, 'pairs': 1}}
 
 
 def terminate(signum, frame):
@@ -41,7 +43,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--repository', type=Path, required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--profile', choices=PROFILES, default='formal')
     args = parser.parse_args()
+    profile = PROFILES[args.profile]
     args.artifacts.mkdir(parents=True, exist_ok=False)
     (args.artifacts / 'entry.pid').write_text(str(os.getpid()))
     signal.signal(signal.SIGTERM, terminate)
@@ -63,7 +67,7 @@ def main():
     build_root = Path(tempfile.mkdtemp(prefix='kip1371-build-', dir=str(args.artifacts.parent)))
     (args.artifacts / 'preparation.json').write_text(json.dumps({
         'baseline': BASELINE, 'candidate': revision, 'java': version,
-        'build_root': str(build_root), 'records': RECORDS, 'pairs': 5,
+        'build_root': str(build_root), 'profile': args.profile, **profile,
         'host_exclusive': False, 'scope': 'healthy subscribed auto-commit throughput; not idle',
     }, indent=2))
 
@@ -104,13 +108,14 @@ def main():
                                   'contractGuidedRuntime'], 3600)
         # Compilation is finished before either timing population starts.
         run('paired-throughput', [sys.executable, str(source / 'run-throughput.py'),
-                                 '--java', str(java), '--records', str(RECORDS), '--pairs', '5',
+                                 '--java', str(java), '--records', str(profile['records']),
+                                 '--pairs', str(profile['pairs']),
                                  '--baseline-worktree', str(build_root / 'baseline'),
                                  '--candidate-worktree', str(build_root / 'candidate'),
                                  '--baseline-runtime', str(build_root / 'baseline-runtime'),
                                  '--candidate-runtime', str(build_root / 'candidate-runtime'),
                                  '--artifact-parent', str(args.artifacts), '--remove-owned-data',
-                                 '--profile', '--profile-records', str(RECORDS)], 5400)
+                                 '--profile', '--profile-records', str(profile['records'])], 5400)
         summaries = list(args.artifacts.glob('kip1371-throughput-*/summary.json'))
         if len(summaries) != 1:
             raise RuntimeError('Missing unambiguous paired summary')
@@ -120,8 +125,17 @@ def main():
                                             str(summaries[0].parent / (role + '.jfr')),
                                             '--jfr', str(java.with_name('jfr')),
                                             '--output', str(summaries[0].parent / ('safe-' + role))], 180)
-        if summary['gate'] != 'pass':
+        if args.profile == 'formal' and summary['gate'] != 'pass':
             raise RuntimeError('Benchmark not accepted: ' + summary['gate'])
+        # Small runs validate plumbing, never formal performance acceptance.
+        rows = json.loads((summaries[0].parent / 'results.json').read_text())
+        if len(rows) != profile['pairs'] * 2 or any(row['records'] != profile['records'] for row in rows):
+            raise RuntimeError('Incomplete paired receipt')
+        (args.artifacts / 'completed.json').write_text(json.dumps({
+            'profile': args.profile, 'candidate': revision,
+            'status': 'formal-accepted' if args.profile == 'formal' else 'smoke-validated',
+            'performance_gate': summary['gate'], 'timed_jvms': len(rows),
+        }, indent=2))
     finally:
         # Only the fresh mkdtemp directory owned by this invocation; receipts live elsewhere.
         shutil.rmtree(build_root)
