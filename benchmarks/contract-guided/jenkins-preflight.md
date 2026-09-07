@@ -1,5 +1,35 @@
 # Jenkins benchmark preparation (2026-09-07)
 
+## Submission gate correction after Jenkins 929
+
+Build 929 failed before tests at `:rat` because 26 Markdown files lacked ASF
+license headers. Its benchmark never ran. The checks recorded below were partial
+and were insufficient to establish submission readiness.
+
+The repair adds the missing headers and a bounded smoke profile to the actual
+source-preparation entry. Formal remains 70,000,000 records and five pairs; smoke
+uses 10,000 records and one pair, with separate JFR runs. Smoke validates plumbing,
+not performance acceptance.
+
+For the Ducktape smoke, keep the same test selector and use
+`--globals '{"contract_benchmark_profile":"smoke"}'`. Do not use `--parameters`
+for this switch: local discovery demonstrated that injection added a second case
+alongside the default formal case. Verify exactly one case and its preparation
+receipt's `profile` before proceeding. Without this global, formal remains default.
+
+Required local gates are an executed license audit in a normal disposable checkout,
+the Linux outer build, and the real Java 17 Ducktape/SSH entry through fresh baseline
+and candidate builds, broker I/O, artifact collection and cleanup. A linked Git
+worktree can skip `rat`; `BUILD SUCCESSFUL` alone is not proof of license validation.
+Receipts for this repair are under `/tmp/kip1371-local-ci-readiness`.
+No new Jenkins submission is authorized by these local checks.
+
+Fresh-source smoke also exposed a Gradle 9.7 configuration-ownership failure:
+the root export task tried to resolve `:tools:runtimeClasspath` without the owning
+project's lock. Runtime export now runs in one task per owning project; the root
+task only aggregates those tasks. This failure was not visible in the earlier
+smoke that reused compiled runtime classpaths.
+
 User authorized preparing the entry point, pushing only to `unknowntpo/kafka`, and
 one benchmark submission following an exact preview. No upstream, Jira or Confluence
 publication is part of this change. No Jenkins build has been submitted by this commit.
