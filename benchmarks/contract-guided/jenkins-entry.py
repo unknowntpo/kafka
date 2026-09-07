@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 
-BASELINE = '820533b870106cc0e0ac60e2076b8644d68bd85f'
+BASELINE = 'd3c6d866adbdbb15a4c2f5223707e2ba926770fc'
 RECORDS = 70_000_000
 PROFILES = {'formal': {'records': RECORDS, 'pairs': 5},
             'smoke': {'records': 10_000, 'pairs': 1}}
@@ -104,8 +104,11 @@ def main():
                                   '--max-workers=2', '-Dorg.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8',
                                   '-I', str(source / 'runtime-classpath.gradle'),
                                   '-PcontractGuidedOutput=' + str(build_root / (role + '-runtime')),
-                                  '-PcontractGuidedBroker=' + ('true' if role == 'candidate' else 'false'),
+                                  '-PcontractGuidedBroker=' + ('true' if role == 'baseline' else 'false'),
                                   'contractGuidedRuntime'], 3600)
+        # Hold the broker runtime fixed at the control revision in this ablation.
+        shutil.copyfile(build_root / 'baseline-runtime/broker-classpath.txt',
+                        build_root / 'candidate-runtime/broker-classpath.txt')
         # Compilation is finished before either timing population starts.
         run('paired-throughput', [sys.executable, str(source / 'run-throughput.py'),
                                  '--java', str(java), '--records', str(profile['records']),
