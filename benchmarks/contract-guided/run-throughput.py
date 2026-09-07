@@ -40,8 +40,8 @@ import time
 import uuid
 
 
-CANDIDATE_REVISION = "37c6603a99"  # Same client behavior as 95095ac064; response-delivery comment clarified.
-EXPECTED_CANDIDATE_CLIENT_TREE = 'be98bbf057dff6da04de6529c9146b4ea19f5051'
+CANDIDATE_REVISION = "4289215a07df6b4d2150d43b1025b75787860a50"
+EXPECTED_CANDIDATE_CLIENT_TREE = 'bc63ddf445fd624ea862bea9709f1c442f3bbdd2'
 
 
 def free_ports():
@@ -101,7 +101,8 @@ def main():
     def git(worktree, *options):
         return subprocess.check_output(["git", "-C", str(worktree), *options], text=True).strip()
 
-    expected_base = "820533b870106cc0e0ac60e2076b8644d68bd85f"
+    # Local diagnostic: isolate removal of the extra post-I/O pass from Jenkins 930.
+    expected_base = "d3c6d866adbdbb15a4c2f5223707e2ba926770fc"
     # Jenkins uses depth=1. Validate the pinned tree without requiring old commit objects.
     expected_candidate_tree = EXPECTED_CANDIDATE_CLIENT_TREE
     if git(args.baseline_worktree, "rev-parse", "HEAD") != expected_base:
@@ -198,7 +199,8 @@ def main():
         "baseline": expected_base,
         "candidate_head": git(args.candidate_worktree, "rev-parse", "HEAD"),
         "candidate_client_revision": CANDIDATE_REVISION,
-        "candidate_behavior_revision": "95095ac064",
+        "candidate_behavior_revision": CANDIDATE_REVISION,
+        "experiment": "post-io-pass-ablation; diagnostic, not correctness acceptance",
         "candidate_client_tree": expected_candidate_tree,
         "records": args.records, "record_size": args.record_size, "pairs": args.pairs,
         "partitions": 4, "broker_address": address, "topic": topic,

@@ -1,5 +1,12 @@
 # Contract-Guided Coordination: local performance acceptance
 
+> This experimental branch repins `run-throughput.py` for the local post-I/O
+> ablation: control `d3c6d866adbdbb15a4c2f5223707e2ba926770fc`, candidate
+> `4289215a07df6b4d2150d43b1025b75787860a50`. See
+> `docs/design/post-io-ablation-results.md` for results and limitations.
+> The historical acceptance/Jenkins instructions below describe the original
+> candidate; this branch is not an approved Jenkins submission configuration.
+
 This is separate from the original reactor benchmark. Never import its percentages.
 Implementation candidate: `37c6603a99` (behavior from `95095ac064`, comment-only clarification);
 baseline: `820533b870106cc0e0ac60e2076b8644d68bd85f`.

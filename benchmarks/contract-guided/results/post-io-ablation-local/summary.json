@@ -1,0 +1,38 @@
+{
+  "baseline_median": 1813330.5702,
+  "baseline_mad": 118333.23380000005,
+  "candidate_median": 2068496.7938,
+  "candidate_mad": 136713.80379999988,
+  "ratio": 1.1407168818489928,
+  "paired_ratios": [
+    1.0494777769256676,
+    0.9812658871149715,
+    1.2005259891328455,
+    1.0648211085662167,
+    1.003969379056146
+  ],
+  "sufficient_duration": true,
+  "gate": "pass",
+  "whole_process_resources": {
+    "baseline": {
+      "process_cpu_seconds": {
+        "median": 24.39,
+        "mad": 0.5499999999999972
+      },
+      "maximum_resident_bytes": {
+        "median": 1121107968,
+        "mad": 819200
+      }
+    },
+    "candidate": {
+      "process_cpu_seconds": {
+        "median": 22.76,
+        "mad": 0.5700000000000003
+      },
+      "maximum_resident_bytes": {
+        "median": 1125908480,
+        "mad": 6127616
+      }
+    }
+  }
+}

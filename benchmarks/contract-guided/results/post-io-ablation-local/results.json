@@ -1,0 +1,112 @@
+[
+  {
+    "pair": 1,
+    "role": "baseline",
+    "records": 70000000,
+    "fetch_ms": 41298.0,
+    "fetch_mib_s": 413.8177,
+    "fetch_records_s": 1694997.3364,
+    "overall_records_s": 1677329.6911,
+    "process_cpu_seconds": 24.47,
+    "maximum_resident_bytes": 1142620160
+  },
+  {
+    "pair": 1,
+    "role": "candidate",
+    "records": 70000000,
+    "fetch_ms": 39351.0,
+    "fetch_mib_s": 434.2925,
+    "fetch_records_s": 1778862.0365,
+    "overall_records_s": 1737835.1539,
+    "process_cpu_seconds": 24.67,
+    "maximum_resident_bytes": 1119305728
+  },
+  {
+    "pair": 2,
+    "role": "candidate",
+    "records": 70000000,
+    "fetch_ms": 39340.0,
+    "fetch_mib_s": 434.4139,
+    "fetch_records_s": 1779359.4306,
+    "overall_records_s": 1761582.4043,
+    "process_cpu_seconds": 25.310000000000002,
+    "maximum_resident_bytes": 1125908480
+  },
+  {
+    "pair": 2,
+    "role": "baseline",
+    "records": 70000000,
+    "fetch_ms": 38603.0,
+    "fetch_mib_s": 442.7077,
+    "fetch_records_s": 1813330.5702,
+    "overall_records_s": 1796299.6228,
+    "process_cpu_seconds": 24.39,
+    "maximum_resident_bytes": 1114439680
+  },
+  {
+    "pair": 3,
+    "role": "baseline",
+    "records": 70000000,
+    "fetch_ms": 40627.0,
+    "fetch_mib_s": 420.6524,
+    "fetch_records_s": 1722992.0989,
+    "overall_records_s": 1707566.961,
+    "process_cpu_seconds": 24.939999999999998,
+    "maximum_resident_bytes": 1121107968
+  },
+  {
+    "pair": 3,
+    "role": "candidate",
+    "records": 70000000,
+    "fetch_ms": 33841.0,
+    "fetch_mib_s": 505.0041,
+    "fetch_records_s": 2068496.7938,
+    "overall_records_s": 2045946.1039,
+    "process_cpu_seconds": 22.76,
+    "maximum_resident_bytes": 1117143040
+  },
+  {
+    "pair": 4,
+    "role": "candidate",
+    "records": 70000000,
+    "fetch_ms": 32366.0,
+    "fetch_mib_s": 528.0184,
+    "fetch_records_s": 2162763.3937,
+    "overall_records_s": 2138449.3188,
+    "process_cpu_seconds": 22.22,
+    "maximum_resident_bytes": 1129431040
+  },
+  {
+    "pair": 4,
+    "role": "baseline",
+    "records": 70000000,
+    "fetch_ms": 34464.0,
+    "fetch_mib_s": 495.8752,
+    "fetch_records_s": 2031104.9211,
+    "overall_records_s": 2009761.6997,
+    "process_cpu_seconds": 23.42,
+    "maximum_resident_bytes": 1120288768
+  },
+  {
+    "pair": 5,
+    "role": "baseline",
+    "records": 70000000,
+    "fetch_ms": 31869.0,
+    "fetch_mib_s": 536.2529,
+    "fetch_records_s": 2196491.8887,
+    "overall_records_s": 2171013.8635,
+    "process_cpu_seconds": 22.22,
+    "maximum_resident_bytes": 1121452032
+  },
+  {
+    "pair": 5,
+    "role": "candidate",
+    "records": 70000000,
+    "fetch_ms": 31743.0,
+    "fetch_mib_s": 538.3815,
+    "fetch_records_s": 2205210.5976,
+    "overall_records_s": 2173305.5978,
+    "process_cpu_seconds": 22.19,
+    "maximum_resident_bytes": 1132036096
+  }
+]
