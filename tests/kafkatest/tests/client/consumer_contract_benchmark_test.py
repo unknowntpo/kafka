@@ -57,9 +57,10 @@ if pidfile.exists():
 
 class ConsumerContractBenchmarkTest(Test):
     @cluster(num_nodes=1)
-    def test_paired_throughput(self, contract_benchmark_profile='formal'):
+    def test_paired_throughput(self):
         """One job, one worker, five AB/BA JVM pairs and separate full-dataset JFRs."""
-        benchmark = ContractBenchmarkService(self.test_context, contract_benchmark_profile)
+        profile = self.test_context.globals.get('contract_benchmark_profile', 'formal')
+        benchmark = ContractBenchmarkService(self.test_context, profile)
         benchmark.start()
         # Two one-hour build limits plus 90 minutes benchmark and teardown margin.
         try:
