@@ -65,6 +65,12 @@ baseline（trunk，`AsyncKafkaConsumer`）8 個 cell 的數字，10M × 100 B：
 
 **結論**：可比的 bench 只能是 baseline 與 candidate 都用「只收集 8 個 test」的版本各跑一次（baseline 側為 `91ac9bfb29` = `575f7d163b` + 修正 1，待 push）。#934 的數字只當 trunk 的參考值，不與 8-test 版的 candidate 直接相減。
 
+**#938 的結果與修正（同日）**：48 個 case 失敗 14 個，全在 `group_protocol=consumer`，型態是 join 逾時 / 等不到 STABLE / 等不到消費。TRACE log 顯示 member 拿到 target assignment 進入 RECONCILING 之後 60 秒內沒有任何 reconciliation 動作，app thread 每 100 ms 迭代但迴圈沒被叫醒；拿到 partition 的 consumer 送了 2 個 FETCH 後就停。根因是我們把「application poll」當成每次 `poll()` 呼叫一次，trunk 是每個等待迭代一次（`PollEvent` + `CreateFetchRequestsEvent`）；`VerifiableConsumer` 只呼叫一次 `poll(Long.MAX_VALUE)`，於是 auto-commit 開啟時唯一允許的 `maybeReconcile(true)` 不再被呼叫，空 fetch 之後也沒人再要求 fetch。修正：`ConsumerEventLoop.onApplicationPollIteration`（每個沒拿到資料的迭代登記序號、park 時喚醒）+ `pollForFetches` 在 RECONCILING 時把等待上界收到 `retry.backoff.ms`；回歸測試 `KafkaConsumerTest.testSingleLongPollJoinsReconcilesAndFetchesWithAutoCommit`（修正前 10 s FAIL，修正後 0.45 s PASS）。規則寫成 06 R11。
+
+**為什麼本機沒抓到**：單元測試都用 `poll(ZERO)` 或短 poll；本機 ducker smoke 的 `test_group_consumption` 一個一個啟動 consumer、且 producer 已在寫入，join 走背景路徑、fetch 有資料，正好避開兩條需要 poll 輸入的路徑。教訓：e2e 前至少跑 `consumer_test.py` 整檔，而且要在 Jenkins（慢、並行）跑，本機通過不算。
+
+**homelab 量測（同日）**：本機負載無法降到 20 以下，改在 `morefine` 跑三方 A/B，數字與讀法見 03 §2.1「安靜機器複測」；結論是迴圈本身吞吐 +2–3%、CPU/GB −5–7%，完整版 1p +46–69%。
+
 ## 不做
 
 - TreeSet / bitmap / timer heap 之類的排程結構：per-task timer 加版本比對已足夠，成本是幾個整數比較。

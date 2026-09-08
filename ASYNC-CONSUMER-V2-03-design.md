@@ -44,7 +44,7 @@
 | **S5 唯一 owner、列舉的通道、資源守恆** | 每個可變狀態有唯一的 owner 執行緒；跨執行緒只經由列舉過的通道；從通道取出的東西在所有路徑上都有 owner 或已釋放 | 沒有兩條執行緒同時改一個狀態的競態；例外路徑不會讓 batch、credit、事件消失 | KIP-1371 問題 3、4；R4、R5 | 欄位分組與 javadoc；`SinkCollector`（完整版）的 ownership 規則 | `SinkCollectorTest`；執行緒斷言待補 | 大致已做；斷言與 property test 待補 |
 | **S6 生命週期單一排序** | close、leave-group、commit-on-close、停止 coordinator 尋找、停執行緒，以及 fatal error 的「commit 先讀、heartbeat 後清」，由迴圈執行緒上的一個狀態機以固定順序執行，共用一個 timer | 沒有元件能各自決定關閉順序；順序依賴不再靠 `entries()` 的排列 | KIP-1371 問題 4；R9 | 順序規則：timer 到期只把 task 標成 due，所有 manager 一律在 pass 內依註冊順序執行（`ManagerTask.isDue`）；`LifecycleSequencer` 取代三個 close 事件 | `managersRunInRegistrationOrderWhateverTriggeredThem`（commit 讀、heartbeat 清）；coordinator 不可用時 close 仍完成（`ConsumerBounceTest.testAsyncClose`） | 已做（2026-09-08）：順序規則 + `LifecycleSequencer`（RUNNING → COMMIT_ON_CLOSE → COORDINATOR_LOOKUP_STOPPED → LEAVING → LEFT → SHUT_DOWN；三個 close 事件全部經由它，亂序會記錄；shutdown 依註冊順序 `pollOnClose`）；整合測試待安靜時段 |
 | **S7 無進展可見、有界** | 迴圈的 pass 率與「執行了卻沒送出 request 的 manager 執行」率以 metric 暴露（`background-pass-rate`、`manager-runs-without-requests-rate`）；元件間互相以真實 RPC 觸發的循環（第 2 類）與外部風暴（第 3 類）**有界於 RTT 加 manager 內的 backoff**，不由迴圈阻止——每一步都是帶身分的真輸入，S1 的版本驗證無法、也不該擋它 | 循環與風暴看得見、可歸因；不會被誤判為迴圈 bug | busy loop 第 2、3 類 | `AsyncConsumerMetrics` 兩個 sensor；`ManagerTask.lastRunSentNothing` | `AsyncConsumerLoopMetricsTest`、`loopRecordsPassesAndManagerRunsThatProducedNoRequest` | 已做（07 第 3 步，2026-09-08） |
-| **S8 每次 poll 零 event、至多一次條件式 wakeup** | 應用執行緒的穩態 `poll()` 只寫 volatile 序號；「請建下一批 fetch」是旗標；只在迴圈已 park 時才 wakeup | 每次 poll 的固定成本與 poll 頻率脫鉤 | §1.5 第 2 列；busy loop 第 4 類 | `onApplicationPoll`、`requestFetch`、`LoopSignal.wakeupIfParked` | 三方 A/B：mpr50 +17%、CPU/GB −11% | 已做 |
+| **S8 每次 poll 零 event、至多一次條件式 wakeup** | 應用執行緒的穩態 `poll()` 只寫 volatile 序號；沒拿到資料的每個等待迭代再登記一次序號（與舊實作每迭代一個 `PollEvent` 對等，見 06 R11）；「請建下一批 fetch」是旗標；只在迴圈已 park 時才 wakeup | 每次 poll 的固定成本與 poll 頻率脫鉤 | §1.5 第 2 列；busy loop 第 4 類 | `onApplicationPoll`、`requestFetch`、`LoopSignal.wakeupIfParked` | 三方 A/B：mpr50 +17%、CPU/GB −11% | 已做 |
 
 **與 KIP-1371 三條主張的對照**：KIP-1371 主張 (i) manager 結果三分、(ii) 跨 manager 的觀察依產生 request 的狀態版本排序並由 owner 套用、(iii) 一份不可變的彙總 timing 決定先於所有可見效果發佈。S1 對應 (i)；S2 加 S5 對應 (ii)；S4 對應 (iii)，差別在我們不把效果暫存到輪尾——續發仍在 response 回呼裡發生（§2.1 的收益來源）——而是讓等待帶版本，對等待者提供同樣的保證（永遠看得到釋放條件）而不延後資料路徑。S3、S6、S7、S8 是 KIP-1371 沒有明列、但四類問題與 busy loop 分類要求的補充。
 
@@ -187,6 +187,19 @@ KIP-1371（KAFKA-20995，Consumer Reactor）列了四類問題。本設計的目
 - **多 partition 時迴圈本身的增益放大到 +58%**（6p）。fetch 路徑完全相同（同一個 `FetchRequestManager`、同樣的 node 層級排除、深度 1），差別只在「下一批 fetch 的請求」從 event 往返變成旗標加條件式 wakeup；多 partition 下每次 poll 只消費一個 partition 的 batch，其餘仍 buffered 而擋住整個 node，所以續發的時機更常落在 app→background 的往返延遲上。這是量測觀察，機制推論待 profile 證實。
 - **2× 不是迴圈給的**：loop-only → 完整版的差距（415 → 1000、374 → 910、805 → 1300）是 fetch 深度、admission 與無鎖交接，也就是 04 文件裡標為「可回移」的部分。
 - **閒置 CPU 沒有可量到的差別**：三者在 30 s 內都約 2.5–2.8 s（含 JVM 啟動與 JIT），§1.5 第 3 列「閒置時每 100 ms 醒一次」在這個量測裡沒有 CPU 上的證據；那一列只剩正確性面向（busy-loop 類 bug）的意義。
+
+**安靜機器複測（2026-09-08，homelab `morefine`：Intel N150 4 核、31 GB、load ≈ 2、JDK 17；broker 用 trunk 發行包，三個變體只換 `kafka-clients` jar；3 輪交錯，中位數；原始數據 `ASYNC-CONSUMER-V2-bench/results-morefine-3way-run1.csv`）**。上表的本機量測在負載 15–20 之間取得；這一組在幾乎無干擾的機器上重跑同一協定，是應該引用的數字：
+
+| 場景 | trunk | loop-only | 完整版 |
+|---|---:|---:|---:|
+| 1p 100B，MB/s | 400 | 408（+2%） | 584（+46%） |
+| 1p 100B，CPU 秒/GB | 4.88 | 4.54（**−7%**） | 5.03 |
+| 1p 100B `max.poll.records=50`，MB/s | 305 | 311（+2%） | 516（+69%） |
+| 1p 100B `max.poll.records=50`，CPU 秒/GB | 6.78 | 6.45（**−5%**） | 5.28 |
+| 6p 1KB，MB/s | 626 | 646（+3%） | 684（+9%） |
+| 6p 1KB，CPU 秒/GB | 4.75 | 4.51（**−5%**） | 4.97 |
+
+讀法的修正：在安靜的 4 核機器上，迴圈本身的收益比本機量到的小——吞吐 +2–3%，CPU/GB −5–7%，方向一致但幅度收斂；本機的 +17% / +58% 有一部分是負載下 trunk 的每輪全掃與 wakeup 被放大的結果。**迴圈本身的價值主要在 CPU/GB（C 類成本）與 S1–S8 的結構保證，不在吞吐**；完整版的 +46–69%（1p）仍來自 04 文件的可回移優化，6p 只剩 +9%（4 核上 broker 與 consumer 搶 CPU）。
 
 結論（回答「事件迴圈的優化是不是真的有解決問題」）：有，但範圍是明確的——它解決的是高 poll 頻率下的固定成本與多 partition 下的續發延遲，在單 partition、大批次的場景幾乎沒有差別；吞吐 2× 要靠 fetch 路徑。切換架構的論證（§9）應據此收斂：迴圈的價值是 C 類成本、busy-loop 類 bug 的 timer 路徑保證、以及讓 fetch 路徑的改動能以資料模型而非 event 表達；不是「2×」。
 

@@ -99,6 +99,13 @@ R1 的完整形式因此是：結果宣告等待條件，**且**排程器記住�
 - **怎麼驗證**：`managerTimerIsRearmedAfterPollThrows`；每個安全網一個「拿掉它會壞什麼」的測試或說明。
 - **目前狀態**：本專案遵守；trunk 靠每輪全跑，沒有安全網概念。
 
+### R11 應用執行緒的每個等待迭代都是一個輸入（對應問題 1、3）
+
+- **規則**：背景迴圈有些工作只允許在「應用正在 poll」的路徑上做（auto-commit 前的 reconcile、revocation、空 fetch 回應後的下一輪 fetch、auto-commit timer）。這些工作的觸發單位是 **poll 的等待迭代**，不是 `poll()` 的呼叫次數：一次 `poll(Long.MAX_VALUE)` 必須持續產生輸入。實作上每個沒拿到資料的迭代登記一次序號（volatile 寫），迴圈 park 時才喚醒；member 在 RECONCILING 或沒有 assignment 時，等待上界用 `retry.backoff.ms`，讓迭代持續。
+- **怎麼驗證**：`KafkaConsumerTest.testSingleLongPollJoinsReconcilesAndFetchesWithAutoCommit`（一次 `poll(10 s)` 內完成 join、`onPartitionsAssigned`、空 fetch 之後的第二次 fetch；修正前 10 s 後失敗）。
+- **反例（2026-09-08，Jenkins `kafka-e2e` #938）**：迴圈只在 `poll()` 進入時登記一次輸入；system test 的 `VerifiableConsumer` 只呼叫一次 `poll(Long.MAX_VALUE)`，三個 member 同時 join、auto-commit 開啟時 `maybeReconcile(true)` 永遠不再被呼叫，member 卡在 RECONCILING；auto-commit 關閉時 join 走背景路徑成功，但空 fetch 回應後沒有任何人再要求 fetch。`consumer_test.py` 48 個 case 失敗 14 個，全在 `group_protocol=consumer`；單元測試與本機 smoke（一個一個啟動 consumer、有資料可 fetch）都沒覆蓋到。
+- **目前狀態**：已修（`onApplicationPollIteration`）；trunk 以每迭代一個 `PollEvent` + `CreateFetchRequestsEvent` 達成同一件事，成本是每迭代兩個 event 與喚醒。
+
 ## 2. 三種實作對照
 
 | 規則 | trunk `ConsumerNetworkThread` | 本專案 `ConsumerEventLoop` | KIP-1371 reactor（依 JIRA 描述） |
@@ -130,5 +137,6 @@ R1 的完整形式因此是：結果宣告等待條件，**且**排程器記住�
 8. 我發出的錯誤，使用者收到時條件還成立嗎？（R8）
 9. 我碰到 close / leave / coordinator 順序了嗎？是在唯一的排序者裡改的嗎？（R9）
 10. 我加的週期性 timer 在防什麼？它拋例外會重排嗎？（R10）
+11. 我改的應用端等待，在「一次 `poll()` 永不返回」的情況下，背景迴圈需要的 poll 輸入還會持續產生嗎？（R11）
 
 每一題「是」都要指到一個測試。
