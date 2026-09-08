@@ -1,0 +1,32 @@
+# ASYNC-CONSUMER-V2 07：在我們的事件迴圈上解決 KIP-1371 的四類問題（路線圖）
+
+> 決定（2026-09-08）：保留降低輪詢成本的方向，並用同一個迴圈把 KIP-1371（KAFKA-20995）列的問題做成**結構性保證**，而不是再標記一次。manager 的程式碼盡量不動；每一步有守門測試與 pass 成本回歸。契約定義在 06 文件（R1–R10），本文件是實作順序。
+
+## 對應表
+
+| KIP-1371 問題 / busy loop 類型 | 做法 | 落點 | 守門 |
+|---|---|---|---|
+| 1 推不了的緊急工作、2 空結果語意不明；busy loop 第 1 類（自我觸發） | `RequestManager` 加 default `waitCondition()`（預設 `ANY_COMPLETION` = 今天的行為）；`ManagerTask` 記下宣告時看到的版本，只在「自己的 timer 到期」「宣告的輸入到達且版本嚴格前進」「command」三者之一時重跑 | `ManagerTask`、`ConsumerEventLoop` 的版本計數（每個完成 / command / metadata 變更前進並帶身分） | 每個 manager 一個凍結時鐘的執行次數上界測試；`KafkaConsumerTest.testResetUsingDurationBasedAutoResetPolicy` |
+| 3 發佈與等待順序 | `runOnce` 尾端發佈不可變 `PassDecision`（pass 序號、下一個 deadline、position 是否齊全、reconciliation 序號、未交付錯誤）；應用端等待條件加版本；所有背景自主錯誤帶「仍成立」predicate | `ConsumerEventLoop.runOnce`、`PipelinedKafkaConsumer.awaitPollProgress`、`ErrorEvent` | 交錯測試（生產者在條件評估後、park 前發佈）；seek 後舊錯誤不得出現 |
+| 4 生命週期分散；fatal error 順序 | `LifecycleSequencer`：`Close(options)` 一個 command，迴圈執行緒跑明確狀態機（commit → leave → 關 session → 停 coordinator 尋找 → 停執行緒），共用一個 timer；fatal error 的「commit 讀、heartbeat 清」成為兩個明確步驟 | `ConsumerEventLoop`、取代 `CommitOnCloseEvent` / `LeaveGroupOnCloseEvent` / `StopFindCoordinatorOnCloseEvent` | `ConsumerBounceTest.testAsyncClose`（coordinator 不可用）；fatal error 重排測試（先寫） |
+| busy loop 第 2 類（元件間循環） | 進展帳：pass 跑了 manager 但淨狀態版本沒前進且無 timer / command → 計數；連續 K 次套有上限的指數 backoff；metric `passes-without-progress` | `ConsumerEventLoop.runDirtyWork` | 兩個互相觸發但淨狀態不變的 mock manager，pass 頻率必須衰減 |
+| busy loop 第 3 類（外部風暴） | 維持 manager 內 backoff；接上同一個 metric | — | 既有 manager 測試 |
+| busy loop 第 4 類（應用端全速 poll） | 已消除（volatile 寫入） | — | 三方 A/B mpr50 |
+| busy loop 第 5 類（timer 回 0） | 已有界（1 ms，只跑自己）；遷移後由 R1 禁止 | `LoopTimer` | `LoopTimerTest` |
+
+## 順序
+
+1. **`PassDecision` + 錯誤通用化**（小；關掉問題 3 剩下的三成）。
+2. **`waitCondition()` + `ManagerTask` 版本驗證 + 安全退路**（結構性關掉第 1 類），然後逐個遷移：`CoordinatorRequestManager` → `HeartbeatRequestManager` → `CommitRequestManager` → `OffsetsRequestManager`（等 commit manager 的 OffsetFetch，即 R6 的宣告）→ `TopicMetadataRequestManager`。每遷移一個就跑三方 A/B 確認 pass 成本沒有回升。
+3. **進展帳與 metric**（第 2 類有界、可觀測）。
+4. **`LifecycleSequencer`**（問題 4），先補 fatal error 順序的整合測試。
+
+## 不做
+
+- TreeSet / bitmap / timer heap 之類的排程結構：per-task timer 加版本比對已足夠，成本是幾個整數比較。
+- 把 manager 改成 callback 式 reactor、效果輪尾批次釋放：會把 fetch 續發拉回輪尾，抵銷 03 §2.1 的收益。
+- 動 fetch 路徑：`FetchPipeline` 已是 (b) 層次的事件驅動（05 §3.1）。
+
+## 完成後的論證
+
+「每個 pass 的固定成本更低（高 poll 頻率 CPU/GB −11%、多 partition +58%），並且 KIP-1371 的四類問題與五類 busy loop 各有機械式保證或有界化，附守門測試」——這是純標記的排程器與 trunk 都給不出的組合。
