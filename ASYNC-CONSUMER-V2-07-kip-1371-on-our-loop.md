@@ -71,6 +71,8 @@ baseline（trunk，`AsyncKafkaConsumer`）8 個 cell 的數字，10M × 100 B：
 
 **homelab 量測（同日）**：本機負載無法降到 20 以下，改在 `morefine` 跑交錯 A/B。修正 R11 之前的 loop-only 對 trunk +2–3%、CPU/GB −5–7%；修正之後與 trunk 打平（−3% / 0% / +1%，CPU/GB −1% / +3% / 0%）。差距就是 bug 少做的那些每迭代工作。四變體對照與讀法見 03 §2.1「安靜機器複測」。**這改變了論證：迴圈的價值只剩 S1–S8 的結構保證，不能再用吞吐或 CPU/GB 說服 reviewer。**
 
+**Jenkins 第三輪（同日，candidate `26ddaccc23` = 兩個修正 + R11 第二版）**：#939 因我填了短 sha 在 clone 階段失敗（pipeline 用 `fetch +<REVISION>:<REVISION>`，必須填完整 sha）；#940 `consumer_test.py` **48/48 PASS**（`group_protocol=consumer` 24/24），ducktape 總時間 7 分 43 秒（#938 因 timeout 拖到更久）。#938 的 14 個失敗全部消失，行為對等的門檻回到 trunk 水準。
+
 **修正 R11 的第二版**：第一版讓 housekeeping 在每個空迭代把 `stateVersion` 加一（所有 ANY_INPUT manager 重跑），`manager-runs-without-requests` 從 1197 升到 1982/s、吞吐 −4%。第二版只在 membership 狀態真的改變時 bump，fetch 與 commit 用 `ManagerTask.trigger()` 定向觸發（S2：輸入有身分，也有收件人）；pass 數不變但每 pass 只多兩個 manager run。
 
 ## 不做
