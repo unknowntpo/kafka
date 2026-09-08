@@ -91,7 +91,7 @@ R1 的完整形式因此是：結果宣告等待條件，**且**排程器記住�
 - **規則**：coordinator 發現、commit-on-close、leave-group、fetch session 關閉、執行緒停止的順序，由**一個**地方定義並執行；其他元件只提供「我要做什麼」，不自己決定「什麼時候」。fatal error 的「誰先讀、誰清」順序（commit manager 讀、heartbeat manager 清）必須寫成明確的轉移，不能靠 `entries()` 的順序。
 - **為什麼**：兩份審查都指出 Commit → Heartbeat 的 fatal error 順序依賴在兩邊設計都存在且無測試。
 - **怎麼驗證**：close 序列的整合測試（coordinator 不可用時 commit 仍完成：`ConsumerBounceTest.testAsyncClose`）；fatal error 重排測試（待補）。
-- **目前狀態**：本專案沿用 trunk 的 close 序列，未集中。
+- **目前狀態**：manager 執行順序已固定為註冊順序、與觸發來源無關（07 文件 4a）；close 序列仍沿用 trunk 的三個事件，未集中。
 
 ### R10 安全網要明列、有界、會自我修復
 
