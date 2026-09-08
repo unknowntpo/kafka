@@ -15,9 +15,10 @@
 
 from ducktape.mark import matrix
 from ducktape.mark.resource import cluster
+from ducktape.tests.test import Test
 
-from kafkatest.benchmarks.core.benchmark_test import Benchmark, TOPIC_REP_THREE, DEFAULT_RECORD_SIZE
-from kafkatest.services.kafka import quorum
+from kafkatest.benchmarks.core.benchmark_test import TOPIC_REP_THREE, DEFAULT_RECORD_SIZE
+from kafkatest.services.kafka import KafkaService, quorum
 from kafkatest.services.performance import ProducerPerformanceService, ConsumerPerformanceService, \
     compute_aggregate_throughput
 from kafkatest.version import DEV_BRANCH, KafkaVersion
@@ -43,15 +44,31 @@ def consumer_performance_with_protocol(context, kafka, topic, messages, group_pr
     return service
 
 
-class ConsumerProtocolBenchmark(Benchmark):
+class ConsumerProtocolBenchmark(Test):
     """Consumer throughput of the classic and the consumer (KIP-848) group protocols on the same revision, so two
     builds of this test on two revisions compare the implementations behind group.protocol=consumer while the
     classic consumer in each build serves as an in-build control. Consumes 10e6 100-byte records from a
-    1-partition and a 6-partition topic with max.poll.records 500 (default) and 50 (high poll rate)."""
+    1-partition and a 6-partition topic with max.poll.records 500 (default) and 50 (high poll rate).
+
+    Extends Test rather than Benchmark on purpose: ducktape discovers every test_* method of a class, so a
+    Benchmark subclass would also run the whole inherited producer/consumer matrix (74 extra cases)."""
 
     def __init__(self, test_context):
         super(ConsumerProtocolBenchmark, self).__init__(test_context)
-        self.topics[TOPIC_ONE_PARTITION] = {'partitions': 1, 'replication-factor': 1}
+        self.num_brokers = 3
+        self.topics = {
+            TOPIC_REP_THREE: {'partitions': 6, 'replication-factor': 3},
+            TOPIC_ONE_PARTITION: {'partitions': 1, 'replication-factor': 1}
+        }
+
+    def start_kafka(self, security_protocol, interbroker_security_protocol, version):
+        self.kafka = KafkaService(
+            self.test_context, self.num_brokers,
+            zk=None, security_protocol=security_protocol,
+            interbroker_security_protocol=interbroker_security_protocol, topics=self.topics,
+            version=version)
+        self.kafka.log_level = "INFO"
+        self.kafka.start()
 
     @cluster(num_nodes=8)
     @matrix(group_protocol=['classic', 'consumer'], partitions=[1, 6], max_poll_records=[500, 50],
