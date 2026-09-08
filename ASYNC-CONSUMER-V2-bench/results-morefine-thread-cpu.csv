@@ -1,0 +1,15 @@
+label,variant,fetchMB_s,bg_cpu_s,main_cpu_s,gc_cpu_s,total_cpu_s,note
+load-rep1,trunk,362.6828,5.66,6.56,0.12,20.78,R11-v2 jar (idle row = ping-pong before R3 fix)
+load-rep1,looponly,343.3571,5.91,7.10,0.12,21.51,R11-v2 jar (idle row = ping-pong before R3 fix)
+load-rep2,trunk,363.3391,5.58,6.52,0.12,20.10,R11-v2 jar (idle row = ping-pong before R3 fix)
+load-rep2,looponly,334.6226,6.07,7.20,0.13,21.58,R11-v2 jar (idle row = ping-pong before R3 fix)
+load-rep3,trunk,366.9742,5.61,6.62,0.12,19.43,R11-v2 jar (idle row = ping-pong before R3 fix)
+load-rep3,looponly,346.8222,5.87,7.07,0.13,20.43,R11-v2 jar (idle row = ping-pong before R3 fix)
+idle60s,trunk,0.0000,1.21,1.18,0.00,4.93,R11-v2 jar (idle row = ping-pong before R3 fix)
+idle60s,looponly,0.0000,16.39,10.65,0.07,32.68,R11-v2 jar (idle row = ping-pong before R3 fix)
+idle60s,looponly,0.0000,1.20,1.13,0.01,5.08,after R3 fix 12929ab7a2
+idle60s,trunk,0.0000,1.19,1.19,0.00,4.87,after R3 fix 12929ab7a2
+idle60s,looponly,0.0000,1.20,1.14,0.00,5.14,after R3 fix 12929ab7a2
+idle180s,looponly,0.0000,2.10,1.39,0.03,6.64,after R3 fix 12929ab7a2
+idle180s,trunk,0.0000,2.09,1.51,0.10,7.07,after R3 fix 12929ab7a2
+idle180s,looponly,0.0000,2.12,1.40,0.03,6.38,after R3 fix 12929ab7a2

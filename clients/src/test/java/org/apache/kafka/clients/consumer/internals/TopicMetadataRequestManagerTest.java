@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
@@ -302,4 +303,19 @@ public class TopicMetadataRequestManagerTest {
                 Arguments.of(new NetworkException("retriable-exception")));
     }
 
+
+    @Test
+    public void testWaitConditionFollowsTheInflightRequests() {
+        assertEquals(WaitCondition.TIMER_ONLY, topicMetadataRequestManager.waitCondition(),
+            "nothing pending: only a command (which re-runs every manager) can bring work");
+        topicMetadataRequestManager.requestTopicMetadata("topic", time.milliseconds() + 1_000);
+        assertEquals(WaitCondition.TIMER_ONLY, topicMetadataRequestManager.waitCondition(),
+            "queued but not sent yet: the send happens on this pass, not on a completion");
+        NetworkClientDelegate.PollResult res = topicMetadataRequestManager.poll(time.milliseconds());
+        assertEquals(1, res.unsentRequests.size());
+        assertEquals(WaitCondition.OWN_COMPLETION, topicMetadataRequestManager.waitCondition());
+        res.unsentRequests.get(0).future().completeExceptionally(new RuntimeException("simulated failure"));
+        assertEquals(WaitCondition.TIMER_ONLY, topicMetadataRequestManager.waitCondition(),
+            "failed: retry after back-off is the timer's business");
+    }
 }

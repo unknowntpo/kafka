@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult;
+import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 
 import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
@@ -84,4 +85,14 @@ public interface RequestManager {
      * Signals the request manager that the consumer is closing to prepare for the proper actions to be taken.
      */
     default void signalClose() { }
+
+    /**
+     * What this manager is waiting for after {@link #poll(long)} returned (design semantics S1): the event loop
+     * runs it again only when its own timer expires, a command arrives, or the declared input arrives after the
+     * declaration. The default, {@link WaitCondition#ANY_INPUT}, keeps the previous behaviour ("run me when
+     * anything happened") for managers whose dependencies on other managers are not declared yet.
+     */
+    default WaitCondition waitCondition() {
+        return WaitCondition.ANY_INPUT;
+    }
 }

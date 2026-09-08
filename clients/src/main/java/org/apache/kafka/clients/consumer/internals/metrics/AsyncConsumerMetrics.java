@@ -20,11 +20,17 @@ import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
 import org.apache.kafka.common.metrics.stats.Max;
+import org.apache.kafka.common.metrics.stats.Rate;
 import org.apache.kafka.common.metrics.stats.Value;
+import org.apache.kafka.common.metrics.stats.WindowedCount;
+
+import java.util.concurrent.TimeUnit;
 
 public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
 
     public static final String TIME_BETWEEN_NETWORK_THREAD_POLL_SENSOR_NAME = "time-between-network-thread-poll";
+    public static final String BACKGROUND_PASS_SENSOR_NAME = "background-pass";
+    public static final String MANAGER_RUNS_WITHOUT_REQUESTS_SENSOR_NAME = "manager-runs-without-requests";
     public static final String APPLICATION_EVENT_QUEUE_SIZE_SENSOR_NAME = "application-event-queue-size";
     public static final String APPLICATION_EVENT_QUEUE_TIME_SENSOR_NAME = "application-event-queue-time";
     public static final String APPLICATION_EVENT_QUEUE_PROCESSING_TIME_SENSOR_NAME = "application-event-queue-processing-time";
@@ -35,6 +41,8 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
     public static final String UNSENT_REQUESTS_QUEUE_SIZE_SENSOR_NAME = "unsent-requests-queue-size";
     public static final String UNSENT_REQUESTS_QUEUE_TIME_SENSOR_NAME = "unsent-requests-queue-time";
     private final Sensor timeBetweenNetworkThreadPollSensor;
+    private final Sensor backgroundPassSensor;
+    private final Sensor managerRunsWithoutRequestsSensor;
     private final Sensor applicationEventQueueSizeSensor;
     private final Sensor applicationEventQueueTimeSensor;
     private final Sensor applicationEventQueueProcessingTimeSensor;
@@ -68,6 +76,14 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
             ),
             new Max()
         );
+
+        this.backgroundPassSensor = rateSensor(metrics, BACKGROUND_PASS_SENSOR_NAME, "background-pass-rate", groupName,
+            "The number of passes of the background thread's loop per second. Under load this follows the " +
+                "arrival of responses; when idle it should follow the timers only (design semantics S7).");
+        this.managerRunsWithoutRequestsSensor = rateSensor(metrics, MANAGER_RUNS_WITHOUT_REQUESTS_SENSOR_NAME,
+            "manager-runs-without-requests-rate", groupName,
+            "The number of request manager runs per second that produced no request. A high value with a " +
+                "high background-pass-rate points at components triggering each other without progress.");
 
         this.applicationEventQueueSizeSensor = metrics.sensor(APPLICATION_EVENT_QUEUE_SIZE_SENSOR_NAME);
         this.applicationEventQueueSizeSensor.add(
@@ -201,6 +217,23 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
 
     public void recordTimeBetweenNetworkThreadPoll(long timeBetweenNetworkThreadPoll) {
         this.timeBetweenNetworkThreadPollSensor.record(timeBetweenNetworkThreadPoll);
+    }
+
+    private static Sensor rateSensor(MetricsLedger metrics, String sensorName, String metricName, String groupName, String description) {
+        Sensor sensor = metrics.sensor(sensorName);
+        sensor.add(metrics.metricName(metricName, groupName, description), new Rate(TimeUnit.SECONDS, new WindowedCount()));
+        return sensor;
+    }
+
+    /** One pass of the background loop. */
+    public void recordBackgroundPass() {
+        this.backgroundPassSensor.record();
+    }
+
+    /** {@code count} request manager runs in a pass produced no request. */
+    public void recordManagerRunsWithoutRequests(int count) {
+        if (count > 0)
+            this.managerRunsWithoutRequestsSensor.record(count);
     }
 
     public void recordApplicationEventQueueSize(int size) {

@@ -1,0 +1,387 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "PipelinedKafkaConsumer：事件驅動的背景執行緒與無鎖資料路徑",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "data-path",
+        "label": "資料路徑",
+        "focus": [
+          "broker",
+          "network",
+          "loop",
+          "pipeline",
+          "sink",
+          "consumer",
+          "app"
+        ],
+        "note": "Fetch response 回到它的 owner，在同一個 stack 內放進 sink 並續發；應用端 take() 不加鎖。"
+      },
+      {
+        "id": "control-path",
+        "label": "控制路徑",
+        "focus": [
+          "app",
+          "consumer",
+          "commands",
+          "credit",
+          "loop",
+          "pipeline"
+        ],
+        "note": "subscribe / seek / commit 走 command queue；消費完把 credit 還回去，credit 決定何時續發。"
+      },
+      {
+        "id": "manager-path",
+        "label": "協定 manager",
+        "focus": [
+          "timer",
+          "loop",
+          "managers",
+          "network",
+          "broker"
+        ],
+        "note": "六個 RequestManager 原樣重用；每個有自己的 timer，到期只重跑自己，沒有全域 wait time。"
+      }
+    ],
+    "viewBox": [
+      1290,
+      640
+    ]
+  },
+  "components": [
+    {
+      "id": "broker",
+      "type": "external",
+      "label": "Kafka broker",
+      "sublabel": "Fetch / Heartbeat",
+      "pos": [
+        40,
+        300
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "network",
+      "type": "cloud",
+      "label": "NetworkClientDelegate",
+      "sublabel": "poll(0)、回呼",
+      "pos": [
+        240,
+        300
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "managers",
+      "type": "backend",
+      "label": "ManagerTask ×6",
+      "sublabel": "manager 原樣重用",
+      "pos": [
+        240,
+        130
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "tag": "不改 manager"
+    },
+    {
+      "id": "timer",
+      "type": "backend",
+      "label": "LoopTimer",
+      "sublabel": "1 ms 下限",
+      "pos": [
+        460,
+        130
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "loop",
+      "type": "backend",
+      "label": "ConsumerEventLoop",
+      "sublabel": "分派，不取最小值",
+      "pos": [
+        460,
+        300
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "tag": "背景執行緒"
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "FetchPipeline",
+      "sublabel": "credit 與 epoch",
+      "pos": [
+        670,
+        300
+      ],
+      "size": [
+        130,
+        64
+      ],
+      "tag": "不變式 I1–I4"
+    },
+    {
+      "id": "commands",
+      "type": "messagebus",
+      "label": "Command queue",
+      "sublabel": "MPSC",
+      "pos": [
+        880,
+        130
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "sink",
+      "type": "messagebus",
+      "label": "RecordSink",
+      "sublabel": "無鎖佇列",
+      "pos": [
+        880,
+        300
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "credit",
+      "type": "messagebus",
+      "label": "CreditReturnQueue",
+      "sublabel": "歸還位元組",
+      "pos": [
+        880,
+        470
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "consumer",
+      "type": "backend",
+      "label": "PipelinedKafkaConsumer",
+      "sublabel": "take → 解碼",
+      "pos": [
+        1090,
+        300
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "tag": "應用執行緒"
+    },
+    {
+      "id": "app",
+      "type": "external",
+      "label": "應用程式",
+      "sublabel": "poll(timeout)",
+      "pos": [
+        1090,
+        470
+      ],
+      "size": [
+        130,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "背景執行緒 consumer_background_thread",
+      "wraps": [
+        "network",
+        "managers",
+        "timer",
+        "loop",
+        "pipeline"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "應用執行緒",
+      "wraps": [
+        "consumer"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "broker-response",
+      "from": "broker",
+      "to": "network",
+      "label": "response",
+      "variant": "emphasis",
+      "labelDy": -26
+    },
+    {
+      "id": "network-dispatch",
+      "from": "network",
+      "to": "loop",
+      "label": "future 完成",
+      "variant": "emphasis",
+      "labelDy": -26
+    },
+    {
+      "id": "loop-to-pipeline",
+      "from": "loop",
+      "to": "pipeline",
+      "label": "response → owner",
+      "variant": "emphasis",
+      "labelDy": -26
+    },
+    {
+      "id": "pipeline-publish",
+      "from": "pipeline",
+      "to": "sink",
+      "label": "publish(batch, epoch)",
+      "variant": "emphasis",
+      "labelDy": -26
+    },
+    {
+      "id": "sink-take",
+      "from": "sink",
+      "to": "consumer",
+      "label": "take()，無鎖",
+      "variant": "emphasis",
+      "labelDy": 26,
+      "labelDx": -6
+    },
+    {
+      "id": "app-poll",
+      "from": "app",
+      "to": "consumer",
+      "label": "poll(timeout)",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "labelDx": 44
+    },
+    {
+      "id": "pipeline-reissue",
+      "from": "pipeline",
+      "to": "network",
+      "label": "下一個 FetchRequest，同一 stack 續發",
+      "variant": "emphasis",
+      "fromSide": "bottom",
+      "toSide": "bottom"
+    },
+    {
+      "id": "timer-fire",
+      "from": "timer",
+      "to": "loop",
+      "label": "到期任務",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 24
+    },
+    {
+      "id": "loop-runs-manager",
+      "from": "loop",
+      "to": "managers",
+      "label": "timer 到期 / request 完成",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "manager-send",
+      "from": "managers",
+      "to": "network",
+      "label": "unsent requests",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 30,
+      "labelDx": -48
+    },
+    {
+      "id": "consumer-command",
+      "from": "consumer",
+      "to": "commands",
+      "label": "subscribe / seek / commit",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "right"
+    },
+    {
+      "id": "command-drain",
+      "from": "commands",
+      "to": "loop",
+      "label": "processCommands",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "consumer-credit",
+      "from": "consumer",
+      "to": "credit",
+      "label": "歸還 credit",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": -40
+    },
+    {
+      "id": "credit-drain",
+      "from": "credit",
+      "to": "pipeline",
+      "label": "drainCredits → 可續發",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "事件驅動，不是 deadline-driven",
+      "items": [
+        "三種來源直接分派：response 給 owner、timer 給 task、command 給 handler",
+        "沒有對所有 manager 取最小等待時間；任一 manager 回 0 只影響它自己",
+        "閒置 pass 只做：空 queue、metadata 版本、timer 檢查、poll(0)"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "資料路徑",
+      "items": [
+        "response 一到就 publish 進 sink 並續發，不等應用端、不等下一輪",
+        "每個 partition credit = 2 × max.partition.fetch.bytes，消費後歸還",
+        "所有 batch 帶 position epoch；seek / reset 後舊資料自動作廢"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "穩態 poll() 零 event、零 syscall",
+      "items": [
+        "應用端只做 take、解碼、position 更新、歸還 credit",
+        "沒事做時 park 在 sink 狀態上，被 publish 或 command 結果叫醒",
+        "只涵蓋 group.protocol=consumer；Streams 與 share consumer 不變"
+      ]
+    }
+  ]
+}
