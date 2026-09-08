@@ -58,6 +58,7 @@ import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
+import org.apache.kafka.common.message.ConsumerGroupHeartbeatResponseData;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.message.HeartbeatResponseData;
 import org.apache.kafka.common.message.JoinGroupRequestData;
@@ -85,6 +86,7 @@ import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.requests.AbstractResponse;
+import org.apache.kafka.common.requests.ConsumerGroupHeartbeatResponse;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.FetchResponse;
 import org.apache.kafka.common.requests.FindCoordinatorResponse;
@@ -1118,6 +1120,55 @@ public class KafkaConsumerTest {
         consumer.poll(Duration.ZERO);
 
         assertTrue(heartbeatReceived.get());
+    }
+
+    /**
+     * A single long {@code poll()} must complete a join whose reconciliation may only run on the poll path
+     * (auto-commit enabled) and keep fetching after a fetch response that carried no records. The previous
+     * implementation produced a poll event on every wait iteration; a consumer that calls
+     * {@code poll(Long.MAX_VALUE)} once (the system tests' VerifiableConsumer does) relies on that cadence.
+     */
+    @Test
+    public void testSingleLongPollJoinsReconcilesAndFetchesWithAutoCommit() {
+        Time realTime = Time.SYSTEM;
+        ConsumerMetadata metadata = createMetadata(subscription);
+        MockClient client = new MockClient(realTime, metadata);
+        initMetadata(client, Map.of(topic, 1));
+        Node node = metadata.fetch().nodes().get(0);
+        Node coordinator = new GroupCoordinatorNode(node.id(), node.host(), node.port());
+
+        client.prepareResponseFrom(FindCoordinatorResponse.prepareResponse(Errors.NONE, groupId, node), node);
+        client.prepareResponseFrom(new ConsumerGroupHeartbeatResponse(new ConsumerGroupHeartbeatResponseData()
+                .setMemberId(memberId)
+                .setMemberEpoch(1)
+                .setHeartbeatIntervalMs(5000)
+                .setAssignment(new ConsumerGroupHeartbeatResponseData.Assignment().setTopicPartitions(List.of(
+                    new ConsumerGroupHeartbeatResponseData.TopicPartitions().setTopicId(topicId).setPartitions(List.of(0)))))),
+            coordinator);
+        // The first fetch carries no records, the second carries five.
+        client.prepareResponseFrom(fetchResponse(tp0, 0, 0), node);
+        client.prepareResponseFrom(fetchResponse(tp0, 0, 5), node);
+
+        consumer = newConsumer(GroupProtocol.CONSUMER, realTime, client, subscription, metadata, assignor, true, groupInstanceId);
+        AtomicInteger assignedCallbacks = new AtomicInteger();
+        consumer.subscribe(Set.of(topic), new ConsumerRebalanceListener() {
+            @Override
+            public void onPartitionsRevoked(Collection<TopicPartition> partitions) {
+            }
+
+            @Override
+            public void onPartitionsAssigned(Collection<TopicPartition> partitions) {
+                assignedCallbacks.incrementAndGet();
+                for (TopicPartition partition : partitions)
+                    consumer.seek(partition, 0);
+            }
+        });
+
+        @SuppressWarnings("unchecked")
+        ConsumerRecords<String, String> records = (ConsumerRecords<String, String>) consumer.poll(Duration.ofSeconds(10));
+
+        assertEquals(1, assignedCallbacks.get(), "onPartitionsAssigned must run inside the single poll()");
+        assertEquals(5, records.count());
     }
 
     @ParameterizedTest

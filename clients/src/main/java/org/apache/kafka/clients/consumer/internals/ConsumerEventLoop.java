@@ -104,6 +104,10 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     private final LoopTimer timer = new LoopTimer();
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
     private final List<ManagerTask> managerTasks = new ArrayList<>();
+    /** The fetch manager's task: the application's "next fetch" request is addressed to it alone. */
+    private ManagerTask fetchTask;
+    /** The commit manager's task, if any: the per-poll auto-commit timer may hand it a request. */
+    private ManagerTask commitTask;
     private LifecycleSequencer lifecycle;
 
     private volatile NetworkClientDelegate networkClientDelegate;
@@ -236,6 +240,23 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         return ++applicationPollSequence;
     }
 
+    /**
+     * Application thread: one iteration of {@code poll()}'s wait loop ended without records and the next one
+     * starts. The previous implementation created a {@code PollEvent} and a {@code CreateFetchRequestsEvent} on
+     * every iteration, not once per {@code poll()} call, and three things depend on that cadence: reconciliation
+     * steps that only the poll path may run (auto-commit before reconciling, revocation), the next fetch request
+     * after a fetch response that carried no records, and the auto-commit timer. A single {@code poll(Long.MAX)}
+     * therefore has to keep producing poll inputs. Each iteration is recorded as an input with identity (S2), and
+     * the loop is woken only if it is parked: under load it is awake and picks the sequence up on its next pass.
+     *
+     * @return the sequence number of this poll iteration
+     */
+    public long onApplicationPollIteration(long pollTimeMs) {
+        long sequence = onApplicationPoll(pollTimeMs);
+        signal.wakeupIfParked();
+        return sequence;
+    }
+
     /** Application thread: poll() is returning to the application. */
     public void onApplicationPollReturn() {
         applicationInPoll = false;
@@ -326,8 +347,13 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         requestManagers = requestManagersSupplier.get();
         lifecycle = new LifecycleSequencer(new LogContext(log.getName() + " "), requestManagers);
         for (RequestManager rm : requestManagers.entries()) {
-            managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, pass::get, stateVersion::get,
-                    this::markManagersDirty, this::markManagerDue));
+            ManagerTask task = new ManagerTask(rm, networkClientDelegate, timer, pass::get, stateVersion::get,
+                    this::markManagersDirty, this::markManagerDue);
+            managerTasks.add(task);
+            if (rm == requestManagers.fetchRequestManager)
+                fetchTask = task;
+            if (requestManagers.commitRequestManager.isPresent() && rm == requestManagers.commitRequestManager.get())
+                commitTask = task;
         }
         long now = time.milliseconds();
         timer.schedule(now, REAPER_INTERVAL_MS, this::reap);
@@ -469,9 +495,10 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
             return;
         fetchRequested = false;
         requestManagers.fetchRequestManager.createFetchRequests();
-        // The application's request for the next fetch is an input with identity: the fetch manager (which
-        // declares ANY_INPUT) must see a newer version or the verification in ManagerTask would hold it back.
-        stateVersion.incrementAndGet();
+        // The application's request for the next fetch is an input addressed to the fetch manager alone: it runs
+        // on this pass, the other managers are not re-run for it (an application poll iteration that ended
+        // without records is frequent under load, one per fetch response, and must stay cheap).
+        fetchTask.trigger();
         managersDirty = true;
     }
 
@@ -557,26 +584,46 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         // Every application poll asks for the next fetch, as the previous implementation's per-poll event did.
         fetchRequested = true;
 
-        requestManagers.consumerMembershipManager.ifPresent(mm -> mm.maybeReconcile(true));
+        // Only the steps that changed something are inputs for the managers (S2): a poll iteration that ended
+        // without records happens once per fetch response under load, and re-running every manager for it costs
+        // more than the loop saves. Membership changes (a reconciliation started, a join triggered) and a pattern
+        // subscription refresh are inputs for all; the auto-commit timer's request goes to the commit manager.
+        boolean membershipChanged = false;
+        if (requestManagers.consumerMembershipManager.isPresent()) {
+            ConsumerMembershipManager mm = requestManagers.consumerMembershipManager.get();
+            MemberState stateBefore = mm.state();
+            boolean inProgressBefore = mm.reconciliationInProgress();
+            mm.maybeReconcile(true);
+            membershipChanged = mm.state() != stateBefore || mm.reconciliationInProgress() != inProgressBefore;
+        }
         reconciliationCheckedPollSequence = pollSequence;
 
         if (requestManagers.commitRequestManager.isPresent()) {
             requestManagers.commitRequestManager.get().updateTimerAndMaybeCommit(pollMs);
-            requestManagers.consumerHeartbeatRequestManager.ifPresent(hrm -> {
-                if (subscriptions.hasPatternSubscription())
+            commitTask.trigger();
+            if (requestManagers.consumerHeartbeatRequestManager.isPresent()) {
+                ConsumerHeartbeatRequestManager hrm = requestManagers.consumerHeartbeatRequestManager.get();
+                if (subscriptions.hasPatternSubscription()) {
                     applicationEventProcessor.process(new UpdatePatternSubscriptionEvent(now + defaultApiTimeoutMs));
+                    membershipChanged = true;
+                }
+                MemberState stateBefore = hrm.membershipManager().state();
                 hrm.membershipManager().onConsumerPoll();
+                membershipChanged |= hrm.membershipManager().state() != stateBefore;
                 hrm.resetPollTimer(pollMs);
-            });
-            requestManagers.streamsGroupHeartbeatRequestManager.ifPresent(hrm -> {
+            }
+            if (requestManagers.streamsGroupHeartbeatRequestManager.isPresent()) {
+                StreamsGroupHeartbeatRequestManager hrm = requestManagers.streamsGroupHeartbeatRequestManager.get();
+                MemberState stateBefore = hrm.membershipManager().state();
                 hrm.membershipManager().onConsumerPoll();
+                membershipChanged |= hrm.membershipManager().state() != stateBefore;
                 hrm.resetPollTimer(pollMs);
-            });
+            }
         }
 
         maybeUpdateFetchPositions(now, false);
-        // An application poll is an input with identity: the per-poll bookkeeping above changed manager state.
-        stateVersion.incrementAndGet();
+        if (membershipChanged)
+            stateVersion.incrementAndGet();
         managersDirty = true;
     }
 

@@ -121,6 +121,15 @@ final class ManagerTask {
     }
 
     /**
+     * An input addressed to this manager alone (S2: inputs have identity), from the loop thread: the manager runs on
+     * the next pass without the version check, as after its own timer. Used when the loop knows exactly which
+     * manager has new work (a fetch request to create, an auto-commit to send) so the others are not re-run.
+     */
+    void trigger() {
+        due = true;
+    }
+
+    /**
      * Loop thread, during a pass in which some input arrived: does the declared trigger allow a run now?
      *
      * @param commandProcessed a command from the application thread was processed in this pass
