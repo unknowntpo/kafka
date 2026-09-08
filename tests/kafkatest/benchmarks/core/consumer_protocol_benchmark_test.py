@@ -25,23 +25,22 @@ from kafkatest.version import DEV_BRANCH, KafkaVersion
 TOPIC_ONE_PARTITION = "test-rep-one-p1"
 
 
-class ProtocolConsumerPerformanceService(ConsumerPerformanceService):
-    """ConsumerPerformanceService that selects the consumer group protocol and the poll batch size through
-    --command-property, which the tool forwards to the consumer configuration."""
+def consumer_performance_with_protocol(context, kafka, topic, messages, group_protocol, max_poll_records):
+    """A ConsumerPerformanceService whose command line selects the group protocol and the poll batch size through
+    --command-property. The override is per instance (not a subclass) so that ducktape keeps resolving the
+    service's templates from the kafkatest.services.performance package."""
+    service = ConsumerPerformanceService(context, 1, kafka, topic=topic, messages=messages)
+    base_args = service.args
 
-    def __init__(self, context, num_nodes, kafka, topic, messages, group_protocol, max_poll_records,
-                 version=DEV_BRANCH):
-        super(ProtocolConsumerPerformanceService, self).__init__(context, num_nodes, kafka, topic, messages,
-                                                                 version=version)
-        self.group_protocol = group_protocol
-        self.max_poll_records = max_poll_records
-
-    def args(self, version):
+    def args_with_protocol(version):
         # start_cmd renders each entry as "--<key> <value>"; a flag with an empty value renders as "--<key> ".
-        args = super(ProtocolConsumerPerformanceService, self).args(version)
-        args['command-property group.protocol=%s' % self.group_protocol] = ""
-        args['command-property max.poll.records=%d' % self.max_poll_records] = ""
+        args = base_args(version)
+        args['command-property group.protocol=%s' % group_protocol] = ""
+        args['command-property max.poll.records=%d' % max_poll_records] = ""
         return args
+
+    service.args = args_with_protocol
+    return service
 
 
 class ConsumerProtocolBenchmark(Benchmark):
@@ -77,10 +76,8 @@ class ConsumerProtocolBenchmark(Benchmark):
         )
         self.producer.run()
 
-        self.consumer = ProtocolConsumerPerformanceService(
-            self.test_context, 1, self.kafka,
-            topic=topic, messages=num_records,
-            group_protocol=group_protocol, max_poll_records=max_poll_records)
+        self.consumer = consumer_performance_with_protocol(
+            self.test_context, self.kafka, topic, num_records, group_protocol, max_poll_records)
         self.consumer.group = "protocol-benchmark-%s-p%d-mpr%d" % (group_protocol, partitions, max_poll_records)
         self.consumer.run()
         return compute_aggregate_throughput(self.consumer)
