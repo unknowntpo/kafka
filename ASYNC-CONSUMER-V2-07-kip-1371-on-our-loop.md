@@ -75,6 +75,8 @@ baseline（trunk，`AsyncKafkaConsumer`）8 個 cell 的數字，10M × 100 B：
 
 **修正 R11 的第二版**：第一版讓 housekeeping 在每個空迭代把 `stateVersion` 加一（所有 ANY_INPUT manager 重跑），`manager-runs-without-requests` 從 1197 升到 1982/s、吞吐 −4%。第二版只在 membership 狀態真的改變時 bump，fetch 與 commit 用 `ManagerTask.trigger()` 定向觸發（S2：輸入有身分，也有收件人）；pass 數不變但每 pass 只多兩個 manager run。
 
+**每執行緒 CPU 與閒置量測（同日）**：user 指出總 CPU 由解碼主導、與迴圈無關，改量背景執行緒自己的 CPU 與 60 秒閒置。結果：負載下背景執行緒 trunk 5.6 s 對我們 5.9 s（40M 筆），閒置兩邊都 1.2 s；閒置量測第一次跑出我們自己的 ping-pong busy loop（16.4 s / 10.7 s），修正為 `12929ab7a2`（06 R3 反例）。**結論不變且更完整：迴圈在吞吐、總 CPU、背景執行緒 CPU、閒置 CPU 上都與 trunk 打平；它的價值是結構性的（busy loop 這一類 bug 在構造上不可能，等待有版本、決定有單一來源、生命週期有排序者），而且這個性質只在 R1–R11 全部守住時成立。**
+
 ## 不做
 
 - TreeSet / bitmap / timer heap 之類的排程結構：per-task timer 加版本比對已足夠，成本是幾個整數比較。

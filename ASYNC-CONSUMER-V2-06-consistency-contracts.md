@@ -47,6 +47,8 @@ R1 的完整形式因此是：結果宣告等待條件，**且**排程器記住�
 - **怎麼驗證**：兩執行緒交錯測試：生產者在等待者評估條件之後、park 之前發佈，等待者必須不 park 或立即醒（`LoopSignalTest`、`RecordSinkTest` 的形式）。Code review 檢查 (c) 的清單。
 - **目前狀態**：本專案應用端與迴圈端都遵守，且自 2026-09-08 起 loop 以 `PassDecision` 在 app 可見欄位改變時喚醒（07 文件第 1 步）；trunk 的背景事件佇列違反 (a)(c)。
 
+- **反例（2026-09-08，homelab 閒置量測）**：R11 修正後每個 poll 迭代都推進 `reconciliationCheckedPollSequence`，而 `PassDecision.applicationVisibleChangeSince` 無條件把它的變化當成應用執行緒在等的東西 → 迴圈叫醒應用執行緒 → 空迭代再叫醒迴圈 → 兩條執行緒互相喚醒。60 秒閒置背景執行緒 16.4 s CPU、主執行緒 10.7 s（trunk 各 1.2 s）。修法：只有 member 在 RECONCILING 時序號變化才可見（`PassDecision.reconciliationPending`）；測試 `reconciliationCheckWakesTheApplicationOnlyWhileAReconciliationIsPending`。教訓：每個喚醒來源都要能指出「誰、在什麼狀態下、等這個」；單元測試用 `MockClient` 量不出這種空轉（它的 poll 不阻塞），要用真 broker 量閒置 CPU。
+
 ### R4 每個狀態有唯一 owner；跨執行緒只走列舉過的通道（對應問題 3、4）
 
 - **規則**：每個可變狀態在 javadoc 標明 owner；非 owner 只能透過明列的通道（本專案：sink、credit、command、result；trunk：application event queue、background event queue、`FetchBuffer`）影響它。owner 執行緒的方法在進入時 `assert` 執行緒身分。
