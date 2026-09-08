@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.protocol.ApiKeys;
@@ -320,5 +321,18 @@ public class CoordinatorRequestManagerTest {
             null,
             findCoordinatorResponse
         );
+    }
+
+    @Test
+    public void testWaitConditionIsOwnCompletionOnlyWhileARequestIsInFlight() {
+        CoordinatorRequestManager coordinatorManager = setupCoordinatorManager(GROUP_ID);
+        assertEquals(WaitCondition.ANY_INPUT, coordinatorManager.waitCondition());
+        NetworkClientDelegate.PollResult res = coordinatorManager.poll(time.milliseconds());
+        assertEquals(1, res.unsentRequests.size());
+        assertEquals(WaitCondition.OWN_COMPLETION, coordinatorManager.waitCondition(),
+            "only the FindCoordinator completion can change anything while it is in flight");
+        res.unsentRequests.get(0).future().completeExceptionally(new RuntimeException("simulated failure"));
+        assertEquals(WaitCondition.ANY_INPUT, coordinatorManager.waitCondition(),
+            "backing off: any other manager may mark the coordinator unknown or a command may arrive");
     }
 }

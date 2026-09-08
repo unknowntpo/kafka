@@ -17,24 +17,29 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.internals.pipeline.LoopTimer;
+import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 
 import java.util.function.LongSupplier;
 
 /**
- * Drives one {@link RequestManager} from the event loop. The manager is run when its own timer fires and after
- * any request completion or command (a "manager pass", see below); its {@code timeUntilNextPollMs} only
- * reschedules its own timer. Nothing here is aggregated across managers, so a manager that asks to be re-run
- * "immediately" costs one run per {@link LoopTimer#MIN_DELAY_MS} and nothing else.
+ * Drives one {@link RequestManager} from the event loop under design semantics S1: after every run the manager
+ * declares what it is waiting for ({@link RequestManager#waitCondition()}), and it is run again only when
+ * <ul>
+ *   <li>its own timer expires (from its {@code timeUntilNextPollMs}, clamped to {@link LoopTimer#MIN_DELAY_MS}),</li>
+ *   <li>the declared input arrives with a version strictly newer than the one it declared under, or</li>
+ *   <li>a command from the application thread was processed in this pass.</li>
+ * </ul>
+ * Nothing else can run it. The verification against the declared version is what makes self-triggered busy loops
+ * impossible for a manager that declares accurately: a condition that was already true when declared does not
+ * count, and neither does an input that arrived before the declaration.
  *
- * <p>A completed request re-runs every manager, not only the one that sent it: managers depend on each other
- * through future chains that are not declared anywhere (an OffsetFetch completing in the commit manager queues a
- * ListOffsets in the offsets manager; a heartbeat response drives the membership manager, which drives commits).
- * Targeting single managers would need those dependencies to be explicit; until then a pass runs all of them,
- * exactly like the previous implementation did on every iteration, but only when something completed.
+ * <p>The default declaration {@link WaitCondition#ANY_INPUT} reproduces the previous implementation's behaviour
+ * restricted to "an input with identity arrived": managers depend on each other through undeclared future chains
+ * (an OffsetFetch completing in the commit manager queues a ListOffsets in the offsets manager), so until a
+ * manager's dependencies are declared it must be run on any input (contract R6).
  *
  * <p>Liveness: the manager runs at most once per loop pass, whatever combination of triggers fired, and its timer is
- * always re-armed, also when {@code poll()} throws (then after {@link #FAILURE_RETRY_MS}). A task never depends on
- * another task's trigger to get its next turn.
+ * always re-armed, also when {@code poll()} throws (then after {@link #FAILURE_RETRY_MS}).
  */
 final class ManagerTask {
 
@@ -47,20 +52,34 @@ final class ManagerTask {
     private final NetworkClientDelegate network;
     private final LoopTimer timer;
     private final LongSupplier currentPass;
+    private final LongSupplier stateVersion;
     private final Runnable onResponse;
     private LoopTimer.Handle scheduled;
     private long scheduledDeadlineMs = Long.MAX_VALUE;
     private long lastRunPass = -1;
+    /** What the manager declared after its last run, and the versions it declared under. */
+    private WaitCondition declared = WaitCondition.ANY_INPUT;
+    private long declaredStateVersion = -1;
+    private long declaredOwnCompletions = -1;
+    /** Completions of this manager's own requests so far (loop thread, inside the network poll). */
+    private long ownCompletions;
 
     /**
-     * @param currentPass supplies the loop's current pass number; a task runs at most once per pass
-     * @param onResponse  called when one of this manager's requests completes (loop thread, inside the network poll)
+     * @param currentPass  supplies the loop's current pass number; a task runs at most once per pass
+     * @param stateVersion supplies the loop's state version (advanced by every input with identity)
+     * @param onResponse   called when one of this manager's requests completes (loop thread, inside the network poll)
      */
-    ManagerTask(RequestManager manager, NetworkClientDelegate network, LoopTimer timer, LongSupplier currentPass, Runnable onResponse) {
+    ManagerTask(RequestManager manager,
+                NetworkClientDelegate network,
+                LoopTimer timer,
+                LongSupplier currentPass,
+                LongSupplier stateVersion,
+                Runnable onResponse) {
         this.manager = manager;
         this.network = network;
         this.timer = timer;
         this.currentPass = currentPass;
+        this.stateVersion = stateVersion;
         this.onResponse = onResponse;
     }
 
@@ -68,8 +87,32 @@ final class ManagerTask {
         return manager;
     }
 
+    /** @return what the manager declared after its last run */
+    WaitCondition declared() {
+        return declared;
+    }
+
     /**
-     * Runs the manager unless it already ran in the current pass.
+     * Loop thread, during a pass in which some input arrived: does the declared trigger allow a run now?
+     *
+     * @param commandProcessed a command from the application thread was processed in this pass
+     */
+    boolean wantsRun(boolean commandProcessed) {
+        if (commandProcessed)
+            return true;
+        switch (declared) {
+            case ANY_INPUT:
+                return stateVersion.getAsLong() > declaredStateVersion;
+            case OWN_COMPLETION:
+                return ownCompletions > declaredOwnCompletions;
+            case TIMER_ONLY:
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Runs the manager unless it already ran in the current pass, then records its declaration.
      *
      * @return {@code true} if the manager was run
      */
@@ -81,16 +124,31 @@ final class ManagerTask {
         NetworkClientDelegate.PollResult result;
         try {
             result = manager.poll(currentTimeMs);
-            for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests)
-                request.whenComplete((response, error) -> onResponse.run());
+            for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
+                request.whenComplete((response, error) -> {
+                    ownCompletions++;
+                    onResponse.run();
+                });
+            }
             network.addAll(result);
         } catch (RuntimeException | Error e) {
             // Keep the manager alive: re-arm its timer before letting the loop log the failure.
+            declare();
             reschedule(currentTimeMs, FAILURE_RETRY_MS, true);
             throw e;
         }
+        declare();
         reschedule(currentTimeMs, Math.min(result.timeUntilNextPollMs, MAX_INTERVAL_MS), false);
         return true;
+    }
+
+    /** Records the manager's declaration and the versions it was made under (S1: verification baseline). */
+    private void declare() {
+        WaitCondition condition = manager.waitCondition();
+        // A manager that declares nothing (null, e.g. a mock) gets the safe default.
+        declared = condition == null ? WaitCondition.ANY_INPUT : condition;
+        declaredStateVersion = stateVersion.getAsLong();
+        declaredOwnCompletions = ownCompletions;
     }
 
     /**

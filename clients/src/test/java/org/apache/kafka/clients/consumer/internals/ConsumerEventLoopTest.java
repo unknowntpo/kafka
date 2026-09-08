@@ -27,6 +27,7 @@ import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.FetchPositionsErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.clients.consumer.internals.pipeline.PassDecision;
+import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -390,5 +391,77 @@ public class ConsumerEventLoopTest {
         loop.runOnce();
         assertTrue(applicationWakeups.get() > beforeError, "a background event was queued for the application");
         assertFalse(loop.latestDecision().positionsAttemptInFlight);
+    }
+
+    @Test
+    public void managerDeclaringOwnCompletionIsNotRerunByOtherManagersInputs() {
+        when(topicMetadataRequestManager.waitCondition()).thenReturn(WaitCondition.OWN_COMPLETION);
+        NetworkClientDelegate.UnsentRequest others = new NetworkClientDelegate.UnsentRequest(
+            new MetadataRequest.Builder(List.of("topic"), false), Optional.of(new Node(0, "localhost", 9092)));
+        when(offsetsRequestManager.poll(anyLong()))
+            .thenReturn(new NetworkClientDelegate.PollResult(Long.MAX_VALUE, List.of(others)))
+            .thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        loop.runOnce();
+        clearInvocations(topicMetadataRequestManager);
+
+        // Another manager's request completes and metadata changes: neither is the declared input.
+        others.future().completeExceptionally(new RuntimeException("simulated completion"));
+        loop.runOnce();
+        metadataVersion.incrementAndGet();
+        loop.runOnce();
+        verify(topicMetadataRequestManager, never()).poll(anyLong());
+
+        // A command always re-runs every manager (its effect on manager state is unknown).
+        loop.add(eventWithDeadline(time.milliseconds() + 1_000));
+        loop.runOnce();
+        verify(topicMetadataRequestManager, times(1)).poll(anyLong());
+    }
+
+    @Test
+    public void managerDeclaringOwnCompletionIsRerunWhenItsOwnRequestCompletes() {
+        when(topicMetadataRequestManager.waitCondition()).thenReturn(WaitCondition.OWN_COMPLETION);
+        NetworkClientDelegate.UnsentRequest own = new NetworkClientDelegate.UnsentRequest(
+            new MetadataRequest.Builder(List.of("topic"), false), Optional.of(new Node(0, "localhost", 9092)));
+        when(topicMetadataRequestManager.poll(anyLong()))
+            .thenReturn(new NetworkClientDelegate.PollResult(Long.MAX_VALUE, List.of(own)))
+            .thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        loop.runOnce();
+        clearInvocations(topicMetadataRequestManager);
+        loop.runOnce();
+        verify(topicMetadataRequestManager, never()).poll(anyLong());
+
+        own.future().completeExceptionally(new RuntimeException("simulated completion"));
+        loop.runOnce();
+        verify(topicMetadataRequestManager, times(1)).poll(anyLong());
+    }
+
+    @Test
+    public void managerDeclaringTimerOnlyRunsOnlyOnItsTimerOrACommand() {
+        when(topicMetadataRequestManager.waitCondition()).thenReturn(WaitCondition.TIMER_ONLY);
+        when(topicMetadataRequestManager.poll(anyLong())).thenReturn(new NetworkClientDelegate.PollResult(50));
+        loop.runOnce();
+        clearInvocations(topicMetadataRequestManager);
+        loop.onApplicationPoll(time.milliseconds());
+        loop.runOnce();
+        metadataVersion.incrementAndGet();
+        loop.runOnce();
+        verify(topicMetadataRequestManager, never()).poll(anyLong());
+        time.sleep(50);
+        loop.runOnce();
+        verify(topicMetadataRequestManager, times(1)).poll(anyLong());
+    }
+
+    @Test
+    public void aManagerAskingForZeroDelayIsBoundedByTheTimerFloorAndItsDeclaration() {
+        when(topicMetadataRequestManager.waitCondition()).thenReturn(WaitCondition.TIMER_ONLY);
+        when(topicMetadataRequestManager.poll(anyLong())).thenReturn(new NetworkClientDelegate.PollResult(0));
+        loop.runOnce();
+        clearInvocations(topicMetadataRequestManager);
+        for (int i = 0; i < 100; i++)
+            loop.runOnce();
+        verify(topicMetadataRequestManager, never()).poll(anyLong());
+        time.sleep(1);
+        loop.runOnce();
+        verify(topicMetadataRequestManager, times(1)).poll(anyLong());
     }
 }

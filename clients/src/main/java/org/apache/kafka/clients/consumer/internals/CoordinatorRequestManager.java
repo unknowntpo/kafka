@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.errors.DisconnectException;
@@ -165,6 +166,15 @@ public class CoordinatorRequestManager implements RequestManager {
      * @param cause         String explanation of why the coordinator is marked unknown
      * @param currentTimeMs Current time in milliseconds
      */
+    /**
+     * While a FindCoordinator request is in flight only its completion can change anything here; otherwise the
+     * coordinator may be marked unknown by any other manager's response, so stay on the default.
+     */
+    @Override
+    public WaitCondition waitCondition() {
+        return coordinatorRequestState.requestInFlight() ? WaitCondition.OWN_COMPLETION : WaitCondition.ANY_INPUT;
+    }
+
     public void markCoordinatorUnknown(final String cause, final long currentTimeMs) {
         if (coordinator != null || timeMarkedUnknownMs == -1) {
             timeMarkedUnknownMs = currentTimeMs;

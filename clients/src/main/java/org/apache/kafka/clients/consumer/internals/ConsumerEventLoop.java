@@ -118,6 +118,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     private volatile boolean managersDirty = true;
     /** Loop pass counter; a manager runs at most once per pass whatever combination of triggers fired. */
     private long pass;
+    /** A command from the application thread was processed in the current pass (commands re-run every manager). */
+    private boolean commandProcessedThisPass;
     /**
      * The application asked for the next fetch (a poll, or records returned): set from the application thread, so
      * the loop calls {@link FetchRequestManager#createFetchRequests()} on its next pass, as the previous
@@ -310,7 +312,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         networkClientDelegate = networkClientDelegateSupplier.get();
         requestManagers = requestManagersSupplier.get();
         for (RequestManager rm : requestManagers.entries()) {
-            managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, () -> pass, this::markManagersDirty));
+            managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, () -> pass, () -> stateVersion, this::markManagersDirty));
         }
         long now = time.milliseconds();
         timer.schedule(now, REAPER_INTERVAL_MS, this::reap);
@@ -340,6 +342,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     void runOnce() {
         signal.markRunning();
         pass++;
+        commandProcessedThisPass = false;
         final long now = time.milliseconds();
         if (lastLoopTimeMs != 0L)
             asyncConsumerMetrics.recordTimeBetweenNetworkThreadPoll(now - lastLoopTimeMs);
@@ -443,14 +446,16 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     }
 
     /**
-     * Runs every manager (each at most once per pass). A manager that throws does not stop the others from getting
-     * their turn; the first failure is rethrown afterwards so the loop's error handling (rate-limited log, back-off)
-     * still applies.
+     * Runs every manager whose declared trigger fired (semantics S1; each at most once per pass). A manager that
+     * throws does not stop the others from getting their turn; the first failure is rethrown afterwards so the
+     * loop's error handling (rate-limited log, back-off) still applies.
      */
     private boolean runManagers(long now) {
         boolean ran = false;
         RuntimeException failure = null;
         for (ManagerTask task : managerTasks) {
+            if (!task.wantsRun(commandProcessedThisPass))
+                continue;
             try {
                 ran |= task.run(now);
             } catch (RuntimeException e) {
@@ -476,7 +481,6 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
 
     private void processCommands(long now) {
         Object command;
-        boolean processedEvent = false;
         while ((command = commands.poll()) != null) {
             try {
                 if (command instanceof ApplicationEvent) {
@@ -487,16 +491,16 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                     if (event instanceof MetadataErrorNotifiableEvent && maybeFailOnMetadataError(List.of(event)))
                         continue;
                     applicationEventProcessor.process(event);
-                    processedEvent = true;
                 } else {
                     ((Runnable) command).run();
                 }
                 stateVersion++;
+                commandProcessedThisPass = true;
             } catch (Throwable t) {
                 log.warn("Error processing command {}", command, t);
             }
         }
-        if (processedEvent)
+        if (commandProcessedThisPass)
             managersDirty = true;
     }
 
@@ -533,6 +537,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         }
 
         maybeUpdateFetchPositions(now, false);
+        // An application poll is an input with identity: the per-poll bookkeeping above changed manager state.
+        stateVersion++;
         managersDirty = true;
     }
 
@@ -559,6 +565,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         final boolean[] asynchronous = {false};
         if (!positionsUpdate.isDone()) {
             // Requests were queued inside the offsets / commit managers; they leave on the next manager pass.
+            // The attempt is an input with identity for the managers that must send them.
+            stateVersion++;
             managersDirty = true;
         }
         positionsUpdate.whenComplete((ignored, error) -> {
