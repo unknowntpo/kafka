@@ -19,6 +19,7 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.consumer.internals.pipeline.LoopTimer;
 import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
@@ -63,16 +64,20 @@ final class ManagerTask {
     private LoopTimer.Handle scheduled;
     private long scheduledDeadlineMs = Long.MAX_VALUE;
     private long lastRunPass = -1;
-    /** What the manager declared after its last run, and the versions it declared under. */
-    private WaitCondition declared = WaitCondition.ANY_INPUT;
-    private long declaredStateVersion = -1;
-    private long declaredOwnCompletions = -1;
-    /** Completions of this manager's own requests so far (loop thread, inside the network poll). */
-    private long ownCompletions;
+    /**
+     * What the manager declared after its last run, and the versions it declared under. All written on the loop
+     * thread only; volatile because the class also has callback-written state and SpotBugs' thread-safety
+     * detectors require it for every shared primitive.
+     */
+    private volatile WaitCondition declared = WaitCondition.ANY_INPUT;
+    private volatile long declaredStateVersion = -1;
+    private volatile long declaredOwnCompletions = -1;
+    /** Completions of this manager's own requests so far (advanced on the loop thread, inside the network poll). */
+    private final AtomicLong ownCompletions = new AtomicLong();
     /** Whether the most recent run produced no request (observability, semantics S7). */
-    private boolean lastRunSentNothing;
+    private volatile boolean lastRunSentNothing;
     /** The manager's timer expired; it runs on the next ordered manager run. */
-    private boolean due;
+    private volatile boolean due;
 
     /**
      * @param currentPass  supplies the loop's current pass number; a task runs at most once per pass
@@ -127,7 +132,7 @@ final class ManagerTask {
             case ANY_INPUT:
                 return stateVersion.getAsLong() > declaredStateVersion;
             case OWN_COMPLETION:
-                return ownCompletions > declaredOwnCompletions;
+                return ownCompletions.get() > declaredOwnCompletions;
             case TIMER_ONLY:
             default:
                 return false;
@@ -151,7 +156,7 @@ final class ManagerTask {
             lastRunSentNothing = result.unsentRequests.isEmpty();
             for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
                 request.whenComplete((response, error) -> {
-                    ownCompletions++;
+                    ownCompletions.incrementAndGet();
                     onResponse.run();
                 });
             }
@@ -173,7 +178,7 @@ final class ManagerTask {
         // A manager that declares nothing (null, e.g. a mock) gets the safe default.
         declared = condition == null ? WaitCondition.ANY_INPUT : condition;
         declaredStateVersion = stateVersion.getAsLong();
-        declaredOwnCompletions = ownCompletions;
+        declaredOwnCompletions = ownCompletions.get();
     }
 
     /**

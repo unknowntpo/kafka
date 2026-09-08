@@ -49,6 +49,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.common.utils.Utils.closeQuietly;
@@ -118,9 +119,9 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
      */
     private volatile boolean managersDirty = true;
     /** Loop pass counter; a manager runs at most once per pass whatever combination of triggers fired. */
-    private long pass;
+    private final AtomicLong pass = new AtomicLong();
     /** A command from the application thread was processed in the current pass (commands re-run every manager). */
-    private boolean commandProcessedThisPass;
+    private volatile boolean commandProcessedThisPass;
     /**
      * The application asked for the next fetch (a poll, or records returned): set from the application thread, so
      * the loop calls {@link FetchRequestManager#createFetchRequests()} on its next pass, as the previous
@@ -147,12 +148,16 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     private CompletableFuture<Void> positionsUpdate;
     /** Called when a published {@link PassDecision} changes something the application thread may wait for. */
     private final Runnable onApplicationVisibleChange;
-    /** Inputs with identity consumed so far: request completions, commands, metadata changes. Loop thread only. */
-    private long stateVersion;
+    /**
+     * Inputs with identity consumed so far: request completions, commands, metadata changes, application polls.
+     * Only ever advanced on the loop thread (also from request-completion callbacks, which run inside the network
+     * poll on the loop thread); atomic so that reads from other threads and SpotBugs see a consistent value.
+     */
+    private final AtomicLong stateVersion = new AtomicLong();
     /** Published at the end of every pass; read by the application thread. */
     private volatile PassDecision latestDecision = PassDecision.NONE;
     /** Whether positions may have changed in this pass (managers ran, a command or metadata change was processed). */
-    private boolean positionsMayHaveChanged = true;
+    private volatile boolean positionsMayHaveChanged = true;
 
     public ConsumerEventLoop(LogContext logContext,
                              Time time,
@@ -321,7 +326,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         requestManagers = requestManagersSupplier.get();
         lifecycle = new LifecycleSequencer(new LogContext(log.getName() + " "), requestManagers);
         for (RequestManager rm : requestManagers.entries()) {
-            managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, () -> pass, () -> stateVersion,
+            managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, pass::get, stateVersion::get,
                     this::markManagersDirty, this::markManagerDue));
         }
         long now = time.milliseconds();
@@ -345,7 +350,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
 
     private void markManagersDirty() {
         // A request completed: an input with identity (the request's owner) reached the loop.
-        stateVersion++;
+        stateVersion.incrementAndGet();
         managersDirty = true;
     }
 
@@ -356,7 +361,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
 
     void runOnce() {
         signal.markRunning();
-        pass++;
+        pass.incrementAndGet();
         commandProcessedThisPass = false;
         final long now = time.milliseconds();
         if (lastLoopTimeMs != 0L)
@@ -399,8 +404,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         boolean allPositionsKnown = positionsMayHaveChanged ? subscriptions.hasAllFetchPositions() : previous.allPositionsKnown;
         positionsMayHaveChanged = false;
         PassDecision decision = new PassDecision(
-                pass,
-                stateVersion,
+                pass.get(),
+                stateVersion.get(),
                 timer.nextDeadlineMs(),
                 allPositionsKnown,
                 positionsUpdate != null && !positionsUpdate.isDone(),
@@ -433,7 +438,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         int metadataVersion = metadata.updateVersion();
         if (metadataVersion != lastMetadataVersion) {
             lastMetadataVersion = metadataVersion;
-            stateVersion++;
+            stateVersion.incrementAndGet();
             managersDirty = true;
             positionsMayHaveChanged = true;
             maybeUpdateFetchPositions(time.milliseconds(), true);
@@ -466,7 +471,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         requestManagers.fetchRequestManager.createFetchRequests();
         // The application's request for the next fetch is an input with identity: the fetch manager (which
         // declares ANY_INPUT) must see a newer version or the verification in ManagerTask would hold it back.
-        stateVersion++;
+        stateVersion.incrementAndGet();
         managersDirty = true;
     }
 
@@ -526,7 +531,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                 } else {
                     ((Runnable) command).run();
                 }
-                stateVersion++;
+                stateVersion.incrementAndGet();
                 commandProcessedThisPass = true;
                 positionsMayHaveChanged = true;
             } catch (Throwable t) {
@@ -571,7 +576,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
 
         maybeUpdateFetchPositions(now, false);
         // An application poll is an input with identity: the per-poll bookkeeping above changed manager state.
-        stateVersion++;
+        stateVersion.incrementAndGet();
         managersDirty = true;
     }
 
@@ -599,7 +604,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         if (!positionsUpdate.isDone()) {
             // Requests were queued inside the offsets / commit managers; they leave on the next manager pass.
             // The attempt is an input with identity for the managers that must send them.
-            stateVersion++;
+            stateVersion.incrementAndGet();
             managersDirty = true;
         }
         positionsUpdate.whenComplete((ignored, error) -> {
