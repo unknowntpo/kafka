@@ -31,6 +31,25 @@
 
 ---
 
+## 主張（Semantics）：這個設計保證什麼
+
+仿 KIP-1371 的寫法，先列主張，再列機制。每條主張是一句可以驗證的規範句；違反它就是 bug。它們合起來要涵蓋 KIP-1371（KAFKA-20995）的四類問題與 06 文件的五類 busy loop，同時保留 §1.5 的成本目標。細則在 06 文件（R1–R10），實作順序在 07 文件。
+
+| # | 主張 | 保證什麼 | 對應的問題 | 機制 | 驗證 | 狀態 |
+|---|---|---|---|---|---|---|
+| **S1 推進宣告** | 一個 manager 的每次執行，結束時必須是三者之一：`WORK_NOW`（已送出 request 或改變狀態）、`RETRY_AT(deadline)`、`WAIT_FOR(input)`；它只會在「自己的 timer 到期」「宣告的輸入到達且版本嚴格大於宣告時的版本」「command」三者之一時被再次執行 | 沒有「延遲 0 卻什麼都沒做」；自我觸發類 busy loop 對已宣告的 manager 在結構上不可能 | KIP-1371 問題 1、2；busy loop 第 1、5 類 | `RequestManager.waitCondition()`（預設 `ANY_COMPLETION` = 安全退路）+ `ManagerTask` 版本驗證 + `LoopTimer` 1 ms 下限 | 每個 manager 一個凍結時鐘的執行次數上界測試；`testResetUsingDurationBasedAutoResetPolicy` | 07 第 2 步；下限已有 |
+| **S2 輸入有身分** | 到達迴圈的每個輸入都有身分（哪個 owner 的哪個 request 完成、哪個 command、哪個 metadata 版本），且讓單一的 `stateVersion` 前進；沒有任何工作是「因為迴圈醒了」而做 | 排程決定可以針對輸入而不是重新掃描；版本比對有共同的座標 | KIP-1371 問題 2；S1 的基礎 | `ConsumerEventLoop.stateVersion`；`ManagerTask` 對每個 `UnsentRequest` 掛回呼 | `decisionIsPublishedEveryPassAndItsVersionAdvancesOnlyOnInputsWithIdentity` | 版本已做；身分標記在第 2 步 |
+| **S3 完成不等於進展** | 沒有改變狀態的完成不觸發工作；同步完成的 future 永遠不觸發重跑 | 不經 timer 的自我觸發空轉不存在 | KIP-1371 問題 1；busy loop 第 1 類 | `maybeUpdateFetchPositions` 的非同步旗標；S1 落實後由版本比對統一保證 | `positionsAttemptThatCompletesWithoutProgressDoesNotRerunManagersOnItsOwn` | 已做（個案）；第 2 步統一 |
+| **S4 每 pass 一份決定，先發佈再阻塞** | 迴圈每個 pass 結束時發佈一份不可變的 `PassDecision`（版本、下一個 deadline、position 狀態、reconciliation 序號、待交付事件），用阻塞前一刻的新時間計算；應用執行緒的等待帶版本，只在它可能等待的欄位改變時被叫醒；所有生產者先發佈再 signal | 應用執行緒永遠不會在看不到釋放條件的狀態下等待，也不會為沒有改變的狀態醒來；等待上限與它看到的狀態來自同一個 pass | KIP-1371 問題 3；02 文件 §2.3、§2.4；R3、R7 | `PassDecision`、`publishDecision`、`Parker` / `FetchBuffer` 的版本式等待、`LoopSignal.prepareToPark` | `applicationIsWokenOnlyWhenADecisionFieldItMayWaitForChanges`、`LoopSignalTest` 交錯案例 | 已做（07 第 1 步） |
+| **S5 唯一 owner、列舉的通道、資源守恆** | 每個可變狀態有唯一的 owner 執行緒；跨執行緒只經由列舉過的通道；從通道取出的東西在所有路徑上都有 owner 或已釋放 | 沒有兩條執行緒同時改一個狀態的競態；例外路徑不會讓 batch、credit、事件消失 | KIP-1371 問題 3、4；R4、R5 | 欄位分組與 javadoc；`SinkCollector`（完整版）的 ownership 規則 | `SinkCollectorTest`；執行緒斷言待補 | 大致已做；斷言與 property test 待補 |
+| **S6 生命週期單一排序** | close、leave-group、commit-on-close、停止 coordinator 尋找、停執行緒，以及 fatal error 的「commit 先讀、heartbeat 後清」，由迴圈執行緒上的一個狀態機以固定順序執行，共用一個 timer | 沒有元件能各自決定關閉順序；順序依賴不再靠 `entries()` 的排列 | KIP-1371 問題 4；R9 | `LifecycleSequencer`，取代三個 close 事件 | coordinator 不可用時 close 仍完成（`ConsumerBounceTest.testAsyncClose`）；fatal error 重排測試 | 07 第 4 步 |
+| **S7 無進展有界且可見** | 跑了工作但 `stateVersion` 沒前進、且沒有 timer 或 command 的 pass 會被計數；連續發生時 manager pass 以有上限的指數退避；計數以 metric 暴露 | 元件間循環與外部風暴從「以 RTT 速率轉」變成有界、可觀測 | busy loop 第 2、3 類 | 進展帳、`passes-without-progress` metric | 兩個互相觸發但淨狀態不變的 mock manager，pass 頻率必須衰減 | 07 第 3 步 |
+| **S8 每次 poll 零 event、至多一次條件式 wakeup** | 應用執行緒的穩態 `poll()` 只寫 volatile 序號；「請建下一批 fetch」是旗標；只在迴圈已 park 時才 wakeup | 每次 poll 的固定成本與 poll 頻率脫鉤 | §1.5 第 2 列；busy loop 第 4 類 | `onApplicationPoll`、`requestFetch`、`LoopSignal.wakeupIfParked` | 三方 A/B：mpr50 +17%、CPU/GB −11% | 已做 |
+
+**與 KIP-1371 三條主張的對照**：KIP-1371 主張 (i) manager 結果三分、(ii) 跨 manager 的觀察依產生 request 的狀態版本排序並由 owner 套用、(iii) 一份不可變的彙總 timing 決定先於所有可見效果發佈。S1 對應 (i)；S2 加 S5 對應 (ii)；S4 對應 (iii)，差別在我們不把效果暫存到輪尾——續發仍在 response 回呼裡發生（§2.1 的收益來源）——而是讓等待帶版本，對等待者提供同樣的保證（永遠看得到釋放條件）而不延後資料路徑。S3、S6、S7、S8 是 KIP-1371 沒有明列、但四類問題與 busy loop 分類要求的補充。
+
+---
+
 ## 0. 設計原則（回應「不要犧牲通用性的 hack」）
 
 1. **每個效能手段都必須是一個有名字的抽象，而不是一個旗標。** 實驗分支裡的每個 hack 在本設計中的正規對應：
