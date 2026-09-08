@@ -56,7 +56,14 @@ baseline（trunk，`AsyncKafkaConsumer`）8 個 cell 的數字，10M × 100 B：
 1. `3d3e4ba179`：`ConsumerProtocolBenchmark` 改繼承 `Test` 而非 `Benchmark`。ducktape 會發現 class 上所有 `test_*`（含繼承），原版一共收集 82 個 test，修正後 8 個（本機 `ducktape --collect-only` 驗證）。留給 baseline/candidate 都重跑的下一輪使用。
 2. `a4cfd52936`：把 `waitCondition()` 移到 `markCoordinatorUnknown` 的 javadoc 之前。本機用 JDK 25 重現 lint 錯誤並確認修正後通過；提交 Jenkins 前的 gate 一律改用 JDK 25 跑 `clean build -x test`。
 
-**待辦**：（a）Build B 以原 revision 重送一次（需授權）；（b）push 兩個修正到 CI 分支後重送 Build C（需授權）；（c）之後若要乾淨的數字，baseline 與 candidate 各用含修正 1 的 revision 再跑一輪 8-cell。
+**第二輪（同日，經授權 push + 重送）**：candidate 分支推到 `42fab4e0b2`（兩個修正都在）。
+
+| Build | 版本 | 測試 | 結果 |
+|---|---|---|---|
+| #937 | candidate `1b5f8ab873`（原 revision，想保持與 #934 同排程） | benchmark | FAILURE：同 #936 的 JDK 25 lint。這是判斷錯誤：該 revision 本來就編不過，「同排程」的前提不存在 |
+| #938 | candidate `42fab4e0b2` | `tests/client/consumer_test.py` | build stage 通過（javadoc 修正生效），ducktape 執行中 |
+
+**結論**：可比的 bench 只能是 baseline 與 candidate 都用「只收集 8 個 test」的版本各跑一次（baseline 側為 `91ac9bfb29` = `575f7d163b` + 修正 1，待 push）。#934 的數字只當 trunk 的參考值，不與 8-test 版的 candidate 直接相減。
 
 ## 不做
 
