@@ -436,7 +436,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                 allPositionsKnown,
                 positionsUpdate != null && !positionsUpdate.isDone(),
                 reconciliationCheckedPollSequence,
-                backgroundEventHandler.size() > 0);
+                backgroundEventHandler.size() > 0,
+                requestManagers.consumerMembershipManager.map(mm -> mm.state() == MemberState.RECONCILING).orElse(false));
         latestDecision = decision;
         if (decision.applicationVisibleChangeSince(previous))
             onApplicationVisibleChange.run();

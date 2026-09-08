@@ -395,7 +395,8 @@ public class ConsumerEventLoopTest {
 
         loop.onApplicationPoll(time.milliseconds());
         loop.runOnce();
-        assertEquals(afterFirst + 2, applicationWakeups.get(), "reconciliation check advanced for the new poll");
+        assertEquals(afterFirst + 1, applicationWakeups.get(),
+            "a poll's reconciliation check advancing wakes nobody while nothing is reconciling (R3)");
 
         positionsFuture = new CompletableFuture<>();
         loop.onApplicationPoll(time.milliseconds());
@@ -406,6 +407,39 @@ public class ConsumerEventLoopTest {
         loop.runOnce();
         assertTrue(applicationWakeups.get() > beforeError, "a background event was queued for the application");
         assertFalse(loop.latestDecision().positionsAttemptInFlight);
+    }
+
+    /**
+     * Every poll iteration advances the reconciliation-check sequence; only an application thread waiting for a
+     * pending reconciliation cares. Waking it unconditionally made the two threads wake each other for ever on an
+     * idle consumer (contract R3: a wake-up must correspond to a wait).
+     */
+    @Test
+    public void reconciliationCheckWakesTheApplicationOnlyWhileAReconciliationIsPending() {
+        ConsumerMembershipManager membershipManager = mock(ConsumerMembershipManager.class);
+        when(membershipManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(membershipManager.state()).thenReturn(MemberState.STABLE);
+        RequestManagers managers = new RequestManagers(logContext, offsetsRequestManager, topicMetadataRequestManager,
+                fetchRequestManager, Optional.empty(), Optional.empty(), Optional.empty(), Optional.of(membershipManager),
+                Optional.empty(), Optional.empty(), Optional.empty());
+        ConsumerEventLoop withMember = new ConsumerEventLoop(logContext, time, 1_000, subscriptions, metadata, () -> processor,
+                () -> networkClientDelegate, () -> managers, new BackgroundEventHandler(backgroundQueue, time, asyncConsumerMetrics),
+                asyncConsumerMetrics, applicationWakeups::incrementAndGet);
+        withMember.initializeResources();
+        withMember.runOnce();
+        int stable = applicationWakeups.get();
+
+        withMember.onApplicationPollIteration(time.milliseconds());
+        withMember.runOnce();
+        withMember.onApplicationPollIteration(time.milliseconds());
+        withMember.runOnce();
+        assertEquals(stable, applicationWakeups.get(), "idle poll iterations of a stable member wake nobody");
+
+        when(membershipManager.state()).thenReturn(MemberState.RECONCILING);
+        withMember.onApplicationPollIteration(time.milliseconds());
+        withMember.runOnce();
+        assertEquals(stable + 1, applicationWakeups.get(), "the check the application waits for during reconciliation woke it");
+        assertTrue(withMember.latestDecision().reconciliationPending);
     }
 
     @Test

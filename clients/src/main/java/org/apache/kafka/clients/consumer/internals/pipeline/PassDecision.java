@@ -29,7 +29,7 @@ package org.apache.kafka.clients.consumer.internals.pipeline;
 public final class PassDecision {
 
     /** Before the first pass. */
-    public static final PassDecision NONE = new PassDecision(0, 0, LoopTimer.NO_DEADLINE, false, false, 0, false);
+    public static final PassDecision NONE = new PassDecision(0, 0, LoopTimer.NO_DEADLINE, false, false, 0, false, false);
 
     /** Sequence number of the pass that produced this decision. */
     public final long pass;
@@ -43,6 +43,12 @@ public final class PassDecision {
     public final boolean positionsAttemptInFlight;
     /** The application poll sequence up to which the reconciliation check has run. */
     public final long reconciliationCheckedPollSequence;
+    /**
+     * The group member is reconciling an assignment, so the application thread may be waiting for the
+     * reconciliation check of its poll before it collects records; only then is an advance of
+     * {@link #reconciliationCheckedPollSequence} something it waits for.
+     */
+    public final boolean reconciliationPending;
     /** The loop queued something for the application thread (background event) during this pass. */
     public final boolean backgroundEventsPending;
 
@@ -52,7 +58,8 @@ public final class PassDecision {
                         boolean allPositionsKnown,
                         boolean positionsAttemptInFlight,
                         long reconciliationCheckedPollSequence,
-                        boolean backgroundEventsPending) {
+                        boolean backgroundEventsPending,
+                        boolean reconciliationPending) {
         this.pass = pass;
         this.stateVersion = stateVersion;
         this.nextDeadlineMs = nextDeadlineMs;
@@ -60,17 +67,23 @@ public final class PassDecision {
         this.positionsAttemptInFlight = positionsAttemptInFlight;
         this.reconciliationCheckedPollSequence = reconciliationCheckedPollSequence;
         this.backgroundEventsPending = backgroundEventsPending;
+        this.reconciliationPending = reconciliationPending;
     }
 
     /**
      * @return {@code true} if something the application thread may be waiting for differs from {@code previous}:
-     * positions became known (or an attempt ended), the reconciliation check advanced, or a background event was
-     * queued. The pass number and timer deadline alone are not reasons to wake it.
+     * positions became known (or an attempt ended), the reconciliation check advanced while a reconciliation is
+     * pending, or a background event was queued. The pass number and timer deadline alone are not reasons to wake
+     * it, and neither is a reconciliation check nobody waits for: every poll iteration advances the checked
+     * sequence, so waking on it unconditionally makes the two threads wake each other for ever (contract R3: a
+     * wake-up must correspond to a wait).
      */
     public boolean applicationVisibleChangeSince(PassDecision previous) {
+        boolean reconciliationCheckWaitedFor = reconciliationPending || previous.reconciliationPending;
+        boolean reconciliationCheckAdvanced = reconciliationCheckedPollSequence != previous.reconciliationCheckedPollSequence;
         return allPositionsKnown != previous.allPositionsKnown
                 || positionsAttemptInFlight != previous.positionsAttemptInFlight
-                || reconciliationCheckedPollSequence != previous.reconciliationCheckedPollSequence
+                || (reconciliationCheckWaitedFor && reconciliationCheckAdvanced)
                 || (backgroundEventsPending && !previous.backgroundEventsPending);
     }
 
@@ -79,6 +92,7 @@ public final class PassDecision {
         return "PassDecision(pass=" + pass + ", version=" + stateVersion + ", nextDeadlineMs=" + nextDeadlineMs +
                 ", allPositionsKnown=" + allPositionsKnown + ", positionsAttemptInFlight=" + positionsAttemptInFlight +
                 ", reconciliationCheckedPollSequence=" + reconciliationCheckedPollSequence +
-                ", backgroundEventsPending=" + backgroundEventsPending + ")";
+                ", backgroundEventsPending=" + backgroundEventsPending +
+                ", reconciliationPending=" + reconciliationPending + ")";
     }
 }
