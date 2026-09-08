@@ -17,14 +17,18 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.MockClient;
+import org.apache.kafka.clients.consumer.CloseOptions;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.CommitOnCloseEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.FetchPositionsErrorEvent;
+import org.apache.kafka.clients.consumer.internals.events.LeaveGroupOnCloseEvent;
+import org.apache.kafka.clients.consumer.internals.events.StopFindCoordinatorOnCloseEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.clients.consumer.internals.pipeline.PassDecision;
 import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
@@ -40,6 +44,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -58,10 +63,12 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -520,5 +527,54 @@ public class ConsumerEventLoopTest {
         ordered.runOnce();
         assertTrue(commitSawFatalError.get(), "the commit manager must read the fatal error before the heartbeat manager clears it");
         assertTrue(fatal.get().isEmpty(), "and the heartbeat manager did clear it afterwards");
+    }
+
+    @Test
+    public void closeTransitionsPassThroughTheLifecycleSequencerInOrderAndShutdownPollsManagersInRegistrationOrder() {
+        CoordinatorRequestManager coordinator = mock(CoordinatorRequestManager.class);
+        when(coordinator.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(coordinator.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        CommitRequestManager commit = mock(CommitRequestManager.class);
+        when(commit.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(commit.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        ConsumerMembershipManager membership = mock(ConsumerMembershipManager.class);
+        when(membership.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(membership.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(membership.leaveGroupOnClose(any())).thenReturn(CompletableFuture.completedFuture(null));
+        when(offsetsRequestManager.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(topicMetadataRequestManager.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(fetchRequestManager.pollOnClose(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        RequestManagers managers = new RequestManagers(logContext, offsetsRequestManager, topicMetadataRequestManager,
+                fetchRequestManager, Optional.of(coordinator), Optional.of(commit), Optional.empty(),
+                Optional.of(membership), Optional.empty(), Optional.empty(), Optional.empty());
+        ConsumerEventLoop closing = new ConsumerEventLoop(logContext, time, 1_000, subscriptions, metadata, () -> processor,
+                () -> networkClientDelegate, () -> managers, new BackgroundEventHandler(backgroundQueue, time, asyncConsumerMetrics),
+                asyncConsumerMetrics, () -> { });
+        closing.initializeResources();
+        assertEquals(LifecycleSequencer.Step.RUNNING, closing.lifecycle().step());
+
+        closing.add(new CommitOnCloseEvent());
+        closing.add(new StopFindCoordinatorOnCloseEvent());
+        LeaveGroupOnCloseEvent leave = new LeaveGroupOnCloseEvent(time.milliseconds() + 1_000, CloseOptions.GroupMembershipOperation.DEFAULT);
+        closing.add(leave);
+        closing.runOnce();
+
+        InOrder order = inOrder(commit, coordinator, membership);
+        order.verify(commit).signalClose();
+        order.verify(coordinator).signalClose();
+        order.verify(membership).leaveGroupOnClose(CloseOptions.GroupMembershipOperation.DEFAULT);
+        assertTrue(leave.future().isDone());
+        assertEquals(LifecycleSequencer.Step.LEFT, closing.lifecycle().step());
+        verify(processor, never()).process(any(CommitOnCloseEvent.class));
+
+        closing.lifecycle().shutdown(time.milliseconds(), networkClientDelegate);
+        InOrder closeOrder = inOrder(coordinator, commit, membership, offsetsRequestManager, topicMetadataRequestManager, fetchRequestManager);
+        closeOrder.verify(coordinator).pollOnClose(anyLong());
+        closeOrder.verify(commit).pollOnClose(anyLong());
+        closeOrder.verify(membership).pollOnClose(anyLong());
+        closeOrder.verify(offsetsRequestManager).pollOnClose(anyLong());
+        closeOrder.verify(topicMetadataRequestManager).pollOnClose(anyLong());
+        closeOrder.verify(fetchRequestManager).pollOnClose(anyLong());
+        assertEquals(LifecycleSequencer.Step.SHUT_DOWN, closing.lifecycle().step());
     }
 }

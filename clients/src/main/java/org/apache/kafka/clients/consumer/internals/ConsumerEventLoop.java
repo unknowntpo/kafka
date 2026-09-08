@@ -103,6 +103,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     private final LoopTimer timer = new LoopTimer();
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
     private final List<ManagerTask> managerTasks = new ArrayList<>();
+    private LifecycleSequencer lifecycle;
 
     private volatile NetworkClientDelegate networkClientDelegate;
     private ApplicationEventProcessor applicationEventProcessor;
@@ -258,6 +259,11 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         return latestDecision;
     }
 
+    // Visible for testing
+    LifecycleSequencer lifecycle() {
+        return lifecycle;
+    }
+
     private void ensureAlive() {
         if (initializationError != null)
             throw ConsumerUtils.maybeWrapAsKafkaException(initializationError);
@@ -311,6 +317,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         applicationEventProcessor = applicationEventProcessorSupplier.get();
         networkClientDelegate = networkClientDelegateSupplier.get();
         requestManagers = requestManagersSupplier.get();
+        lifecycle = new LifecycleSequencer(new LogContext(log.getName() + " "), requestManagers);
         for (RequestManager rm : requestManagers.entries()) {
             managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, () -> pass, () -> stateVersion,
                     this::markManagersDirty, this::markManagerDue));
@@ -506,7 +513,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                         applicationEventReaper.add((CompletableEvent<?>) event);
                     if (event instanceof MetadataErrorNotifiableEvent && maybeFailOnMetadataError(List.of(event)))
                         continue;
-                    applicationEventProcessor.process(event);
+                    if (!lifecycle.apply(event))
+                        applicationEventProcessor.process(event);
                 } else {
                     ((Runnable) command).run();
                 }
@@ -673,11 +681,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         log.trace("Closing the consumer event loop");
         Timer closeTimer = time.timer(closeTimeout);
         try {
-            if (requestManagers != null && networkClientDelegate != null) {
-                long now = time.milliseconds();
-                for (ManagerTask task : managerTasks)
-                    networkClientDelegate.addAll(task.manager().pollOnClose(now));
-            }
+            if (requestManagers != null && networkClientDelegate != null)
+                lifecycle.shutdown(time.milliseconds(), networkClientDelegate);
         } catch (Exception e) {
             log.error("Unexpected error during shutdown. Proceed with closing.", e);
         } finally {
