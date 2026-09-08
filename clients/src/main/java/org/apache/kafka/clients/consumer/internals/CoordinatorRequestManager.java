@@ -155,6 +155,15 @@ public class CoordinatorRequestManager implements RequestManager {
     }
 
     /**
+     * While a FindCoordinator request is in flight only its completion can change anything here; otherwise the
+     * coordinator may be marked unknown by any other manager's response, so stay on the default.
+     */
+    @Override
+    public WaitCondition waitCondition() {
+        return coordinatorRequestState.requestInFlight() ? WaitCondition.OWN_COMPLETION : WaitCondition.ANY_INPUT;
+    }
+
+    /**
      * Mark the coordinator as "unknown" (i.e. {@code null}) when a disconnect is detected. This detection can occur
      * in one of two paths:
      *
@@ -166,15 +175,6 @@ public class CoordinatorRequestManager implements RequestManager {
      * @param cause         String explanation of why the coordinator is marked unknown
      * @param currentTimeMs Current time in milliseconds
      */
-    /**
-     * While a FindCoordinator request is in flight only its completion can change anything here; otherwise the
-     * coordinator may be marked unknown by any other manager's response, so stay on the default.
-     */
-    @Override
-    public WaitCondition waitCondition() {
-        return coordinatorRequestState.requestInFlight() ? WaitCondition.OWN_COMPLETION : WaitCondition.ANY_INPUT;
-    }
-
     public void markCoordinatorUnknown(final String cause, final long currentTimeMs) {
         if (coordinator != null || timeMarkedUnknownMs == -1) {
             timeMarkedUnknownMs = currentTimeMs;
