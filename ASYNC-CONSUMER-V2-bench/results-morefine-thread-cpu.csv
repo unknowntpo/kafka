@@ -10,3 +10,6 @@ idle60s,looponly,0.0000,16.39,10.65,0.07,32.68,R11-v2 jar (idle row = ping-pong 
 idle60s,looponly,0.0000,1.20,1.13,0.01,5.08,after R3 fix 12929ab7a2
 idle60s,trunk,0.0000,1.19,1.19,0.00,4.87,after R3 fix 12929ab7a2
 idle60s,looponly,0.0000,1.20,1.14,0.00,5.14,after R3 fix 12929ab7a2
+idle180s,looponly,0.0000,2.10,1.39,0.03,6.64,after R3 fix 12929ab7a2
+idle180s,trunk,0.0000,2.09,1.51,0.10,7.07,after R3 fix 12929ab7a2
+idle180s,looponly,0.0000,2.12,1.40,0.03,6.38,after R3 fix 12929ab7a2
