@@ -327,9 +327,11 @@ public class ConsumerEventLoopTest {
         verify(fetchRequestManager, atLeastOnce()).poll(anyLong());
         loop.runOnce();
         verify(fetchRequestManager, times(1)).createFetchRequests();
+        clearInvocations(fetchRequestManager);
         loop.requestFetch();
         loop.runOnce();
-        verify(fetchRequestManager, times(2)).createFetchRequests();
+        verify(fetchRequestManager, times(1)).createFetchRequests();
+        verify(fetchRequestManager, times(1)).poll(anyLong());
     }
 
     @Test

@@ -442,6 +442,9 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
             return;
         fetchRequested = false;
         requestManagers.fetchRequestManager.createFetchRequests();
+        // The application's request for the next fetch is an input with identity: the fetch manager (which
+        // declares ANY_INPUT) must see a newer version or the verification in ManagerTask would hold it back.
+        stateVersion++;
         managersDirty = true;
     }
 
