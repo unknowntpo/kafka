@@ -18,6 +18,7 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.internals.pipeline.WaitCondition;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.PartitionInfo;
@@ -104,6 +105,20 @@ public class TopicMetadataRequestManager implements RequestManager {
         }
 
         return requests.isEmpty() ? EMPTY : new NetworkClientDelegate.PollResult(0, requests);
+    }
+
+    /**
+     * New work only arrives through a command (a topic metadata event), which re-runs every manager; otherwise this
+     * manager needs to run again only when one of its own requests completes, or on its timer (retry back-off,
+     * request expiry).
+     */
+    @Override
+    public WaitCondition waitCondition() {
+        for (TopicMetadataRequestState request : inflightRequests) {
+            if (request.requestInFlight())
+                return WaitCondition.OWN_COMPLETION;
+        }
+        return WaitCondition.TIMER_ONLY;
     }
 
     /**
