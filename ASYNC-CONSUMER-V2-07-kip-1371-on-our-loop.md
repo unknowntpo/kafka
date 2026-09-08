@@ -26,6 +26,38 @@
    **4a 已做（2026-09-08）**：測試 `managersRunInRegistrationOrderWhateverTriggeredThem` 重現「heartbeat 的 timer 在 dirty pass 之前執行 → 先清掉 coordinator 的 fatal error → commit manager 讀不到」；修法是結構規則：timer 到期只把 task 標成 due（`ManagerTask.isDue`），所有 manager 一律在 `runManagers` 內依 `entries()` 順序執行，不論觸發來源。這把 trunk「每輪依註冊順序跑全部」隱含的順序契約變成明文，且不多花任何成本。**4b 已做（2026-09-08）**：`LifecycleSequencer`（loop 執行緒）成為所有生命週期轉移的唯一入口：三個 close 事件仍由應用端依序送出（應用端必須自己跑 rebalance callback 與同步 commit，所以 close 仍跨兩條執行緒），但在 loop 端全部經由 sequencer 套用，步驟順序是資料（`Step` enum），亂序記錄 WARN，`shutdown` 依 `entries()` 順序呼叫 `pollOnClose`。測試 `closeTransitionsPassThroughTheLifecycleSequencerInOrderAndShutdownPollsManagersInRegistrationOrder`。`ConsumerBounceTest` / `PlaintextConsumerCloseTest` 待安靜時段執行。
    **量測註記**：step 2 的三方 A/B（`/tmp/s2-ab.out`）在執行中負載從 18 升到 146，同一輪內三個變體互相矛盾，不採用；需在安靜時段重跑。
 
+## Jenkins 量測紀錄（2026-09-08，`kafka-e2e`，ducktape）
+
+本機負載被其他容器佔滿（load 25–35），三方 A/B 改到 Jenkins 跑。CI 分支不含工作文件（rat 會擋未授權檔）：`async-consumer-v2-bench-candidate`（loop-only 主線 + 文件剝除）與 `async-consumer-v2-bench-baseline`（trunk `820533b870` + 同一個 ducktape 測試）。
+
+| Build | 版本 | 測試 | 結果 |
+|---|---|---|---|
+| #934 | baseline `575f7d163b` | `consumer_protocol_benchmark_test.py` | UNSTABLE：我們的 8 個 cell 全 PASS；另外 10 個 FAIL 都是繼承來的基底 SSL / share-consumer case，與本工作無關 |
+| #935 | candidate `1b5f8ab873` | 同上 | FAILURE：pipeline 自己的 `ducker-ak down` 對前一個 build 已 exited 的容器做 `podman kill`，尚未 checkout 任何程式碼（infra race） |
+| #936 | candidate `1b5f8ab873` | `tests/client/consumer_test.py` | FAILURE：Jenkins 用 JDK 25 編譯，`-Xlint:dangling-doc-comments -Werror` 抓到 `CoordinatorRequestManager` 裡 `waitCondition()` 被插在 `markCoordinatorUnknown` 的 javadoc 與宣告之間；本機 JDK 21 沒有這個 lint |
+
+baseline（trunk，`AsyncKafkaConsumer`）8 個 cell 的數字，10M × 100 B：
+
+| cell | rec/s | MB/s |
+|---|---|---|
+| classic, 1p, mpr 500 | 263,380 | 25 |
+| classic, 1p, mpr 50 | 297,247 | 28 |
+| classic, 6p, mpr 500 | 667,557 | 64 |
+| classic, 6p, mpr 50 | 345,185 | 33 |
+| consumer, 1p, mpr 500 | 359,363 | 34 |
+| consumer, 1p, mpr 50 | 250,357 | 24 |
+| consumer, 6p, mpr 500 | 361,768 | 35 |
+| consumer, 6p, mpr 50 | 455,996 | 43 |
+
+**讀法上的限制**：ducktape 在同一台 docker host 上並行跑多個 test，8 個 cell 與 74 個基底 case 互相搶資源，絕對值比本機低一個量級（本機 1p 約 2.3M rec/s），同一 build 內的 cell 之間也不可直接比（classic 6p mpr 500 vs mpr 50 差近一倍就是干擾）。可用的比較只有「同一個 cell、同一份排程」的 baseline vs candidate；因此 candidate 重送時要用**同一個 revision（82 個 test 的排程）**，不能先套用下面的測試修正，否則 candidate 只跑 8 個 test、干擾模式不同。
+
+**兩個修正（都在 loop-only 主線，並 cherry-pick 到本機的 CI clone，尚未 push）**：
+
+1. `3d3e4ba179`：`ConsumerProtocolBenchmark` 改繼承 `Test` 而非 `Benchmark`。ducktape 會發現 class 上所有 `test_*`（含繼承），原版一共收集 82 個 test，修正後 8 個（本機 `ducktape --collect-only` 驗證）。留給 baseline/candidate 都重跑的下一輪使用。
+2. `a4cfd52936`：把 `waitCondition()` 移到 `markCoordinatorUnknown` 的 javadoc 之前。本機用 JDK 25 重現 lint 錯誤並確認修正後通過；提交 Jenkins 前的 gate 一律改用 JDK 25 跑 `clean build -x test`。
+
+**待辦**：（a）Build B 以原 revision 重送一次（需授權）；（b）push 兩個修正到 CI 分支後重送 Build C（需授權）；（c）之後若要乾淨的數字，baseline 與 candidate 各用含修正 1 的 revision 再跑一輪 8-cell。
+
 ## 不做
 
 - TreeSet / bitmap / timer heap 之類的排程結構：per-task timer 加版本比對已足夠，成本是幾個整數比較。
