@@ -49,7 +49,9 @@ import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -476,5 +478,47 @@ public class ConsumerEventLoopTest {
         verify(asyncConsumerMetrics).recordManagerRunsWithoutRequests(3);
         loop.runOnce();
         verify(asyncConsumerMetrics, times(2)).recordBackgroundPass();
+    }
+
+    /**
+     * The commit manager reads the coordinator's fatal error and the heartbeat manager clears it; the previous
+     * implementation ran them in registration order on every iteration, so the read always came first. A timer that
+     * ran the heartbeat manager on the spot would break that contract (semantics S6).
+     */
+    @Test
+    public void managersRunInRegistrationOrderWhateverTriggeredThem() {
+        CoordinatorRequestManager coordinator = mock(CoordinatorRequestManager.class);
+        AtomicReference<Optional<Throwable>> fatal = new AtomicReference<>(Optional.of(new RuntimeException("fatal")));
+        when(coordinator.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(coordinator.fatalError()).thenAnswer(inv -> fatal.get());
+        when(coordinator.getAndClearFatalError()).thenAnswer(inv -> fatal.getAndSet(Optional.empty()));
+        CommitRequestManager commit = mock(CommitRequestManager.class);
+        AtomicBoolean commitSawFatalError = new AtomicBoolean();
+        when(commit.poll(anyLong())).thenAnswer(inv -> {
+            commitSawFatalError.set(coordinator.fatalError().isPresent());
+            return NetworkClientDelegate.PollResult.EMPTY;
+        });
+        ConsumerHeartbeatRequestManager heartbeat = mock(ConsumerHeartbeatRequestManager.class);
+        when(heartbeat.poll(anyLong())).thenAnswer(inv -> {
+            coordinator.getAndClearFatalError();
+            return new NetworkClientDelegate.PollResult(50);
+        });
+        RequestManagers managers = new RequestManagers(logContext, offsetsRequestManager, topicMetadataRequestManager,
+                fetchRequestManager, Optional.of(coordinator), Optional.of(commit), Optional.of(heartbeat),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        ConsumerEventLoop ordered = new ConsumerEventLoop(logContext, time, 1_000, subscriptions, metadata, () -> processor,
+                () -> networkClientDelegate, () -> managers, new BackgroundEventHandler(backgroundQueue, time, asyncConsumerMetrics),
+                asyncConsumerMetrics, () -> { });
+        ordered.initializeResources();
+        // First pass: no fatal error yet, everything runs once and the heartbeat timer is armed for +50 ms.
+        fatal.set(Optional.empty());
+        ordered.runOnce();
+        // The coordinator now has a fatal error; the heartbeat timer expires and a command arrives in the same pass.
+        fatal.set(Optional.of(new RuntimeException("fatal")));
+        time.sleep(50);
+        ordered.add(eventWithDeadline(time.milliseconds() + 1_000));
+        ordered.runOnce();
+        assertTrue(commitSawFatalError.get(), "the commit manager must read the fatal error before the heartbeat manager clears it");
+        assertTrue(fatal.get().isEmpty(), "and the heartbeat manager did clear it afterwards");
     }
 }

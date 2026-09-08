@@ -312,7 +312,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         networkClientDelegate = networkClientDelegateSupplier.get();
         requestManagers = requestManagersSupplier.get();
         for (RequestManager rm : requestManagers.entries()) {
-            managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, () -> pass, () -> stateVersion, this::markManagersDirty));
+            managerTasks.add(new ManagerTask(rm, networkClientDelegate, timer, () -> pass, () -> stateVersion,
+                    this::markManagersDirty, this::markManagerDue));
         }
         long now = time.milliseconds();
         timer.schedule(now, REAPER_INTERVAL_MS, this::reap);
@@ -336,6 +337,11 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     private void markManagersDirty() {
         // A request completed: an input with identity (the request's owner) reached the loop.
         stateVersion++;
+        managersDirty = true;
+    }
+
+    /** A manager's timer expired: run the due managers, in registration order, in this pass (semantics S6). */
+    private void markManagerDue() {
         managersDirty = true;
     }
 

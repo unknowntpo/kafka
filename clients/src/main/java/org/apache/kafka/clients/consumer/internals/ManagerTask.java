@@ -38,6 +38,11 @@ import java.util.function.LongSupplier;
  * (an OffsetFetch completing in the commit manager queues a ListOffsets in the offsets manager), so until a
  * manager's dependencies are declared it must be run on any input (contract R6).
  *
+ * <p>Order (semantics S6): a timer expiry does not run the manager on the spot; it marks the task {@link #isDue()
+ * due}, and the loop runs every due or triggered manager in registration order in one place. Managers share state
+ * through read-then-clear pairs (the commit manager reads the coordinator's fatal error, the heartbeat manager
+ * clears it), so the order the previous implementation ran them in is a contract, whatever the trigger.
+ *
  * <p>Liveness: the manager runs at most once per loop pass, whatever combination of triggers fired, and its timer is
  * always re-armed, also when {@code poll()} throws (then after {@link #FAILURE_RETRY_MS}).
  */
@@ -54,6 +59,7 @@ final class ManagerTask {
     private final LongSupplier currentPass;
     private final LongSupplier stateVersion;
     private final Runnable onResponse;
+    private final Runnable onDue;
     private LoopTimer.Handle scheduled;
     private long scheduledDeadlineMs = Long.MAX_VALUE;
     private long lastRunPass = -1;
@@ -65,24 +71,34 @@ final class ManagerTask {
     private long ownCompletions;
     /** Whether the most recent run produced no request (observability, semantics S7). */
     private boolean lastRunSentNothing;
+    /** The manager's timer expired; it runs on the next ordered manager run. */
+    private boolean due;
 
     /**
      * @param currentPass  supplies the loop's current pass number; a task runs at most once per pass
      * @param stateVersion supplies the loop's state version (advanced by every input with identity)
      * @param onResponse   called when one of this manager's requests completes (loop thread, inside the network poll)
+     * @param onDue        called when this manager's timer expires, so the loop schedules an ordered manager run
      */
     ManagerTask(RequestManager manager,
                 NetworkClientDelegate network,
                 LoopTimer timer,
                 LongSupplier currentPass,
                 LongSupplier stateVersion,
-                Runnable onResponse) {
+                Runnable onResponse,
+                Runnable onDue) {
         this.manager = manager;
         this.network = network;
         this.timer = timer;
         this.currentPass = currentPass;
         this.stateVersion = stateVersion;
         this.onResponse = onResponse;
+        this.onDue = onDue;
+    }
+
+    /** @return {@code true} if the manager's timer expired and it has not run since */
+    boolean isDue() {
+        return due;
     }
 
     RequestManager manager() {
@@ -105,7 +121,7 @@ final class ManagerTask {
      * @param commandProcessed a command from the application thread was processed in this pass
      */
     boolean wantsRun(boolean commandProcessed) {
-        if (commandProcessed)
+        if (commandProcessed || due)
             return true;
         switch (declared) {
             case ANY_INPUT:
@@ -128,6 +144,7 @@ final class ManagerTask {
         if (lastRunPass == pass)
             return false;
         lastRunPass = pass;
+        due = false;
         NetworkClientDelegate.PollResult result;
         try {
             result = manager.poll(currentTimeMs);
@@ -171,7 +188,10 @@ final class ManagerTask {
             return;
         if (scheduled != null)
             scheduled.cancel();
-        scheduled = timer.schedule(currentTimeMs, delay, () -> run(timer.lastRunTimeMs()));
+        scheduled = timer.schedule(currentTimeMs, delay, () -> {
+            due = true;
+            onDue.run();
+        });
         scheduledDeadlineMs = deadline;
     }
 }
