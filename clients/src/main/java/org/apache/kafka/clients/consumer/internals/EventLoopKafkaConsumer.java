@@ -670,7 +670,7 @@ public class EventLoopKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
 
-            final long pollSequence = eventLoop.onApplicationPoll(timer.currentTimeMs());
+            long pollSequence = eventLoop.onApplicationPoll(timer.currentTimeMs());
             if (hasPendingReconciliation || !subscriptions.hasAllFetchPositions()) {
                 // The loop's per-poll bookkeeping (reconciliation check, fetch position initialization, fetch
                 // request creation) is needed before data can flow; wake it now instead of at its next timer.
@@ -696,6 +696,10 @@ public class EventLoopKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     }
                     return interceptors.onConsume(new ConsumerRecords<>(fetch.records(), fetch.nextOffsets()));
                 }
+                // The wait ended without records. The next iteration is a new poll input for the loop, as the
+                // previous implementation's per-iteration events were (see ConsumerEventLoop#onApplicationPollIteration).
+                if (timer.notExpired())
+                    pollSequence = eventLoop.onApplicationPollIteration(timer.currentTimeMs());
             } while (timer.notExpired());
 
             return ConsumerRecords.empty();
@@ -719,7 +723,9 @@ public class EventLoopKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         long pollTimeout = timer.remainingMs();
         PassDecision decision = eventLoop.latestDecision();
         if (pollTimeout > retryBackoffMs) {
-            if (subscriptions.numAssignedPartitions() == 0) {
+            if (subscriptions.numAssignedPartitions() == 0 || hasPendingReconciliation) {
+                // Nothing to fetch, or a reconciliation that may need the poll path (auto-commit, revocation):
+                // keep iterating so the loop keeps receiving poll inputs.
                 pollTimeout = retryBackoffMs;
             } else if (!subscriptions.hasAllFetchPositions()) {
                 if (decision.positionsAttemptInFlight) {
