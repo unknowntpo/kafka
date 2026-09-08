@@ -16,7 +16,7 @@
 
 ## 順序
 
-1. **`PassDecision` + 錯誤通用化**（小；關掉問題 3 剩下的三成）。
+1. **`PassDecision` + 錯誤通用化**（小；關掉問題 3 剩下的三成）。**已做（2026-09-08）**：`pipeline/PassDecision`（pass、stateVersion、nextDeadlineMs、allPositionsKnown、positionsAttemptInFlight、reconciliationCheckedPollSequence、backgroundEventsPending），`runOnce` 尾端一次 volatile 寫入發佈；`stateVersion` 在 request 完成、command、metadata 變更時前進（第 2 步版本驗證的基礎）；只有 app 可見欄位改變才叫醒應用執行緒（取代 housekeeping 的無條件喚醒，並補上 trunk 違反的「背景事件要喚醒」）；`EventLoopKafkaConsumer.pollForFetches` 在 position 嘗試在飛時不再每 100 ms 醒來，改等 loop 的下一個 deadline；`FetchPositionsErrorEvent` 改帶 `stillRelevant` predicate。測試：`decisionIsPublishedEveryPassAndItsVersionAdvancesOnlyOnInputsWithIdentity`、`applicationIsWokenOnlyWhenADecisionFieldItMayWaitForChanges`；`KafkaConsumerTest` 225/225、相關套件共 428/428；checkstyle / spotbugs 通過。
 2. **`waitCondition()` + `ManagerTask` 版本驗證 + 安全退路**（結構性關掉第 1 類），然後逐個遷移：`CoordinatorRequestManager` → `HeartbeatRequestManager` → `CommitRequestManager` → `OffsetsRequestManager`（等 commit manager 的 OffsetFetch，即 R6 的宣告）→ `TopicMetadataRequestManager`。每遷移一個就跑三方 A/B 確認 pass 成本沒有回升。
 3. **進展帳與 metric**（第 2 類有界、可觀測）。
 4. **`LifecycleSequencer`**（問題 4），先補 fatal error 順序的整合測試。

@@ -29,6 +29,7 @@ import org.apache.kafka.clients.consumer.internals.events.UpdatePatternSubscript
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.clients.consumer.internals.pipeline.LoopSignal;
 import org.apache.kafka.clients.consumer.internals.pipeline.LoopTimer;
+import org.apache.kafka.clients.consumer.internals.pipeline.PassDecision;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.utils.Time;
@@ -141,7 +142,12 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     /** The poll sequence up to which the reconciliation check has run; read by the application thread. */
     private volatile long reconciliationCheckedPollSequence;
     private CompletableFuture<Void> positionsUpdate;
-    private final Runnable onHousekeeping;
+    /** Called when a published {@link PassDecision} changes something the application thread may wait for. */
+    private final Runnable onApplicationVisibleChange;
+    /** Inputs with identity consumed so far: request completions, commands, metadata changes. Loop thread only. */
+    private long stateVersion;
+    /** Published at the end of every pass; read by the application thread. */
+    private volatile PassDecision latestDecision = PassDecision.NONE;
 
     public ConsumerEventLoop(LogContext logContext,
                              Time time,
@@ -153,7 +159,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                              Supplier<RequestManagers> requestManagersSupplier,
                              BackgroundEventHandler backgroundEventHandler,
                              AsyncConsumerMetrics asyncConsumerMetrics,
-                             Runnable onHousekeeping) {
+                             Runnable onApplicationVisibleChange) {
         super(BACKGROUND_THREAD_NAME, true);
         this.log = logContext.logger(ConsumerEventLoop.class);
         this.time = time;
@@ -166,7 +172,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         this.backgroundEventHandler = backgroundEventHandler;
         this.applicationEventReaper = new CompletableEventReaper(logContext);
         this.asyncConsumerMetrics = asyncConsumerMetrics;
-        this.onHousekeeping = onHousekeeping;
+        this.onApplicationVisibleChange = onApplicationVisibleChange;
         this.signal = new LoopSignal(() -> {
             NetworkClientDelegate delegate = networkClientDelegate;
             if (delegate != null)
@@ -245,6 +251,11 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         return reconciliationCheckedPollSequence;
     }
 
+    /** Any thread: the loop's conclusion at the end of its most recent pass. */
+    public PassDecision latestDecision() {
+        return latestDecision;
+    }
+
     private void ensureAlive() {
         if (initializationError != null)
             throw ConsumerUtils.maybeWrapAsKafkaException(initializationError);
@@ -321,6 +332,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     }
 
     private void markManagersDirty() {
+        // A request completed: an input with identity (the request's owner) reached the loop.
+        stateVersion++;
         managersDirty = true;
     }
 
@@ -345,6 +358,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         if (applicationEventReaper.size() > 0)
             reapExpiredEvents(now);
         propagateMetadataError();
+        publishDecision();
 
         long blockMs = Math.min(timer.timeToNextMs(now), MAX_BLOCK_MS);
         if (!signal.prepareToPark(this::hasPendingWork))
@@ -352,6 +366,26 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         if (lastPassFailed)
             blockMs = Math.max(blockMs, ERROR_BACKOFF_MS);
         networkClientDelegate.poll(blockMs, now);
+    }
+
+    /**
+     * One immutable conclusion per pass, published before the loop blocks. The application thread is woken only
+     * when a field it may be waiting for changed, so it never waits on a state it cannot observe (and never spins
+     * on one that did not change).
+     */
+    private void publishDecision() {
+        PassDecision previous = latestDecision;
+        PassDecision decision = new PassDecision(
+                pass,
+                stateVersion,
+                timer.nextDeadlineMs(),
+                subscriptions.hasAllFetchPositions(),
+                positionsUpdate != null && !positionsUpdate.isDone(),
+                reconciliationCheckedPollSequence,
+                backgroundEventHandler.size() > 0);
+        latestDecision = decision;
+        if (decision.applicationVisibleChangeSince(previous))
+            onApplicationVisibleChange.run();
     }
 
     /**
@@ -376,6 +410,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         int metadataVersion = metadata.updateVersion();
         if (metadataVersion != lastMetadataVersion) {
             lastMetadataVersion = metadataVersion;
+            stateVersion++;
             managersDirty = true;
             maybeUpdateFetchPositions(time.milliseconds(), true);
         }
@@ -456,6 +491,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                 } else {
                     ((Runnable) command).run();
                 }
+                stateVersion++;
             } catch (Throwable t) {
                 log.warn("Error processing command {}", command, t);
             }
@@ -498,7 +534,6 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
 
         maybeUpdateFetchPositions(now, false);
         managersDirty = true;
-        onHousekeeping.run();
     }
 
     /**
@@ -538,7 +573,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                 return; // positions are retried on the next poll or metadata change; timeouts are not surfaced
             // Not a plain ErrorEvent: this attempt was not requested by a poll(), so the application thread checks
             // that positions are still missing before surfacing it (a seek may have happened in between).
-            backgroundEventHandler.add(new FetchPositionsErrorEvent(ConsumerUtils.maybeWrapAsKafkaException(cause)));
+            backgroundEventHandler.add(new FetchPositionsErrorEvent(ConsumerUtils.maybeWrapAsKafkaException(cause),
+                    () -> !subscriptions.hasAllFetchPositions()));
         });
         asynchronous[0] = true;
     }

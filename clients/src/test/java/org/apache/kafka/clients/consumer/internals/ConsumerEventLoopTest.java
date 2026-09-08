@@ -26,6 +26,7 @@ import org.apache.kafka.clients.consumer.internals.events.CompletableApplication
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.FetchPositionsErrorEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
+import org.apache.kafka.clients.consumer.internals.pipeline.PassDecision;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InvalidTopicException;
@@ -83,6 +84,7 @@ public class ConsumerEventLoopTest {
     private TopicMetadataRequestManager topicMetadataRequestManager;
     private FetchRequestManager fetchRequestManager;
     private RequestManagers requestManagers;
+    private final AtomicInteger applicationWakeups = new AtomicInteger();
     private LinkedBlockingQueue<BackgroundEvent> backgroundQueue;
     private NetworkClientDelegate networkClientDelegate;
     private ConsumerEventLoop loop;
@@ -122,7 +124,7 @@ public class ConsumerEventLoopTest {
                 Optional.empty(), Optional.empty());
         loop = new ConsumerEventLoop(logContext, time, 1_000, subscriptions, metadata, () -> processor,
                 () -> networkClientDelegate, () -> requestManagers, backgroundEventHandler,
-                asyncConsumerMetrics, () -> { });
+                asyncConsumerMetrics, applicationWakeups::incrementAndGet);
         loop.initializeResources();
     }
 
@@ -327,5 +329,66 @@ public class ConsumerEventLoopTest {
         loop.requestFetch();
         loop.runOnce();
         verify(fetchRequestManager, times(2)).createFetchRequests();
+    }
+
+    @Test
+    public void decisionIsPublishedEveryPassAndItsVersionAdvancesOnlyOnInputsWithIdentity() {
+        loop.runOnce();
+        PassDecision first = loop.latestDecision();
+        assertEquals(1, first.pass);
+        loop.runOnce();
+        PassDecision idle = loop.latestDecision();
+        assertEquals(2, idle.pass);
+        assertEquals(first.stateVersion, idle.stateVersion, "an idle pass consumed no input");
+
+        loop.add(eventWithDeadline(time.milliseconds() + 1_000));
+        loop.runOnce();
+        long afterCommand = loop.latestDecision().stateVersion;
+        assertTrue(afterCommand > idle.stateVersion, "a command is an input with identity");
+
+        metadataVersion.incrementAndGet();
+        loop.runOnce();
+        long afterMetadata = loop.latestDecision().stateVersion;
+        assertTrue(afterMetadata > afterCommand, "a metadata change is an input with identity");
+
+        NetworkClientDelegate.UnsentRequest unsent = new NetworkClientDelegate.UnsentRequest(
+            new MetadataRequest.Builder(List.of("topic"), false), Optional.of(new Node(0, "localhost", 9092)));
+        when(offsetsRequestManager.poll(anyLong()))
+            .thenReturn(new NetworkClientDelegate.PollResult(Long.MAX_VALUE, List.of(unsent)))
+            .thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        loop.add(eventWithDeadline(time.milliseconds() + 1_000));
+        loop.runOnce();
+        long beforeCompletion = loop.latestDecision().stateVersion;
+        unsent.future().completeExceptionally(new RuntimeException("simulated completion"));
+        loop.runOnce();
+        assertTrue(loop.latestDecision().stateVersion > beforeCompletion, "a request completion is an input with identity");
+    }
+
+    @Test
+    public void applicationIsWokenOnlyWhenADecisionFieldItMayWaitForChanges() {
+        loop.runOnce();
+        int afterFirst = applicationWakeups.get();
+        loop.runOnce();
+        loop.runOnce();
+        assertEquals(afterFirst, applicationWakeups.get(), "idle passes do not wake the application");
+
+        when(subscriptions.hasAllFetchPositions()).thenReturn(false);
+        loop.runOnce();
+        assertEquals(afterFirst + 1, applicationWakeups.get(), "positions no longer all known");
+        assertFalse(loop.latestDecision().allPositionsKnown);
+
+        loop.onApplicationPoll(time.milliseconds());
+        loop.runOnce();
+        assertEquals(afterFirst + 2, applicationWakeups.get(), "reconciliation check advanced for the new poll");
+
+        positionsFuture = new CompletableFuture<>();
+        loop.onApplicationPoll(time.milliseconds());
+        loop.runOnce();
+        assertTrue(loop.latestDecision().positionsAttemptInFlight);
+        int beforeError = applicationWakeups.get();
+        positionsFuture.completeExceptionally(new java.util.concurrent.CompletionException(new InvalidTopicException("bad")));
+        loop.runOnce();
+        assertTrue(applicationWakeups.get() > beforeError, "a background event was queued for the application");
+        assertFalse(loop.latestDecision().positionsAttemptInFlight);
     }
 }

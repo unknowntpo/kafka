@@ -73,6 +73,7 @@ import org.apache.kafka.clients.consumer.internals.events.UpdatePatternSubscript
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.clients.consumer.internals.metrics.KafkaConsumerMetrics;
 import org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager;
+import org.apache.kafka.clients.consumer.internals.pipeline.PassDecision;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.KafkaException;
@@ -199,9 +200,9 @@ public class EventLoopKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         }
 
         private void process(final ErrorEvent event) {
-            if (event instanceof FetchPositionsErrorEvent && subscriptions.hasAllFetchPositions()) {
-                // The loop's own positions attempt failed, but every partition has a position now (the
-                // application seeked, or a later attempt succeeded): the error would refer to a state that is gone.
+            if (event instanceof FetchPositionsErrorEvent && !((FetchPositionsErrorEvent) event).stillRelevant()) {
+                // The loop's own positions attempt failed, but the condition is gone (the application seeked, or a
+                // later attempt succeeded): the error would refer to a state that no longer exists.
                 log.debug("Dropping stale fetch positions error {}", event);
                 return;
             }
@@ -711,12 +712,23 @@ public class EventLoopKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         if (!fetch.isEmpty())
             return fetch;
 
-        // Same bounds as the previous implementation, minus its cross-thread maximumTimeToWait(): there is no
-        // global wait time any more. When the loop may make fetching possible soon, wait at most retryBackoffMs.
+        // Bound the wait with the loop's own conclusion (PassDecision) instead of guessing from fragments of
+        // shared state: the loop wakes this thread when positions become known, an attempt ends, or a background
+        // event arrives, so while an attempt is in flight there is nothing to gain from waking every
+        // retryBackoffMs. Without an attempt in flight a new poll is what starts one, so keep the short bound.
         long pollTimeout = timer.remainingMs();
+        PassDecision decision = eventLoop.latestDecision();
         if (pollTimeout > retryBackoffMs) {
-            if (subscriptions.numAssignedPartitions() == 0 || !subscriptions.hasAllFetchPositions()) {
+            if (subscriptions.numAssignedPartitions() == 0) {
                 pollTimeout = retryBackoffMs;
+            } else if (!subscriptions.hasAllFetchPositions()) {
+                if (decision.positionsAttemptInFlight) {
+                    long untilLoopDeadline = decision.nextDeadlineMs == Long.MAX_VALUE
+                        ? pollTimeout : Math.max(retryBackoffMs, decision.nextDeadlineMs - time.milliseconds());
+                    pollTimeout = Math.min(pollTimeout, untilLoopDeadline);
+                } else {
+                    pollTimeout = retryBackoffMs;
+                }
             } else {
                 Set<TopicPartition> buffered = fetchBuffer.bufferedPartitions();
                 if (subscriptions.hasFetchablePartitions(tp -> !buffered.contains(tp)))

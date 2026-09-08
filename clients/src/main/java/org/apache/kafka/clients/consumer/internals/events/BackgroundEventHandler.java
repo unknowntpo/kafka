@@ -68,4 +68,9 @@ public class BackgroundEventHandler {
         asyncConsumerMetrics.recordBackgroundEventQueueSize(0);
         return events;
     }
+
+    /** @return number of events waiting for the application thread */
+    public int size() {
+        return backgroundEventQueue.size();
+    }
 }

@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.clients.consumer.internals.events;
 
+import java.util.function.BooleanSupplier;
+
 /**
  * An error from an attempt, started by the event loop on its own, to resolve missing fetch positions (for example
  * {@link org.apache.kafka.clients.consumer.NoOffsetForPartitionException} with no reset policy). Such an attempt
@@ -25,7 +27,18 @@ package org.apache.kafka.clients.consumer.internals.events;
  */
 public class FetchPositionsErrorEvent extends ErrorEvent {
 
-    public FetchPositionsErrorEvent(Throwable t) {
+    private final BooleanSupplier stillRelevant;
+
+    /**
+     * @param stillRelevant evaluated on the application thread when the event is delivered; {@code false} means the
+     *                      condition the error refers to is gone and the error is dropped
+     */
+    public FetchPositionsErrorEvent(Throwable t, BooleanSupplier stillRelevant) {
         super(t);
+        this.stillRelevant = stillRelevant;
+    }
+
+    public boolean stillRelevant() {
+        return stillRelevant.getAsBoolean();
     }
 }

@@ -45,7 +45,7 @@ R1 的完整形式因此是：結果宣告等待條件，**且**排程器記住�
 - **為什麼**：trunk 的 `BackgroundEventHandler.add` 不喚醒任何人，應用執行緒可能在事件已到之後才進入 100 ms 等待；02 §2.4。
 - **怎麼遵守**：`Parker.await(condition, deadline)` + `signals()`；`LoopSignal.prepareToPark`（Dekker 式）。新的共享佇列一律包成「入佇列即 signal」（`SignallingQueue`）。
 - **怎麼驗證**：兩執行緒交錯測試：生產者在等待者評估條件之後、park 之前發佈，等待者必須不 park 或立即醒（`LoopSignalTest`、`RecordSinkTest` 的形式）。Code review 檢查 (c) 的清單。
-- **目前狀態**：本專案應用端與迴圈端都遵守；trunk 的背景事件佇列違反 (a)(c)。
+- **目前狀態**：本專案應用端與迴圈端都遵守，且自 2026-09-08 起 loop 以 `PassDecision` 在 app 可見欄位改變時喚醒（07 文件第 1 步）；trunk 的背景事件佇列違反 (a)(c)。
 
 ### R4 每個狀態有唯一 owner；跨執行緒只走列舉過的通道（對應問題 3、4）
 
@@ -84,7 +84,7 @@ R1 的完整形式因此是：結果宣告等待條件，**且**排程器記住�
 - **為什麼**：loop 自己的 position 嘗試失敗，`ErrorEvent` 可能在使用者 `seek()` 之後才被下一次 `poll()` 丟出（附錄 F 整合測試段）。
 - **怎麼遵守**：`FetchPositionsErrorEvent` + 交付時 `hasAllFetchPositions()` 檢查。通用化：`ErrorEvent` 帶 `Predicate<State> stillRelevant` 或狀態版本。
 - **怎麼驗證**：seek 後舊錯誤不得出現的單元測試（待補：目前靠整合測試 `testAsyncConsumerFetchInvalidOffset`）。
-- **目前狀態**：本專案只對 position 錯誤做了；其他背景錯誤（metadata error）仍無條件丟出。
+- **目前狀態**：本專案 `FetchPositionsErrorEvent` 帶 `stillRelevant` predicate（07 文件第 1 步）；其他背景錯誤（metadata error）仍無條件丟出。
 
 ### R9 生命週期轉移只有一個排序者（對應問題 4）
 
