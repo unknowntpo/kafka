@@ -63,6 +63,8 @@ final class ManagerTask {
     private long declaredOwnCompletions = -1;
     /** Completions of this manager's own requests so far (loop thread, inside the network poll). */
     private long ownCompletions;
+    /** Whether the most recent run produced no request (observability, semantics S7). */
+    private boolean lastRunSentNothing;
 
     /**
      * @param currentPass  supplies the loop's current pass number; a task runs at most once per pass
@@ -90,6 +92,11 @@ final class ManagerTask {
     /** @return what the manager declared after its last run */
     WaitCondition declared() {
         return declared;
+    }
+
+    /** @return {@code true} if the most recent run produced no request */
+    boolean lastRunSentNothing() {
+        return lastRunSentNothing;
     }
 
     /**
@@ -124,6 +131,7 @@ final class ManagerTask {
         NetworkClientDelegate.PollResult result;
         try {
             result = manager.poll(currentTimeMs);
+            lastRunSentNothing = result.unsentRequests.isEmpty();
             for (NetworkClientDelegate.UnsentRequest request : result.unsentRequests) {
                 request.whenComplete((response, error) -> {
                     ownCompletions++;

@@ -85,6 +85,7 @@ public class ConsumerEventLoopTest {
     private TopicMetadataRequestManager topicMetadataRequestManager;
     private FetchRequestManager fetchRequestManager;
     private RequestManagers requestManagers;
+    private AsyncConsumerMetrics asyncConsumerMetrics;
     private final AtomicInteger applicationWakeups = new AtomicInteger();
     private LinkedBlockingQueue<BackgroundEvent> backgroundQueue;
     private NetworkClientDelegate networkClientDelegate;
@@ -108,7 +109,7 @@ public class ConsumerEventLoopTest {
         when(fetchRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
         backgroundQueue = new LinkedBlockingQueue<>();
-        AsyncConsumerMetrics asyncConsumerMetrics = mock(AsyncConsumerMetrics.class);
+        asyncConsumerMetrics = mock(AsyncConsumerMetrics.class);
         BackgroundEventHandler backgroundEventHandler = new BackgroundEventHandler(backgroundQueue, time, asyncConsumerMetrics);
 
         Properties properties = new Properties();
@@ -465,5 +466,15 @@ public class ConsumerEventLoopTest {
         time.sleep(1);
         loop.runOnce();
         verify(topicMetadataRequestManager, times(1)).poll(anyLong());
+    }
+
+    @Test
+    public void loopRecordsPassesAndManagerRunsThatProducedNoRequest() {
+        loop.runOnce();
+        verify(asyncConsumerMetrics, times(1)).recordBackgroundPass();
+        // The first pass runs every manager (all dirty at start); the mocks return no requests.
+        verify(asyncConsumerMetrics).recordManagerRunsWithoutRequests(3);
+        loop.runOnce();
+        verify(asyncConsumerMetrics, times(2)).recordBackgroundPass();
     }
 }

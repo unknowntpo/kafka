@@ -347,6 +347,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
         if (lastLoopTimeMs != 0L)
             asyncConsumerMetrics.recordTimeBetweenNetworkThreadPoll(now - lastLoopTimeMs);
         lastLoopTimeMs = now;
+        asyncConsumerMetrics.recordBackgroundPass();
 
         processCommands(now);
         housekeepApplicationPoll(now);
@@ -455,12 +456,17 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
      */
     private boolean runManagers(long now) {
         boolean ran = false;
+        int runsWithoutRequests = 0;
         RuntimeException failure = null;
         for (ManagerTask task : managerTasks) {
             if (!task.wantsRun(commandProcessedThisPass))
                 continue;
             try {
-                ran |= task.run(now);
+                if (task.run(now)) {
+                    ran = true;
+                    if (task.lastRunSentNothing())
+                        runsWithoutRequests++;
+                }
             } catch (RuntimeException e) {
                 if (failure == null)
                     failure = e;
@@ -468,6 +474,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                     log.debug("Additional request manager failure in the same pass", e);
             }
         }
+        asyncConsumerMetrics.recordManagerRunsWithoutRequests(runsWithoutRequests);
         if (failure != null)
             throw failure;
         return ran;

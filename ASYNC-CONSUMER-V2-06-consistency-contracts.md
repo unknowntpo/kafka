@@ -24,7 +24,7 @@
 | 類型 | 例子 | trunk | 本專案迴圈 | 標記 + 排程器版本驗證 |
 |---|---|---|---|---|
 | 1. 自我觸發：元件說「現在跑我」但推不了 | manager 回 0 而 coordinator 不可用（六張 JIRA）；F4 | 整條執行緒空轉 | timer 路徑有界（1 ms，只跑自己）；完成回呼那條靠個案修 | **不可能**，但只在排程器驗證下：元件只能在「它要求的 timer 到期」「它宣告的輸入到達且版本嚴格大於它看過的」「command」三者之一時被重跑。純標記不夠：宣告已成立的條件、或回 `WORK_NOW` 卻沒送出東西，都會再空轉 |
-| 2. 元件間循環 | commit 完成 → membership 反應 → 再 commit，淨狀態不變 | 可能 | 可能，「完成就跑全部」讓它以 RTT 速率轉 | 可能；每步都是真事件。只有跨元件的「淨狀態版本沒前進就不得再送」守恆檢查擋得住 |
+| 2. 元件間循環 | commit 完成 → membership 反應 → 再 commit，淨狀態不變 | 可能 | 可能，有界於 RTT 加 manager 內 backoff；`background-pass-rate` 與 `manager-runs-without-requests-rate` 讓它可見（S7） | 可能；每步都是真事件。只有跨元件的「淨狀態版本沒前進就不得再送」守恆檢查擋得住 |
 | 3. 外部風暴 | broker 立刻回錯誤 | 有界於 manager 內的 backoff | 同左 | 同左；是 retry 策略問題 |
 | 4. 應用端全速 `poll(0)` | 緊迴圈 poll | 每次 poll 2 個 event | **消除**（volatile 寫入） | 取決於 app↔background 協定 |
 | 5. timer 回 0 | `timeUntilNextPollMs = 0` | 整輪重跑 | 有界（1 ms，只跑它） | 同左，除非 R1 禁止「延遲 0 但沒做事」並驗證 |
