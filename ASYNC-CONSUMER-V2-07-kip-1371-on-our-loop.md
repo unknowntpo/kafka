@@ -69,7 +69,9 @@ baseline（trunk，`AsyncKafkaConsumer`）8 個 cell 的數字，10M × 100 B：
 
 **為什麼本機沒抓到**：單元測試都用 `poll(ZERO)` 或短 poll；本機 ducker smoke 的 `test_group_consumption` 一個一個啟動 consumer、且 producer 已在寫入，join 走背景路徑、fetch 有資料，正好避開兩條需要 poll 輸入的路徑。教訓：e2e 前至少跑 `consumer_test.py` 整檔，而且要在 Jenkins（慢、並行）跑，本機通過不算。
 
-**homelab 量測（同日）**：本機負載無法降到 20 以下，改在 `morefine` 跑三方 A/B，數字與讀法見 03 §2.1「安靜機器複測」；結論是迴圈本身吞吐 +2–3%、CPU/GB −5–7%，完整版 1p +46–69%。
+**homelab 量測（同日）**：本機負載無法降到 20 以下，改在 `morefine` 跑交錯 A/B。修正 R11 之前的 loop-only 對 trunk +2–3%、CPU/GB −5–7%；修正之後與 trunk 打平（−3% / 0% / +1%，CPU/GB −1% / +3% / 0%）。差距就是 bug 少做的那些每迭代工作。四變體對照與讀法見 03 §2.1「安靜機器複測」。**這改變了論證：迴圈的價值只剩 S1–S8 的結構保證，不能再用吞吐或 CPU/GB 說服 reviewer。**
+
+**修正 R11 的第二版**：第一版讓 housekeeping 在每個空迭代把 `stateVersion` 加一（所有 ANY_INPUT manager 重跑），`manager-runs-without-requests` 從 1197 升到 1982/s、吞吐 −4%。第二版只在 membership 狀態真的改變時 bump，fetch 與 commit 用 `ManagerTask.trigger()` 定向觸發（S2：輸入有身分，也有收件人）；pass 數不變但每 pass 只多兩個 manager run。
 
 ## 不做
 

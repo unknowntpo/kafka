@@ -18,4 +18,5 @@ ASYNC_PROFILER_LIB=.../libasyncProfiler.dylib $BENCH_DIR/profile.sh consumer big
 - `profile.sh`：async-profiler per-thread 樣本
 - `verify/OffsetCheck.java`：offset 連續性 / 重複 / seek 驗證（編譯時 classpath 需 kafka-clients jar + slf4j-api）
 - `results-*.csv`：2026-09-07 本機結果
+- `results-morefine-4way-run4.csv`：2026-09-08 homelab 四變體（trunk / loop-only 修正前 / loop-only 修正後 / full）交錯 3 輪，**03 §2.1 引用的是這一份**；`results-morefine-3way-run2.csv` 為 R11 修正第一版的三方結果（僅供對照）
 - `results-morefine-3way-run1.csv`：2026-09-08 homelab `morefine`（Intel N150 4 核，load ≈ 2）三方交錯 A/B，3 輪；runner 為 Linux 版（`/usr/bin/time -f`），broker 用 trunk 發行包，只換 `kafka-clients` jar
