@@ -151,6 +151,8 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
     private long stateVersion;
     /** Published at the end of every pass; read by the application thread. */
     private volatile PassDecision latestDecision = PassDecision.NONE;
+    /** Whether positions may have changed in this pass (managers ran, a command or metadata change was processed). */
+    private boolean positionsMayHaveChanged = true;
 
     public ConsumerEventLoop(LogContext logContext,
                              Time time,
@@ -392,11 +394,15 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
      */
     private void publishDecision() {
         PassDecision previous = latestDecision;
+        // SubscriptionState is a monitor shared with the application thread: only take it when this pass could
+        // have changed positions, not on the (frequent) passes that merely handled a fetch response.
+        boolean allPositionsKnown = positionsMayHaveChanged ? subscriptions.hasAllFetchPositions() : previous.allPositionsKnown;
+        positionsMayHaveChanged = false;
         PassDecision decision = new PassDecision(
                 pass,
                 stateVersion,
                 timer.nextDeadlineMs(),
-                subscriptions.hasAllFetchPositions(),
+                allPositionsKnown,
                 positionsUpdate != null && !positionsUpdate.isDone(),
                 reconciliationCheckedPollSequence,
                 backgroundEventHandler.size() > 0);
@@ -429,6 +435,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
             lastMetadataVersion = metadataVersion;
             stateVersion++;
             managersDirty = true;
+            positionsMayHaveChanged = true;
             maybeUpdateFetchPositions(time.milliseconds(), true);
         }
     }
@@ -440,6 +447,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
             ran = runManagers(now);
         }
         if (ran) {
+            positionsMayHaveChanged = true;
             // Managers may have changed the assignment or positions (reconciliation, offset reset/validation);
             // newly assigned partitions need positions before they can be fetched, without waiting for a poll.
             maybeUpdateFetchPositions(now, false);
@@ -520,6 +528,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
                 }
                 stateVersion++;
                 commandProcessedThisPass = true;
+                positionsMayHaveChanged = true;
             } catch (Throwable t) {
                 log.warn("Error processing command {}", command, t);
             }
@@ -597,6 +606,7 @@ public class ConsumerEventLoop extends KafkaThread implements Closeable {
             // Positions resolved by a response: create fetch requests for them without waiting for the next poll,
             // as the previous implementation chained them after the positions update. An attempt that completed
             // at once made no progress and must not trigger anything (that would spin, see above).
+            positionsMayHaveChanged = true;
             if (asynchronous[0])
                 fetchRequested = true;
             Throwable cause = error instanceof CompletionException ? error.getCause() : error;

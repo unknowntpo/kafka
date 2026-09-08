@@ -385,7 +385,10 @@ public class ConsumerEventLoopTest {
         loop.runOnce();
         assertEquals(afterFirst, applicationWakeups.get(), "idle passes do not wake the application");
 
+        // Positions only change through an input with identity (a command such as assign/seek, a manager pass,
+        // a metadata change); the decision re-reads them on such passes only.
         when(subscriptions.hasAllFetchPositions()).thenReturn(false);
+        loop.add(eventWithDeadline(time.milliseconds() + 1_000));
         loop.runOnce();
         assertEquals(afterFirst + 1, applicationWakeups.get(), "positions no longer all known");
         assertFalse(loop.latestDecision().allPositionsKnown);
