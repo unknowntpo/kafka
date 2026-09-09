@@ -10,6 +10,10 @@ env = dict(os.environ, KAFKA_HEAP_OPTS=os.environ.get("KAFKA_HEAP_OPTS", "-Xmx2G
 cmd = [f"{K}/bin/kafka-consumer-perf-test.sh", "--bootstrap-server", "localhost:9092", "--topic", topic, "--num-records", records,
        "--group", f"st-{label}-{os.getpid()}", "--timeout", "120000", "--hide-header", "--show-detailed-stats", "--reporting-interval", "1000",
        "--command-property", f"group.protocol={proto}"] + extra
+import shlex
+if os.environ.get("STEADY_CMD"):
+    # Alternative consumer under test; it must print the same per-interval lines. {topic} {records} are substituted.
+    cmd = shlex.split(os.environ["STEADY_CMD"].replace("{topic}", topic).replace("{records}", records).replace("{label}", f"st-{label}-{os.getpid()}"))
 p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
 # find the java pid (kafka-run-class execs java, so p.pid is usually it; fall back to scanning children)
 def java_pid():
@@ -19,7 +23,7 @@ def java_pid():
     for d in os.listdir("/proc"):
         if d.isdigit():
             try:
-                if open(f"/proc/{d}/comm").read().strip()=="java" and f"st-{label}-{os.getpid()}" in open(f"/proc/{d}/cmdline").read(): return int(d)
+                if open(f"/proc/{d}/comm").read().strip()=="java" and (f"st-{label}-{os.getpid()}" in open(f"/proc/{d}/cmdline").read() or (os.environ.get("STEADY_CMD") and "ConsumeBench" in open(f"/proc/{d}/cmdline").read())): return int(d)
             except Exception: pass
     return None
 samples = []  # (t, cpu_seconds)
