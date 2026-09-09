@@ -94,7 +94,7 @@ public class FetchMetricsManager extends AbstractConsumerMetricsManager {
         return throttleTime;
     }
 
-    void recordLatency(String node, long requestLatencyMs) {
+    public void recordLatency(String node, long requestLatencyMs) {
         fetchLatency.record(requestLatencyMs);
         if (!node.isEmpty()) {
             String nodeTimeName = "node-" + node + ".latency";
@@ -104,15 +104,15 @@ public class FetchMetricsManager extends AbstractConsumerMetricsManager {
         }
     }
 
-    void recordBytesFetched(int bytes) {
+    public void recordBytesFetched(int bytes) {
         bytesFetched.record(bytes);
     }
 
-    void recordRecordsFetched(int records) {
+    public void recordRecordsFetched(int records) {
         recordsFetched.record(records);
     }
 
-    void recordBytesFetched(String topic, int bytes) {
+    public void recordBytesFetched(String topic, int bytes) {
         String name = topicBytesFetchedMetricName(topic);
         maybeRecordDeprecatedBytesFetched(name, topic, bytes);
 
@@ -124,7 +124,7 @@ public class FetchMetricsManager extends AbstractConsumerMetricsManager {
         bytesFetched.record(bytes);
     }
 
-    void recordRecordsFetched(String topic, int records) {
+    public void recordRecordsFetched(String topic, int records) {
         String name = topicRecordsFetchedMetricName(topic);
         maybeRecordDeprecatedRecordsFetched(name, topic, records);
 
@@ -135,7 +135,7 @@ public class FetchMetricsManager extends AbstractConsumerMetricsManager {
         recordsFetched.record(records);
     }
 
-    void recordPartitionLag(TopicPartition tp, long lag) {
+    public void recordPartitionLag(TopicPartition tp, long lag) {
         this.recordsLag.record(lag);
 
         String name = partitionRecordsLagMetricName(tp);
@@ -150,7 +150,7 @@ public class FetchMetricsManager extends AbstractConsumerMetricsManager {
         recordsLag.record(lag);
     }
 
-    void recordPartitionLead(TopicPartition tp, long lead) {
+    public void recordPartitionLead(TopicPartition tp, long lead) {
         this.recordsLead.record(lead);
 
         String name = partitionRecordsLeadMetricName(tp);
@@ -172,7 +172,7 @@ public class FetchMetricsManager extends AbstractConsumerMetricsManager {
      * @param subscription {@link SubscriptionState} that contains the set of assigned partitions
      * @see SubscriptionState#assignmentId()
      */
-    void maybeUpdateAssignment(SubscriptionState subscription) {
+    public void maybeUpdateAssignment(SubscriptionState subscription) {
         int newAssignmentId = subscription.assignmentId();
 
         if (this.assignmentId != newAssignmentId) {

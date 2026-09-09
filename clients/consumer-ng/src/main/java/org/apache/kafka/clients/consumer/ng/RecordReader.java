@@ -18,7 +18,9 @@ package org.apache.kafka.clients.consumer.ng;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.clients.consumer.internals.FetchMetricsManager;
 import org.apache.kafka.clients.consumer.internals.SubscriptionState;
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
@@ -59,6 +61,7 @@ public final class RecordReader<K, V> {
         CloseableIterator<Record> records;
         Optional<Integer> batchLeaderEpoch = Optional.empty();
         TimestampType batchTimestampType = TimestampType.NO_TIMESTAMP_TYPE;
+        int deliveredFromSegment;
 
         Cursor(TopicPartition partition) {
             this.partition = partition;
@@ -70,6 +73,8 @@ public final class RecordReader<K, V> {
     private final Deserializer<K> keyDeserializer;
     private final Deserializer<V> valueDeserializer;
     private final boolean checkCrcs;
+    private final IsolationLevel isolationLevel;
+    private final FetchMetricsManager metricsManager;
     private final BufferSupplier decompressionBuffers = BufferSupplier.create();
     private final Map<TopicPartition, Cursor> cursors = new HashMap<>();
     private final List<Cursor> order = new ArrayList<>();
@@ -77,12 +82,15 @@ public final class RecordReader<K, V> {
     private int assignmentId = -1;
 
     public RecordReader(ConsumerEngine engine, SubscriptionState subscriptions, Deserializer<K> keyDeserializer,
-                        Deserializer<V> valueDeserializer, boolean checkCrcs) {
+                        Deserializer<V> valueDeserializer, boolean checkCrcs, IsolationLevel isolationLevel,
+                        FetchMetricsManager metricsManager) {
         this.engine = engine;
         this.subscriptions = subscriptions;
         this.keyDeserializer = keyDeserializer;
         this.valueDeserializer = valueDeserializer;
         this.checkCrcs = checkCrcs;
+        this.isolationLevel = isolationLevel;
+        this.metricsManager = metricsManager;
     }
 
     /**
@@ -135,7 +143,8 @@ public final class RecordReader<K, V> {
             c.batches = null;
             if (c.queue != null)
                 c.queue.poll();
-            engine.released(done);
+            engine.released(done, c.deliveredFromSegment);
+            c.deliveredFromSegment = 0;
         }
     }
 
@@ -166,10 +175,21 @@ public final class RecordReader<K, V> {
             added++;
         }
         if (added > 0) {
+            c.deliveredFromSegment += added;
             subscriptions.position(tp, new SubscriptionState.FetchPosition(next, c.batchLeaderEpoch, position.currentLeader));
             nextOffsets.put(tp, new OffsetAndMetadata(next, c.batchLeaderEpoch, ""));
+            recordLagAndLead(tp);
         }
         return added;
+    }
+
+    private void recordLagAndLead(TopicPartition tp) {
+        Long lag = subscriptions.partitionLag(tp, isolationLevel);
+        if (lag != null)
+            metricsManager.recordPartitionLag(tp, lag);
+        Long lead = subscriptions.partitionLead(tp);
+        if (lead != null)
+            metricsManager.recordPartitionLead(tp, lead);
     }
 
     /** @return the next record at or after {@code position} for this cursor, or null if nothing is buffered */
@@ -213,7 +233,8 @@ public final class RecordReader<K, V> {
             c.segment = null;
             c.batches = null;
             c.queue.poll();
-            engine.released(done);
+            engine.released(done, c.deliveredFromSegment);
+            c.deliveredFromSegment = 0;
         }
         FetchSegment head = c.queue.peek();
         if (head == null || head.fetchOffset > position)

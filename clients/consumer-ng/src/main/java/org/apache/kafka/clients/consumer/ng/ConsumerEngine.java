@@ -24,6 +24,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.internals.CommitRequestManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager;
+import org.apache.kafka.clients.consumer.internals.FetchMetricsManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerMetadata;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
 import org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager;
@@ -44,10 +45,14 @@ import org.apache.kafka.clients.consumer.ng.loop.LoopTimer;
 import org.apache.kafka.clients.consumer.ng.loop.ManagerTask;
 import org.apache.kafka.clients.consumer.ng.loop.PassDecision;
 import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.network.Selector;
+import org.apache.kafka.common.network.NetworkReceive;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.common.utils.internals.KafkaThread;
 import org.apache.kafka.common.utils.internals.LogContext;
@@ -58,6 +63,7 @@ import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.nio.ByteBuffer;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
@@ -85,6 +91,7 @@ public final class ConsumerEngine implements AutoCloseable {
 
     private static final long REAPER_INTERVAL_MS = 100;
     private static final long MAX_BLOCK_MS = 60_000;
+    private static final long DEFAULT_CLOSE_TIMEOUT_MS = 30_000L;
     private static final long ERROR_BACKOFF_MS = 100;
 
     private final Logger log;
@@ -94,6 +101,7 @@ public final class ConsumerEngine implements AutoCloseable {
     final ConsumerMetadata metadata;
     final Metrics metrics;
     private final NetworkClient client;
+    private final Selector selector;
     private final NetworkClientDelegate network;
     private final DirectBufferPool pool;
     final FetchPipeline fetch;
@@ -118,6 +126,11 @@ public final class ConsumerEngine implements AutoCloseable {
     private volatile long applicationPollSequence;
     private volatile long lastApplicationPollMs;
     private volatile boolean applicationInPoll;
+    /** Application thread is in {@code position()} and needs the positions machinery to run. */
+    private volatile boolean applicationWantsPositions;
+    /** Counts poll() and position() calls, so a positions error is raised at most once per application call. */
+    private final AtomicLong applicationCallSequence = new AtomicLong();
+    private long positionsErrorRaisedForCall = -1;
     private volatile PassDecision latestDecision = PassDecision.NONE;
     private volatile boolean reconciling;
 
@@ -130,11 +143,12 @@ public final class ConsumerEngine implements AutoCloseable {
     private boolean lastPassFailed;
     private volatile boolean positionsMayHaveChanged = true;
     private CompletableFuture<Void> positionsUpdate;
+    private volatile long closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS;
     private boolean closing;
 
     public ConsumerEngine(ConsumerConfig config, LogContext logContext, Time time, Metrics metrics,
                           SubscriptionState subscriptions, OffsetCommitCallbackInvoker commitCallbackInvoker,
-                          MemberStateListener applicationMemberStateListener, long creditBytes,
+                          MemberStateListener applicationMemberStateListener, FetchMetricsManager fetchMetricsManager, long creditBytes,
                           Runnable onApplicationVisibleChange) {
         this.log = logContext.logger(ConsumerEngine.class);
         this.logContext = logContext;
@@ -152,7 +166,12 @@ public final class ConsumerEngine implements AutoCloseable {
         metadata.bootstrap(addresses);
 
         this.pool = new DirectBufferPool(creditBytes + 2L * config.getInt(ConsumerConfig.FETCH_MAX_BYTES_CONFIG), this::memoryReleased);
-        this.client = EngineNetwork.createNetworkClient(config, logContext, time, metrics, metadata, pool);
+        // One ApiVersions instance shared by the network client (which fills it) and the managers (which read it).
+        ApiVersions apiVersions = new ApiVersions();
+        EngineNetwork.Created created = EngineNetwork.createNetworkClient(config, logContext, time, metrics, metadata, pool, apiVersions,
+                fetchMetricsManager.throttleTimeSensor());
+        this.client = created.client();
+        this.selector = created.selector();
 
         this.backgroundQueue = new LinkedBlockingQueue<>();
         AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, ConsumerUtils.CONSUMER_METRIC_GROUP);
@@ -163,8 +182,6 @@ public final class ConsumerEngine implements AutoCloseable {
         long retryBackoffMaxMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MAX_MS_CONFIG);
         int requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
         IsolationLevel isolationLevel = IsolationLevel.valueOf(config.getString(ConsumerConfig.ISOLATION_LEVEL_CONFIG).toUpperCase(Locale.ROOT));
-        ApiVersions apiVersions = new ApiVersions();
-
         CoordinatorRequestManager coordinator = null;
         CommitRequestManager commit = null;
         ConsumerMembershipManager membership = null;
@@ -201,7 +218,8 @@ public final class ConsumerEngine implements AutoCloseable {
         this.offsetsManager = new OffsetsRequestManager(subscriptions, metadata, isolationLevel, time, retryBackoffMs, requestTimeoutMs,
                 (int) defaultApiTimeoutMs, apiVersions, network, commit, positionsValidator, logContext);
 
-        this.fetch = new FetchPipeline(config, logContext, subscriptions, metadata, client, pool, creditBytes, this::onData);
+        this.fetch = new FetchPipeline(config, logContext, subscriptions, metadata, client, pool, creditBytes, this::onData,
+                e -> backgroundEventHandler.add(new ErrorEvent(e)), fetchMetricsManager);
         this.timer = new LoopTimer();
         this.signal = new LoopSignal(client::wakeup);
         for (RequestManager rm : managers())
@@ -258,6 +276,7 @@ public final class ConsumerEngine implements AutoCloseable {
     public long onApplicationPoll(long pollTimeMs) {
         lastApplicationPollMs = pollTimeMs;
         applicationInPoll = true;
+        applicationCallSequence.incrementAndGet();
         long sequence = ++applicationPollSequence;
         if (reconciling || !latestDecision.allPositionsKnown)
             signal.wakeupIfParked();
@@ -276,6 +295,15 @@ public final class ConsumerEngine implements AutoCloseable {
         applicationInPoll = false;
     }
 
+    /** Application thread: {@code position()} starts or stops waiting for a fetch position (same rules as in poll). */
+    public void applicationWantsPositions(boolean wants) {
+        applicationWantsPositions = wants;
+        if (wants) {
+            applicationCallSequence.incrementAndGet();
+            signal.wakeupIfParked();
+        }
+    }
+
     public PassDecision latestDecision() {
         return latestDecision;
     }
@@ -289,8 +317,8 @@ public final class ConsumerEngine implements AutoCloseable {
     }
 
     /** Application thread: a fetch segment was delivered and released. */
-    public void released(FetchSegment segment) {
-        fetch.released(segment);
+    public void released(FetchSegment segment, int deliveredRecords) {
+        fetch.released(segment, deliveredRecords);
         if (fetch.starved())
             signal.wakeupIfParked();
     }
@@ -310,7 +338,13 @@ public final class ConsumerEngine implements AutoCloseable {
 
     @Override
     public void close() {
+        close(DEFAULT_CLOSE_TIMEOUT_MS);
+    }
+
+    /** Stops the I/O thread; pending requests (leave group, last commit, in-flight fetch) get up to {@code timeoutMs}. */
+    public void close(long timeoutMs) {
         if (running.compareAndSet(true, false)) {
+            closeTimeoutMs = Math.max(0, timeoutMs);
             signal.wakeupIfParked();
             try {
                 thread.join(30_000);
@@ -356,6 +390,8 @@ public final class ConsumerEngine implements AutoCloseable {
         if (timer.runExpired(now) > 0)
             managersDirty = true;
         keepPollTimerFreshWhileInPoll(now);
+        if (applicationWantsPositions && positionsUpdateWanted())
+            managersDirty = true;
         if (managersDirty) {
             managersDirty = false;
             runManagers(now);
@@ -371,7 +407,24 @@ public final class ConsumerEngine implements AutoCloseable {
         if (lastPassFailed)
             blockMs = Math.max(blockMs, ERROR_BACKOFF_MS);
         network.poll(blockMs, now);
+        releaseUnclaimedReceives();
+        checkCoordinatorConnection(time.milliseconds());
         fetch.handleResponses();
+    }
+
+    /**
+     * Same rule as the classic consumer ({@code AbstractCoordinator.checkAndGetCoordinator}): a coordinator whose
+     * connection dropped is unknown, so requests wait for rediscovery instead of failing against a dead node.
+     */
+    private void checkCoordinatorConnection(long now) {
+        if (coordinatorManager.isEmpty())
+            return;
+        Optional<Node> node = coordinatorManager.get().coordinator();
+        if (node.isPresent() && client.connectionFailed(node.get()) && client.connectionDelay(node.get(), now) > 0) {
+            coordinatorManager.get().markCoordinatorUnknown("coordinator connection lost", now);
+            stateVersion.incrementAndGet();
+            managersDirty = true;
+        }
     }
 
     private boolean hasPendingWork() {
@@ -404,6 +457,7 @@ public final class ConsumerEngine implements AutoCloseable {
             return;
         lastHousekeptPollSequence = sequence;
         long pollMs = lastApplicationPollMs;
+        fetch.resumeAfterErrors();
         boolean membershipChanged = false;
         if (membershipManager.isPresent()) {
             ConsumerMembershipManager mm = membershipManager.get();
@@ -458,30 +512,82 @@ public final class ConsumerEngine implements AutoCloseable {
 
     private void runManagers(long now) {
         for (ManagerTask task : tasks) {
-            if (!task.wantsRun(commandProcessedThisPass))
+            if (!task.wantsRun(commandProcessedThisPass)) {
+                if (log.isTraceEnabled())
+                    log.trace("pass {} skip {} (declared {}, version {})", pass.get(), task.manager().getClass().getSimpleName(), task.declared(), stateVersion.get());
                 continue;
+            }
             task.run(now);
+            if (log.isTraceEnabled())
+                log.trace("pass {} ran {} sent={} version {}", pass.get(), task.manager().getClass().getSimpleName(), !task.lastRunSentNothing(), stateVersion.get());
         }
     }
 
-    private void maybeUpdateFetchPositions(long now) {
+    /**
+     * Positions are fetched on behalf of an application call (poll or position), as before: the errors it can raise
+     * (no reset policy, authorization) belong to that call, and an idle consumer does not keep retrying in the background.
+     */
+    private boolean positionsUpdateWanted() {
         if (closing || (positionsUpdate != null && !positionsUpdate.isDone()))
-            return;
-        if (subscriptions.hasAllFetchPositions())
+            return false;
+        if (!applicationInPoll && !applicationWantsPositions)
+            return false;
+        return !subscriptions.hasAllFetchPositions();
+    }
+
+    private void maybeUpdateFetchPositions(long now) {
+        if (!positionsUpdateWanted())
             return;
         positionsUpdate = offsetsManager.updateFetchPositions(now + defaultApiTimeoutMs);
+        if (positionsUpdate.isDone()) {
+            // Nothing was queued (e.g. a partition is waiting out a validation/reset backoff, or the reset policy is
+            // missing): the next input (poll iteration, metadata change, timer) retries; re-running managers now would spin.
+            positionsMayHaveChanged = true;
+            positionsUpdate.whenComplete((ignored, error) -> onPositionsUpdateDone(error));
+            return;
+        }
+        // Requests were queued on the managers: run them so the requests go out.
         stateVersion.incrementAndGet();
         managersDirty = true;
         positionsUpdate.whenComplete((ignored, error) -> {
             positionsMayHaveChanged = true;
             managersDirty = true;
-            if (error == null)
-                return;
-            Throwable cause = error instanceof CompletionException ? error.getCause() : error;
-            if (cause instanceof org.apache.kafka.common.errors.TimeoutException || cause instanceof java.util.concurrent.TimeoutException)
-                return;
-            backgroundEventHandler.add(new ErrorEvent(cause));
+            onPositionsUpdateDone(error);
         });
+    }
+
+    private void onPositionsUpdateDone(Throwable error) {
+        if (error == null)
+            return;
+        Throwable cause = error instanceof CompletionException ? error.getCause() : error;
+        if (cause instanceof org.apache.kafka.common.errors.TimeoutException || cause instanceof java.util.concurrent.TimeoutException)
+            return;
+        raisePositionsError(cause);
+    }
+
+    /**
+     * One error per application call: the call that triggered the update sees it (or, when it already returned as
+     * {@code poll(0)} does, the next call), and later calls start clean.
+     */
+    private void raisePositionsError(Throwable cause) {
+        long call = applicationCallSequence.get();
+        if (positionsErrorRaisedForCall == call)
+            return;
+        positionsErrorRaisedForCall = call;
+        backgroundEventHandler.add(new ErrorEvent(cause));
+    }
+
+    /**
+     * The network layer reads every response into a pooled buffer. Fetch responses keep theirs (records point into
+     * them, see {@link FetchSegment.Owner}); every other response was fully parsed during the poll, so its buffer goes
+     * back to the pool here.
+     */
+    private void releaseUnclaimedReceives() {
+        for (NetworkReceive receive : selector.completedReceives()) {
+            ByteBuffer payload = receive.payload();
+            if (!fetch.claimed(payload))
+                pool.releaseIfPooled(payload);
+        }
     }
 
     private void publishDecision() {
@@ -499,11 +605,18 @@ public final class ConsumerEngine implements AutoCloseable {
     /** Close sequence on the I/O thread: commit on close, leave the group, then flush what the managers still send. */
     private void shutdown() {
         closing = true;
-        long now = time.milliseconds();
+        Timer timer = time.timer(closeTimeoutMs);
         try {
             for (RequestManager rm : managers())
-                network.addAll(rm.pollOnClose(now).unsentRequests);
-            network.poll(0, now);
+                network.addAll(rm.pollOnClose(timer.currentTimeMs()).unsentRequests);
+            // Same as the previous network thread: poll until the pending requests are done or the close timer runs out.
+            while (network.hasAnyPendingRequests() && timer.notExpired()) {
+                network.poll(timer.remainingMs(), timer.currentTimeMs(), true);
+                releaseUnclaimedReceives();
+                timer.update();
+            }
+            if (network.hasAnyPendingRequests())
+                log.warn("Close timeout of {} ms expired with {} request(s) still in flight", timer.timeoutMs(), network.inflightRequestCount());
         } finally {
             Utils.closeQuietly(network, "network client delegate");
         }

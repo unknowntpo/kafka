@@ -608,6 +608,7 @@ subprojects {
     systemProperty("kafka.test.run.new", project.findProperty("kafka.test.run.new"))
     systemProperty("kafka.test.run.flaky", project.findProperty("kafka.test.run.flaky"))
     systemProperty("kafka.test.verbose", project.findProperty("kafka.test.verbose"))
+    systemProperty("kafka.consumer.delegate", project.findProperty("kafka.consumer.delegate"))
 
     testLogging {
       events = userTestLoggingEvents ?: testLoggingEvents
@@ -2240,6 +2241,15 @@ project(':clients:clients-integration-tests') {
     archivesName = "kafka-clients-integration-tests"
   }
 
+  if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21)) {
+    // Let the test runtime classpath resolve the Java 21 consumer-ng variant (tests run on the current JVM).
+    configurations.testRuntimeClasspath {
+      attributes {
+        attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 21)
+      }
+    }
+  }
+
   configurations {
     // To prevent a UniqueResourceException due the same resource existing in both
     // org.apache.directory.api/api-all and org.apache.directory.api/api-ldap-schema-data
@@ -2260,8 +2270,11 @@ project(':clients:clients-integration-tests') {
     testImplementation project(':storage')
     testImplementation testFixtures(project(':storage'))
     testImplementation testFixtures(project(':clients'))
-    // The next-generation consumer (Java 21) is discovered through ConsumerDelegateFactory when present at runtime.
-    testRuntimeOnly project(':clients:consumer-ng')
+    // The next-generation consumer (Java 21) is discovered through ConsumerDelegateFactory when present at runtime;
+    // it is only added when the build runs on a JVM that can execute it.
+    if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_21)) {
+      testRuntimeOnly project(':clients:consumer-ng')
+    }
     implementation project(':server-common')
     testImplementation testFixtures(project(':server-common'))
     implementation project(':group-coordinator')

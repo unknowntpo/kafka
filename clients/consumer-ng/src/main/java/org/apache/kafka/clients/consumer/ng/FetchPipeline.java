@@ -21,7 +21,9 @@ import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.FetchSessionHandler;
 import org.apache.kafka.clients.NetworkClient;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
 import org.apache.kafka.clients.consumer.internals.ConsumerMetadata;
+import org.apache.kafka.clients.consumer.internals.FetchMetricsManager;
 import org.apache.kafka.clients.consumer.internals.SubscriptionState;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.IsolationLevel;
@@ -41,7 +43,9 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.nio.ByteBuffer;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -70,6 +74,8 @@ public final class FetchPipeline {
         final ConcurrentLinkedQueue<FetchSegment> segments = new ConcurrentLinkedQueue<>();
         /** I/O thread: the offset the next fetch will ask for; -1 until the position is known. */
         long nextFetchOffset = -1L;
+        /** I/O thread: a fetch error was raised to the application; no refetch until its next poll (or a seek). */
+        boolean errorRaised;
 
         PartitionQueue(TopicPartition partition) {
             this.partition = partition;
@@ -121,15 +127,20 @@ public final class FetchPipeline {
     private final IsolationLevel isolationLevel;
     private final String clientRackId;
     private final Runnable onData;
+    private final java.util.function.Consumer<RuntimeException> onError;
+    private final FetchMetricsManager metricsManager;
 
     private final Map<TopicPartition, PartitionQueue> queues = new ConcurrentHashMap<>();
+    /** Receive buffers taken over from the network layer (a fetch response's records point into them). */
+    private final Set<ByteBuffer> claimedPayloads = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Map<Integer, NodeState> nodes = new HashMap<>();
     private final AtomicLong queuedBytes = new AtomicLong();
     private long inFlightBytes;
     private volatile boolean starved;
 
     public FetchPipeline(ConsumerConfig config, LogContext logContext, SubscriptionState subscriptions, ConsumerMetadata metadata,
-                         NetworkClient client, DirectBufferPool pool, long creditBytes, Runnable onData) {
+                         NetworkClient client, DirectBufferPool pool, long creditBytes, Runnable onData,
+                         java.util.function.Consumer<RuntimeException> onError, FetchMetricsManager metricsManager) {
         this.log = logContext.logger(FetchPipeline.class);
         this.subscriptions = subscriptions;
         this.metadata = metadata;
@@ -137,6 +148,8 @@ public final class FetchPipeline {
         this.pool = pool;
         this.creditBytes = creditBytes;
         this.onData = onData;
+        this.onError = onError;
+        this.metricsManager = metricsManager;
         this.fetchMaxWaitMs = config.getInt(ConsumerConfig.FETCH_MAX_WAIT_MS_CONFIG);
         this.fetchMinBytes = config.getInt(ConsumerConfig.FETCH_MIN_BYTES_CONFIG);
         this.fetchMaxBytes = config.getInt(ConsumerConfig.FETCH_MAX_BYTES_CONFIG);
@@ -153,9 +166,9 @@ public final class FetchPipeline {
     }
 
     /** Application thread: a segment was fully delivered; return its bytes to the credit. */
-    public void released(FetchSegment segment) {
+    public void released(FetchSegment segment, int deliveredRecords) {
         queuedBytes.addAndGet(-segment.sizeInBytes);
-        segment.release();
+        segment.release(deliveredRecords);
     }
 
     /** @return true if a release from another thread should wake the I/O thread (it stopped fetching for lack of credit) */
@@ -176,6 +189,7 @@ public final class FetchPipeline {
 
     /** Keeps the per-partition queues in step with the assignment; drops queues (and their credit) of removed partitions. */
     public void syncAssignment() {
+        metricsManager.maybeUpdateAssignment(subscriptions);
         Set<TopicPartition> assigned = subscriptions.assignedPartitions();
         for (TopicPartition tp : assigned)
             queues.computeIfAbsent(tp, PartitionQueue::new);
@@ -194,6 +208,18 @@ public final class FetchPipeline {
             return;
         drain(q);
         q.nextFetchOffset = -1L;
+        q.errorRaised = false;
+    }
+
+    /** I/O thread, once per application poll: partitions whose error the application has now seen may be fetched again. */
+    public void resumeAfterErrors() {
+        for (PartitionQueue q : queues.values())
+            q.errorRaised = false;
+    }
+
+    /** @return true if the network layer's receive buffer belongs to a fetch response and must not be released by the sweep */
+    public boolean claimed(ByteBuffer payload) {
+        return claimedPayloads.contains(payload);
     }
 
     private void drain(PartitionQueue q) {
@@ -213,7 +239,7 @@ public final class FetchPipeline {
         Cluster cluster = metadata.fetch();
         for (PartitionQueue q : queues.values()) {
             TopicPartition tp = q.partition;
-            if (!subscriptions.isFetchable(tp))
+            if (!subscriptions.isFetchable(tp) || q.errorRaised)
                 continue;
             if (q.nextFetchOffset < 0) {
                 SubscriptionState.FetchPosition position = subscriptions.position(tp);
@@ -261,10 +287,13 @@ public final class FetchPipeline {
     private void onFetchResponse(NodeState state, ClientResponse response) {
         state.inFlight = false;
         inFlightBytes -= fetchMaxBytes;
+        metricsManager.recordLatency(response.destination(), response.requestLatencyMs());
         if (response.hasResponse()) {
             state.pendingResponse = (FetchResponse) response.responseBody();
             state.pendingVersion = response.requestHeader().apiVersion();
             state.pendingPayload = response.payload();
+            if (state.pendingPayload != null)
+                claimedPayloads.add(state.pendingPayload);
         } else {
             state.sessionHandler.handleError(response.authenticationException() != null
                     ? response.authenticationException() : new KafkaException("fetch failed: " + response));
@@ -290,37 +319,52 @@ public final class FetchPipeline {
         state.pendingResponse = null;
         Map<TopicPartition, Long> asked = new HashMap<>(state.inFlightOffsets);
         state.inFlightOffsets.clear();
+        ByteBuffer payload = state.pendingPayload;
+        state.pendingPayload = null;
+        claimedPayloads.remove(payload);
         if (!state.sessionHandler.handleResponse(response, state.pendingVersion)) {
             metadata.requestUpdate(false);
+            pool.releaseIfPooled(payload);
             return false;
         }
-        FetchSegment.Owner owner = new FetchSegment.Owner(state.pendingPayload, pool);
-        state.pendingPayload = null;
+        FetchSegment.Owner owner = new FetchSegment.Owner(payload, pool, metricsManager);
         boolean queued = false;
         for (Map.Entry<TopicPartition, FetchResponseData.PartitionData> entry
                 : response.responseData(state.sessionHandler.sessionTopicNames(), state.pendingVersion).entrySet()) {
             TopicPartition tp = entry.getKey();
-            FetchResponseData.PartitionData data = entry.getValue();
             PartitionQueue q = queues.get(tp);
             Long fetchOffset = asked.get(tp);
             if (q == null || fetchOffset == null || q.nextFetchOffset != fetchOffset)
                 continue; // a seek, reset or unassignment raced with this fetch
-            if (!handlePartitionError(tp, q, Errors.forCode(data.errorCode())))
-                continue;
-            MemoryRecords records = (MemoryRecords) FetchResponse.recordsOrFail(data);
-            if (records.sizeInBytes() == 0)
-                continue;
-            long nextOffset = lastOffsetAfter(records, fetchOffset);
-            if (nextOffset <= fetchOffset)
-                continue;
-            q.nextFetchOffset = nextOffset;
-            FetchSegment segment = new FetchSegment(tp, fetchOffset, records, data.highWatermark(), data.lastStableOffset(), owner);
-            queuedBytes.addAndGet(segment.sizeInBytes);
-            q.segments.add(segment);
-            queued = true;
+            queued |= queuePartitionData(q, fetchOffset, entry.getValue(), owner);
         }
         owner.creationDone();
         return queued;
+    }
+
+    /** @return true if a segment was queued for the partition */
+    private boolean queuePartitionData(PartitionQueue q, long fetchOffset, FetchResponseData.PartitionData data, FetchSegment.Owner owner) {
+        TopicPartition tp = q.partition;
+        if (!handlePartitionError(tp, q, Errors.forCode(data.errorCode())))
+            return false;
+        // Log offsets of the partition, for lag/lead metrics and currentLag(); the safe variants tolerate an unassignment race.
+        if (data.highWatermark() >= 0)
+            subscriptions.tryUpdatingHighWatermark(tp, data.highWatermark());
+        if (data.logStartOffset() >= 0)
+            subscriptions.tryUpdatingLogStartOffset(tp, data.logStartOffset());
+        if (data.lastStableOffset() >= 0)
+            subscriptions.tryUpdatingLastStableOffset(tp, data.lastStableOffset());
+        MemoryRecords records = (MemoryRecords) FetchResponse.recordsOrFail(data);
+        if (records.sizeInBytes() == 0)
+            return false;
+        long nextOffset = lastOffsetAfter(records, fetchOffset);
+        if (nextOffset <= fetchOffset)
+            return false;
+        q.nextFetchOffset = nextOffset;
+        FetchSegment segment = new FetchSegment(tp, fetchOffset, records, data.highWatermark(), data.lastStableOffset(), owner);
+        queuedBytes.addAndGet(segment.sizeInBytes);
+        q.segments.add(segment);
+        return true;
     }
 
     /** @return true if the partition's data can be used; false if the error was handled and the data must be skipped */
@@ -337,8 +381,16 @@ public final class FetchPipeline {
                 metadata.requestUpdate(false);
                 return false;
             case OFFSET_OUT_OF_RANGE:
-                // The subscription state decides how to reset (auto.offset.reset); the cursor follows the new position.
-                subscriptions.requestOffsetResetIfPartitionAssigned(tp);
+                if (subscriptions.hasDefaultOffsetResetPolicy()) {
+                    // The subscription state decides how to reset (auto.offset.reset); the cursor follows the new position.
+                    log.info("Fetch offset {} is out of range for partition {}, resetting offset", q.nextFetchOffset, tp);
+                    subscriptions.requestOffsetResetIfPartitionAssigned(tp);
+                } else {
+                    log.info("Fetch offset {} is out of range for partition {}, raising error to the application since no reset policy is configured", q.nextFetchOffset, tp);
+                    onError.accept(new OffsetOutOfRangeException("Fetch position " + q.nextFetchOffset + " is out of range for partition " + tp,
+                            Map.of(tp, q.nextFetchOffset)));
+                    q.errorRaised = true;
+                }
                 q.nextFetchOffset = -1L;
                 return false;
             default:

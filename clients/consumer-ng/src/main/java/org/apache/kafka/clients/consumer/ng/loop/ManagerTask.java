@@ -112,12 +112,12 @@ public final class ManagerTask {
     }
 
     /** @return what the manager declared after its last run */
-    WaitCondition declared() {
+    public WaitCondition declared() {
         return declared;
     }
 
     /** @return {@code true} if the most recent run produced no request */
-    boolean lastRunSentNothing() {
+    public boolean lastRunSentNothing() {
         return lastRunSentNothing;
     }
 

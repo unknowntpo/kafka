@@ -27,6 +27,7 @@ import org.apache.kafka.clients.consumer.internals.ConsumerMetadata;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
 import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.network.ChannelBuilder;
 import org.apache.kafka.common.network.NetworkReceive;
 import org.apache.kafka.common.network.Selector;
@@ -44,15 +45,19 @@ final class EngineNetwork {
     private EngineNetwork() {
     }
 
-    static NetworkClient createNetworkClient(ConsumerConfig config, LogContext logContext, Time time, Metrics metrics,
-                                             ConsumerMetadata metadata, MemoryPool pool) {
+    /** The client and the selector it reads from; the engine sweeps the selector's completed receives back to the pool. */
+    record Created(NetworkClient client, Selector selector) {
+    }
+
+    static Created createNetworkClient(ConsumerConfig config, LogContext logContext, Time time, Metrics metrics,
+                                       ConsumerMetadata metadata, MemoryPool pool, ApiVersions apiVersions, Sensor throttleTimeSensor) {
         String clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
         ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config, time, logContext);
         Selector selector = new Selector(NetworkReceive.UNLIMITED,
                 config.getLong(CommonClientConfigs.CONNECTIONS_MAX_IDLE_MS_CONFIG), 0,
                 metrics, time, ConsumerUtils.CONSUMER_METRIC_GROUP_PREFIX, Map.of(), false, false,
                 channelBuilder, pool, logContext);
-        return new NetworkClient(null, metadata, selector, clientId,
+        NetworkClient client = new NetworkClient(null, metadata, selector, clientId,
                 1,
                 config.getLong(CommonClientConfigs.RECONNECT_BACKOFF_MS_CONFIG),
                 config.getLong(CommonClientConfigs.RECONNECT_BACKOFF_MAX_MS_CONFIG),
@@ -61,11 +66,12 @@ final class EngineNetwork {
                 config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
                 config.getLong(CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG),
                 config.getLong(CommonClientConfigs.SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG),
-                time, true, new ApiVersions(), null, logContext,
+                time, true, apiVersions, throttleTimeSensor, logContext,
                 new DefaultHostResolver(), null,
                 config.getLong(CommonClientConfigs.METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG),
                 MetadataRecoveryStrategy.forName(config.getString(CommonClientConfigs.METADATA_RECOVERY_STRATEGY_CONFIG)),
                 ClientUtils.bootstrapConfiguration(config, config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG)),
                 config.getBoolean(CommonClientConfigs.METADATA_CLUSTER_CHECK_ENABLE_CONFIG));
+        return new Created(client, selector);
     }
 }

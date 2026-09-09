@@ -40,6 +40,8 @@ public final class DirectBufferPool implements MemoryPool {
 
     private static final int MIN_CLASS_SHIFT = 16; // 64 KiB
     private static final int MAX_CLASS_SHIFT = 30; // 1 GiB
+    /** Below this the pool could not hold even a few smallest buffers and every receive would stall. */
+    static final long MIN_CAPACITY_BYTES = 4L << MIN_CLASS_SHIFT; // 256 KiB
 
     private final long capacityBytes;
     private final AtomicLong allocatedBytes = new AtomicLong();
@@ -49,11 +51,11 @@ public final class DirectBufferPool implements MemoryPool {
 
     /**
      * @param capacityBytes upper bound on bytes handed out at any time (in flight in the network layer plus
-     *                      buffered for the application)
+     *                      buffered for the application); raised to {@link #MIN_CAPACITY_BYTES} if smaller
      * @param onRelease     called after a release, so a network thread parked for lack of memory can resume
      */
     public DirectBufferPool(long capacityBytes, Runnable onRelease) {
-        this.capacityBytes = capacityBytes;
+        this.capacityBytes = Math.max(capacityBytes, MIN_CAPACITY_BYTES);
         this.onRelease = onRelease;
         for (int i = 0; i <= MAX_CLASS_SHIFT; i++)
             free.add(new ConcurrentLinkedDeque<>());
@@ -88,6 +90,16 @@ public final class DirectBufferPool implements MemoryPool {
         buffer.clear();
         buffer.limit(sizeBytes);
         return buffer;
+    }
+
+    /** Releases {@code buffer} if it came from this pool; buffers from elsewhere (e.g. the empty receive) are ignored. */
+    public void releaseIfPooled(ByteBuffer buffer) {
+        if (buffer == null || !buffer.isDirect())
+            return;
+        int classSize = buffer.capacity();
+        if (classSize < (1 << MIN_CLASS_SHIFT) || Integer.bitCount(classSize) != 1)
+            return;
+        release(buffer);
     }
 
     @Override

@@ -42,11 +42,13 @@ import org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker;
 import org.apache.kafka.clients.consumer.internals.SubscriptionState;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.ConsumerRebalanceListenerCallbackCompletedEvent;
+import org.apache.kafka.clients.consumer.internals.FetchMetricsManager;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.PartitionsAssignedEvent;
 import org.apache.kafka.clients.consumer.internals.events.PartitionsRemovedEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.KafkaConsumerMetrics;
 import org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager;
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
@@ -70,6 +72,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -109,12 +112,15 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     private final boolean autoCommitEnabled;
     private final Optional<String> groupId;
     private final KafkaConsumerMetrics kafkaConsumerMetrics;
+    private final FetchMetricsManager fetchMetricsManager;
     private final String clientId;
     private final AtomicReference<ConsumerGroupMetadata> groupMetadata = new AtomicReference<>();
     private final AtomicBoolean wakeupRequested = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile Thread applicationThread;
     private volatile boolean signalled;
+    /** The most recent commitAsync; commitSync and close wait for it so its callback runs before they return. */
+    private CompletableFuture<?> lastPendingAsyncCommit;
 
     public NgKafkaConsumer(ConsumerConfig config, Deserializer<K> keyDeserializer, Deserializer<V> valueDeserializer) {
         this(config, keyDeserializer, valueDeserializer, Time.SYSTEM);
@@ -146,10 +152,12 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         MemberStateListener memberStateListener = (memberEpoch, memberId) ->
                 groupId.ifPresent(id -> groupMetadata.set(new ConsumerGroupMetadata(id, memberEpoch.orElse(-1), memberId, groupRebalanceConfig.groupInstanceId)));
         long creditBytes = 4L * config.getInt(ConsumerConfig.FETCH_MAX_BYTES_CONFIG);
+        this.fetchMetricsManager = ConsumerUtils.createFetchMetricsManager(metrics);
         this.engine = new ConsumerEngine(config, logContext, time, metrics, subscriptions, commitCallbackInvoker,
-                memberStateListener, creditBytes, this::signalApplication);
+                memberStateListener, fetchMetricsManager, creditBytes, this::signalApplication);
+        IsolationLevel isolationLevel = IsolationLevel.valueOf(config.getString(ConsumerConfig.ISOLATION_LEVEL_CONFIG).toUpperCase(Locale.ROOT));
         this.reader = new RecordReader<>(engine, subscriptions, this.deserializers.keyDeserializer(), this.deserializers.valueDeserializer(),
-                config.getBoolean(ConsumerConfig.CHECK_CRCS_CONFIG));
+                config.getBoolean(ConsumerConfig.CHECK_CRCS_CONFIG), isolationLevel, fetchMetricsManager);
         engine.start();
         log.debug("Consumer engine started");
     }
@@ -424,13 +432,36 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     private void commitSyncInternal(Map<TopicPartition, OffsetAndMetadata> offsets, Duration timeout) {
         throwIfNoGroup();
         Map<TopicPartition, OffsetAndMetadata> copy = Map.copyOf(offsets);
-        long deadline = time.milliseconds() + timeout.toMillis();
+        Timer timer = time.timer(timeout);
+        long deadline = timer.currentTimeMs() + timeout.toMillis();
         try {
             if (!copy.isEmpty())
                 await(engine.submit(e -> e.commitManager.get().commitSync(copy, deadline)), timeout.toMillis(), "commitSync");
+            timer.update();
             interceptors.onCommit(copy);
         } finally {
+            awaitPendingAsyncCommit(timer);
             commitCallbackInvoker.executeCallbacks();
+        }
+    }
+
+    /** Waits (bounded by the timer) for the last commitAsync to complete so that its callback is ready to run. */
+    private void awaitPendingAsyncCommit(Timer timer) {
+        CompletableFuture<?> pending = lastPendingAsyncCommit;
+        if (pending == null)
+            return;
+        try {
+            pending.handle((v, t) -> null).get(Math.max(1, timer.remainingMs()), TimeUnit.MILLISECONDS);
+            lastPendingAsyncCommit = null;
+        } catch (java.util.concurrent.TimeoutException e) {
+            log.debug("Pending asynchronous commit did not complete within the timeout");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new InterruptException(e);
+        } catch (ExecutionException e) {
+            lastPendingAsyncCommit = null; // the error reaches the user through the commit callback
+        } finally {
+            timer.update();
         }
     }
 
@@ -449,7 +480,7 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         ensureOpen();
         throwIfNoGroup();
         Map<TopicPartition, OffsetAndMetadata> copy = Map.copyOf(offsets);
-        engine.execute(() -> engine.commitManager.get().commitAsync(copy).whenComplete((committed, error) -> {
+        lastPendingAsyncCommit = engine.submit(e -> e.commitManager.get().commitAsync(copy).whenComplete((committed, error) -> {
             if (error == null)
                 commitCallbackInvoker.enqueueInterceptorInvocation(committed);
             if (callback != null)
@@ -538,15 +569,21 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             throw new IllegalStateException("You can only check the position for partitions assigned to this consumer.");
         applicationThread = Thread.currentThread();
         Timer timer = time.timer(timeout);
-        do {
-            maybeThrowWakeup();
-            SubscriptionState.FetchPosition position = subscriptions.hasValidPosition(partition) ? subscriptions.position(partition) : null;
-            if (position != null)
-                return position.offset;
-            engine.wakeup();
-            parkUntil(System.nanoTime() + Math.min(retryBackoffMs, timer.remainingMs()) * 1_000_000L);
-            timer.update();
-        } while (timer.notExpired());
+        engine.applicationWantsPositions(true);
+        try {
+            do {
+                maybeThrowWakeup();
+                processBackgroundEvents();
+                SubscriptionState.FetchPosition position = subscriptions.hasValidPosition(partition) ? subscriptions.position(partition) : null;
+                if (position != null)
+                    return position.offset;
+                engine.wakeup();
+                parkUntil(System.nanoTime() + Math.min(retryBackoffMs, timer.remainingMs()) * 1_000_000L);
+                timer.update();
+            } while (timer.notExpired());
+        } finally {
+            engine.applicationWantsPositions(false);
+        }
         throw new TimeoutException("Timeout of " + timeout.toMillis() + "ms expired before the position for partition " + partition + " could be determined");
     }
 
@@ -736,6 +773,8 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         Duration timeout = option.timeout().orElse(Duration.ofMillis(30_000));
         Timer timer = time.timer(timeout);
         try {
+            // The previous implementation's order: auto-commit, stop committing / finding the coordinator, leave the
+            // group, run the pending asynchronous commit callbacks, shut the network down.
             if (autoCommitEnabled && groupId.isPresent() && !subscriptions.allConsumed().isEmpty()) {
                 try {
                     commitSyncInternal(subscriptions.allConsumed(), Duration.ofMillis(timer.remainingMs()));
@@ -744,14 +783,23 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 }
             }
             timer.update();
+            engine.execute(() -> {
+                engine.commitManager.ifPresent(m -> m.signalClose());
+                engine.coordinatorManager.ifPresent(m -> m.signalClose());
+            });
             try {
                 await(engine.submit(e -> e.leaveGroupOnClose(option.groupMembershipOperation())), timer.remainingMs(), "leave group");
             } catch (Exception e) {
                 log.warn("Leaving the group on close failed", e);
             }
+            timer.update();
+            awaitPendingAsyncCommit(timer);
+            commitCallbackInvoker.executeCallbacks();
         } finally {
             reader.close();
-            engine.close();
+            timer.update();
+            engine.close(timer.remainingMs());
+            fetchMetricsManager.close();
             kafkaConsumerMetrics.close();
             metrics.close();
             deserializers.close();
