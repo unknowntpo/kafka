@@ -33,7 +33,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 public class OffsetCommitCallbackInvoker {
     private final ConsumerInterceptors<?, ?> interceptors;
 
-    OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors) {
+    public OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors) {
         this.interceptors = interceptors;
     }
 

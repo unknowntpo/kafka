@@ -41,7 +41,7 @@ public class ConsumerRebalanceListenerInvoker {
     private final Time time;
     private final RebalanceCallbackMetricsManager metricsManager;
 
-    ConsumerRebalanceListenerInvoker(LogContext logContext,
+    public ConsumerRebalanceListenerInvoker(LogContext logContext,
                                      SubscriptionState subscriptions,
                                      Time time,
                                      RebalanceCallbackMetricsManager metricsManager) {

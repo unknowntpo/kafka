@@ -48,7 +48,7 @@ import java.util.function.LongSupplier;
  * <p>Liveness: the manager runs at most once per loop pass, whatever combination of triggers fired, and its timer is
  * always re-armed, also when {@code poll()} throws (then after {@link #FAILURE_RETRY_MS}).
  */
-final class ManagerTask {
+public final class ManagerTask {
 
     /** Every manager is run at least this often even if it asked to wait forever, as a safety net. */
     static final long MAX_INTERVAL_MS = 1_000;
@@ -86,7 +86,7 @@ final class ManagerTask {
      * @param onResponse   called when one of this manager's requests completes (loop thread, inside the network poll)
      * @param onDue        called when this manager's timer expires, so the loop schedules an ordered manager run
      */
-    ManagerTask(RequestManager manager,
+    public ManagerTask(RequestManager manager,
                 NetworkClientDelegate network,
                 LoopTimer timer,
                 LongSupplier currentPass,
@@ -107,7 +107,7 @@ final class ManagerTask {
         return due;
     }
 
-    RequestManager manager() {
+    public RequestManager manager() {
         return manager;
     }
 
@@ -126,7 +126,7 @@ final class ManagerTask {
      * the next pass without the version check, as after its own timer. Used when the loop knows exactly which
      * manager has new work (a fetch request to create, an auto-commit to send) so the others are not re-run.
      */
-    void trigger() {
+    public void trigger() {
         due = true;
     }
 
@@ -135,7 +135,7 @@ final class ManagerTask {
      *
      * @param commandProcessed a command from the application thread was processed in this pass
      */
-    boolean wantsRun(boolean commandProcessed) {
+    public boolean wantsRun(boolean commandProcessed) {
         if (commandProcessed || due)
             return true;
         switch (declared) {
@@ -154,7 +154,7 @@ final class ManagerTask {
      *
      * @return {@code true} if the manager was run
      */
-    boolean run(long currentTimeMs) {
+    public boolean run(long currentTimeMs) {
         long pass = currentPass.getAsLong();
         if (lastRunPass == pass)
             return false;

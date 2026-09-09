@@ -18,14 +18,15 @@ package org.apache.kafka.clients.consumer.ng.bench;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ng.FetchEngine;
-import org.apache.kafka.clients.consumer.ng.RecordReader;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.ng.NgKafkaConsumer;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteBufferDeserializer;
 import org.apache.kafka.common.serialization.Deserializer;
 
 import java.text.SimpleDateFormat;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
@@ -34,13 +35,14 @@ import java.util.Map;
 import java.util.Properties;
 
 /**
- * Measurement harness for the fetch-engine cut, printing the same per-interval lines as
+ * Measurement harness for the next-generation consumer, printing the same per-interval lines as
  * {@code kafka-consumer-perf-test --show-detailed-stats} so the same steady-state tooling applies.
  *
  * <pre>
- * args: --bootstrap host:port --topic t --partitions N --records M [--credit-mb 64] [--max-poll-records 500]
+ * args: --bootstrap host:port --topic t [--partitions N | --group g] --records M [--max-poll-records 500]
  *       [--deserializer bytes|bytebuffer] [--interval-ms 1000] [--idle-ms 0] [--loops 1]
  * </pre>
+ * With {@code --group} the consumer subscribes (group protocol); otherwise it assigns partitions 0..N-1 from offset 0.
  */
 public final class ConsumeBench {
 
@@ -51,48 +53,42 @@ public final class ConsumeBench {
                 throw new IllegalArgumentException("unknown arg " + args[i]);
             opts.put(args[i].substring(2), args[i + 1]);
         }
-        String bootstrap = opts.getOrDefault("bootstrap", "localhost:9092");
         String topic = opts.get("topic");
-        int partitions = Integer.parseInt(opts.getOrDefault("partitions", "1"));
-        long records = Long.parseLong(opts.getOrDefault("records", String.valueOf(Long.MAX_VALUE)));
-        long creditMb = Long.parseLong(opts.getOrDefault("credit-mb", "64"));
-        int maxPollRecords = Integer.parseInt(opts.getOrDefault("max-poll-records", "500"));
-        String deserializer = opts.getOrDefault("deserializer", "bytes");
-        long intervalMs = Long.parseLong(opts.getOrDefault("interval-ms", "1000"));
-        long idleMs = Long.parseLong(opts.getOrDefault("idle-ms", "0"));
-        int loops = Integer.parseInt(opts.getOrDefault("loops", "1"));
         if (topic == null)
             throw new IllegalArgumentException("--topic is required");
-        run(bootstrap, topic, partitions, records, creditMb, maxPollRecords, deserializer, intervalMs, idleMs, loops);
+        run(opts.getOrDefault("bootstrap", "localhost:9092"), topic, opts.get("group"),
+                Integer.parseInt(opts.getOrDefault("partitions", "1")),
+                Long.parseLong(opts.getOrDefault("records", String.valueOf(Long.MAX_VALUE))),
+                Integer.parseInt(opts.getOrDefault("max-poll-records", "500")),
+                opts.getOrDefault("deserializer", "bytes"),
+                Long.parseLong(opts.getOrDefault("interval-ms", "1000")),
+                Long.parseLong(opts.getOrDefault("idle-ms", "0")),
+                Integer.parseInt(opts.getOrDefault("loops", "1")));
     }
 
-    private static void run(String bootstrap, String topic, int partitions, long records, long creditMb, int maxPollRecords,
+    private static void run(String bootstrap, String topic, String group, int partitions, long records, int maxPollRecords,
                             String deserializer, long intervalMs, long idleMs, int loops) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrap);
         props.put(ConsumerConfig.CLIENT_ID_CONFIG, "ng-bench");
+        props.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, String.valueOf(maxPollRecords));
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        ConsumerConfig config = new ConsumerConfig(props);
-
-        List<TopicPartition> assigned = new ArrayList<>();
-        for (int p = 0; p < partitions; p++)
-            assigned.add(new TopicPartition(topic, p));
-
-        RecordReader<?, ?>[] readerHolder = new RecordReader<?, ?>[1];
-        FetchEngine engine = new FetchEngine(config, creditMb * 1024 * 1024, ignored -> {
-            RecordReader<?, ?> r = readerHolder[0];
-            if (r != null)
-                r.onData();
-        });
+        if (group != null)
+            props.put(ConsumerConfig.GROUP_ID_CONFIG, group);
         Deserializer<?> valueDeserializer = "bytebuffer".equals(deserializer) ? new ByteBufferDeserializer() : new ByteArrayDeserializer();
-        RecordReader<byte[], Object> reader = new RecordReader<>(engine, new ByteArrayDeserializer(),
-                uncheckedCast(valueDeserializer), config.getBoolean(ConsumerConfig.CHECK_CRCS_CONFIG));
-        readerHolder[0] = reader;
-        engine.assign(assigned);
-        for (TopicPartition tp : assigned)
-            reader.track(tp, 0L);
-        engine.start();
+        NgKafkaConsumer<byte[], Object> consumer = new NgKafkaConsumer<>(new ConsumerConfig(props), new ByteArrayDeserializer(),
+                uncheckedCast(valueDeserializer));
+        List<TopicPartition> assigned = new ArrayList<>();
+        if (group != null) {
+            consumer.subscribe(List.of(topic));
+        } else {
+            for (int p = 0; p < partitions; p++)
+                assigned.add(new TopicPartition(topic, p));
+            consumer.assign(assigned);
+            consumer.seekToBeginning(assigned);
+        }
 
         SimpleDateFormat fmt = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss:SSS");
         long start = System.currentTimeMillis();
@@ -105,14 +101,13 @@ public final class ConsumeBench {
         long nextLoopAt = records;
         int loop = 1;
         while (consumed < records * loops && System.currentTimeMillis() < deadline) {
-            List<? extends ConsumerRecord<?, ?>> batch = reader.poll(maxPollRecords, 1000);
-            for (ConsumerRecord<?, ?> r : batch) {
+            ConsumerRecords<byte[], Object> batch = consumer.poll(Duration.ofMillis(1000));
+            for (ConsumerRecord<byte[], Object> r : batch) {
                 consumed++;
                 bytes += r.serializedValueSize() + Math.max(0, r.serializedKeySize());
             }
-            if (consumed >= nextLoopAt && loop < loops) {
-                // --loops: the topic is consumed again from the beginning, for steady-state runs longer than the data.
-                reader.seekAll(0L);
+            if (consumed >= nextLoopAt && loop < loops && group == null) {
+                consumer.seekToBeginning(assigned); // --loops: consume the topic again for long steady windows
                 loop++;
                 nextLoopAt += records;
             }
@@ -133,8 +128,7 @@ public final class ConsumeBench {
         double mb = bytes / (1024.0 * 1024.0);
         System.out.printf("%s, %s, %.4f, %.4f, %d, %.4f, 0, %d, %.4f, %.4f%n", fmt.format(new Date(start)), fmt.format(new Date(end)),
                 mb, mb / secs, consumed, consumed / secs, end - start, mb / secs, consumed / secs);
-        System.err.printf("pool: outstanding=%d allocated=%d queued=%d%n", engine.pool().outstandingBytes(), engine.pool().allocatedBytes(), engine.queuedBytes());
-        engine.close();
+        consumer.close();
     }
 
     @SuppressWarnings("unchecked")

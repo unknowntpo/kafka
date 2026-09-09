@@ -176,7 +176,7 @@ public class SubscriptionState {
      *
      * @return The current assignment Id
      */
-    synchronized int assignmentId() {
+    public synchronized int assignmentId() {
         return assignmentId;
     }
 
@@ -944,7 +944,7 @@ public class SubscriptionState {
         return assignedOrNull != null && assignedOrNull.isPaused();
     }
 
-    synchronized boolean isFetchable(TopicPartition tp) {
+    public synchronized boolean isFetchable(TopicPartition tp) {
         TopicPartitionState tps = assignedStateOrNull(tp);
         return tps != null && isFetchableAndSubscribed(tp, tps);
     }
@@ -1476,8 +1476,8 @@ public class SubscriptionState {
      */
     public static class FetchPosition {
         public final long offset;
-        final Optional<Integer> offsetEpoch;
-        final Metadata.LeaderAndEpoch currentLeader;
+        public final Optional<Integer> offsetEpoch;
+        public final Metadata.LeaderAndEpoch currentLeader;
 
         FetchPosition(long offset) {
             this(offset, Optional.empty(), Metadata.LeaderAndEpoch.noLeaderOrEpoch());
