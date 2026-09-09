@@ -27,9 +27,14 @@ import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.LogContext;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.ServiceConfigurationError;
+import java.util.ServiceLoader;
 
 /**
  * {@code ConsumerDelegateCreator} implements a quasi-factory pattern to allow the caller to remain unaware of the
@@ -54,21 +59,48 @@ import java.util.Optional;
  */
 public class ConsumerDelegateCreator {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ConsumerDelegateCreator.class);
+
     public <K, V> ConsumerDelegate<K, V> create(ConsumerConfig config,
                                                 Deserializer<K> keyDeserializer,
                                                 Deserializer<V> valueDeserializer) {
         try {
             GroupProtocol groupProtocol = GroupProtocol.valueOf(config.getString(ConsumerConfig.GROUP_PROTOCOL_CONFIG).toUpperCase(Locale.ROOT));
 
-            if (groupProtocol == GroupProtocol.CONSUMER)
+            if (groupProtocol == GroupProtocol.CONSUMER) {
+                ConsumerDelegate<K, V> provided = fromServiceLoader(config, keyDeserializer, valueDeserializer);
+                if (provided != null)
+                    return provided;
                 return new AsyncKafkaConsumer<>(config, keyDeserializer, valueDeserializer, Optional.empty());
-            else
+            } else
                 return new ClassicKafkaConsumer<>(config, keyDeserializer, valueDeserializer);
         } catch (KafkaException e) {
             throw e;
         } catch (Throwable t) {
             throw new KafkaException("Failed to construct Kafka consumer", t);
         }
+    }
+
+    /**
+     * An alternative {@code group.protocol=consumer} implementation registered as a {@link ConsumerDelegateFactory}
+     * service wins over the built-in one, unless {@code -Dkafka.consumer.delegate=builtin} is set. A provider that
+     * cannot be loaded on this JVM (for example one compiled for a newer Java release) is skipped.
+     */
+    private static <K, V> ConsumerDelegate<K, V> fromServiceLoader(ConsumerConfig config,
+                                                                   Deserializer<K> keyDeserializer,
+                                                                   Deserializer<V> valueDeserializer) {
+        if ("builtin".equals(System.getProperty("kafka.consumer.delegate")))
+            return null;
+        try {
+            for (ConsumerDelegateFactory factory : ServiceLoader.load(ConsumerDelegateFactory.class)) {
+                ConsumerDelegate<K, V> delegate = factory.create(config, keyDeserializer, valueDeserializer);
+                if (delegate != null)
+                    return delegate;
+            }
+        } catch (ServiceConfigurationError e) {
+            LOG.debug("Ignoring an unusable ConsumerDelegateFactory provider", e);
+        }
+        return null;
     }
 
     public <K, V> ConsumerDelegate<K, V> create(LogContext logContext,

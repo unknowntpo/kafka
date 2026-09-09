@@ -31,6 +31,7 @@ import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.clients.consumer.RebalanceListener;
 import org.apache.kafka.clients.consumer.SubscriptionPattern;
 import org.apache.kafka.clients.consumer.internals.AutoOffsetResetStrategy;
+import org.apache.kafka.clients.consumer.internals.ConsumerDelegate;
 import org.apache.kafka.clients.consumer.internals.ConsumerInterceptors;
 import org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerInvoker;
 import org.apache.kafka.clients.consumer.internals.ConsumerRebalanceListenerMethodName;
@@ -44,6 +45,7 @@ import org.apache.kafka.clients.consumer.internals.events.ConsumerRebalanceListe
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.PartitionsAssignedEvent;
 import org.apache.kafka.clients.consumer.internals.events.PartitionsRemovedEvent;
+import org.apache.kafka.clients.consumer.internals.metrics.KafkaConsumerMetrics;
 import org.apache.kafka.clients.consumer.internals.metrics.RebalanceCallbackMetricsManager;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Metric;
@@ -88,7 +90,7 @@ import java.util.regex.Pattern;
  *
  * <p>Single-threaded like every {@code Consumer}: one application thread at a time.
  */
-public final class NgKafkaConsumer<K, V> implements Consumer<K, V> {
+public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
     private final Logger log;
     private final Time time;
@@ -106,6 +108,8 @@ public final class NgKafkaConsumer<K, V> implements Consumer<K, V> {
     private final long defaultApiTimeoutMs;
     private final boolean autoCommitEnabled;
     private final Optional<String> groupId;
+    private final KafkaConsumerMetrics kafkaConsumerMetrics;
+    private final String clientId;
     private final AtomicReference<ConsumerGroupMetadata> groupMetadata = new AtomicReference<>();
     private final AtomicBoolean wakeupRequested = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -125,6 +129,8 @@ public final class NgKafkaConsumer<K, V> implements Consumer<K, V> {
         this.log = logContext.logger(NgKafkaConsumer.class);
         this.groupId = Optional.ofNullable(groupRebalanceConfig.groupId);
         this.metrics = ConsumerUtils.createMetrics(config, time);
+        this.kafkaConsumerMetrics = new KafkaConsumerMetrics(metrics);
+        this.clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
         this.subscriptions = ConsumerUtils.createSubscriptionState(config, logContext);
         this.deserializers = new Deserializers<>(config, keyDeserializer, valueDeserializer, metrics);
         List<ConsumerInterceptor<K, V>> interceptorList = ConsumerUtils.configuredConsumerInterceptors(config);
@@ -648,6 +654,50 @@ public final class NgKafkaConsumer<K, V> implements Consumer<K, V> {
         throw unsupported("enforceRebalance");
     }
 
+    // ---- ConsumerDelegate ---------------------------------------------------------------------------------------
+
+    @Override
+    public String clientId() {
+        return clientId;
+    }
+
+    @Override
+    public Metrics metricsRegistry() {
+        return metrics;
+    }
+
+    @Override
+    public KafkaConsumerMetrics kafkaConsumerMetrics() {
+        return kafkaConsumerMetrics;
+    }
+
+    /**
+     * Test hook of the facade: process pending assignment/errors and wait until every assigned partition has a
+     * position, or the timer expires. Returns true if positions are all known.
+     */
+    @Override
+    public boolean updateAssignmentMetadataIfNeeded(Timer timer) {
+        ensureOpen();
+        applicationThread = Thread.currentThread();
+        engine.onApplicationPoll(timer.currentTimeMs());
+        try {
+            do {
+                maybeThrowWakeup();
+                commitCallbackInvoker.executeCallbacks();
+                processBackgroundEvents();
+                if (subscriptions.hasAllFetchPositions() && !engine.reconciling())
+                    return true;
+                parkUntil(System.nanoTime() + Math.min(retryBackoffMs, Math.max(1, timer.remainingMs())) * 1_000_000L);
+                timer.update();
+                if (timer.notExpired())
+                    engine.onApplicationPollIteration(timer.currentTimeMs());
+            } while (timer.notExpired());
+            return subscriptions.hasAllFetchPositions();
+        } finally {
+            engine.onApplicationPollReturn();
+        }
+    }
+
     // ---- misc -----------------------------------------------------------------------------------------------------
 
     @Override
@@ -702,6 +752,7 @@ public final class NgKafkaConsumer<K, V> implements Consumer<K, V> {
         } finally {
             reader.close();
             engine.close();
+            kafkaConsumerMetrics.close();
             metrics.close();
             deserializers.close();
             interceptors.close();
