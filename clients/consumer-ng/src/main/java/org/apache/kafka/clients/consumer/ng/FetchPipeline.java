@@ -54,6 +54,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 
 /**
  * The fetch path of the next-generation consumer (CONSUMER-NG-03), as a component of the engine's I/O thread:
@@ -230,37 +231,20 @@ public final class FetchPipeline {
         }
     }
 
-    public void sendFetches(long now) {
+    /**
+     * @param nodeFree false for a node whose only in-flight slot a manager request is waiting for; fetches keep every
+     *                 connection busy otherwise (the next one goes out the moment a response arrives), and requests
+     *                 without a fixed node (FindCoordinator, metadata) would never find a free connection
+     */
+    public void sendFetches(long now, Predicate<Node> nodeFree) {
         if (queuedBytes.get() + inFlightBytes >= creditBytes || pool.isOutOfMemory()) {
             starved = true;
             return;
         }
         Map<Node, FetchSessionHandler.Builder> builders = new LinkedHashMap<>();
         Cluster cluster = metadata.fetch();
-        for (PartitionQueue q : queues.values()) {
-            TopicPartition tp = q.partition;
-            if (!subscriptions.isFetchable(tp) || q.errorRaised)
-                continue;
-            if (q.nextFetchOffset < 0) {
-                SubscriptionState.FetchPosition position = subscriptions.position(tp);
-                if (position == null)
-                    continue;
-                q.nextFetchOffset = position.offset;
-            }
-            Node leader = cluster.leaderFor(tp);
-            if (leader == null) {
-                metadata.requestUpdate(true);
-                continue;
-            }
-            NodeState state = nodes.computeIfAbsent(leader.id(), id -> new NodeState(new LogContext("[ng-fetch node=" + id + "] "), id));
-            if (state.inFlight || !client.ready(leader, now))
-                continue;
-            FetchSessionHandler.Builder builder = builders.computeIfAbsent(leader, n -> state.sessionHandler.newBuilder());
-            Uuid topicId = cluster.topicId(tp.topic());
-            Optional<Integer> leaderEpoch = metadata.currentLeader(tp).epoch;
-            builder.add(tp, new FetchRequest.PartitionData(topicId, q.nextFetchOffset, -1L, maxPartitionFetchBytes, leaderEpoch));
-            state.inFlightOffsets.put(tp, q.nextFetchOffset);
-        }
+        for (PartitionQueue q : queues.values())
+            addToFetch(q, cluster, now, nodeFree, builders);
         for (Map.Entry<Node, FetchSessionHandler.Builder> entry : builders.entrySet()) {
             Node node = entry.getKey();
             NodeState state = nodes.get(node.id());
@@ -281,6 +265,33 @@ public final class FetchPipeline {
                 response -> onFetchResponse(state, response));
             client.send(clientRequest, now);
         }
+    }
+
+    /** Adds the partition to the fetch for its leader if it can be fetched now. */
+    private void addToFetch(PartitionQueue q, Cluster cluster, long now, Predicate<Node> nodeFree,
+                            Map<Node, FetchSessionHandler.Builder> builders) {
+        TopicPartition tp = q.partition;
+        if (!subscriptions.isFetchable(tp) || q.errorRaised)
+            return;
+        if (q.nextFetchOffset < 0) {
+            SubscriptionState.FetchPosition position = subscriptions.position(tp);
+            if (position == null)
+                return;
+            q.nextFetchOffset = position.offset;
+        }
+        Node leader = cluster.leaderFor(tp);
+        if (leader == null) {
+            metadata.requestUpdate(true);
+            return;
+        }
+        NodeState state = nodes.computeIfAbsent(leader.id(), id -> new NodeState(new LogContext("[ng-fetch node=" + id + "] "), id));
+        if (state.inFlight || !nodeFree.test(leader) || !client.ready(leader, now))
+            return;
+        FetchSessionHandler.Builder builder = builders.computeIfAbsent(leader, n -> state.sessionHandler.newBuilder());
+        Uuid topicId = cluster.topicId(tp.topic());
+        Optional<Integer> leaderEpoch = metadata.currentLeader(tp).epoch;
+        builder.add(tp, new FetchRequest.PartitionData(topicId, q.nextFetchOffset, -1L, maxPartitionFetchBytes, leaderEpoch));
+        state.inFlightOffsets.put(tp, q.nextFetchOffset);
     }
 
     /** Network callback (I/O thread): the response is handled after the network poll returns. */

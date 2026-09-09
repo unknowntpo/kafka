@@ -29,8 +29,8 @@ clients 模組的小改動（都是可見性或一個小掛鉤，對既有實作
 
 ## 3. 還沒做的（M2b / M2c）
 
-- `Consumer` 方法：pattern 訂閱（3 個多載）、`partitionsFor` / `listTopics`、`offsetsForTimes` / `beginningOffsets` / `endOffsets`、`currentLag`、`enforceRebalance`、metric 註冊、`clientInstanceId`；目前丟 `UnsupportedOperationException`。
-- 沒有 consumer 層級的 metrics（`records-lag`、`fetch-*`、`commit-*` 等公開名稱）；效能數字裡因此少了 trunk 付的 5–8% metrics 成本，之後要補回並重量。
+- `Consumer` 方法：KIP-714 telemetry 的 `registerMetricForSubscription` / `unregisterMetricFromSubscription` / `clientInstanceId` 仍丟 `UnsupportedOperationException`（其餘見 §5）。
+- fetch metrics 已接（§4）；效能數字要在 group 路徑上重量一次，看 metrics 成本。
 - ducktape 還沒跑（見 §4）。
 - ducktape 的 ducker 映像是 JDK 17：要跑 system test，容器要用 JDK 21 映像（`ducker-ak` 有 `--jdk-version`）。
 - 閒置與 T3 的量測要在 group 路徑上重做（heartbeat 加入後閒置喚醒會變）。
@@ -60,8 +60,37 @@ clients 模組的小改動（都是可見性或一個小掛鉤，對既有實作
 
 教訓：**manager 假設「有人會定期 poll 我」的地方，換成事件驅動的引擎後要一個個找出來**（positions、coordinator 連線）；**M1 的「有界記憶體」在每條路徑都要有釋放者**，這次靠把容量壓到極小的測試抓到；找的方法是整合測試 + I/O thread 的 pass 追蹤（TRACE 記每個 pass 跑了哪個 manager、有沒有送出東西）。
 
-整合測試結果（JDK 21，本機）：
+整合測試結果（JDK 21，本機，`group.protocol=consumer` 的 case 全走新實作；classic 的 case 仍走 `ClassicKafkaConsumer`）：
 
-| 類別 | 結果 |
+| 類別 | 結果 | 剩下的 |
+|---|---|---|
+| `PlaintextConsumerCommitTest` | 25/25 | |
+| `PlaintextConsumerAssignTest` | 18/18 | |
+| `PlaintextConsumerCloseTest` | 4/4 | |
+| `PlaintextConsumerPollTest` | 24/24 | |
+| `PlaintextConsumerSubscriptionTest` | 31/31 | |
+| `PlaintextConsumerFetchTest` | 16/18 | 兩個 `FetchHonours*IfLargeRecordNotFirst`：預取深度的刻意差異（上文） |
+| `PlaintextConsumerTest` | 77/80 → 見 §5 | |
+| `PlaintextConsumerCallbackTest` | 30/35 → 見 §5 | |
+
+## 5. M2b：補齊 `Consumer` 介面（同日深夜）
+
+跑到 Subscription / Callback / `PlaintextConsumerTest` 時缺的方法一次補上，全部重用既有的 manager，沒有新的協定程式碼：
+
+| 方法 | 做法 |
 |---|---|
-| `PlaintextConsumerCommitTest` | 25/25 |
+| `subscribe(Pattern)` | `SubscriptionUpdater`（I/O thread）：`SubscriptionState.subscribe(pattern)` + metadata 要全部 topic；每次 poll 的 housekeeping 在 metadata 版本變了時重算符合的 topic（`subscribeFromPattern`）並通知 membership，與舊實作 `UpdatePatternSubscriptionEvent` 同一條規則 |
+| `subscribe(SubscriptionPattern)`（RE2/J，broker 端解析） | `SubscriptionState.subscribe(pattern)` + `onSubscriptionUpdated`，下一個 heartbeat 帶上 |
+| `partitionsFor` / `listTopics` | 先看 metadata cache；沒有就走 `TopicMetadataRequestManager`（加進 manager 排程） |
+| `offsetsForTimes` / `beginningOffsets` / `endOffsets` | `OffsetsRequestManager.fetchOffsets`；timeout 0 的回傳形狀與舊實作相同（空 map / 每個 partition 一個 null） |
+| `currentLag` | `OffsetsRequestManager.currentLag`（會順便要 end offset） |
+| `enforceRebalance` | 與舊實作一樣只 warn（新協定沒有 client 觸發的 rebalance） |
+| `commitSync` / `unsubscribe` / `close` 的等待 | `awaitProcessingEvents`：等 future 的同時處理 background event（rebalance callback、錯誤），因為離群要在 app thread 跑 `onPartitionsRevoked` |
+| `close` | 離群前先由 app thread 對 group 指派的 partition 跑 revoke（epoch > 0）或 lost callback，與舊實作 `runRebalanceCallbacksOnClose` 相同；`leaveGroupOnClose` 本身不跑 callback |
+| 錯誤傳遞 | metadata 錯誤（invalid topic 等）改走 ErrorEvent 到 app；I/O thread 上偵測到的 `IllegalStateException` / `IllegalArgumentException`（例如 seek 未指派的 partition、subscribe 後 assign）原樣丟回呼叫者，不包成 `KafkaException` |
+| positions | 「每次 app 呼叫（poll 迭代 / position() 等待迭代）請求一次更新」；poll(0) 也會觸發一次，錯誤在下一次呼叫拿到（舊實作的 cached exception 行為） |
+| `ClusterResourceListener` | deserializer / interceptor / metrics reporter 拿到 cluster id（`ClientUtils.configureClusterResourceListeners`） |
+
+`ConsumerEngine` 的 manager 建構抽到 `EngineManagers`（checkstyle 的 class fan-out / coupling 上限），引擎本體只剩排程與 pass。
+
+`ConsumerBounceTest` 與 callback 裡呼叫 `beginningOffsets` 的 case 又抓到一個引擎特有的問題：**fetch 續發把每條連線唯一的 in-flight 槽（consumer 的 `max.in.flight.requests.per.connection` = 1）永遠佔滿**。回應一到，同一個 pass 就發下一個 fetch，然後才輪到 `NetworkClientDelegate` 送 manager 的請求；指定節點的請求（ListOffsets 到 leader）與不指定節點的請求（FindCoordinator、metadata 走 `leastLoadedNode`）都永遠等不到空的連線，30 秒後以 request timeout 失敗。舊實作沒這問題是因為它要等 app poll 才續發 fetch，中間有空檔。修法是一條一般規則：**manager 的請求優先**——delegate 的待送佇列裡有等某個節點的請求，那個節點這個 pass 不發 fetch；有不指定節點的請求，這個 pass 全部不發 fetch。控制請求很少，fetch 最多晚一個 RTT。

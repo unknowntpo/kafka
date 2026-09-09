@@ -18,7 +18,6 @@ package org.apache.kafka.clients.consumer.ng;
 
 import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.ClientUtils;
-import org.apache.kafka.clients.GroupRebalanceConfig;
 import org.apache.kafka.clients.NetworkClient;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.internals.CommitRequestManager;
@@ -33,9 +32,9 @@ import org.apache.kafka.clients.consumer.internals.MemberStateListener;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
 import org.apache.kafka.clients.consumer.internals.OffsetCommitCallbackInvoker;
 import org.apache.kafka.clients.consumer.internals.OffsetsRequestManager;
-import org.apache.kafka.clients.consumer.internals.PositionsValidator;
 import org.apache.kafka.clients.consumer.internals.RequestManager;
 import org.apache.kafka.clients.consumer.internals.SubscriptionState;
+import org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
@@ -44,7 +43,6 @@ import org.apache.kafka.clients.consumer.ng.loop.LoopSignal;
 import org.apache.kafka.clients.consumer.ng.loop.LoopTimer;
 import org.apache.kafka.clients.consumer.ng.loop.ManagerTask;
 import org.apache.kafka.clients.consumer.ng.loop.PassDecision;
-import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.network.Selector;
 import org.apache.kafka.common.network.NetworkReceive;
@@ -61,10 +59,11 @@ import org.slf4j.Logger;
 
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.nio.ByteBuffer;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
@@ -74,6 +73,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * The I/O thread of the next-generation consumer (CONSUMER-NG-04 §2). It owns the network client, the protocol
@@ -112,6 +112,9 @@ public final class ConsumerEngine implements AutoCloseable {
     final Optional<ConsumerMembershipManager> membershipManager;
     final Optional<ConsumerHeartbeatRequestManager> heartbeatManager;
     final OffsetsRequestManager offsetsManager;
+    final TopicMetadataRequestManager topicMetadataManager;
+    final SubscriptionUpdater subscriptionUpdater;
+    private final List<RequestManager> requestManagers;
     private final List<ManagerTask> tasks = new ArrayList<>();
     private final LoopTimer timer;
     private final LoopSignal signal;
@@ -128,6 +131,8 @@ public final class ConsumerEngine implements AutoCloseable {
     private volatile boolean applicationInPoll;
     /** Application thread is in {@code position()} and needs the positions machinery to run. */
     private volatile boolean applicationWantsPositions;
+    /** An application call (poll iteration or position()) asked for positions; one update attempt per request. */
+    private volatile boolean positionsRequested;
     /** Counts poll() and position() calls, so a positions error is raised at most once per application call. */
     private final AtomicLong applicationCallSequence = new AtomicLong();
     private long positionsErrorRaisedForCall = -1;
@@ -147,9 +152,9 @@ public final class ConsumerEngine implements AutoCloseable {
     private boolean closing;
 
     public ConsumerEngine(ConsumerConfig config, LogContext logContext, Time time, Metrics metrics,
-                          SubscriptionState subscriptions, OffsetCommitCallbackInvoker commitCallbackInvoker,
-                          MemberStateListener applicationMemberStateListener, FetchMetricsManager fetchMetricsManager, long creditBytes,
-                          Runnable onApplicationVisibleChange) {
+                          SubscriptionState subscriptions, ClusterResourceListeners clusterResourceListeners,
+                          OffsetCommitCallbackInvoker commitCallbackInvoker, MemberStateListener applicationMemberStateListener,
+                          FetchMetricsManager fetchMetricsManager, long creditBytes, Runnable onApplicationVisibleChange) {
         this.log = logContext.logger(ConsumerEngine.class);
         this.logContext = logContext;
         this.time = time;
@@ -158,9 +163,8 @@ public final class ConsumerEngine implements AutoCloseable {
         this.onApplicationVisibleChange = onApplicationVisibleChange;
         this.defaultApiTimeoutMs = config.getInt(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG);
         String clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
-        GroupRebalanceConfig groupRebalanceConfig = new GroupRebalanceConfig(config, GroupRebalanceConfig.ProtocolType.CONSUMER);
 
-        this.metadata = new ConsumerMetadata(config, subscriptions, logContext, new ClusterResourceListeners());
+        this.metadata = new ConsumerMetadata(config, subscriptions, logContext, clusterResourceListeners);
         List<InetSocketAddress> addresses = ClientUtils.parseAndValidateAddresses(
                 config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG), config.getString(ConsumerConfig.CLIENT_DNS_LOOKUP_CONFIG));
         metadata.bootstrap(addresses);
@@ -176,47 +180,18 @@ public final class ConsumerEngine implements AutoCloseable {
         this.backgroundQueue = new LinkedBlockingQueue<>();
         AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, ConsumerUtils.CONSUMER_METRIC_GROUP);
         this.backgroundEventHandler = new BackgroundEventHandler(backgroundQueue, time, asyncConsumerMetrics);
-        this.network = new NetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler, false, asyncConsumerMetrics);
+        this.network = new NetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler, true, asyncConsumerMetrics);
 
-        long retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
-        long retryBackoffMaxMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MAX_MS_CONFIG);
-        int requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
-        IsolationLevel isolationLevel = IsolationLevel.valueOf(config.getString(ConsumerConfig.ISOLATION_LEVEL_CONFIG).toUpperCase(Locale.ROOT));
-        CoordinatorRequestManager coordinator = null;
-        CommitRequestManager commit = null;
-        ConsumerMembershipManager membership = null;
-        ConsumerHeartbeatRequestManager heartbeat = null;
-        if (groupRebalanceConfig.groupId != null) {
-            coordinator = new CoordinatorRequestManager(logContext, retryBackoffMs, retryBackoffMaxMs, groupRebalanceConfig.groupId);
-            commit = new CommitRequestManager(time, logContext, subscriptions, config, coordinator, commitCallbackInvoker,
-                    groupRebalanceConfig.groupId, groupRebalanceConfig.groupInstanceId, metrics, metadata);
-            membership = new ConsumerMembershipManager(groupRebalanceConfig.groupId, groupRebalanceConfig.groupInstanceId,
-                    groupRebalanceConfig.rackId, groupRebalanceConfig.rebalanceTimeoutMs,
-                    Optional.ofNullable(config.getString(ConsumerConfig.GROUP_REMOTE_ASSIGNOR_CONFIG)),
-                    subscriptions, commit, metadata, logContext, backgroundEventHandler, time, metrics,
-                    config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG));
-            membership.registerStateListener(commit);
-            membership.registerStateListener(applicationMemberStateListener);
-            membership.registerStateListener(new MemberStateListener() {
-                @Override
-                public void onMemberEpochUpdated(Optional<Integer> memberEpoch, String memberId) {
-                }
-
-                @Override
-                public void onMemberStateChange(MemberState state) {
-                    reconciling = state == MemberState.RECONCILING;
-                }
-            });
-            heartbeat = new ConsumerHeartbeatRequestManager(logContext, time, config, coordinator, subscriptions, membership,
-                    backgroundEventHandler, metrics);
-        }
-        this.coordinatorManager = Optional.ofNullable(coordinator);
-        this.commitManager = Optional.ofNullable(commit);
-        this.membershipManager = Optional.ofNullable(membership);
-        this.heartbeatManager = Optional.ofNullable(heartbeat);
-        PositionsValidator positionsValidator = new PositionsValidator(logContext, time, subscriptions, metadata);
-        this.offsetsManager = new OffsetsRequestManager(subscriptions, metadata, isolationLevel, time, retryBackoffMs, requestTimeoutMs,
-                (int) defaultApiTimeoutMs, apiVersions, network, commit, positionsValidator, logContext);
+        EngineManagers managers = new EngineManagers(config, logContext, time, metrics, subscriptions, metadata, backgroundEventHandler,
+                network, apiVersions, commitCallbackInvoker, applicationMemberStateListener, r -> reconciling = r);
+        this.coordinatorManager = managers.coordinator;
+        this.commitManager = managers.commit;
+        this.membershipManager = managers.membership;
+        this.heartbeatManager = managers.heartbeat;
+        this.offsetsManager = managers.offsets;
+        this.topicMetadataManager = managers.topicMetadata;
+        this.subscriptionUpdater = managers.subscriptionUpdater;
+        this.requestManagers = managers.all();
 
         this.fetch = new FetchPipeline(config, logContext, subscriptions, metadata, client, pool, creditBytes, this::onData,
                 e -> backgroundEventHandler.add(new ErrorEvent(e)), fetchMetricsManager);
@@ -228,13 +203,7 @@ public final class ConsumerEngine implements AutoCloseable {
     }
 
     private List<RequestManager> managers() {
-        List<RequestManager> list = new ArrayList<>();
-        coordinatorManager.ifPresent(list::add);
-        commitManager.ifPresent(list::add);
-        heartbeatManager.ifPresent(list::add);
-        membershipManager.ifPresent(list::add);
-        list.add(offsetsManager);
-        return list;
+        return requestManagers;
     }
 
     public void start() {
@@ -276,6 +245,7 @@ public final class ConsumerEngine implements AutoCloseable {
     public long onApplicationPoll(long pollTimeMs) {
         lastApplicationPollMs = pollTimeMs;
         applicationInPoll = true;
+        positionsRequested = true;
         applicationCallSequence.incrementAndGet();
         long sequence = ++applicationPollSequence;
         if (reconciling || !latestDecision.allPositionsKnown)
@@ -286,6 +256,7 @@ public final class ConsumerEngine implements AutoCloseable {
     /** Application thread: one wait iteration of {@code poll()} ended without records; the next one is a poll input (R11). */
     public long onApplicationPollIteration(long pollTimeMs) {
         lastApplicationPollMs = pollTimeMs;
+        positionsRequested = true;
         long sequence = ++applicationPollSequence;
         signal.wakeupIfParked();
         return sequence;
@@ -300,8 +271,14 @@ public final class ConsumerEngine implements AutoCloseable {
         applicationWantsPositions = wants;
         if (wants) {
             applicationCallSequence.incrementAndGet();
-            signal.wakeupIfParked();
+            requestPositions();
         }
+    }
+
+    /** Application thread: one more attempt to fetch the missing positions (each wait iteration of {@code position()}). */
+    public void requestPositions() {
+        positionsRequested = true;
+        signal.wakeupIfParked();
     }
 
     public PassDecision latestDecision() {
@@ -390,7 +367,7 @@ public final class ConsumerEngine implements AutoCloseable {
         if (timer.runExpired(now) > 0)
             managersDirty = true;
         keepPollTimerFreshWhileInPoll(now);
-        if (applicationWantsPositions && positionsUpdateWanted())
+        if (positionsRequested && positionsUpdateWanted())
             managersDirty = true;
         if (managersDirty) {
             managersDirty = false;
@@ -398,7 +375,7 @@ public final class ConsumerEngine implements AutoCloseable {
             positionsMayHaveChanged = true;
             maybeUpdateFetchPositions(now);
         }
-        fetch.sendFetches(now);
+        fetch.sendFetches(now, nodeFreeForFetch());
         publishDecision();
 
         long blockMs = Math.min(Math.min(timer.timeToNextMs(now), MAX_BLOCK_MS), fetch.fetchMaxWaitMs() + 1_000L);
@@ -425,6 +402,23 @@ public final class ConsumerEngine implements AutoCloseable {
             stateVersion.incrementAndGet();
             managersDirty = true;
         }
+    }
+
+    /**
+     * Manager requests go first: a fetch is not sent to a node while a request waits for that node (or for any node,
+     * when it has no fixed target), otherwise the fetch pipeline keeps every connection's single in-flight slot busy.
+     */
+    private Predicate<Node> nodeFreeForFetch() {
+        Queue<NetworkClientDelegate.UnsentRequest> unsent = network.unsentRequests();
+        if (unsent.isEmpty())
+            return node -> true;
+        Set<Integer> waitingFor = new HashSet<>();
+        for (NetworkClientDelegate.UnsentRequest request : unsent) {
+            if (request.node().isEmpty())
+                return node -> false;
+            waitingFor.add(request.node().get().id());
+        }
+        return node -> !waitingFor.contains(node.id());
     }
 
     private boolean hasPendingWork() {
@@ -458,6 +452,7 @@ public final class ConsumerEngine implements AutoCloseable {
         lastHousekeptPollSequence = sequence;
         long pollMs = lastApplicationPollMs;
         fetch.resumeAfterErrors();
+        subscriptionUpdater.maybeUpdatePatternSubscription();
         boolean membershipChanged = false;
         if (membershipManager.isPresent()) {
             ConsumerMembershipManager mm = membershipManager.get();
@@ -524,13 +519,14 @@ public final class ConsumerEngine implements AutoCloseable {
     }
 
     /**
-     * Positions are fetched on behalf of an application call (poll or position), as before: the errors it can raise
-     * (no reset policy, authorization) belong to that call, and an idle consumer does not keep retrying in the background.
+     * Positions are fetched on behalf of an application call (each poll iteration or position() wait), as before:
+     * the errors it can raise (no reset policy, authorization) belong to that call, and an idle consumer does not
+     * keep retrying in the background.
      */
     private boolean positionsUpdateWanted() {
         if (closing || (positionsUpdate != null && !positionsUpdate.isDone()))
             return false;
-        if (!applicationInPoll && !applicationWantsPositions)
+        if (!positionsRequested)
             return false;
         return !subscriptions.hasAllFetchPositions();
     }
@@ -538,6 +534,7 @@ public final class ConsumerEngine implements AutoCloseable {
     private void maybeUpdateFetchPositions(long now) {
         if (!positionsUpdateWanted())
             return;
+        positionsRequested = false;
         positionsUpdate = offsetsManager.updateFetchPositions(now + defaultApiTimeoutMs);
         if (positionsUpdate.isDone()) {
             // Nothing was queued (e.g. a partition is waiting out a validation/reset backoff, or the reset policy is
@@ -623,12 +620,6 @@ public final class ConsumerEngine implements AutoCloseable {
     }
 
     // ---- commands used by the application side (run on the I/O thread) --------------------------------------------
-
-    void subscribe(Set<String> topics) {
-        if (subscriptions.subscribe(topics))
-            metadata.requestUpdateForNewTopics();
-        membershipManager.ifPresent(ConsumerMembershipManager::onSubscriptionUpdated);
-    }
 
     void assign(Set<TopicPartition> partitions) {
         if (subscriptions.assignFromUser(partitions))

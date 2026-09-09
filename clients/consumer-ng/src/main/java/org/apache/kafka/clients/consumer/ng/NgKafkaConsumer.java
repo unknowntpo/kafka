@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.consumer.ng;
 
 import org.apache.kafka.clients.GroupRebalanceConfig;
+import org.apache.kafka.clients.ClientUtils;
 import org.apache.kafka.clients.consumer.CloseOptions;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -43,6 +44,7 @@ import org.apache.kafka.clients.consumer.internals.SubscriptionState;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.ConsumerRebalanceListenerCallbackCompletedEvent;
 import org.apache.kafka.clients.consumer.internals.FetchMetricsManager;
+import org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.PartitionsAssignedEvent;
 import org.apache.kafka.clients.consumer.internals.events.PartitionsRemovedEvent;
@@ -58,9 +60,11 @@ import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.WakeupException;
+import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.metrics.KafkaMetric;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.requests.ListOffsetsRequest;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
@@ -70,14 +74,18 @@ import org.slf4j.Logger;
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -113,9 +121,12 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     private final Optional<String> groupId;
     private final KafkaConsumerMetrics kafkaConsumerMetrics;
     private final FetchMetricsManager fetchMetricsManager;
+    private final IsolationLevel isolationLevel;
     private final String clientId;
     private final AtomicReference<ConsumerGroupMetadata> groupMetadata = new AtomicReference<>();
     private final AtomicBoolean wakeupRequested = new AtomicBoolean();
+    private final AtomicBoolean closing = new AtomicBoolean();
+    private final int requestTimeoutMs;
     private final AtomicBoolean closed = new AtomicBoolean();
     private volatile Thread applicationThread;
     private volatile boolean signalled;
@@ -147,15 +158,18 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.maxPollRecords = config.getInt(ConsumerConfig.MAX_POLL_RECORDS_CONFIG);
         this.retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
         this.defaultApiTimeoutMs = config.getInt(ConsumerConfig.DEFAULT_API_TIMEOUT_MS_CONFIG);
+        this.requestTimeoutMs = config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG);
         this.autoCommitEnabled = config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
         groupId.ifPresent(id -> groupMetadata.set(new ConsumerGroupMetadata(id)));
         MemberStateListener memberStateListener = (memberEpoch, memberId) ->
                 groupId.ifPresent(id -> groupMetadata.set(new ConsumerGroupMetadata(id, memberEpoch.orElse(-1), memberId, groupRebalanceConfig.groupInstanceId)));
         long creditBytes = 4L * config.getInt(ConsumerConfig.FETCH_MAX_BYTES_CONFIG);
         this.fetchMetricsManager = ConsumerUtils.createFetchMetricsManager(metrics);
-        this.engine = new ConsumerEngine(config, logContext, time, metrics, subscriptions, commitCallbackInvoker,
+        ClusterResourceListeners clusterResourceListeners = ClientUtils.configureClusterResourceListeners(metrics.reporters(),
+                interceptorList, List.of(deserializers.keyDeserializer(), deserializers.valueDeserializer()));
+        this.engine = new ConsumerEngine(config, logContext, time, metrics, subscriptions, clusterResourceListeners, commitCallbackInvoker,
                 memberStateListener, fetchMetricsManager, creditBytes, this::signalApplication);
-        IsolationLevel isolationLevel = IsolationLevel.valueOf(config.getString(ConsumerConfig.ISOLATION_LEVEL_CONFIG).toUpperCase(Locale.ROOT));
+        this.isolationLevel = IsolationLevel.valueOf(config.getString(ConsumerConfig.ISOLATION_LEVEL_CONFIG).toUpperCase(Locale.ROOT));
         this.reader = new RecordReader<>(engine, subscriptions, this.deserializers.keyDeserializer(), this.deserializers.valueDeserializer(),
                 config.getBoolean(ConsumerConfig.CHECK_CRCS_CONFIG), isolationLevel, fetchMetricsManager);
         engine.start();
@@ -220,7 +234,7 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         listener.ifPresent(l -> subscriptions.setRebalanceListener(l, this));
         Set<String> set = new HashSet<>(topics);
         await(engine.submit(e -> {
-            e.subscribe(set);
+            e.subscriptionUpdater.subscribe(set);
             return null;
         }), defaultApiTimeoutMs, "subscribe");
         log.info("Subscribed to topic(s): {}", set);
@@ -244,33 +258,66 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
     @Override
     public void subscribe(Pattern pattern, ConsumerRebalanceListener callback) {
-        throw unsupported("subscribe(Pattern)");
+        if (callback == null)
+            throw new IllegalArgumentException("RebalanceListener cannot be null");
+        subscribe(pattern, Optional.of(callback));
     }
 
     @Override
     public void subscribe(Pattern pattern) {
-        throw unsupported("subscribe(Pattern)");
+        subscribe(pattern, Optional.empty());
+    }
+
+    private void subscribe(Pattern pattern, Optional<ConsumerRebalanceListener> listener) {
+        ensureOpen();
+        throwIfNoGroup();
+        if (pattern == null || pattern.toString().isEmpty())
+            throw new IllegalArgumentException("Topic pattern to subscribe to cannot be " + (pattern == null ? "null" : "empty"));
+        listener.ifPresent(l -> subscriptions.setRebalanceListener(l, this));
+        log.info("Subscribed to pattern: '{}'", pattern);
+        await(engine.submit(e -> {
+            e.subscriptionUpdater.subscribe(pattern);
+            return null;
+        }), defaultApiTimeoutMs, "subscribe");
     }
 
     @Override
     public void subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener callback) {
-        throw unsupported("subscribe(SubscriptionPattern)");
+        if (callback == null)
+            throw new IllegalArgumentException("RebalanceListener cannot be null");
+        subscribe(pattern, Optional.of(callback));
     }
 
     @Override
     public void subscribe(SubscriptionPattern pattern) {
-        throw unsupported("subscribe(SubscriptionPattern)");
+        subscribe(pattern, Optional.empty());
+    }
+
+    private void subscribe(SubscriptionPattern pattern, Optional<ConsumerRebalanceListener> listener) {
+        ensureOpen();
+        throwIfNoGroup();
+        if (pattern == null)
+            throw new IllegalArgumentException("Topic pattern to subscribe to cannot be null");
+        if (pattern.pattern().isEmpty())
+            throw new IllegalArgumentException("Topic pattern to subscribe to cannot be empty");
+        listener.ifPresent(l -> subscriptions.setRebalanceListener(l, this));
+        log.info("Subscribing to regular expression {}", pattern);
+        await(engine.submit(e -> {
+            e.subscriptionUpdater.subscribe(pattern);
+            return null;
+        }), defaultApiTimeoutMs, "subscribe");
     }
 
     @Override
     public void unsubscribe() {
         ensureOpen();
-        await(engine.submit(e -> {
+        // Leaving the group runs the onPartitionsRevoked callback on this thread, so keep processing events while waiting.
+        awaitProcessingEvents(engine.submit(e -> {
             e.subscriptions.unsubscribe();
             CompletableFuture<Void> left = e.membershipManager.isPresent() ? e.membershipManager.get().leaveGroup()
                     : CompletableFuture.completedFuture(null);
             return left;
-        }), defaultApiTimeoutMs, "unsubscribe");
+        }), time.timer(defaultApiTimeoutMs), true, "unsubscribe");
         reader.close();
     }
 
@@ -295,7 +342,7 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 maybeThrowWakeup();
                 commitCallbackInvoker.executeCallbacks();
                 processBackgroundEvents();
-                Map<TopicPartition, OffsetAndMetadata> nextOffsets = new java.util.HashMap<>();
+                Map<TopicPartition, OffsetAndMetadata> nextOffsets = new HashMap<>();
                 Map<TopicPartition, List<ConsumerRecord<K, V>>> records = reader.drain(maxPollRecords, nextOffsets);
                 if (!records.isEmpty())
                     return interceptors.onConsume(new ConsumerRecords<>(records, nextOffsets));
@@ -324,8 +371,8 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     }
 
     private void maybeThrowWakeup() {
-        if (wakeupRequested.compareAndSet(true, false))
-            throw new WakeupException();
+        if (wakeupRequested.compareAndSet(true, false) && !closing.get())
+            throw new WakeupException(); // a wakeup that arrives once close() started is dropped, as before
     }
 
     private void processBackgroundEvents() {
@@ -399,7 +446,7 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             error = e;
         }
         Optional<KafkaException> wrapped = error == null ? Optional.empty()
-                : Optional.of(ConsumerUtils.maybeWrapAsKafkaException(error));
+                : Optional.of(ConsumerUtils.maybeWrapAsKafkaException(error, "User rebalance callback throws an error"));
         ConsumerRebalanceListenerCallbackCompletedEvent completed = new ConsumerRebalanceListenerCallbackCompletedEvent(method, future, wrapped);
         engine.execute(() -> engine.membershipManager.ifPresent(mm -> mm.consumerRebalanceListenerCallbackCompleted(completed)));
         if (wrapped.isPresent())
@@ -436,7 +483,7 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         long deadline = timer.currentTimeMs() + timeout.toMillis();
         try {
             if (!copy.isEmpty())
-                await(engine.submit(e -> e.commitManager.get().commitSync(copy, deadline)), timeout.toMillis(), "commitSync");
+                awaitProcessingEvents(engine.submit(e -> e.commitManager.get().commitSync(copy, deadline)), timer, true, "commitSync");
             timer.update();
             interceptors.onCommit(copy);
         } finally {
@@ -577,7 +624,7 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 SubscriptionState.FetchPosition position = subscriptions.hasValidPosition(partition) ? subscriptions.position(partition) : null;
                 if (position != null)
                     return position.offset;
-                engine.wakeup();
+                engine.requestPositions();
                 parkUntil(System.nanoTime() + Math.min(retryBackoffMs, timer.remainingMs()) * 1_000_000L);
                 timer.update();
             } while (timer.notExpired());
@@ -624,71 +671,6 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     @Override
     public Uuid clientInstanceId(Duration timeout) {
         throw unsupported("clientInstanceId");
-    }
-
-    @Override
-    public List<PartitionInfo> partitionsFor(String topic) {
-        throw unsupported("partitionsFor");
-    }
-
-    @Override
-    public List<PartitionInfo> partitionsFor(String topic, Duration timeout) {
-        throw unsupported("partitionsFor");
-    }
-
-    @Override
-    public Map<String, List<PartitionInfo>> listTopics() {
-        throw unsupported("listTopics");
-    }
-
-    @Override
-    public Map<String, List<PartitionInfo>> listTopics(Duration timeout) {
-        throw unsupported("listTopics");
-    }
-
-    @Override
-    public Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch) {
-        throw unsupported("offsetsForTimes");
-    }
-
-    @Override
-    public Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch, Duration timeout) {
-        throw unsupported("offsetsForTimes");
-    }
-
-    @Override
-    public Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition> partitions) {
-        throw unsupported("beginningOffsets");
-    }
-
-    @Override
-    public Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition> partitions, Duration timeout) {
-        throw unsupported("beginningOffsets");
-    }
-
-    @Override
-    public Map<TopicPartition, Long> endOffsets(Collection<TopicPartition> partitions) {
-        throw unsupported("endOffsets");
-    }
-
-    @Override
-    public Map<TopicPartition, Long> endOffsets(Collection<TopicPartition> partitions, Duration timeout) {
-        throw unsupported("endOffsets");
-    }
-
-    @Override
-    public OptionalLong currentLag(TopicPartition topicPartition) {
-        throw unsupported("currentLag");
-    }
-
-    @Override
-    public void enforceRebalance() {
-        throw unsupported("enforceRebalance");
-    }
-
-    @Override
-    public void enforceRebalance(String reason) {
-        throw unsupported("enforceRebalance");
     }
 
     // ---- ConsumerDelegate ---------------------------------------------------------------------------------------
@@ -768,10 +750,13 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
     @Override
     public void close(CloseOptions option) {
-        if (!closed.compareAndSet(false, true))
+        // Closed is set at the end: the rebalance callbacks run during close may still call the consumer.
+        if (!closing.compareAndSet(false, true))
             return;
+        wakeupRequested.set(false); // we are closing with a timeout: no wake-ups from here on
         Duration timeout = option.timeout().orElse(Duration.ofMillis(30_000));
-        Timer timer = time.timer(timeout);
+        // As before: requests made while closing get at most request.timeout.ms, so a huge close timeout still returns.
+        Timer timer = time.timer(Math.min(timeout.toMillis(), requestTimeoutMs));
         try {
             // The previous implementation's order: auto-commit, stop committing / finding the coordinator, leave the
             // group, run the pending asynchronous commit callbacks, shut the network down.
@@ -787,8 +772,9 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 engine.commitManager.ifPresent(m -> m.signalClose());
                 engine.coordinatorManager.ifPresent(m -> m.signalClose());
             });
+            runRebalanceCallbacksOnClose();
             try {
-                await(engine.submit(e -> e.leaveGroupOnClose(option.groupMembershipOperation())), timer.remainingMs(), "leave group");
+                awaitProcessingEvents(engine.submit(e -> e.leaveGroupOnClose(option.groupMembershipOperation())), timer, false, "leave group");
             } catch (Exception e) {
                 log.warn("Leaving the group on close failed", e);
             }
@@ -804,11 +790,51 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             metrics.close();
             deserializers.close();
             interceptors.close();
+            closed.set(true);
             log.debug("Consumer closed");
         }
     }
 
+    /**
+     * As before: the application thread revokes (or, without a valid member epoch, loses) the group-assigned partitions
+     * before the member leaves; {@code leaveGroupOnClose} itself runs no callbacks.
+     */
+    private void runRebalanceCallbacksOnClose() {
+        ConsumerGroupMetadata metadata = groupMetadata.get();
+        if (metadata == null || !subscriptions.hasAutoAssignedPartitions())
+            return;
+        SortedSet<TopicPartition> droppedPartitions = new TreeSet<>(Comparator.comparing(TopicPartition::topic).thenComparing(TopicPartition::partition));
+        droppedPartitions.addAll(subscriptions.assignedPartitions());
+        if (droppedPartitions.isEmpty())
+            return;
+        Exception error = metadata.generationId() > 0
+                ? rebalanceListenerInvoker.invokePartitionsRevoked(droppedPartitions)
+                : rebalanceListenerInvoker.invokePartitionsLost(droppedPartitions);
+        if (error != null)
+            log.warn("Rebalance callback failed while closing the consumer", error);
+    }
+
     // ---- helpers ------------------------------------------------------------------------------------------------
+
+    /**
+     * Waits for {@code future} while processing background events (rebalance callbacks, errors) on this thread, as
+     * the previous implementation did for commitSync, unsubscribe and close: the operation may need a callback to run here.
+     */
+    private <T> T awaitProcessingEvents(CompletableFuture<T> future, Timer timer, boolean allowWakeup, String what) {
+        applicationThread = Thread.currentThread();
+        future.whenComplete((v, t) -> signalApplication());
+        while (true) {
+            if (allowWakeup)
+                maybeThrowWakeup();
+            processBackgroundEvents();
+            if (future.isDone())
+                return await(future, 0, what);
+            timer.update();
+            if (timer.isExpired())
+                throw new TimeoutException("Timeout of " + timer.timeoutMs() + "ms expired before " + what + " completed");
+            parkUntil(System.nanoTime() + Math.min(retryBackoffMs, timer.remainingMs()) * 1_000_000L);
+        }
+    }
 
     private <T> T await(CompletableFuture<T> future, long timeoutMs, String what) {
         try {
@@ -819,7 +845,10 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             Thread.currentThread().interrupt();
             throw new InterruptException(e);
         } catch (ExecutionException e) {
-            throw ConsumerUtils.maybeWrapAsKafkaException(e.getCause());
+            Throwable cause = e.getCause();
+            if (cause instanceof IllegalStateException || cause instanceof IllegalArgumentException)
+                throw (RuntimeException) cause; // the caller's own mistake, detected on the I/O thread (e.g. seek of an unassigned partition)
+            throw ConsumerUtils.maybeWrapAsKafkaException(cause);
         }
     }
 
@@ -835,6 +864,131 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     private void throwIfNoGroup() {
         if (groupId.isEmpty())
             throw new org.apache.kafka.common.errors.InvalidGroupIdException("To use the group management or offset commit APIs, you must provide a valid group.id in the consumer configuration.");
+    }
+
+    // ---- topic metadata, offsets by time, lag (M2b) --------------------------------------------------------------
+
+    @Override
+    public List<PartitionInfo> partitionsFor(String topic) {
+        return partitionsFor(topic, Duration.ofMillis(defaultApiTimeoutMs));
+    }
+
+    @Override
+    public List<PartitionInfo> partitionsFor(String topic, Duration timeout) {
+        ensureOpen();
+        List<PartitionInfo> parts = engine.metadata.fetch().partitionsForTopic(topic);
+        if (!parts.isEmpty())
+            return parts;
+        if (timeout.toMillis() == 0L)
+            throw new TimeoutException();
+        long deadline = time.milliseconds() + timeout.toMillis();
+        Map<String, List<PartitionInfo>> topicMetadata = await(engine.submit(e -> e.topicMetadataManager.requestTopicMetadata(topic, deadline)),
+                timeout.toMillis(), "partitionsFor");
+        return topicMetadata.getOrDefault(topic, Collections.emptyList());
+    }
+
+    @Override
+    public Map<String, List<PartitionInfo>> listTopics() {
+        return listTopics(Duration.ofMillis(defaultApiTimeoutMs));
+    }
+
+    @Override
+    public Map<String, List<PartitionInfo>> listTopics(Duration timeout) {
+        ensureOpen();
+        if (timeout.toMillis() == 0L)
+            throw new TimeoutException();
+        long deadline = time.milliseconds() + timeout.toMillis();
+        return await(engine.submit(e -> e.topicMetadataManager.requestAllTopicsMetadata(deadline)), timeout.toMillis(), "listTopics");
+    }
+
+    @Override
+    public Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch) {
+        return offsetsForTimes(timestampsToSearch, Duration.ofMillis(defaultApiTimeoutMs));
+    }
+
+    @Override
+    public Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartition, Long> timestampsToSearch, Duration timeout) {
+        ensureOpen();
+        Objects.requireNonNull(timestampsToSearch, "Timestamps to search cannot be null");
+        for (Map.Entry<TopicPartition, Long> entry : timestampsToSearch.entrySet()) {
+            // Exclude the earliest and latest offset here so the timestamp in the returned OffsetAndTimestamp is always positive.
+            if (entry.getValue() < 0)
+                throw new IllegalArgumentException("The target time for partition " + entry.getKey() + " is " +
+                        entry.getValue() + ". The target time cannot be negative.");
+        }
+        if (timestampsToSearch.isEmpty())
+            return new HashMap<>();
+        if (timeout.toMillis() == 0L) {
+            Map<TopicPartition, OffsetAndTimestamp> empty = new HashMap<>();
+            timestampsToSearch.keySet().forEach(tp -> empty.put(tp, null));
+            return empty;
+        }
+        Map<TopicPartition, OffsetAndTimestampInternal> offsets = listOffsets(Map.copyOf(timestampsToSearch), true, timeout);
+        Map<TopicPartition, OffsetAndTimestamp> results = new HashMap<>(offsets.size());
+        offsets.forEach((k, v) -> results.put(k, v != null ? v.buildOffsetAndTimestamp() : null));
+        return results;
+    }
+
+    @Override
+    public Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition> partitions) {
+        return beginningOffsets(partitions, Duration.ofMillis(defaultApiTimeoutMs));
+    }
+
+    @Override
+    public Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition> partitions, Duration timeout) {
+        return beginningOrEndOffset(partitions, ListOffsetsRequest.EARLIEST_TIMESTAMP, timeout);
+    }
+
+    @Override
+    public Map<TopicPartition, Long> endOffsets(Collection<TopicPartition> partitions) {
+        return endOffsets(partitions, Duration.ofMillis(defaultApiTimeoutMs));
+    }
+
+    @Override
+    public Map<TopicPartition, Long> endOffsets(Collection<TopicPartition> partitions, Duration timeout) {
+        return beginningOrEndOffset(partitions, ListOffsetsRequest.LATEST_TIMESTAMP, timeout);
+    }
+
+    private Map<TopicPartition, Long> beginningOrEndOffset(Collection<TopicPartition> partitions, long timestamp, Duration timeout) {
+        ensureOpen();
+        Objects.requireNonNull(partitions, "Partitions cannot be null");
+        // With a zero timeout the classic consumer returns an empty map; keep that.
+        if (partitions.isEmpty() || timeout.isZero())
+            return new HashMap<>();
+        Map<TopicPartition, Long> timestampsToSearch = new HashMap<>();
+        for (TopicPartition tp : partitions)
+            timestampsToSearch.put(tp, timestamp);
+        Map<TopicPartition, Long> results = new HashMap<>();
+        listOffsets(timestampsToSearch, false, timeout).forEach((tp, offset) -> results.put(tp, offset.offset()));
+        return results;
+    }
+
+    private Map<TopicPartition, OffsetAndTimestampInternal> listOffsets(Map<TopicPartition, Long> timestampsToSearch,
+                                                                         boolean requireTimestamps, Duration timeout) {
+        try {
+            return await(engine.submit(e -> e.offsetsManager.fetchOffsets(timestampsToSearch, requireTimestamps)),
+                    timeout.toMillis(), "list offsets");
+        } catch (TimeoutException e) {
+            throw new TimeoutException("Failed to get offsets by times in " + timeout.toMillis() + "ms");
+        }
+    }
+
+    @Override
+    public OptionalLong currentLag(TopicPartition topicPartition) {
+        ensureOpen();
+        return await(engine.submit(e -> CompletableFuture.completedFuture(e.offsetsManager.currentLag(topicPartition, isolationLevel))),
+                defaultApiTimeoutMs, "currentLag");
+    }
+
+    @Override
+    public void enforceRebalance() {
+        enforceRebalance(null);
+    }
+
+    @Override
+    public void enforceRebalance(String reason) {
+        // Same as the previous implementation: the new group protocol has no client-triggered rebalance.
+        log.warn("Operation not supported in new consumer group protocol");
     }
 
     private static UnsupportedOperationException unsupported(String method) {

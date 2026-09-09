@@ -34,15 +34,15 @@ public class OffsetAndTimestampInternal {
         this.leaderEpoch = leaderEpoch;
     }
 
-    long offset() {
+    public long offset() {
         return offset;
     }
 
-    long timestamp() {
+    public long timestamp() {
         return timestamp;
     }
 
-    Optional<Integer> leaderEpoch() {
+    public Optional<Integer> leaderEpoch() {
         return leaderEpoch;
     }
 

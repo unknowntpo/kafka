@@ -100,7 +100,7 @@ public class NetworkClientDelegate implements AutoCloseable {
     }
 
     // Visible for testing
-    Queue<UnsentRequest> unsentRequests() {
+    public Queue<UnsentRequest> unsentRequests() {
         return unsentRequests;
     }
 
@@ -404,7 +404,7 @@ public class NetworkClientDelegate implements AutoCloseable {
             return requestBuilder;
         }
 
-        Optional<Node> node() {
+        public Optional<Node> node() {
             return node;
         }
 
