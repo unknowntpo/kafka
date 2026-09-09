@@ -30,6 +30,17 @@
 
 不再守的舊限制：不動 Streams / share consumer、保留 `RequestManager` 邏輯、只改 deadline-driven 部分。
 
+### 2.1 優化必須可維護（2026-09-09 補）
+
+每一個優化進主線前過四關：
+
+1. **一般性**：不綁特定工作負載、record 大小、partition 數、JVM 旗標或 broker 版本；在 T1/T2/T3 都不退化。
+2. **用既有抽象**：RPC 層與公共 API 已有的掛鉤（`MemoryPool`、`FetchSessionHandler`、`Deserializer` 的 `ByteBuffer` 多載、`Metadata`）優先於繞過或複製它們；若掛鉤不夠，改 RPC 層一個小而通用的點，而不是在 consumer 端依賴它的內部行為。
+3. **一句話講得清楚為什麼快**：少一次複製、少一次喚醒、少一次配置。講不清楚的不進。
+4. **有測試守住**：正確性的單元測試，加上證明效益的量測 cell（哪個等級、哪個指標、贏多少、代價）。
+
+明確不做：`Unsafe` / 隱藏 API、手寫 lock-free 結構（除非量到必要且有測試）、只對 benchmark 有利的分支、靠 JVM 旗標得來的「優化」。M1 裡已知要清掉的：用 `Selector.completedReceives()` 依 node 配對回應與接收 buffer（依賴 Selector「每 channel 每 poll 至多一個 receive」的內部性質），改為回應攜帶其 payload buffer 的通用小改動。
+
 ## 3. 對照組
 
 | 實作 | 語言 | 工具 | 備註 |
