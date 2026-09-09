@@ -44,7 +44,7 @@ M1 只做 02 §4 的兩個槓桿 (a)(b)，範圍刻意小：手動 assign、沒�
 |---|---:|---:|---:|
 | 空 JVM 地板（`Thread.sleep`） | 0.02 | 30 | 96 MB |
 | trunk consumer | 1.96 | 68 | 243 MB |
-| **M1** | **0.82** | **38** | 165 MB |
+| **M1** | **0.82**（去掉自我喚醒後 0.77） | **38** | 165 MB |
 | librdkafka / franz-go（02，整段 60 秒含啟動） | ≤ 0.14 | 13–22 | 24 MB / 14 MB |
 
 扣掉 JVM 地板，trunk 每分鐘 1.94 秒、每秒醒 38 次；M1 每分鐘 0.80 秒、每秒醒 8 次。M1 的 8 次/秒來自：broker 每 500 ms 一次的空 fetch 回應（2 次）、pool 釋放時的自我喚醒（2 次）、app thread 的 1 秒輪詢（1 次）與其餘 JVM 雜訊；CPU 仍比 librdkafka 高約 6 倍，下一步先 profile 閒置期的 I/O thread。
@@ -66,7 +66,7 @@ M1 只做 02 §4 的兩個槓桿 (a)(b)，範圍刻意小：手動 assign、沒�
 ## 4. 下一步（依 02 §4 的缺口）
 
 1. **閒置**：拿到 §1 的閒置穩態數字後，把 I/O thread 的自我喚醒與 app thread 的 1 秒輪詢去掉（app thread 只在 `onData` 或 timeout 醒）。
-2. **暖機**：量 JDK 25 AOT cache（`-XX:AOTCache`）對 time-to-steady-state 的效果；這是 T1 短命工作的主要成本。
+2. **暖機**：JDK 25 AOT cache 已量（`warmup-aot.sh`，訓練一次產生 44 MB cache）：同一份 12 GB 消費 whole-run CPU 17.4 → 16.1 s（−7%），暖機期 CPU 9.95 → 9.75 s，穩態不變。它省的是 class loading 與 profile 收集，C2 編譯本身沒省；暖機要靠讓熱路徑更簡單（更少 megamorphic call site、更少需要編譯的程式碼）而不是 JVM 旗標。T1 短命工作可另外評估 C1-only 的取捨，但那是部署建議，不算優化。
 3. **per-record 物件**：每筆 6–8 個物件裡，`Optional`、空 `RecordHeaders`、兩個 slice 可以減少；量 1p 100 B。
 4. **功能面**：group membership / commit / rebalance 要在同一個 I/O 執行緒上重做（不能回到 `RequestManager` 的輪詢模型，那是前一條線證明過的平局）；這是 M2 的範圍，做完才能跑 `consumer_test.py`。
 5. **T3**：每個 broker 一條執行緒的 shared-nothing 版本，在 8 核筆電上量線性度。
