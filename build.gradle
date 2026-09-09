@@ -2205,6 +2205,36 @@ project(':clients') {
   }
 }
 
+project(':clients:consumer-ng') {
+  base {
+    archivesName = "kafka-consumer-ng"
+  }
+
+  // The next-generation consumer targets Java 21 (see CONSUMER-NG-01); the rest of the clients stay on Java 11.
+  tasks.withType(JavaCompile).configureEach {
+    options.release = 21
+  }
+
+  dependencies {
+    implementation project(':clients')
+    implementation libs.slf4jApi
+
+    testImplementation testFixtures(project(':clients'))
+    testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
+
+    testRuntimeOnly runtimeTestLibs
+  }
+
+  javadoc {
+    enabled = false
+  }
+
+  checkstyle {
+    configProperties = checkstyleConfigProperties("import-control-consumer-ng.xml")
+  }
+}
+
 project(':clients:clients-integration-tests') {
   base {
     archivesName = "kafka-clients-integration-tests"

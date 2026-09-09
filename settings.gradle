@@ -74,6 +74,7 @@ buildCache {
 
 include 'clients',
     'clients:clients-integration-tests',
+    'clients:consumer-ng',
     'connect:api',
     'connect:basic-auth-extension',
     'connect:file',

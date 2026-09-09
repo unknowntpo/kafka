@@ -8,7 +8,7 @@
 
 | 等級 | 代表機器 | 關注點 |
 |---|---|---|
-| T1：1–2 核、小記憶體（edge / sidecar / 容器配額 0.5–1 CPU） | morefine 限制 `taskset` 1 核 | 每 GB 的 CPU 秒、閒置時的喚醒次數與 CPU、記憶體上限下不退化 |
+| T1：1–2 核、小記憶體（edge / sidecar / 容器配額 0.5–1 CPU） | morefine 限制 `taskset` 1 核、`-Xmx256m` | 每 GB 的 CPU 秒、閒置時的喚醒次數與 CPU、記憶體上限下不退化也不 OOM |
 | T2：4 核（一般服務） | morefine（Intel N150，4 核，31 GB） | 吞吐與 CPU/GB 並重 |
 | T3：8 核以上 | M1 Pro 筆電（8 核） | 單 consumer 吞吐上限、多 partition 擴展 |
 
@@ -17,6 +17,9 @@
 1. 吞吐：MB/s 與 records/s（1 partition 與 6 partition；100 B 與 1 KB records）。
 2. CPU 效率：process 的 user+sys 秒 / 消費 GB。
 3. 功耗代理：閒置（有 assignment、topic 無新資料）60–180 秒的 CPU 秒與 voluntary context switch 次數；trunk 目前約 0.75% 核心。
+4. **記憶體有界**：負載上升（partition 變多、broker 突然吐出大量資料、應用處理變慢）時，consumer 的記憶體用量必須由設定決定的上限管住，不能因為堆積而 OOM。判準：在小 heap（例如 `-Xmx256m`）與多 partition（64、256）下，突發流量時 RSS 與 heap 佔用有可預期的上限，吞吐降級而不是崩潰；trunk 的 `fetch.max.bytes` / `max.partition.fetch.bytes` 只管單一回應，不管在途與已緩衝的總量。
+
+「有界」的實作原則：向 broker 要資料之前先看還有多少額度（credit / admission），額度由使用者可設定的總緩衝上限與應用的消費速度決定；已收到但尚未交付的資料算在額度裡；額度用完就不發 fetch，讓 broker 端等待而不是 client 端堆積。這與功耗目標一致：不做無謂的 fetch。
 
 ## 2. 約束（只有這些）
 
@@ -35,7 +38,7 @@
 | librdkafka | C | `examples/rdkafka_performance -C` | morefine 上以 mklove 從原始碼建（無 root；關 zlib/zstd/ssl/sasl，本量測不用壓縮） |
 | franz-go | Go | `examples/bench` | Go 1.25 tarball 裝在家目錄 |
 
-三者跑同一個 broker（trunk 發行包，單節點，`~/kafka-bench`）、同一批 topic（`big100b` 1p × 40M × 100 B；`t6p` 6p × 3M × 1 KB；`idle1p` 空 topic）。每個 cell 交錯跑 3 輪取中位數；每執行緒 CPU 用 `/proc/<pid>/task/*/stat`（既有 `thread-cpu.sh`），context switch 用 `/proc/<pid>/status`。
+三者跑同一個 broker（trunk 發行包，單節點，`~/kafka-bench`）、同一批 topic（`big100b` 1p × 40M × 100 B；`t6p` 6p × 3M × 1 KB；`idle1p` 空 topic；記憶體 cell 另建 `t64p` / `t256p`，並以慢速消費者模擬應用處理變慢）。每個 cell 交錯跑 3 輪取中位數；每執行緒 CPU 用 `/proc/<pid>/task/*/stat`（既有 `thread-cpu.sh`），context switch 用 `/proc/<pid>/status`。
 
 ## 4. 方法：先量、再假設、再做
 
