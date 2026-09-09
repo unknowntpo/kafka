@@ -65,13 +65,15 @@ clients 模組的小改動（都是可見性或一個小掛鉤，對既有實作
 | 類別 | 結果 | 剩下的 |
 |---|---|---|
 | `PlaintextConsumerCommitTest` | 25/25 | |
-| `PlaintextConsumerAssignTest` | 18/18 | |
+| `PlaintextConsumerAssignTest` | 18/18 | `testAsyncPollAfterTopicDeleted` 偶爾失敗在 admin 端「topic 刪了又回來」（fetch 錯誤後的 metadata 請求帶 `allowAutoTopicCreation`，與 broker 刪除傳播賽跑）；舊實作單跑也會，同一個 race |
 | `PlaintextConsumerCloseTest` | 4/4 | |
 | `PlaintextConsumerPollTest` | 24/24 | |
 | `PlaintextConsumerSubscriptionTest` | 31/31 | |
-| `PlaintextConsumerFetchTest` | 16/18 | 兩個 `FetchHonours*IfLargeRecordNotFirst`：預取深度的刻意差異（上文） |
-| `PlaintextConsumerTest` | 77/80 → 見 §5 | |
-| `PlaintextConsumerCallbackTest` | 30/35 → 見 §5 | |
+| `PlaintextConsumerFetchTest` | 16/18 | 兩個 `FetchHonours*IfLargeRecordNotFirst`：預取深度的刻意差異（上文；其中一個看時序有時會過） |
+| `PlaintextConsumerTest` | 80/80（§5 之後） | `testAsyncConsumerHeaders` 曾在 `producer.flush()` 卡住一次（producer 端），單獨重跑過 |
+| `PlaintextConsumerCallbackTest` | 35/35（§5 之後） | |
+| `ConsumerIntegrationTest` | 14/14（§5 之後） | |
+| `ConsumerBounceTest` | 12/12（§5 之後） | |
 
 ## 5. M2b：補齊 `Consumer` 介面（同日深夜）
 
