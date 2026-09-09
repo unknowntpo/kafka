@@ -122,6 +122,7 @@ public final class FetchEngine implements AutoCloseable {
         final Map<TopicPartition, Long> inFlightOffsets = new HashMap<>();
         FetchResponse pendingResponse;
         short pendingVersion;
+        ByteBuffer pendingPayload;
 
         NodeState(LogContext logContext, int nodeId) {
             this.nodeId = nodeId;
@@ -134,7 +135,6 @@ public final class FetchEngine implements AutoCloseable {
     private final SubscriptionState subscriptions;
     private final ConsumerMetadata metadata;
     private final NetworkClient client;
-    private final Selector selector;
     private final DirectBufferPool pool;
     private final int fetchMaxWaitMs;
     private final int fetchMinBytes;
@@ -152,9 +152,10 @@ public final class FetchEngine implements AutoCloseable {
     private final AtomicLong queuedBytes = new AtomicLong();
     private long inFlightBytes;
     private final AtomicBoolean running = new AtomicBoolean(true);
+    /** Set by the I/O thread when it could not fetch for lack of credit or pool memory; cleared when it fetches again. */
+    private volatile boolean starved;
     private final KafkaThread thread;
     private final Consumer<Void> onData;
-    private final Map<Integer, ByteBuffer> receiveBuffersThisPoll = new HashMap<>();
 
     /**
      * @param config     consumer configuration (fetch.* and network settings are honoured)
@@ -184,10 +185,10 @@ public final class FetchEngine implements AutoCloseable {
         metadata.bootstrap(addresses);
 
         // The pool's capacity leaves room above the credit for the response being read while the credit is spent.
-        this.pool = new DirectBufferPool(creditBytes + 2L * fetchMaxBytes, this::wakeup);
+        this.pool = new DirectBufferPool(creditBytes + 2L * fetchMaxBytes, this::memoryReleased);
         Metrics metrics = new Metrics(time);
         ChannelBuilder channelBuilder = ClientUtils.createChannelBuilder(config, time, logContext);
-        this.selector = new Selector(NetworkReceive.UNLIMITED,
+        Selector selector = new Selector(NetworkReceive.UNLIMITED,
                 config.getLong(CommonClientConfigs.CONNECTIONS_MAX_IDLE_MS_CONFIG),
                 0,
                 metrics, time, "ng-consumer", Map.of(), false, false,
@@ -255,9 +256,18 @@ public final class FetchEngine implements AutoCloseable {
 
     /** Application thread: a segment was fully delivered; return its bytes to the credit. */
     public void released(FetchSegment segment) {
-        long remaining = queuedBytes.addAndGet(-segment.sizeInBytes);
+        queuedBytes.addAndGet(-segment.sizeInBytes);
         segment.release();
-        if (remaining + inFlightBytes < creditBytes)
+        if (starved)
+            wakeup();
+    }
+
+    /**
+     * Pool callback. Only a release from another thread while the I/O thread stopped fetching for lack of memory or
+     * credit needs a wake-up; the I/O thread releasing an empty response's buffer to itself must not cost a syscall.
+     */
+    private void memoryReleased() {
+        if (starved && Thread.currentThread() != thread)
             wakeup();
     }
 
@@ -297,10 +307,7 @@ public final class FetchEngine implements AutoCloseable {
                 long now = time.milliseconds();
                 resolveUnknownPositions(now);
                 sendFetches(now);
-                receiveBuffersThisPoll.clear();
                 client.poll(fetchMaxWaitMs + 1_000L, now);
-                for (NetworkReceive receive : selector.completedReceives())
-                    receiveBuffersThisPoll.put(Integer.parseInt(receive.source()), receive.payload());
                 for (NodeState node : nodes.values()) {
                     if (node.pendingResponse != null)
                         handleFetchResponse(node);
@@ -354,8 +361,10 @@ public final class FetchEngine implements AutoCloseable {
     }
 
     private void sendFetches(long now) {
-        if (queuedBytes.get() + inFlightBytes >= creditBytes)
+        if (queuedBytes.get() + inFlightBytes >= creditBytes || pool.isOutOfMemory()) {
+            starved = true;
             return;
+        }
         Map<Node, FetchSessionHandler.Builder> builders = new LinkedHashMap<>();
         Cluster cluster = metadata.fetch();
         for (PartitionQueue q : queues.values()) {
@@ -387,6 +396,7 @@ public final class FetchEngine implements AutoCloseable {
                     .replaced(data.toReplace())
                     .rackId(clientRackId);
             state.inFlight = true;
+            starved = false;
             inFlightBytes += fetchMaxBytes;
             ClientRequest clientRequest = client.newClientRequest(node.idString(), request, now, true, requestTimeoutMs,
                 response -> onFetchResponse(state, response));
@@ -401,6 +411,7 @@ public final class FetchEngine implements AutoCloseable {
         if (response.hasResponse()) {
             state.pendingResponse = (FetchResponse) response.responseBody();
             state.pendingVersion = response.requestHeader().apiVersion();
+            state.pendingPayload = response.payload();
         } else {
             state.sessionHandler.handleError(response.authenticationException() != null
                     ? response.authenticationException() : new KafkaException("fetch failed: " + response));
@@ -418,8 +429,9 @@ public final class FetchEngine implements AutoCloseable {
             metadata.requestUpdate(false);
             return;
         }
-        ByteBuffer receiveBuffer = receiveBuffersThisPoll.remove(state.nodeId);
-        FetchSegment.Owner owner = new FetchSegment.Owner(receiveBuffer, pool);
+        // The records of the response point into the receive buffer; the segments' refcount returns it to the pool.
+        FetchSegment.Owner owner = new FetchSegment.Owner(state.pendingPayload, pool);
+        state.pendingPayload = null;
         boolean queued = false;
         for (Map.Entry<TopicPartition, FetchResponseData.PartitionData> entry
                 : response.responseData(state.sessionHandler.sessionTopicNames(), state.pendingVersion).entrySet()) {

@@ -427,6 +427,7 @@ public class NetworkClientTest {
         assertEquals(1, responses.size());
         assertTrue(handler.executed, "The handler should have executed.");
         assertTrue(handler.response.hasResponse(), "Should have a response body.");
+        assertNotNull(handler.response.payload(), "A response received from the network carries the buffer it was read into.");
         assertEquals(request.correlationId(), handler.response.requestHeader().correlationId(),
             "Should be correlated to the original request");
     }

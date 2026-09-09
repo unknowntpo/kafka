@@ -21,6 +21,8 @@ import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.requests.RequestHeader;
 
+import java.nio.ByteBuffer;
+
 /**
  * A response from the server. Contains both the body of the response as well as the correlated request
  * metadata that was originally sent.
@@ -37,6 +39,7 @@ public class ClientResponse {
     private final UnsupportedVersionException versionMismatch;
     private final AuthenticationException authenticationException;
     private final AbstractResponse responseBody;
+    private final ByteBuffer payload;
 
     /**
      * @param requestHeader The header of the corresponding request
@@ -94,6 +97,26 @@ public class ClientResponse {
                           UnsupportedVersionException versionMismatch,
                           AuthenticationException authenticationException,
                           AbstractResponse responseBody) {
+        this(requestHeader, callback, destination, createdTimeMs, receivedTimeMs, disconnected, timedOut,
+                versionMismatch, authenticationException, responseBody, null);
+    }
+
+    /**
+     * @param payload The buffer the response was received into, or null. Response objects that reference it
+     *                (records of a fetch response) stay valid only as long as the caller keeps the buffer alive;
+     *                a caller that pools receive buffers uses this to know when the buffer may be reused.
+     */
+    public ClientResponse(RequestHeader requestHeader,
+                          RequestCompletionHandler callback,
+                          String destination,
+                          long createdTimeMs,
+                          long receivedTimeMs,
+                          boolean disconnected,
+                          boolean timedOut,
+                          UnsupportedVersionException versionMismatch,
+                          AuthenticationException authenticationException,
+                          AbstractResponse responseBody,
+                          ByteBuffer payload) {
         if (!disconnected && timedOut)
             throw new IllegalStateException("The client response can't be in the state of connected, yet timed out");
 
@@ -107,6 +130,7 @@ public class ClientResponse {
         this.versionMismatch = versionMismatch;
         this.authenticationException = authenticationException;
         this.responseBody = responseBody;
+        this.payload = payload;
     }
 
     public long receivedTimeMs() {
@@ -135,6 +159,11 @@ public class ClientResponse {
 
     public String destination() {
         return destination;
+    }
+
+    /** @return the buffer this response was received into, or null if it was not received from the network */
+    public ByteBuffer payload() {
+        return payload;
     }
 
     public AbstractResponse responseBody() {

@@ -1109,7 +1109,7 @@ public class NetworkClient implements KafkaClient {
             else if (req.isInternalRequest && response instanceof PushTelemetryResponse)
                 telemetrySender.handleResponse((PushTelemetryResponse) response);
             else
-                responses.add(req.completed(response, now));
+                responses.add(req.completed(response, now, receive.payload()));
         }
     }
 
@@ -1843,8 +1843,12 @@ public class NetworkClient implements KafkaClient {
         }
 
         public ClientResponse completed(AbstractResponse response, long timeMs) {
+            return completed(response, timeMs, null);
+        }
+
+        public ClientResponse completed(AbstractResponse response, long timeMs, ByteBuffer payload) {
             return new ClientResponse(header, callback, destination, createdTimeMs, timeMs,
-                    false, null, null, response);
+                    false, false, null, null, response, payload);
         }
 
         public ClientResponse timedOut(long timeMs) {
