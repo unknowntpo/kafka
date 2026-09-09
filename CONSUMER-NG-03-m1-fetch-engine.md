@@ -47,7 +47,9 @@ M1 只做 02 §4 的兩個槓桿 (a)(b)，範圍刻意小：手動 assign、沒�
 | **M1** | **0.82**（去掉自我喚醒後 0.77） | **38** | 165 MB |
 | librdkafka / franz-go（02，整段 60 秒含啟動） | ≤ 0.14 | 13–22 | 24 MB / 14 MB |
 
-扣掉 JVM 地板，trunk 每分鐘 1.94 秒、每秒醒 38 次；M1 每分鐘 0.80 秒、每秒醒 8 次。M1 的 8 次/秒來自：broker 每 500 ms 一次的空 fetch 回應（2 次）、pool 釋放時的自我喚醒（2 次）、app thread 的 1 秒輪詢（1 次）與其餘 JVM 雜訊；CPU 仍比 librdkafka 高約 6 倍，下一步先 profile 閒置期的 I/O thread。
+扣掉 JVM 地板，trunk 每分鐘 1.94 秒、每秒醒 38 次；M1 每分鐘 0.80 秒、每秒醒 8 次。
+
+**閒置的 profile 與長視窗（同日補）**：10–70 秒視窗的 M1 閒置 CPU 有 39% 在 JIT 執行緒、約 10% 在 class loading（`inflate`、`ClassFileParser`）與直譯器——那是冷路徑（每秒只執行 2 次的空 fetch 週期）還在暖機。把視窗拉到第 3–6 分鐘（`idle-long.sh`，JDK 25）：**M1 每分鐘 0.357 秒、每秒 10.7 次喚醒**；AOT cache 對此無差別（0.353 / 10.8）。剩下的每分鐘 0.33 秒等於每個空 fetch 週期約 3 ms，比編譯後應有的成本高一個數量級：2 Hz 的路徑要幾十分鐘才達到 C2 的呼叫次數門檻，長期停在 C1 的 profiling tier。這是 JIT 分層的性質，不是 consumer 邏輯；能做的是讓閒置週期每次做的事更少（例如 incremental fetch session 已讓請求幾乎為空，剩下的是 `NetworkClient` 的送收路徑本身），以及接受它會隨時間收斂。
 
 ## 2. 讀法
 
@@ -67,6 +69,6 @@ M1 只做 02 §4 的兩個槓桿 (a)(b)，範圍刻意小：手動 assign、沒�
 
 1. **閒置**：拿到 §1 的閒置穩態數字後，把 I/O thread 的自我喚醒與 app thread 的 1 秒輪詢去掉（app thread 只在 `onData` 或 timeout 醒）。
 2. **暖機**：JDK 25 AOT cache 已量（`warmup-aot.sh`，訓練一次產生 44 MB cache）：同一份 12 GB 消費 whole-run CPU 17.4 → 16.1 s（−7%），暖機期 CPU 9.95 → 9.75 s，穩態不變。它省的是 class loading 與 profile 收集，C2 編譯本身沒省；暖機要靠讓熱路徑更簡單（更少 megamorphic call site、更少需要編譯的程式碼）而不是 JVM 旗標。T1 短命工作可另外評估 C1-only 的取捨，但那是部署建議，不算優化。
-3. **per-record 物件**：每筆 6–8 個物件裡，`Optional`、空 `RecordHeaders`、兩個 slice 可以減少；量 1p 100 B。
+3. **per-record 物件**：leader epoch 的 `Optional` 與 `TimestampType` 改為每個 batch 一份（commit `fa6d3786dc`）：1p 100 B 從 788 → 924 MB/s、2.22 → 1.98 s/GB。剩下每筆的物件：`DefaultRecord`、value slice、`byte[]`、`ConsumerRecord`、`RecordHeaders`（含內部 `ArrayList`）。空 `RecordHeaders` 延遲配置內部 list 是一般性的小改動（producer/consumer 都受益）；slice 與 `DefaultRecord` 要動 record 迭代的 API，先不做。M1 的 1p 100 B profile：I/O thread 80% 是純 `libc read`（memset 與二次複製已消失）；app thread 的成本全在 record 解析與 `ConsumerRecord` 建構（CRC 13%、`toConsumerRecord` 15%、slice 10%、value 複製 10%、varint 7%）。注意對照組 librdkafka 預設 `check.crcs=false`，我們的數字是 CRC 開啟。
 4. **功能面**：group membership / commit / rebalance 要在同一個 I/O 執行緒上重做（不能回到 `RequestManager` 的輪詢模型，那是前一條線證明過的平局）；這是 M2 的範圍，做完才能跑 `consumer_test.py`。
 5. **T3**：每個 broker 一條執行緒的 shared-nothing 版本，在 8 核筆電上量線性度。
