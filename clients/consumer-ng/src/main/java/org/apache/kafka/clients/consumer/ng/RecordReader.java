@@ -21,6 +21,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
+import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.CompressionType;
 import org.apache.kafka.common.record.internal.MutableRecordBatch;
 import org.apache.kafka.common.record.internal.Record;
@@ -50,6 +51,9 @@ public final class RecordReader<K, V> {
         Iterator<MutableRecordBatch> batches;
         CloseableIterator<Record> records;
         RecordBatch batch;
+        /** Per-batch values shared by every record of the batch (one Optional per batch, not per record). */
+        Optional<Integer> batchLeaderEpoch = Optional.empty();
+        TimestampType batchTimestampType = TimestampType.NO_TIMESTAMP_TYPE;
         long position;
 
         Cursor(FetchEngine.PartitionQueue queue, long position) {
@@ -172,6 +176,9 @@ public final class RecordReader<K, V> {
                 if (checkCrcs && batch.compressionType() == CompressionType.NONE)
                     batch.ensureValid();
                 c.batch = batch;
+                int epoch = batch.partitionLeaderEpoch();
+                c.batchLeaderEpoch = epoch == RecordBatch.NO_PARTITION_LEADER_EPOCH ? Optional.empty() : Optional.of(epoch);
+                c.batchTimestampType = batch.timestampType();
                 c.records = batch.streamingIterator(decompressionBuffers);
                 continue;
             }
@@ -202,10 +209,9 @@ public final class RecordReader<K, V> {
         Headers headers = rawHeaders.length == 0 ? new RecordHeaders() : new RecordHeaders(rawHeaders);
         K key = keyBytes == null ? null : keyDeserializer.deserialize(tp.topic(), headers, keyBytes);
         V value = valueBytes == null ? null : valueDeserializer.deserialize(tp.topic(), headers, valueBytes);
-        int epoch = c.batch.partitionLeaderEpoch();
-        return new ConsumerRecord<>(tp.topic(), tp.partition(), record.offset(), record.timestamp(), c.batch.timestampType(),
+        return new ConsumerRecord<>(tp.topic(), tp.partition(), record.offset(), record.timestamp(), c.batchTimestampType,
                 keyBytes == null ? ConsumerRecord.NULL_SIZE : keyBytes.remaining(),
                 valueBytes == null ? ConsumerRecord.NULL_SIZE : valueBytes.remaining(),
-                key, value, headers, epoch == RecordBatch.NO_PARTITION_LEADER_EPOCH ? Optional.empty() : Optional.of(epoch));
+                key, value, headers, c.batchLeaderEpoch);
     }
 }
