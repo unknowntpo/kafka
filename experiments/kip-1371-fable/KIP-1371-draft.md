@@ -237,7 +237,22 @@ Trunk vs branch, interleaved A/B, same host. **Loop-level JMH, `ConsumerNetworkT
 
 Reading: only the busy-loop scenario changes behaviour (trunk asks for a zero wait on 97% of passes while the first heartbeat is in flight; the branch never does). All other scenarios are within noise in time and identical in allocation. A first branch build had +29% ns/pass and doubled allocation in BLOCKED/RECOVERY because the C2 expiry sweep copied empty queues on every poll; that was fixed (`isEmpty()` guards) and the BLOCKED/RECOVERY/IDLE rows above are from the re-run with the fixed build (`jmh-ab/results2/`).
 
-End-to-end (`AsyncConsumerBrokerBenchmark`, real broker) has not been run on this branch yet; the earlier real-broker measurements that motivate C1 are in the NextPollCondition review (trunk 1.6 CPU cores while the coordinator is unreachable).**
+End-to-end, `AsyncConsumerBrokerBenchmark` against a single-node broker on the same laptop (2,000,000 x 128 B, one partition; JMH `-f 1 -wi 5 -w 2s -i 5 -r 5s`, interleaved T,B,B,T; raw data in `e2e-ab/`):
+
+| mode | metric | trunk | branch | change |
+|---|---|---:|---:|---:|
+| consume | records/s | 2,671,455 | 2,750,425 | +3.0% |
+| consume | process CPU ms/s | 465.22 | 474.92 | +2.1% |
+| consume | network-thread CPU ms/s | 186.93 | 180.68 | -3.3% |
+| idle | process CPU ms/s | 18.29 | 17.43 | -4.7% |
+| idle | network-thread CPU ms/s | 7.38 | 6.52 | -11.6% |
+| unavailable (closed port) | process CPU ms/s | 19.94 | 19.66 | -1.4% |
+
+Consume and idle are within noise, as expected: within one variant, consume throughput moved from 1.22M to 4.21M records/s across runs as the page cache warmed, far more than the 3% between variants. The idle rows have n=2 and absolute values under 1% of a core.
+
+The `unavailable` mode of this harness does **not** exercise the busy loop this KIP fixes, and its numbers must not be quoted as evidence either way. It points the bootstrap at a closed port, so every connection is refused immediately and the client sits in reconnect backoff, which trunk already handles. The busy loop needs a peer that accepts the connection and never answers the heartbeat, which is what the loop-level `BLOCKED_HEARTBEAT_INFLIGHT` scenario builds and where the effect is measured. Making the end-to-end harness show it needs a listener that accepts but never replies; that is a follow-up.
+
+The earlier real-broker measurement that motivates C1 (trunk about 1.6 CPU cores with an unreachable coordinator) comes from the NextPollCondition review harness, which used a different unavailable setup.**
 
 | Scenario | Metric | trunk | branch | Expected |
 |---|---|---|---|---|
