@@ -19,10 +19,15 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.internals.LogContext;
+import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -31,12 +36,18 @@ import org.mockito.quality.Strictness;
 
 import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -46,10 +57,53 @@ public class OffsetCommitCallbackInvokerTest {
     @Mock
     private ConsumerInterceptors<?, ?> consumerInterceptors;
     private OffsetCommitCallbackInvoker offsetCommitCallbackInvoker;
+    @Mock
+    private Runnable wakeupApplication;
 
     @BeforeEach
     public void setup() {
-        offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(consumerInterceptors);
+        offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(consumerInterceptors, wakeupApplication);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testEnqueueWakesApplicationAndRunsCallbackOnApplicationThread(boolean alreadyWaiting) throws Exception {
+        try (FetchBuffer buffer = new FetchBuffer(new LogContext())) {
+            OffsetCommitCallbackInvoker invoker = new OffsetCommitCallbackInvoker(consumerInterceptors, buffer::wakeup);
+            Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("topic", 0), new OffsetAndMetadata(10));
+            Exception error = new IllegalStateException("commit failed");
+            AtomicReference<Thread> callbackThread = new AtomicReference<>();
+            OffsetCommitCallback callback = (actualOffsets, actualError) -> {
+                assertSame(offsets, actualOffsets);
+                assertSame(error, actualError);
+                callbackThread.set(Thread.currentThread());
+            };
+            CompletableFuture<Void> returned = new CompletableFuture<>();
+            Thread application = new Thread(() -> {
+                try {
+                    buffer.awaitWakeup(Time.SYSTEM.timer(30_000));
+                    invoker.executeCallbacks();
+                    returned.complete(null);
+                } catch (Throwable t) {
+                    returned.completeExceptionally(t);
+                }
+            });
+            try {
+                if (!alreadyWaiting)
+                    invoker.enqueueUserCallbackInvocation(callback, offsets, error);
+                application.start();
+                if (alreadyWaiting) {
+                    TestUtils.waitForCondition(() -> application.getState() == Thread.State.TIMED_WAITING,
+                        "Application did not park waiting for fetch data");
+                    invoker.enqueueUserCallbackInvocation(callback, offsets, error);
+                }
+                returned.get(5, TimeUnit.SECONDS);
+                assertSame(application, callbackThread.get());
+            } finally {
+                application.interrupt();
+                application.join(5_000);
+            }
+        }
     }
 
     @Test
@@ -66,6 +120,7 @@ public class OffsetCommitCallbackInvokerTest {
         offsetCommitCallbackInvoker.enqueueUserCallbackInvocation(callback2, offsets2, null);
         verify(callback1, never()).onComplete(any(), any());
         verify(callback2, never()).onComplete(any(), any());
+        verify(wakeupApplication, times(2)).run();
 
         offsetCommitCallbackInvoker.executeCallbacks();
         InOrder inOrder = inOrder(callback1, callback2);
@@ -89,6 +144,7 @@ public class OffsetCommitCallbackInvokerTest {
         offsetCommitCallbackInvoker.enqueueInterceptorInvocation(offsets2);
         offsetCommitCallbackInvoker.executeCallbacks();
         verify(consumerInterceptors, never()).onCommit(any());
+        verifyNoInteractions(wakeupApplication);
     }
 
     @Test
@@ -103,6 +159,7 @@ public class OffsetCommitCallbackInvokerTest {
         offsetCommitCallbackInvoker.enqueueInterceptorInvocation(offsets1);
         offsetCommitCallbackInvoker.enqueueInterceptorInvocation(offsets2);
         verify(consumerInterceptors, never()).onCommit(any());
+        verify(wakeupApplication, times(2)).run();
 
         offsetCommitCallbackInvoker.executeCallbacks();
         InOrder inOrder = inOrder(consumerInterceptors);

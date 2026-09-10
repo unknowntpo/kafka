@@ -35,13 +35,16 @@ public class BackgroundEventHandler {
 
     private final BlockingQueue<BackgroundEvent> backgroundEventQueue;
     private final Time time;
+    private final Runnable wakeupApplication;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
     public BackgroundEventHandler(final BlockingQueue<BackgroundEvent> backgroundEventQueue,
                                   final Time time,
-                                  final AsyncConsumerMetrics asyncConsumerMetrics) {
+                                  final AsyncConsumerMetrics asyncConsumerMetrics,
+                                  final Runnable wakeupApplication) {
         this.backgroundEventQueue = backgroundEventQueue;
         this.time = time;
+        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
         this.asyncConsumerMetrics = asyncConsumerMetrics;
     }
 
@@ -55,6 +58,9 @@ public class BackgroundEventHandler {
         event.setEnqueuedMs(time.milliseconds());
         asyncConsumerMetrics.recordBackgroundEventQueueSize(backgroundEventQueue.size() + 1);
         backgroundEventQueue.add(event);
+        // Publish the event before waking its consumer. The buffer retains a wakeup that arrives
+        // before the application thread parks, closing the check-to-wait race.
+        wakeupApplication.run();
     }
 
     /**

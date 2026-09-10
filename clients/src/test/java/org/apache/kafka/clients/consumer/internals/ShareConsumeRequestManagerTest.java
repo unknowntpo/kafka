@@ -227,6 +227,31 @@ public class ShareConsumeRequestManagerTest {
     }
 
     @Test
+    public void testConditionConsumesInputAndWaitsForFetchCompletion() {
+        buildRequestManager();
+        shareConsumeRequestManager.poll(time.milliseconds());
+        assertFalse(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        assignFromSubscribed(Set.of(tp0));
+        assertTrue(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        shareConsumeRequestManager.poll(time.milliseconds());
+        assertFalse(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        shareConsumeRequestManager.fetch(Map.of());
+        assertTrue(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertEquals(1, shareConsumeRequestManager.sendAcknowledgements());
+        assertFalse(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        client.prepareResponse(fullFetchResponse(tip0, records, acquiredRecords, Errors.NONE));
+        networkClientDelegate.poll(time.timer(0));
+        assertTrue(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        shareConsumeRequestManager.poll(time.milliseconds());
+        assertFalse(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        shareConsumeRequestManager.onGroupAssignmentUpdated(Set.of());
+        assertTrue(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
+    @Test
     public void testFetchWithAcquiredRecords() {
         buildRequestManager();
 
@@ -435,8 +460,10 @@ public class ShareConsumeRequestManagerTest {
         assertFalse(closeFuture.isDone());
 
         // The subsequent poll should complete the closeFuture as the memberId is null.
+        assertTrue(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
         shareConsumeRequestManager.sendFetches();
         assertTrue(closeFuture.isDone());
+        assertFalse(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
     }
 
     @Test
@@ -675,6 +702,10 @@ public class ShareConsumeRequestManagerTest {
         assertEquals(0, shareConsumeRequestManager.requestStates(0).getSyncRequestQueue().peek().getInFlightAcknowledgementsCount(tip0));
 
         // Wait for backoff time before sending the next request.
+        assertTrue(shareConsumeRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertEquals(0, shareConsumeRequestManager.sendAcknowledgements());
+        long retryWaitMs = shareConsumeRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+        assertTrue(retryWaitMs > 0 && retryWaitMs <= 2 * retryBackoffMs);
         // After the first attempt, it can maximum be 1.2x of the configured backoff when acknowledge fails. (jitter = 0.2)
         time.sleep((long) (1.5 * retryBackoffMs));
         assertEquals(1, shareConsumeRequestManager.sendAcknowledgements());
@@ -1714,6 +1745,7 @@ public class ShareConsumeRequestManagerTest {
     @Test
     public void testCloseShouldBeIdempotent() {
         buildRequestManager();
+        shareConsumeRequestManager = spy(shareConsumeRequestManager);
 
         shareConsumeRequestManager.close();
         shareConsumeRequestManager.close();
@@ -3635,7 +3667,9 @@ public class ShareConsumeRequestManagerTest {
                 shareFetchConfig,
                 deserializers);
         ShareAcknowledgementEventHandler acknowledgementEventHandler = new TestableShareAcknowledgementEventHandler(completedAcknowledgements, renewedRecords);
-        shareConsumeRequestManager = spy(new TestableShareConsumeRequestManager<>(
+        // Keep the registered metadata listener and the polled owner on the same instance.
+        // A copying spy would leave the constructor's listener attached to the original owner.
+        shareConsumeRequestManager = new TestableShareConsumeRequestManager<>(
                 logContext,
                 groupId,
                 metadata,
@@ -3645,7 +3679,7 @@ public class ShareConsumeRequestManagerTest {
                 acknowledgementEventHandler,
                 metricsManager,
                 shareFetchCollector,
-                memberId));
+                memberId);
     }
 
     private void buildDependencies(MetricConfig metricConfig,
@@ -3669,7 +3703,7 @@ public class ShareConsumeRequestManagerTest {
         ConsumerConfig config = new ConsumerConfig(properties);
         networkClientDelegate = spy(new TestableNetworkClientDelegate(
             time, config, logContext, client, metadata,
-            new BackgroundEventHandler(new LinkedBlockingQueue<>(), time, mock(AsyncConsumerMetrics.class)), false));
+            new BackgroundEventHandler(new LinkedBlockingQueue<>(), time, mock(AsyncConsumerMetrics.class), () -> { }), false));
     }
 
     private class TestableShareConsumeRequestManager<K, V> extends ShareConsumeRequestManager {
@@ -3835,7 +3869,7 @@ public class ShareConsumeRequestManagerTest {
         Set<Long> renewedRecords;
 
         public TestableShareAcknowledgementEventHandler(List<Map<TopicIdPartition, Acknowledgements>> completedAcknowledgements, Set<Long> renewedRecords) {
-            super(new LinkedBlockingQueue<>());
+            super(new LinkedBlockingQueue<>(), () -> { });
             this.completedAcknowledgements = completedAcknowledgements;
             this.renewedRecords = renewedRecords;
         }

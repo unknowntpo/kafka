@@ -278,12 +278,12 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
             this.shareFetchMetricsManager = createShareFetchMetricsManager(metrics);
             ApiVersions apiVersions = new ApiVersions();
             final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
-            this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue);
-            this.backgroundEventHandler = new BackgroundEventHandler(
-                backgroundEventQueue, time, asyncConsumerMetrics);
-
             // This FetchBuffer is shared between the application and network threads.
             this.fetchBuffer = new ShareFetchBuffer(logContext);
+            this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue, fetchBuffer::wakeup);
+            this.backgroundEventHandler = new BackgroundEventHandler(
+                backgroundEventQueue, time, asyncConsumerMetrics, fetchBuffer::wakeup);
+
             final Supplier<NetworkClientDelegate> networkClientDelegateSupplier = NetworkClientDelegate.supplier(
                     time,
                     logContext,
@@ -398,10 +398,10 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
 
         final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
         this.acknowledgementEventQueue = new LinkedBlockingQueue<>();
-        this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue);
+        this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue, fetchBuffer::wakeup);
         this.backgroundEventQueue = new LinkedBlockingQueue<>();
         this.backgroundEventHandler = new BackgroundEventHandler(
-            backgroundEventQueue, time, asyncConsumerMetrics);
+            backgroundEventQueue, time, asyncConsumerMetrics, fetchBuffer::wakeup);
 
         final Supplier<NetworkClientDelegate> networkClientDelegateSupplier =
                 NetworkClientDelegate.supplier(time, config, logContext, client, metadata, backgroundEventHandler, true, asyncConsumerMetrics);
@@ -494,11 +494,11 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
         this.applicationEventHandler = applicationEventHandler;
         this.kafkaShareConsumerMetrics = new KafkaShareConsumerMetrics(metrics);
         this.clientTelemetryReporter = Optional.empty();
-        this.completedAcknowledgements = List.of();
+        this.completedAcknowledgements = new LinkedList<>();
         this.asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_SHARE_METRIC_GROUP);
-        this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue);
+        this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue, fetchBuffer::wakeup);
         this.backgroundEventHandler = new BackgroundEventHandler(
-                backgroundEventQueue, time, asyncConsumerMetrics);
+                backgroundEventQueue, time, asyncConsumerMetrics, fetchBuffer::wakeup);
     }
 
     // auxiliary interface for testing
@@ -642,6 +642,8 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
                 // Throw any errors notified by the background thread
                 processBackgroundEvents();
                 metadata.maybeThrowAnyException();
+                // A completion may have woken the empty fetch wait. Deliver it before parking again.
+                handleCompletedAcknowledgements();
 
                 // We will wait for retryBackoffMs
             } while (timer.notExpired());
@@ -702,7 +704,9 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
     }
 
     private ShareFetch<K, V> pollForFetches(final Timer timer) {
-        long pollTimeout = Math.min(applicationEventHandler.maximumTimeToWait(), timer.remainingMs());
+        long pollTimeout = Math.min(
+                applicationEventHandler.applicationPollCondition().remainingMs(time.milliseconds()),
+                timer.remainingMs());
 
         Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap = currentFetch.takeAcknowledgedRecords();
 

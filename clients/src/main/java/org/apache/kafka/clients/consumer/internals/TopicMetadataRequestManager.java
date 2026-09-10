@@ -83,6 +83,22 @@ public class TopicMetadataRequestManager implements RequestManager {
     }
 
     @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        NextPollCondition condition = NextPollCondition.idle();
+        for (TopicMetadataRequestState request : inflightRequests) {
+            // An in-flight attempt still has an operation deadline. A different request may also
+            // have a retry deadline; neither obligation can be hidden by the in-flight attempt.
+            condition = NextPollCondition.either(condition,
+                NextPollCondition.after(currentTimeMs, request.remainingMs()));
+            if (!request.requestInFlight()) {
+                condition = NextPollCondition.either(condition,
+                    NextPollCondition.after(currentTimeMs, request.remainingBackoffMs(currentTimeMs)));
+            }
+        }
+        return condition;
+    }
+
+    @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         // Prune any requests which have timed out
         Iterator<TopicMetadataRequestState> requestStateIterator = inflightRequests.iterator();
@@ -103,7 +119,7 @@ public class TopicMetadataRequestManager implements RequestManager {
             unsentRequest.ifPresent(requests::add);
         }
 
-        return requests.isEmpty() ? EMPTY : new NetworkClientDelegate.PollResult(0, requests);
+        return requests.isEmpty() ? EMPTY : new NetworkClientDelegate.PollResult(requests);
     }
 
     /**

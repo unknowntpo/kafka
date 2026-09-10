@@ -350,6 +350,26 @@ public abstract class AbstractFetch implements Closeable {
     }
 
     /**
+     * Return true when fetchable work exists for a node whose response cannot provide the next
+     * application wakeup. This is a read-only, conservative scheduling query; fetch preparation
+     * remains responsible for replica lease expiry, metadata updates and reconnect checks.
+     */
+    protected boolean hasFetchablePartitionWithoutPendingNode() {
+        Set<TopicPartition> buffered = Collections.unmodifiableSet(fetchBuffer.bufferedPartitions());
+        for (TopicPartition partition : fetchablePartitions(buffered)) {
+            SubscriptionState.FetchPosition position = positionForPartition(partition);
+            Optional<Node> leader = position.currentLeader.leader;
+            if (leader.isEmpty() || !nodesWithPendingFetchRequests.contains(leader.get().id()))
+                return true;
+            Optional<Integer> preferredReplica = subscriptions.preferredReadReplicaId(partition);
+            if (preferredReplica.isPresent() &&
+                    !nodesWithPendingFetchRequests.contains(preferredReplica.get()))
+                return true;
+        }
+        return false;
+    }
+
+    /**
      * Determine from which replica to read: the <i>preferred</i> or the <i>leader</i>. The preferred replica is used
      * iff:
      *

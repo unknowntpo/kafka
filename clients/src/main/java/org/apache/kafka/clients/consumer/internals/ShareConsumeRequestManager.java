@@ -99,6 +99,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
     private final IdempotentCloser idempotentCloser = new IdempotentCloser();
     private Uuid memberId;
     private boolean fetchMoreRecords = false;
+    private boolean pendingInput = true;
     private final AtomicInteger fetchRecordsNodeId = new AtomicInteger(-1);
     private final Map<TopicPartition, TopicIdPartition> shareSessionTopicIdMap;
     private final Map<TopicIdPartition, LeaderIdAndEpoch> shareSessionLeaderMap;
@@ -144,10 +145,56 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
         this.fetchAcknowledgementsToSend = new HashMap<>();
         this.fetchAcknowledgementsInFlight = new HashMap<>();
         this.closeFuture = new CompletableFuture<>();
+        metadata.addClusterUpdateListener(clusterResource -> pendingInput = true);
+    }
+
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (pendingInput)
+            return NextPollCondition.ready();
+        if (memberId == null)
+            return NextPollCondition.idle();
+        NextPollCondition condition = NextPollCondition.idle();
+        for (Map.Entry<Integer, Tuple<AcknowledgeRequestState>> entry : acknowledgeRequestStates.entrySet()) {
+            // The delegate owns transport expiry; another node's retry remains independent.
+            if (!isNodeFree(entry.getKey()))
+                continue;
+            Tuple<AcknowledgeRequestState> requests = entry.getValue();
+            if (isRequestStateInProgress(requests.getAsyncRequest())) {
+                condition = NextPollCondition.either(condition, acknowledgementCondition(requests.getAsyncRequest(), currentTimeMs));
+            } else if (requests.getSyncRequestQueue() != null) {
+                boolean active = false;
+                for (AcknowledgeRequestState request : requests.getSyncRequestQueue()) {
+                    if (isRequestStateInProgress(request)) {
+                        active = true;
+                        condition = NextPollCondition.either(condition, acknowledgementCondition(request, currentTimeMs));
+                    }
+                }
+                if (!active)
+                    return NextPollCondition.ready(); // Prune completed requests and expose the close step.
+            } else if (isRequestStateInProgress(requests.getCloseRequest())) {
+                condition = NextPollCondition.either(condition, acknowledgementCondition(requests.getCloseRequest(), currentTimeMs));
+            } else {
+                return NextPollCondition.ready(); // Remove the completed tuple.
+            }
+        }
+        if (closing && acknowledgeRequestStates.isEmpty() && !closeFuture.isDone())
+            return NextPollCondition.ready();
+        return condition;
+    }
+
+    private NextPollCondition acknowledgementCondition(AcknowledgeRequestState request, long currentTimeMs) {
+        NextPollCondition condition = request.requestInFlight() ? NextPollCondition.idle()
+            : NextPollCondition.after(currentTimeMs, request.remainingBackoffMs(currentTimeMs));
+        if (request.numAttempts > 0)
+            condition = NextPollCondition.either(condition, NextPollCondition.after(currentTimeMs, request.remainingMs()));
+        return condition;
     }
 
     @Override
     public PollResult poll(long currentTimeMs) {
+        // Consume before processing so a command/completion invoked during this pass is retained.
+        pendingInput = false;
         if (memberId == null) {
             if (closing && !closeFuture.isDone()) {
                 closeFuture.complete(null);
@@ -446,6 +493,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
     }
 
     public void fetch(Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap) {
+        pendingInput = true;
         if (!fetchMoreRecords) {
             log.debug("Fetch more data");
             fetchMoreRecords = true;
@@ -676,6 +724,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
     public CompletableFuture<Map<TopicIdPartition, Acknowledgements>> commitSync(
             final Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap,
             final long deadlineMs) {
+        pendingInput = true;
         final AtomicInteger resultCount = new AtomicInteger();
         final CompletableFuture<Map<TopicIdPartition, Acknowledgements>> future = new CompletableFuture<>();
         final ResultHandler resultHandler = new ResultHandler(resultCount, Optional.of(future));
@@ -750,6 +799,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
     public void commitAsync(
             final Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap,
             final long deadlineMs) {
+        pendingInput = true;
         final ResultHandler resultHandler = new ResultHandler(Optional.empty());
 
         Map<Integer, Map<TopicIdPartition, Acknowledgements>> acknowledgementsMapAllNodes = new HashMap<>();
@@ -824,6 +874,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
     public CompletableFuture<Void> acknowledgeOnClose(
             final Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap,
             final long deadlineMs) {
+        pendingInput = true;
         final AtomicInteger resultCount = new AtomicInteger();
         final ResultHandler resultHandler = new ResultHandler(resultCount, Optional.empty());
 
@@ -905,6 +956,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
     private void handleShareFetchSuccess(Node fetchTarget,
                                          ShareFetchRequestData requestData,
                                          ClientResponse resp) {
+        pendingInput = true;
         try {
             log.debug("Completed ShareFetch request from node {} successfully", fetchTarget.id());
             final ShareFetchResponse response = (ShareFetchResponse) resp.responseBody();
@@ -1048,6 +1100,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
     private void handleShareFetchFailure(Node fetchTarget,
                                          ShareFetchRequestData requestData,
                                          Throwable error) {
+        pendingInput = true;
         try {
             log.debug("Completed ShareFetch request from node {} unsuccessfully {}", fetchTarget.id(), Errors.forException(error));
             final ShareSessionHandler handler = sessionHandler(fetchTarget.id());
@@ -1103,6 +1156,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
                                                AcknowledgeRequestState acknowledgeRequestState,
                                                ClientResponse resp,
                                                long responseCompletionTimeMs) {
+        pendingInput = true;
         try {
             log.debug("Completed ShareAcknowledge request from node {} successfully", fetchTarget.id());
             ShareAcknowledgeResponse response = (ShareAcknowledgeResponse) resp.responseBody();
@@ -1182,6 +1236,7 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
                                                AcknowledgeRequestState acknowledgeRequestState,
                                                Throwable error,
                                                long responseCompletionTimeMs) {
+        pendingInput = true;
         try {
             log.debug("Completed ShareAcknowledge request from node {} unsuccessfully {}", fetchTarget.id(), Errors.forException(error));
             acknowledgeRequestState.sessionHandler().handleError(error);
@@ -1354,7 +1409,16 @@ public class ShareConsumeRequestManager implements RequestManager, MemberStateLi
 
     @Override
     public void onMemberEpochUpdated(Optional<Integer> memberEpochOpt, String memberId) {
-        this.memberId = Uuid.fromString(memberId);
+        Uuid updatedMemberId = Uuid.fromString(memberId);
+        if (!updatedMemberId.equals(this.memberId)) {
+            this.memberId = updatedMemberId;
+            pendingInput = true;
+        }
+    }
+
+    @Override
+    public void onGroupAssignmentUpdated(Set<TopicPartition> partitions) {
+        pendingInput = true;
     }
 
     /**

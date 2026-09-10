@@ -32,9 +32,12 @@ import java.util.concurrent.BlockingQueue;
 public class ShareAcknowledgementEventHandler {
 
     private final BlockingQueue<ShareAcknowledgementEvent> eventQueue;
+    private final Runnable wakeupApplication;
 
-    public ShareAcknowledgementEventHandler(final BlockingQueue<ShareAcknowledgementEvent> eventQueue) {
+    public ShareAcknowledgementEventHandler(final BlockingQueue<ShareAcknowledgementEvent> eventQueue,
+                                            final Runnable wakeupApplication) {
         this.eventQueue = eventQueue;
+        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
     }
 
     /**
@@ -45,6 +48,7 @@ public class ShareAcknowledgementEventHandler {
     public void add(ShareAcknowledgementEvent event) {
         Objects.requireNonNull(event, "ShareAcknowledgementCompleteEvent provided to add must be non-null");
         eventQueue.add(event);
+        wakeupApplication.run();
     }
 
     /**

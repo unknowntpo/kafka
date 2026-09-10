@@ -22,10 +22,19 @@ import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollRes
 import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
- * {@code PollResult} consist of {@code UnsentRequest} if there are requests to send; otherwise, return the time till
- * the next poll event.
+ * A request manager exposes its next execution condition and produces outgoing requests when polled.
+ * Scheduling conditions remain separate from the request batch.
  */
 public interface RequestManager {
+
+    /**
+     * Query the current reason to invoke {@link #poll(long)}. The network thread re-evaluates this
+     * after processing inputs and after the ordered manager pass; this is not a retained subscription.
+     * The query must not consume results, produce requests or advance domain state. Eligibility may
+     * mean handling an error or a local transition, not necessarily sending a request.
+     *
+     */
+    NextPollCondition nextPollCondition(long currentTimeMs);
 
     /**
      * During normal operation of the {@link Consumer}, a request manager may need to send out network requests.
@@ -66,18 +75,11 @@ public interface RequestManager {
     }
 
     /**
-     * Returns the delay for which the application thread can safely wait before it should be responsive
-     * to results from the request managers. For example, the subscription state can change when heartbeats
-     * are sent, so blocking for longer than the heartbeat interval might mean the application thread is not
-     * responsive to changes.
-     *
-     * @param currentTimeMs The current system time at which the method was called; useful for determining if
-     *                      time-sensitive operations should be performed
-     *
-     * @return The maximum delay in milliseconds
+     * Query when the application thread must next observe manager state. The returned condition must be
+     * immutable and time-only because the network thread publishes it across threads.
      */
-    default long maximumTimeToWait(long currentTimeMs) {
-        return Long.MAX_VALUE;
+    default NextPollCondition applicationPollCondition(long currentTimeMs) {
+        return NextPollCondition.idle();
     }
 
     /**

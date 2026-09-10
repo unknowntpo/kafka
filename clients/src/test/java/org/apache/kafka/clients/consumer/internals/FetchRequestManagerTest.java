@@ -237,6 +237,23 @@ public class FetchRequestManagerTest {
                 tp -> validLeaderEpoch, topicIds), false, 0L);
     }
 
+    @Test
+    public void testFetchDemandCreatedDuringCompletionRemainsPending() {
+        buildFetcher();
+        CompletableFuture<Void> first = fetcher.createFetchRequests();
+        CompletableFuture<CompletableFuture<Void>> next = first.thenApply(__ -> fetcher.createFetchRequests());
+
+        fetcher.poll(time.milliseconds());
+
+        assertTrue(first.isDone());
+        assertTrue(next.isDone());
+        assertFalse(next.join().isDone());
+        assertTrue(fetcher.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        fetcher.poll(time.milliseconds());
+        assertTrue(next.join().isDone());
+        assertFalse(fetcher.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
     @AfterEach
     public void teardown() throws Exception {
         if (metrics != null)
@@ -385,7 +402,7 @@ public class FetchRequestManagerTest {
         subscriptions.seek(tp0, 0);
 
         assertEquals(1, sendFetches());
-        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, applicationWaitMs());
     }
 
     @Test
@@ -396,14 +413,14 @@ public class FetchRequestManagerTest {
         subscriptions.seek(tp0, 0);
 
         // Fetch data for tp0, but leave it buffered (unconsumed) so the next prepare() finds every fetchable
-        // partition already buffered. With no in-flight request, maximumTimeToWait is bounded.
+        // partition already buffered. With no in-flight request, applicationPollCondition is bounded.
         client.prepareResponse(fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
         assertEquals(1, sendFetches());
         networkClientDelegate.poll(time.timer(0));
         assertTrue(fetcher.hasCompletedFetches());
 
         assertEquals(0, sendFetches());
-        assertEquals(retryBackoffMs, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(retryBackoffMs, applicationWaitMs());
     }
 
     @Test
@@ -413,23 +430,47 @@ public class FetchRequestManagerTest {
         assignFromUser(singleton(tp0));
         subscriptions.seek(tp0, 0);
 
-        // A fetch request is sent successfully; maximumTimeToWait remains unbounded.
+        // A fetch request is sent successfully; applicationPollCondition remains unbounded.
         assertEquals(1, sendFetches());
-        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, applicationWaitMs());
 
-        // The in-flight request blocks the node, so the next prepare() skips the partition. maximumTimeToWait
+        // The in-flight request blocks the node, so the next prepare() skips the partition. applicationPollCondition
         // stays unbounded: the in-flight request's completion will wake the buffer regardless.
         assertEquals(0, sendFetches());
-        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, applicationWaitMs());
 
         // Complete the in-flight request and consume the buffered data.
         client.prepareResponse(fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
         networkClientDelegate.poll(time.timer(0));
         fetchRecords();
 
-        // A new fetch request can now be sent; maximumTimeToWait remains unbounded.
+        // A new fetch request can now be sent; applicationPollCondition remains unbounded.
         assertEquals(1, sendFetches());
-        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, applicationWaitMs());
+    }
+
+    @Test
+    public void testApplicationWaitRetainsFreeNodeRetryWhileAnotherNodeIsInflight() {
+        buildFetcher();
+
+        assignFromUser(Set.of(tp0, tp1), 2);
+        subscriptions.seek(tp0, 0);
+        subscriptions.seek(tp1, 0);
+        Node firstNode = metadata.fetch().leaderFor(tp0);
+        Node secondNode = metadata.fetch().leaderFor(tp1);
+        assertNotEquals(firstNode, secondNode);
+        client.backoff(secondNode, 500);
+
+        List<NetworkClientDelegate.UnsentRequest> firstPoll = fetcher.sendFetches();
+        assertEquals(1, firstPoll.size());
+        assertEquals(firstNode, firstPoll.get(0).node().orElseThrow());
+        assertEquals(retryBackoffMs, applicationWaitMs());
+
+        time.sleep(500);
+        List<NetworkClientDelegate.UnsentRequest> secondPoll = fetcher.sendFetches();
+        assertEquals(1, secondPoll.size());
+        assertEquals(secondNode, secondPoll.get(0).node().orElseThrow());
+        assertEquals(Long.MAX_VALUE, applicationWaitMs());
     }
 
     @Test
@@ -442,12 +483,12 @@ public class FetchRequestManagerTest {
 
         client.backoff(node, 500);
         assertEquals(0, sendFetches());
-        assertEquals(retryBackoffMs, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(retryBackoffMs, applicationWaitMs());
 
-        // Once the backoff clears, a fetch request can be sent and maximumTimeToWait reverts to unbounded.
+        // Once the backoff clears, a fetch request can be sent and applicationPollCondition reverts to unbounded.
         time.sleep(500);
         assertEquals(1, sendFetches());
-        assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, applicationWaitMs());
     }
 
     @Test
@@ -4250,6 +4291,11 @@ public class FetchRequestManagerTest {
     private void buildFetcher(int maxPollRecords) {
         buildFetcher(AutoOffsetResetStrategy.EARLIEST, new ByteArrayDeserializer(), new ByteArrayDeserializer(),
                 maxPollRecords, IsolationLevel.READ_UNCOMMITTED);
+    }
+
+    private long applicationWaitMs() {
+        long currentTimeMs = time.milliseconds();
+        return fetcher.applicationPollCondition(currentTimeMs).remainingMs(currentTimeMs);
     }
 
     private void buildFetcher() {

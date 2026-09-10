@@ -78,10 +78,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * If any request is in flight, its completion will wake the application thread regardless of the outcome, so
      * no separate bound is needed. Otherwise, the application thread's wait is bounded by {@code retryBackoffMs}
      * so it can re-evaluate subscription state changes promptly.
-     */
+    */
     @Override
-    public long maximumTimeToWait(long currentTimeMs) {
-        return nodesWithPendingFetchRequests.isEmpty() ? retryBackoffMs : Long.MAX_VALUE;
+    public NextPollCondition applicationPollCondition(long currentTimeMs) {
+        return nodesWithPendingFetchRequests.isEmpty() || hasFetchablePartitionWithoutPendingNode()
+                ? NextPollCondition.after(currentTimeMs, retryBackoffMs)
+                : NextPollCondition.idle();
     }
 
     /**
@@ -114,6 +116,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     /**
      * {@inheritDoc}
      */
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        // This represents preparation demand, not the lifetime of a broker fetch or delivered records.
+        return pendingFetchRequestFuture == null ? NextPollCondition.idle() : NextPollCondition.ready();
+    }
+
     @Override
     public PollResult poll(long currentTimeMs) {
         return pollInternal(
@@ -157,6 +165,10 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             return PollResult.EMPTY;
         }
 
+        // Detach this preparation attempt before notifying its waiters. A completion callback may
+        // request another attempt, which must remain pending for the next manager pass.
+        CompletableFuture<Void> preparation = pendingFetchRequestFuture;
+        pendingFetchRequestFuture = null;
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
@@ -168,7 +180,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                     // the data in the fetch buffer is consumed.
                     fetchBuffer.wakeup();
                 }
-                pendingFetchRequestFuture.complete(null);
+                preparation.complete(null);
                 return PollResult.EMPTY;
             }
 
@@ -186,16 +198,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
             }).collect(Collectors.toList());
 
-            pendingFetchRequestFuture.complete(null);
+            preparation.complete(null);
             return new PollResult(requests);
         } catch (Throwable t) {
             // A "dummy" poll result is returned here rather than rethrowing the error because any error
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
-            pendingFetchRequestFuture.completeExceptionally(t);
+            preparation.completeExceptionally(t);
             return PollResult.EMPTY;
-        } finally {
-            pendingFetchRequestFuture = null;
         }
     }
 

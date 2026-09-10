@@ -41,8 +41,8 @@ import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.
  * Whether there is an existing coordinator.
  * Whether there is an inflight request.
  * Whether the backoff timer has expired.
- * The {@link NetworkClientDelegate.PollResult} contains either a wait timer
- * or a singleton list of {@link NetworkClientDelegate.UnsentRequest}.
+ * The {@link NextPollCondition} exposes eligibility; {@link NetworkClientDelegate.PollResult}
+ * contains the generated request, if any.
  * <p/>
  * The {@link FindCoordinatorRequest} will be handled by the {@link #onResponse(long, FindCoordinatorResponse)}  callback, which
  * subsequently invokes {@code onResponse} to handle the exception and response. Note that the coordinator node will be
@@ -88,15 +88,20 @@ public class CoordinatorRequestManager implements RequestManager {
     }
 
     /**
-     * Poll for the FindCoordinator request.
-     * If we don't need to discover a coordinator, this method will return a PollResult with Long.MAX_VALUE backoff time and an empty list.
-     * If we are still backing off from a previous attempt, this method will return a PollResult with the remaining backoff time and an empty list.
-     * Otherwise, this returns will return a PollResult with a singleton list of UnsentRequest and Long.MAX_VALUE backoff time.
-     * Note that this method does not involve any actual network IO, and it only determines if we need to send a new request or not.
+     * Query whether coordinator discovery can make progress. An existing coordinator, close, or
+     * an in-flight discovery requires no autonomous attempt; an unsent retry retains its backoff.
      *
      * @param currentTimeMs current time in ms.
-     * @return {@link NetworkClientDelegate.PollResult}. This will not be {@code null}.
+     * @return the next discovery condition
      */
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        // Discovery completion and coordinator invalidation update the state read by the next query.
+        if (closing || coordinator != null || coordinatorRequestState.requestInFlight())
+            return NextPollCondition.idle();
+        return NextPollCondition.after(currentTimeMs, coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+    }
+
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         if (closing || this.coordinator != null)
@@ -114,7 +119,7 @@ public class CoordinatorRequestManager implements RequestManager {
             return EMPTY;
         }
 
-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+        return NetworkClientDelegate.PollResult.EMPTY;
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {

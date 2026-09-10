@@ -994,6 +994,48 @@ public class StreamsMembershipManagerTest {
 
         verifyInStateReconciling(membershipManager);
         verify(subscriptionState, never()).enablePartitionsAwaitingCallback(any());
+        for (int i = 0; i < 3; i++)
+            membershipManager.poll(time.milliseconds());
+        verify(backgroundEventHandler, times(tasksAssignedAddCount)).add(any(StreamsTasksAssignedEvent.class));
+        assertFalse(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
+    @Test
+    public void testFailedOldAssignmentDoesNotBlockNewTarget() {
+        setupStreamsRebalanceDataWithOneSubtopologyOneSourceTopic(SUBTOPOLOGY_ID_0, TOPIC_0);
+        joining();
+        reconcile(makeHeartbeatResponseWithActiveTasks(SUBTOPOLOGY_ID_0, List.of(PARTITION_0)));
+        StreamsTasksAssignedEvent oldEvent = verifyOnTasksAssignedCallbackNeededEventAddedToBackgroundEventHandler(
+            Set.of(new StreamsRebalanceData.TaskId(SUBTOPOLOGY_ID_0, PARTITION_0)), Set.of(), Set.of());
+
+        membershipManager.onHeartbeatSuccess(makeHeartbeatResponseWithActiveTasks(SUBTOPOLOGY_ID_0, List.of(PARTITION_1)));
+        assertFalse(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        oldEvent.future().completeExceptionally(new KafkaException("old callback failed"));
+
+        assertTrue(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        membershipManager.poll(time.milliseconds());
+        verifyOnTasksAssignedCallbackNeededEventAddedToBackgroundEventHandler(
+            Set.of(new StreamsRebalanceData.TaskId(SUBTOPOLOGY_ID_0, PARTITION_1)), Set.of(), Set.of());
+    }
+
+    @Test
+    public void testLateAssignmentFailureDoesNotBlockRejoinedSession() {
+        setupStreamsRebalanceDataWithOneSubtopologyOneSourceTopic(SUBTOPOLOGY_ID_0, TOPIC_0);
+        joining();
+        reconcile(makeHeartbeatResponseWithActiveTasks(SUBTOPOLOGY_ID_0, List.of(PARTITION_0)));
+        Set<StreamsRebalanceData.TaskId> tasks = Set.of(new StreamsRebalanceData.TaskId(SUBTOPOLOGY_ID_0, PARTITION_0));
+        StreamsTasksAssignedEvent oldEvent = verifyOnTasksAssignedCallbackNeededEventAddedToBackgroundEventHandler(
+            tasks, Set.of(), Set.of());
+
+        membershipManager.leaveGroup();
+        membershipManager.onHeartbeatRequestGenerated();
+        joining();
+        membershipManager.onHeartbeatSuccess(makeHeartbeatResponseWithActiveTasks(SUBTOPOLOGY_ID_0, List.of(PARTITION_0)));
+        oldEvent.future().completeExceptionally(new KafkaException("old session callback failed"));
+
+        assertTrue(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        membershipManager.poll(time.milliseconds());
+        verifyOnTasksAssignedCallbackNeededEventAddedToBackgroundEventHandler(tasks, Set.of(), Set.of());
     }
 
     @Test

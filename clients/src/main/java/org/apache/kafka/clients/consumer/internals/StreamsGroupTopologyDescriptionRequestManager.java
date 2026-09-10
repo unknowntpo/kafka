@@ -61,6 +61,17 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
     }
 
     @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        String memberId = membershipManager.memberId();
+        if (!streamsRebalanceData.topologyPushRequired() || streamsRebalanceData.wireTopologyDescription() == null ||
+            memberId == null || memberId.isEmpty() || coordinatorRequestManager.coordinator().isEmpty() ||
+            pushRequestState.requestInFlight())
+            return NextPollCondition.idle();
+        return NextPollCondition.after(currentTimeMs,
+            Math.max(pushRequestState.remainingBackoffMs(currentTimeMs), Math.max(0L, nextPushTimeMs - currentTimeMs)));
+    }
+
+    @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         if (!shouldSendTopologyDescriptionUpdate(currentTimeMs)) {
             return NetworkClientDelegate.PollResult.EMPTY;
@@ -85,17 +96,19 @@ public class StreamsGroupTopologyDescriptionRequestManager implements RequestMan
     }
 
     @Override
-    public long maximumTimeToWait(final long currentTimeMs) {
+    public NextPollCondition applicationPollCondition(final long currentTimeMs) {
         if (!streamsRebalanceData.topologyPushRequired()) {
-            return Long.MAX_VALUE;
+            return NextPollCondition.idle();
         }
         final long backoffRemainingMs = pushRequestState.remainingBackoffMs(currentTimeMs);
         final long throttleRemainingMs = Math.max(0L, nextPushTimeMs - currentTimeMs);
         final long waitMs = Math.max(backoffRemainingMs, throttleRemainingMs);
         if (waitMs > 0L) {
-            return waitMs;
+            return NextPollCondition.after(currentTimeMs, waitMs);
         }
-        return shouldSendTopologyDescriptionUpdate(currentTimeMs) ? 0L : Long.MAX_VALUE;
+        return shouldSendTopologyDescriptionUpdate(currentTimeMs)
+                ? NextPollCondition.ready()
+                : NextPollCondition.idle();
     }
 
     private boolean shouldSendTopologyDescriptionUpdate(final long currentTimeMs) {

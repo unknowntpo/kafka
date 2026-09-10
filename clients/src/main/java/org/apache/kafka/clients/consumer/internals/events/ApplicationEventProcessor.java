@@ -726,6 +726,9 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
     }
 
     private void process(final AsyncPollEvent event) {
+        if (event.isComplete())
+            return;
+
         // Trigger a reconciliation that can safely commit offsets if needed to rebalance,
         // as we're processing before any new fetching starts
         requestManagers.consumerMembershipManager.ifPresent(consumerMembershipManager ->
@@ -770,10 +773,12 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
     }
 
     /**
-     * If there's an error to report to the user, the current event will be completed and this method will
-     * return {@code true}. Otherwise, it will return {@code false}.
+     * Stop a continuation if its event is already terminal, or complete it if there is an error
+     * to report. A late result must not start another stage after a metadata error ended the event.
      */
     private boolean maybeCompleteAsyncPollEventExceptionally(AsyncPollEvent event, Throwable t) {
+        if (event.isComplete())
+            return true;
         if (t == null)
             return false;
 

@@ -432,21 +432,29 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
      *     <li>The heartbeat interval has expired, or the member is in a state that indicates
      *     that it should heartbeat without waiting for the interval.</li>
      * </ol>
-     * This will also determine the maximum wait time until the next poll based on the member's
-     * state.
-     * <ol>
-     *     <li>If the member is without a coordinator or is in a failed state, the timer is set
-     *     to Long.MAX_VALUE, as there's no need to send a heartbeat.</li>
-     *     <li>If the member cannot send a heartbeat due to either exponential backoff, it will
-     *     return the remaining time left on the backoff timer.</li>
-     *     <li>If the member's heartbeat timer has not expired, It will return the remaining time
-     *     left on the heartbeat timer.</li>
-     *     <li>If the member can send a heartbeat, the timer is set to the current heartbeat interval.</li>
-     * </ol>
-     *
-     * @return {@link org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult} that includes a
-     *         heartbeat request if one must be sent, and the time to wait until the next poll.
+     * Scheduling eligibility and deadlines are exposed separately by this query. Request production
+     * is performed by {@link #poll(long)} after the loop checks eligibility.
      */
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
+            return membershipManager.state() == MemberState.LEAVING || coordinatorRequestManager.fatalError().isPresent()
+                ? NextPollCondition.ready() : NextPollCondition.idle();
+        }
+        // A skipped leave is still a local transition that must complete the leave operation.
+        if (membershipManager.state() == MemberState.LEAVING && shouldSkipLeaveHeartbeat())
+            return NextPollCondition.ready();
+        pollTimer.update(currentTimeMs);
+        NextPollCondition condition = membershipManager.isLeavingGroup()
+            ? NextPollCondition.idle() : NextPollCondition.after(currentTimeMs, pollTimer.remainingMs());
+        if (shouldHeartbeatBeforeIntervalExpires())
+            return NextPollCondition.ready();
+        if (heartbeatRequestState.requestInFlight())
+            return condition;
+        return NextPollCondition.either(condition,
+            NextPollCondition.after(currentTimeMs, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
+    }
+
     @Override
     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
@@ -468,7 +476,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             heartbeatState.reset();
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat));
+            return new NetworkClientDelegate.PollResult(Collections.singletonList(leaveHeartbeat));
         }
         if (membershipManager.state() == MemberState.LEAVING && shouldSkipLeaveHeartbeat()) {
             logger.info("Dynamic member {} skipping leave heartbeat (operation=REMAIN_IN_GROUP). " +
@@ -479,9 +487,9 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         }
         if (shouldHeartbeatBeforeIntervalExpires() || heartbeatRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndHandleResponse(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+            return new NetworkClientDelegate.PollResult(Collections.singletonList(request));
         } else {
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+            return NetworkClientDelegate.PollResult.EMPTY;
         }
     }
 
@@ -506,7 +514,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
     public NetworkClientDelegate.PollResult pollOnClose(long currentTimeMs) {
         if (membershipManager.isLeavingGroup() && !shouldSkipLeaveHeartbeat()) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequestAndLogResponse(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), List.of(request));
+            return new NetworkClientDelegate.PollResult(List.of(request));
         }
         return EMPTY;
     }
@@ -526,12 +534,12 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
      *
      * <p>In the event that heartbeats are currently being skipped, this still returns the next heartbeat
      * delay rather than {@code Long.MAX_VALUE} so that the application thread remains responsive.
-     */
+    */
     @Override
-    public long maximumTimeToWait(long currentTimeMs) {
+    public NextPollCondition applicationPollCondition(long currentTimeMs) {
         pollTimer.update(currentTimeMs);
         if (pollTimer.isExpired()) {
-            return 0L;
+            return NextPollCondition.ready();
         }
         // A heartbeat is only sent when the coordinator is known; poll() returns EMPTY otherwise
         // (see the guard at the top of poll()). If the coordinator is unavailable (for example,
@@ -542,12 +550,13 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         // Wait a retry backoff rather than the heartbeat interval, because the interval is zero
         // until the first heartbeat response is received, which would also busy-spin.
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager.shouldSkipHeartbeat()) {
-            return heartbeatRequestState.retryBackoffMs();
+            return NextPollCondition.after(currentTimeMs, heartbeatRequestState.retryBackoffMs());
         }
         if (membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
-            return 0L;
+            return NextPollCondition.ready();
         }
-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+        return NextPollCondition.after(currentTimeMs,
+                Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
     }
 
     public void resetPollTimer(final long pollMs) {

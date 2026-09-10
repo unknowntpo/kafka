@@ -72,7 +72,7 @@ public class ApplicationEventHandlerTest {
                      asyncConsumerMetrics
              )) {
             // add event
-            applicationEventHandler.add(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds()));
+            applicationEventHandler.add(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds(), () -> { }));
             verify(asyncConsumerMetrics).recordApplicationEventQueueSize(1);
         }
     }
@@ -125,7 +125,7 @@ public class ApplicationEventHandlerTest {
             handler.close(Duration.ZERO);
 
             KafkaException error = assertThrows(KafkaException.class,
-                () -> handler.add(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds())));
+                () -> handler.add(new AsyncPollEvent(time.milliseconds() + 10, time.milliseconds(), () -> { })));
             assertTrue(error.getMessage().contains("background thread is not running"));
         }
     }

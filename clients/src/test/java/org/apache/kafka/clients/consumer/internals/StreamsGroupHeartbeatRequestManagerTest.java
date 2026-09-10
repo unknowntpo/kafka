@@ -286,6 +286,37 @@ class StreamsGroupHeartbeatRequestManagerTest {
     }
 
     @Test
+    public void testInFlightHeartbeatPreservesPollDeadlineWithoutIntervalSpin() {
+        StreamsGroupHeartbeatRequestManager manager = createStreamsGroupHeartbeatRequestManager();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        when(membershipManager.state()).thenReturn(MemberState.STABLE);
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+        long remaining = manager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+        assertTrue(remaining > 100 && remaining < Long.MAX_VALUE);
+        time.sleep(100);
+        assertEquals(remaining - 100, manager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
+        time.sleep(remaining - 100);
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
+    @Test
+    public void testConditionRechecksCoordinatorAndPreservesFatalError() {
+        StreamsGroupHeartbeatRequestManager manager = createStreamsGroupHeartbeatRequestManager();
+        when(membershipManager.state()).thenReturn(MemberState.JOINING);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        when(coordinatorRequestManager.fatalError()).thenReturn(Optional.of(Errors.GROUP_AUTHORIZATION_FAILED.exception()));
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        verify(coordinatorRequestManager, never()).getAndClearFatalError();
+
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        verify(membershipManager, never()).onHeartbeatRequestSkipped();
+    }
+
+    @Test
     public void testNoHeartbeatIfHeartbeatSkipped() {
         try (final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(Timer.class)) {
             final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
@@ -319,13 +350,11 @@ class StreamsGroupHeartbeatRequestManagerTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testSendingHeartbeatIfMemberIsLeaving(final boolean requestInFlight) {
-        final long heartbeatIntervalMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> heartbeatRequestStateMockedConstruction = mockConstruction(
                 HeartbeatRequestState.class,
                 (mock, context) -> {
                     when(mock.canSendRequest(time.milliseconds())).thenReturn(false);
-                    when(mock.heartbeatIntervalMs()).thenReturn(heartbeatIntervalMs);
                     when(mock.requestInFlight()).thenReturn(requestInFlight);
                 });
              final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(Timer.class)
@@ -338,7 +367,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            verify(heartbeatRequestStateMockedConstruction.constructed().get(0)).onSendAttempt(time.milliseconds());
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -362,13 +391,11 @@ class StreamsGroupHeartbeatRequestManagerTest {
     public void testSendLeaveHeartbeatForStaticMember(final CloseOptions.GroupMembershipOperation operation) {
         // Static members always send a leave heartbeat (with epoch -2) so the broker can hold the
         // assignment until session timeout, regardless of the close operation.
-        final long heartbeatIntervalMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> ignored = mockConstruction(
                 HeartbeatRequestState.class,
                 (mock, context) -> {
                     when(mock.canSendRequest(time.milliseconds())).thenReturn(false);
-                    when(mock.heartbeatIntervalMs()).thenReturn(heartbeatIntervalMs);
                     when(mock.requestInFlight()).thenReturn(false);
                 })
         ) {
@@ -395,13 +422,11 @@ class StreamsGroupHeartbeatRequestManagerTest {
     @ParameterizedTest
     @EnumSource(value = MemberState.class, names = {"JOINING", "ACKNOWLEDGING"})
     public void testSendingHeartbeatIfMemberIsJoiningOrAcknowledging(final MemberState memberState) {
-        final long heartbeatIntervalMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> heartbeatRequestStateMockedConstruction = mockConstruction(
                 HeartbeatRequestState.class,
                 (mock, context) -> {
                     when(mock.canSendRequest(time.milliseconds())).thenReturn(false);
-                    when(mock.heartbeatIntervalMs()).thenReturn(heartbeatIntervalMs);
                 });
              final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(Timer.class)
         ) {
@@ -413,7 +438,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            verify(heartbeatRequestStateMockedConstruction.constructed().get(0)).onSendAttempt(time.milliseconds());
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -440,20 +465,19 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(timeToNextHeartbeatMs, result.timeUntilNextPollMs);
             verify(pollTimer).update(time.milliseconds());
+            when(pollTimer.remainingMs()).thenReturn(5_000L);
+            assertEquals(5_000L, heartbeatRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         }
     }
 
     @Test
     public void testSendingHeartbeatIfHeartbeatCanBeSent() {
-        final long heartbeatIntervalMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> heartbeatRequestStateMockedConstruction = mockConstruction(
                 HeartbeatRequestState.class,
                 (mock, context) -> {
                     when(mock.canSendRequest(time.milliseconds())).thenReturn(true);
-                    when(mock.heartbeatIntervalMs()).thenReturn(heartbeatIntervalMs);
 
                 });
             final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(Timer.class)
@@ -466,7 +490,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            verify(heartbeatRequestStateMockedConstruction.constructed().get(0)).onSendAttempt(time.milliseconds());
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -490,18 +514,18 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(timeToNextHeartbeatMs, result.timeUntilNextPollMs);
             verify(pollTimer).update(time.milliseconds());
+            when(pollTimer.remainingMs()).thenReturn(Long.MAX_VALUE);
+            assertEquals(timeToNextHeartbeatMs, heartbeatRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         }
     }
 
     @Test
     public void testSendingLeaveHeartbeatIfPollTimerExpired() {
-        final long heartbeatIntervalMs = 1234;
         try (
             final MockedConstruction<HeartbeatRequestState> heartbeatRequestStateMockedConstruction = mockConstruction(
                 HeartbeatRequestState.class,
-                (mock, context) -> when(mock.heartbeatIntervalMs()).thenReturn(heartbeatIntervalMs));
+                (mock, context) -> { });
             final MockedConstruction<Timer> pollTimerMockedConstruction = mockConstruction(
                 Timer.class,
                 (mock, context) -> when(mock.isExpired()).thenReturn(true));
@@ -517,7 +541,7 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(heartbeatIntervalMs, result.timeUntilNextPollMs);
+            verify(heartbeatRequestStateMockedConstruction.constructed().get(0)).onSendAttempt(time.milliseconds());
             verify(pollTimer).update(time.milliseconds());
             verify(membershipManager).onPollTimerExpired();
             verify(heartbeatRequestState).reset();
@@ -549,8 +573,9 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(timeToNextHeartbeatMs, result.timeUntilNextPollMs);
             verify(pollTimer).update(time.milliseconds());
+            when(pollTimer.remainingMs()).thenReturn(Long.MAX_VALUE);
+            assertEquals(timeToNextHeartbeatMs, heartbeatRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
             verify(membershipManager, never()).onPollTimerExpired();
             verify(heartbeatRequestState, never()).reset();
             verify(heartbeatState, never()).reset();
@@ -577,7 +602,6 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
-            assertEquals(0, result.timeUntilNextPollMs);
             assertEquals(1, result.unsentRequests.size());
             assertEquals(Optional.of(coordinatorNode), result.unsentRequests.get(0).node());
             NetworkClientDelegate.UnsentRequest networkRequest = result.unsentRequests.get(0);
@@ -613,7 +637,6 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
             final NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
-            assertEquals(0, result.timeUntilNextPollMs);
             assertEquals(1, result.unsentRequests.size());
             assertEquals(Optional.of(coordinatorNode), result.unsentRequests.get(0).node());
             NetworkClientDelegate.UnsentRequest networkRequest = result.unsentRequests.get(0);
@@ -2495,9 +2518,9 @@ class StreamsGroupHeartbeatRequestManagerTest {
             final Timer pollTimer = timerMockedConstruction.constructed().get(0);
             time.sleep(1234);
 
-            final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+            final long applicationPollCondition = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
-            assertEquals(0, maximumTimeToWait);
+            assertEquals(0, applicationPollCondition);
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -2516,9 +2539,9 @@ class StreamsGroupHeartbeatRequestManagerTest {
             when(membershipManager.shouldNotWaitForHeartbeatInterval()).thenReturn(true);
             time.sleep(1234);
 
-            final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+            final long applicationPollCondition = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
-            assertEquals(0, maximumTimeToWait);
+            assertEquals(0, applicationPollCondition);
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -2545,9 +2568,9 @@ class StreamsGroupHeartbeatRequestManagerTest {
             when(membershipManager.shouldNotWaitForHeartbeatInterval()).thenReturn(shouldNotWaitForHeartbeatInterval);
             time.sleep(1234);
 
-            final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+            final long applicationPollCondition = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
-            assertEquals(timeToNextHeartbeatMs, maximumTimeToWait);
+            assertEquals(timeToNextHeartbeatMs, applicationPollCondition);
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -2568,9 +2591,9 @@ class StreamsGroupHeartbeatRequestManagerTest {
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
             time.sleep(1234);
 
-            final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+            final long applicationPollCondition = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
-            assertEquals(5, maximumTimeToWait);
+            assertEquals(5, applicationPollCondition);
             verify(pollTimer).update(time.milliseconds());
         }
     }
@@ -2591,9 +2614,9 @@ class StreamsGroupHeartbeatRequestManagerTest {
             when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
             time.sleep(1234);
 
-            final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+            final long applicationPollCondition = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
-            assertEquals(retryBackoffMs, maximumTimeToWait);
+            assertEquals(retryBackoffMs, applicationPollCondition);
         }
     }
 

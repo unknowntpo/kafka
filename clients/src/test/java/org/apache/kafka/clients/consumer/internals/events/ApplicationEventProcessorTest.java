@@ -166,7 +166,7 @@ public class ApplicationEventProcessorTest {
     public void testPrepClosingCommitEvents() {
         setupProcessor(true);
         List<NetworkClientDelegate.UnsentRequest> results = mockCommitResults();
-        doReturn(new NetworkClientDelegate.PollResult(100, results)).when(commitRequestManager).pollOnClose(anyLong());
+        doReturn(new NetworkClientDelegate.PollResult(results)).when(commitRequestManager).pollOnClose(anyLong());
         processor.process(new CommitOnCloseEvent());
         verify(commitRequestManager).signalClose();
     }
@@ -197,7 +197,7 @@ public class ApplicationEventProcessorTest {
 
     private static Stream<Arguments> applicationEvents() {
         return Stream.of(
-                Arguments.of(new AsyncPollEvent(calculateDeadlineMs(12345, 100), 100)),
+                Arguments.of(new AsyncPollEvent(calculateDeadlineMs(12345, 100), 100, () -> { })),
                 Arguments.of(new CreateFetchRequestsEvent(calculateDeadlineMs(12345, 100))),
                 Arguments.of(new CheckAndUpdatePositionsEvent(500)),
                 Arguments.of(new TopicMetadataEvent("topic", Long.MAX_VALUE)),
@@ -291,7 +291,7 @@ public class ApplicationEventProcessorTest {
 
     @Test
     public void testAsyncPollEvent() {
-        AsyncPollEvent event = new AsyncPollEvent(12346, 12345);
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345, () -> { });
 
         setupProcessor(true);
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
@@ -304,6 +304,55 @@ public class ApplicationEventProcessorTest {
         verify(heartbeatRequestManager).resetPollTimer(event.pollTimeMs());
         verify(offsetsRequestManager).updateFetchPositions(event.deadlineMs());
         verify(fetchRequestManager).createFetchRequests();
+    }
+
+    @Test
+    public void testLatePositionResultDoesNotStartFetchAfterMetadataError() {
+        setupProcessor(false);
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345, () -> { });
+        CompletableFuture<Void> positions = new CompletableFuture<>();
+        when(offsetsRequestManager.updateFetchPositions(event.deadlineMs())).thenReturn(positions);
+        processor.process(event);
+
+        KafkaException error = new KafkaException("metadata failed");
+        event.onMetadataError(error);
+        positions.complete(null);
+
+        verify(fetchRequestManager, never()).createFetchRequests();
+        assertEquals(Optional.of(error), event.error());
+        assertTrue(event.isComplete());
+    }
+
+    @Test
+    public void testLateFetchErrorDoesNotReplaceTerminalError() {
+        setupProcessor(false);
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345, () -> { });
+        CompletableFuture<Void> fetch = new CompletableFuture<>();
+        when(offsetsRequestManager.updateFetchPositions(event.deadlineMs()))
+            .thenReturn(CompletableFuture.completedFuture(null));
+        when(fetchRequestManager.createFetchRequests()).thenReturn(fetch);
+        processor.process(event);
+
+        KafkaException error = new KafkaException("metadata failed");
+        event.onMetadataError(error);
+        fetch.completeExceptionally(new KafkaException("late fetch failure"));
+
+        assertEquals(Optional.of(error), event.error());
+        assertTrue(event.isComplete());
+    }
+
+    @Test
+    public void testCompletedPollIgnoresLaterMetadataError() {
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345, () -> { });
+        event.completeSuccessfully();
+        event.onMetadataError(new KafkaException("late metadata failure"));
+        setupProcessor(false);
+        processor.process(event);
+
+        assertTrue(event.error().isEmpty());
+        assertTrue(event.isReconciliationCheckComplete());
+        verify(offsetsRequestManager, never()).updateFetchPositions(anyLong());
+        verify(fetchRequestManager, never()).createFetchRequests();
     }
 
     @Test
@@ -728,7 +777,7 @@ public class ApplicationEventProcessorTest {
         when(offsetsRequestManager.updateFetchPositions(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
 
         setupProcessor(true);
-        processor.process(new AsyncPollEvent(110, 100));
+        processor.process(new AsyncPollEvent(110, 100, () -> { }));
         verify(subscriptionState, verificationMode).matchesSubscribedPattern(topic);
         verify(membershipManager, verificationMode).onSubscriptionUpdated();
     }
@@ -753,7 +802,7 @@ public class ApplicationEventProcessorTest {
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
 
         // Verify that the poll completes even when the update fetch positions throws an error.
-        AsyncPollEvent event = new AsyncPollEvent(110, 100);
+        AsyncPollEvent event = new AsyncPollEvent(110, 100, () -> { });
         processor.process(event);
         verify(offsetsRequestManager).updateFetchPositions(anyLong());
         assertTrue(event.isComplete());

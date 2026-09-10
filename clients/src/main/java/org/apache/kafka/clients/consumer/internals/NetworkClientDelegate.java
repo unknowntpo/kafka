@@ -305,10 +305,9 @@ public class NetworkClientDelegate implements AutoCloseable {
         this.client.close();
     }
 
-    public long addAll(PollResult pollResult) {
+    public void addAll(PollResult pollResult) {
         Objects.requireNonNull(pollResult);
         addAll(pollResult.unsentRequests);
-        return pollResult.timeUntilNextPollMs;
     }
 
     public void addAll(final List<UnsentRequest> requests) {
@@ -326,26 +325,15 @@ public class NetworkClientDelegate implements AutoCloseable {
     }
 
     public static class PollResult {
-        public static final long WAIT_FOREVER = Long.MAX_VALUE;
-        public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
-        public final long timeUntilNextPollMs;
+        public static final PollResult EMPTY = new PollResult(Collections.emptyList());
         public final List<UnsentRequest> unsentRequests;
 
-        public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
-            this.timeUntilNextPollMs = timeUntilNextPollMs;
-            this.unsentRequests = Collections.unmodifiableList(unsentRequests);
-        }
-
         public PollResult(final List<UnsentRequest> unsentRequests) {
-            this(WAIT_FOREVER, unsentRequests);
+            this.unsentRequests = Collections.unmodifiableList(unsentRequests);
         }
 
         public PollResult(final UnsentRequest unsentRequest) {
             this(Collections.singletonList(unsentRequest));
-        }
-
-        public PollResult(final long timeUntilNextPollMs) {
-            this(timeUntilNextPollMs, Collections.emptyList());
         }
     }
 

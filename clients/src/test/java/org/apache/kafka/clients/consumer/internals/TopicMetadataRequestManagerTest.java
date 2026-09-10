@@ -90,6 +90,33 @@ public class TopicMetadataRequestManagerTest {
     }
 
     @Test
+    public void testConditionPreservesRetryAndExpiryBesideAnInflightRequest() {
+        long deadlineMs = time.milliseconds() + 1000;
+        CompletableFuture<?> first = topicMetadataRequestManager.requestTopicMetadata("first", deadlineMs);
+        CompletableFuture<?> second = topicMetadataRequestManager.requestTopicMetadata("second", deadlineMs);
+        assertTrue(topicMetadataRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        NetworkClientDelegate.PollResult initial = topicMetadataRequestManager.poll(time.milliseconds());
+        assertEquals(2, initial.unsentRequests.size());
+        assertEquals(1000, topicMetadataRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
+
+        initial.unsentRequests.get(1).handler().onFailure(time.milliseconds(), Errors.NETWORK_EXCEPTION.exception());
+        long retryMs = topicMetadataRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+        assertTrue(retryMs > 0 && retryMs < 1000);
+        time.sleep(retryMs);
+        assertTrue(topicMetadataRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertEquals(1, topicMetadataRequestManager.poll(time.milliseconds()).unsentRequests.size());
+        assertFalse(first.isDone());
+        assertFalse(second.isDone());
+
+        time.sleep(deadlineMs - time.milliseconds());
+        assertTrue(topicMetadataRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        topicMetadataRequestManager.poll(time.milliseconds());
+        assertTrue(first.isCompletedExceptionally());
+        assertTrue(second.isCompletedExceptionally());
+        assertFalse(topicMetadataRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
+    @Test
     public void testPoll_SuccessfulRequestAllTopicsMetadata() {
         this.topicMetadataRequestManager.requestAllTopicsMetadata(Long.MAX_VALUE);
         this.time.sleep(100);
