@@ -1,0 +1,97 @@
+{
+  "scope": "Fresh live snapshot pre-push validation; Java 17; offline; targeted clients tests; main/test Checkstyle and Spotless",
+  "totals": {
+    "tests": 436,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "suites": [
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.ApplicationPollWaitTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.CommitRequestManagerTest$BackgroundAutoCommitTest",
+      "tests": 5,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.CommitRequestManagerTest",
+      "tests": 153,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest",
+      "tests": 27,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.FetchRequestManagerTest",
+      "tests": 132,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.HeartbeatNextPollConditionTest",
+      "tests": 1,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.NetworkLoopConditionTest",
+      "tests": 6,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.NextPollConditionTest",
+      "tests": 27,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.OffsetsRequestManagerTest$ValidationCompletionTest",
+      "tests": 29,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.OffsetsRequestManagerTest",
+      "tests": 44,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.SignalFanoutTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    {
+      "name": "org.apache.kafka.clients.consumer.internals.WaitingReuseTest",
+      "tests": 4,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  ],
+  "spotbugs": "Excluded from this run; historical warnings and live suppression assumptions require separate review.",
+  "validated_source_commit": "9f8dc35e285107ce9f926f35ab74486796161073"
+}

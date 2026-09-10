@@ -1,0 +1,114 @@
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractHeartbeatRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractHeartbeatRequestManager.java
+@@ -192,7 +192,12 @@
+             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
+ 
+         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
+-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
++            // An expired heartbeat interval cannot trigger another send while its response is pending.
++            // Network I/O still wakes on the response; retain the poll deadline for stale-member detection.
++            long waitMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
++            if (heartbeatRequestState.requestInFlight() && waitMs == 0L)
++                waitMs = pollTimer.remainingMs();
++            return new NetworkClientDelegate.PollResult(waitMs);
+         }
+ 
+         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
+@@ -259,18 +264,25 @@
+         if (pollTimer.isExpired()) {
+             return 0L;
+         }
++        // Keep a positive delay even in the final millisecond before the poll timer expires.
++        long pollTimerWaitMs = Math.max(1L, pollTimer.remainingMs() / 2);
+         // KAFKA-20253: mirror the guard in poll(). A heartbeat is only sent when the coordinator is known
+         // and the member is in a state that heartbeats. When the coordinator is unavailable (e.g. after a
+         // re-authentication failure) or the member should skip heartbeats (FATAL/FENCED/STALE/UNSUBSCRIBED),
+         // poll() returns EMPTY, so falling through to the timer-based branches below would return 0 (the
+         // heartbeat timer is left permanently expired) and busy-spin both the application and network threads.
+         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
+-            return heartbeatRequestState.heartbeatIntervalMs();
++            long heartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
++            // Before the first response the interval is zero, but a skipped heartbeat cannot progress.
++            return heartbeatIntervalMs > 0 ? Math.min(pollTimerWaitMs, heartbeatIntervalMs) : pollTimerWaitMs;
+         }
+         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
+             return 0L;
+         }
+-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
++        long heartbeatWaitMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
++        if (heartbeatRequestState.requestInFlight() && heartbeatWaitMs == 0L)
++            heartbeatWaitMs = Long.MAX_VALUE;
++        return Math.min(pollTimerWaitMs, heartbeatWaitMs);
+     }
+ 
+     /**
+--- a/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java
++++ b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/ConsumerHeartbeatRequestManagerTest.java
+@@ -326,6 +326,67 @@
+         assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, result);
+     }
+ 
++    @ParameterizedTest
++    @ValueSource(booleans = {true, false})
++    public void testNoSpinWithInitialIntervalAndBlockedHeartbeat(boolean coordinatorMissing) {
++        createHeartbeatRequestStateWithZeroHeartbeatInterval();
++        when(membershipManager.state()).thenReturn(MemberState.JOINING);
++        when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
++        if (coordinatorMissing)
++            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
++        else
++            when(membershipManager.shouldSkipHeartbeat()).thenReturn(true);
++
++        for (int i = 0; i < 10; i++) {
++            long now = time.milliseconds();
++            NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(now);
++            assertTrue(result.unsentRequests.isEmpty());
++            assertTrue(result.timeUntilNextPollMs > 0);
++            assertTrue(heartbeatRequestManager.maximumTimeToWait(now) > 0,
++                "An unsendable heartbeat must not force an immediate application retry");
++            time.sleep(1);
++        }
++
++        // Removing the actual blocker must allow the initial heartbeat immediately.
++        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mock(Node.class)));
++        when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
++        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
++        assertEquals(1, heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.size());
++    }
++
++    @Test
++    public void testNoSpinWhileHeartbeatResponseIsPending() {
++        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
++        NetworkClientDelegate.PollResult sent = heartbeatRequestManager.poll(time.milliseconds());
++        assertEquals(1, sent.unsentRequests.size());
++        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
++
++        for (int i = 0; i < 10; i++) {
++            long now = time.milliseconds();
++            NetworkClientDelegate.PollResult waiting = heartbeatRequestManager.poll(now);
++            assertTrue(waiting.unsentRequests.isEmpty());
++            assertTrue(waiting.timeUntilNextPollMs > 0,
++                "An in-flight heartbeat must not force a zero-time network poll");
++            assertTrue(waiting.timeUntilNextPollMs <= pollTimer.remainingMs());
++            assertTrue(heartbeatRequestManager.maximumTimeToWait(now) > 0);
++            time.sleep(1);
++        }
++    }
++
++    @Test
++    public void testNoSpinWithinLastMillisecondBeforePollTimerExpires() {
++        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
++        assertEquals(1, heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.size());
++        time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS - DEFAULT_HEARTBEAT_INTERVAL_MS - 1);
++        NetworkClientDelegate.PollResult waiting = heartbeatRequestManager.poll(time.milliseconds());
++        assertEquals(1, waiting.timeUntilNextPollMs);
++        assertEquals(1, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
++        time.sleep(1);
++        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
++        assertEquals(1, heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.size());
++        verify(membershipManager).transitionToSendingLeaveGroup(true);
++    }
++
+     @Test
+     public void testHeartbeatNotSentIfAnotherOneInFlight() {
+         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);

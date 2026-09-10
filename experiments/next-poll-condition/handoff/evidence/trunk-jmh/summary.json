@@ -1,0 +1,2606 @@
+{
+  "summary": {
+    "unavailable": {
+      "trunk": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            498.8728025895275,
+            498.5976891493319,
+            499.788333595044
+          ],
+          "median": 498.8728025895275,
+          "min": 498.5976891493319,
+          "max": 499.788333595044
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            500.3449634447058,
+            500.2544206262468,
+            500.9166467647988
+          ],
+          "median": 500.3449634447058,
+          "min": 500.2544206262468,
+          "max": 500.9166467647988
+        }
+      },
+      "nospin": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            34.91817658906735,
+            32.57985825903401,
+            33.232414431742555
+          ],
+          "median": 33.232414431742555,
+          "min": 32.57985825903401,
+          "max": 34.91817658906735
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            36.84487957580871,
+            34.3532384506946,
+            35.088629305670906
+          ],
+          "median": 35.088629305670906,
+          "min": 34.3532384506946,
+          "max": 36.84487957580871
+        }
+      },
+      "condition": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            35.918499934504744,
+            37.23055954790407,
+            36.23809602863401
+          ],
+          "median": 36.23809602863401,
+          "min": 35.918499934504744,
+          "max": 37.23055954790407
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            38.214199921968564,
+            40.231319000650984,
+            37.59669964907783
+          ],
+          "median": 38.214199921968564,
+          "min": 37.59669964907783,
+          "max": 40.231319000650984
+        }
+      }
+    },
+    "idle": {
+      "trunk": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            33.599617022292755,
+            31.93245867318244,
+            31.612463144038546
+          ],
+          "median": 31.93245867318244,
+          "min": 31.612463144038546,
+          "max": 33.599617022292755
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            35.7661858983854,
+            34.049668989770375,
+            33.53374813322739
+          ],
+          "median": 34.049668989770375,
+          "min": 33.53374813322739,
+          "max": 35.7661858983854
+        }
+      },
+      "nospin": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            32.26993790054507,
+            31.59869260188802,
+            32.269027215240996
+          ],
+          "median": 32.269027215240996,
+          "min": 31.59869260188802,
+          "max": 32.26993790054507
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            34.06153395463081,
+            33.590162326695484,
+            34.087793308165445
+          ],
+          "median": 34.06153395463081,
+          "min": 33.590162326695484,
+          "max": 34.087793308165445
+        }
+      },
+      "condition": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            37.210106992021416,
+            36.26228911142592,
+            36.93763742573518
+          ],
+          "median": 36.93763742573518,
+          "min": 36.26228911142592,
+          "max": 37.210106992021416
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            39.591927101595466,
+            38.19818844423899,
+            38.92339264592902
+          ],
+          "median": 38.92339264592902,
+          "min": 38.19818844423899,
+          "max": 39.591927101595466
+        }
+      }
+    },
+    "consume": {
+      "trunk": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            498.49873772711106,
+            469.8720854186397,
+            484.8960443205545
+          ],
+          "median": 484.8960443205545,
+          "min": 469.8720854186397,
+          "max": 498.49873772711106
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            499.98224440587,
+            470.9637957837383,
+            486.1874177448603
+          ],
+          "median": 486.1874177448603,
+          "min": 470.9637957837383,
+          "max": 499.98224440587
+        },
+        "records_per_s": {
+          "fork_means": [
+            1402703.3646794092,
+            1114768.6447880862,
+            1373505.3567890304
+          ],
+          "median": 1373505.3567890304,
+          "min": 1114768.6447880862,
+          "max": 1402703.3646794092
+        },
+        "process_cpu_ms_per_million_records": {
+          "fork_means": [
+            359.425242217222,
+            429.5381849377957,
+            357.5239203755728
+          ],
+          "median": 359.425242217222,
+          "min": 357.5239203755728,
+          "max": 429.5381849377957
+        },
+        "allocated_bytes_per_record": {
+          "fork_means": [
+            554.4627668231316,
+            610.7755106757021,
+            554.8358185756407
+          ],
+          "median": 554.8358185756407,
+          "min": 554.4627668231316,
+          "max": 610.7755106757021
+        }
+      },
+      "nospin": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            490.45464040025405,
+            488.47368917409403,
+            469.77057638477953
+          ],
+          "median": 488.47368917409403,
+          "min": 469.77057638477953,
+          "max": 490.45464040025405
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            491.55046217939724,
+            490.321365786265,
+            471.4565863805956
+          ],
+          "median": 490.321365786265,
+          "min": 471.4565863805956,
+          "max": 491.55046217939724
+        },
+        "records_per_s": {
+          "fork_means": [
+            1258803.6924697133,
+            1335360.2480910502,
+            1130990.1873459986
+          ],
+          "median": 1258803.6924697133,
+          "min": 1130990.1873459986,
+          "max": 1335360.2480910502
+        },
+        "process_cpu_ms_per_million_records": {
+          "fork_means": [
+            416.0538312501695,
+            367.9859185130609,
+            425.4816362166285
+          ],
+          "median": 416.0538312501695,
+          "min": 367.9859185130609,
+          "max": 425.4816362166285
+        },
+        "allocated_bytes_per_record": {
+          "fork_means": [
+            556.4873851605763,
+            554.4503988431973,
+            610.4681439660586
+          ],
+          "median": 556.4873851605763,
+          "min": 554.4503988431973,
+          "max": 610.4681439660586
+        }
+      },
+      "condition": {
+        "process_cpu_ms_per_s": {
+          "fork_means": [
+            491.73217187405584,
+            477.11329254308004,
+            488.5064542992893
+          ],
+          "median": 488.5064542992893,
+          "min": 477.11329254308004,
+          "max": 491.73217187405584
+        },
+        "cgroup_cpu_ms_per_s": {
+          "fork_means": [
+            493.9514551616337,
+            478.2512191864045,
+            490.19535447480376
+          ],
+          "median": 490.19535447480376,
+          "min": 478.2512191864045,
+          "max": 493.9514551616337
+        },
+        "records_per_s": {
+          "fork_means": [
+            1168586.5510247855,
+            1085052.894904536,
+            1169956.7252319735
+          ],
+          "median": 1168586.5510247855,
+          "min": 1085052.894904536,
+          "max": 1169956.7252319735
+        },
+        "process_cpu_ms_per_million_records": {
+          "fork_means": [
+            433.44559517479587,
+            452.8785885763216,
+            438.1333639444303
+          ],
+          "median": 438.1333639444303,
+          "min": 433.44559517479587,
+          "max": 452.8785885763216
+        },
+        "allocated_bytes_per_record": {
+          "fork_means": [
+            567.8443723820546,
+            593.6701952259984,
+            567.1337342476314
+          ],
+          "median": 567.8443723820546,
+          "min": 567.1337342476314,
+          "max": 593.6701952259984
+        }
+      }
+    }
+  },
+  "paired_changes": [
+    {
+      "scenario": "unavailable",
+      "baseline": "trunk",
+      "candidate": "nospin",
+      "metric": "process_cpu_ms_per_s",
+      "changes_percent": [
+        -93.00058523779697,
+        -93.46570211454063,
+        -93.35070224775008
+      ],
+      "median_percent": -93.35070224775008
+    },
+    {
+      "scenario": "unavailable",
+      "baseline": "trunk",
+      "candidate": "condition",
+      "metric": "process_cpu_ms_per_s",
+      "changes_percent": [
+        -92.80006852487035,
+        -92.53294582824402,
+        -92.74931133986891
+      ],
+      "median_percent": -92.74931133986891
+    },
+    {
+      "scenario": "unavailable",
+      "baseline": "nospin",
+      "candidate": "condition",
+      "metric": "process_cpu_ms_per_s",
+      "changes_percent": [
+        2.864763980117413,
+        14.274774469224315,
+        9.044427401039279
+      ],
+      "median_percent": 9.044427401039279
+    },
+    {
+      "scenario": "idle",
+      "baseline": "trunk",
+      "candidate": "nospin",
+      "metric": "process_cpu_ms_per_s",
+      "changes_percent": [
+        -3.9574234458252033,
+        -1.0452250943480346,
+        2.0769152603227647
+      ],
+      "median_percent": -1.0452250943480346
+    },
+    {
+      "scenario": "idle",
+      "baseline": "trunk",
+      "candidate": "condition",
+      "metric": "process_cpu_ms_per_s",
+      "changes_percent": [
+        10.745628342528924,
+        13.559339362364131,
+        16.84517355523072
+      ],
+      "median_percent": 13.559339362364131
+    },
+    {
+      "scenario": "idle",
+      "baseline": "nospin",
+      "candidate": "condition",
+      "metric": "process_cpu_ms_per_s",
+      "changes_percent": [
+        15.30888936539574,
+        14.758827424585451,
+        14.467774870787409
+      ],
+      "median_percent": 14.758827424585451
+    },
+    {
+      "scenario": "consume",
+      "baseline": "trunk",
+      "candidate": "nospin",
+      "metric": "records_per_s",
+      "changes_percent": [
+        -10.258738649463817,
+        19.78810619892326,
+        -17.65665989173728
+      ],
+      "median_percent": -10.258738649463817
+    },
+    {
+      "scenario": "consume",
+      "baseline": "trunk",
+      "candidate": "nospin",
+      "metric": "process_cpu_ms_per_million_records",
+      "changes_percent": [
+        15.755317763331567,
+        -14.329870680449186,
+        19.007879464307532
+      ],
+      "median_percent": 15.755317763331567
+    },
+    {
+      "scenario": "consume",
+      "baseline": "trunk",
+      "candidate": "nospin",
+      "metric": "allocated_bytes_per_record",
+      "changes_percent": [
+        0.36514955711905994,
+        -9.221900820842055,
+        10.026808567124545
+      ],
+      "median_percent": 0.36514955711905994
+    },
+    {
+      "scenario": "consume",
+      "baseline": "trunk",
+      "candidate": "condition",
+      "metric": "records_per_s",
+      "changes_percent": [
+        -16.69040080388854,
+        -2.6656427791076798,
+        -14.819645991982966
+      ],
+      "median_percent": -14.819645991982966
+    },
+    {
+      "scenario": "consume",
+      "baseline": "trunk",
+      "candidate": "condition",
+      "metric": "process_cpu_ms_per_million_records",
+      "changes_percent": [
+        20.594088634664963,
+        5.433836724412755,
+        22.546587507817286
+      ],
+      "median_percent": 20.594088634664963
+    },
+    {
+      "scenario": "consume",
+      "baseline": "trunk",
+      "candidate": "condition",
+      "metric": "allocated_bytes_per_record",
+      "changes_percent": [
+        2.4134362773527096,
+        -2.8005896030081523,
+        2.2164963508595426
+      ],
+      "median_percent": 2.2164963508595426
+    },
+    {
+      "scenario": "consume",
+      "baseline": "nospin",
+      "candidate": "condition",
+      "metric": "records_per_s",
+      "changes_percent": [
+        -7.166895202533608,
+        -18.744556275682044,
+        3.4453471234277
+      ],
+      "median_percent": -7.166895202533608
+    },
+    {
+      "scenario": "consume",
+      "baseline": "nospin",
+      "candidate": "condition",
+      "metric": "process_cpu_ms_per_million_records",
+      "changes_percent": [
+        4.180171559138679,
+        23.069543097271428,
+        2.9735073504700837
+      ],
+      "median_percent": 4.180171559138679
+    },
+    {
+      "scenario": "consume",
+      "baseline": "nospin",
+      "candidate": "condition",
+      "metric": "allocated_bytes_per_record",
+      "changes_percent": [
+        2.0408346216511664,
+        7.073634803875906,
+        -7.098553814273478
+      ],
+      "median_percent": 2.0408346216511664
+    }
+  ],
+  "rows": [
+    {
+      "label": "consume-1-trunk",
+      "variant": "trunk",
+      "scenario": "consume",
+      "started": 1788967738.0860767,
+      "ended": 1788967788.6857684,
+      "json": "consume-1-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-1-trunk.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 498.49873772711106,
+          "unit": "ms/s",
+          "iterations": [
+            497.9616289193335,
+            498.83778169467627,
+            498.6968025673235
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 499.98224440587,
+          "unit": "ms/s",
+          "iterations": [
+            499.71759361119143,
+            499.8759440920509,
+            500.35319551436777
+          ]
+        },
+        "records_per_s": {
+          "score": 1402703.3646794092,
+          "unit": "ops/s",
+          "iterations": [
+            1275416.23066197,
+            1620083.9656709859,
+            1312609.8977052716
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 359.425242217222,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            390.43512348098784,
+            307.9106503764038,
+            379.9299527942744
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 554.4627668231316,
+          "unit": "B/op",
+          "iterations": [
+            554.5473900431203,
+            554.5426804887079,
+            554.2982299375666
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1402703.3646794092
+    },
+    {
+      "label": "consume-1-nospin",
+      "variant": "nospin",
+      "scenario": "consume",
+      "started": 1788967788.6866128,
+      "ended": 1788967839.1460803,
+      "json": "consume-1-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-1-nospin.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 490.45464040025405,
+          "unit": "ms/s",
+          "iterations": [
+            497.78019524896195,
+            474.784226142141,
+            498.79949980965927
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 491.55046217939724,
+          "unit": "ms/s",
+          "iterations": [
+            497.9833055615615,
+            476.78741575816514,
+            499.88066521846514
+          ]
+        },
+        "records_per_s": {
+          "score": 1258803.6924697133,
+          "unit": "ops/s",
+          "iterations": [
+            859328.8069065551,
+            1371991.2222500492,
+            1545091.0482525353
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 416.0538312501695,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            579.2718390136095,
+            346.0585749672155,
+            322.83107976968364
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 556.4873851605763,
+          "unit": "B/op",
+          "iterations": [
+            560.206651622659,
+            554.6693212880665,
+            554.5861825710034
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1258803.6924697133
+    },
+    {
+      "label": "consume-1-condition",
+      "variant": "condition",
+      "scenario": "consume",
+      "started": 1788967839.1828427,
+      "ended": 1788967889.7168293,
+      "json": "consume-1-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-1-condition.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 491.73217187405584,
+          "unit": "ms/s",
+          "iterations": [
+            499.51784090358564,
+            477.9229220726892,
+            497.75575264589276
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 493.9514551616337,
+          "unit": "ms/s",
+          "iterations": [
+            500.51887465675645,
+            480.63038542139344,
+            500.7051054067512
+          ]
+        },
+        "records_per_s": {
+          "score": 1168586.5510247855,
+          "unit": "ops/s",
+          "iterations": [
+            921116.7666473963,
+            1196213.844483793,
+            1388429.0419431669
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 433.44559517479587,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            542.2993492407809,
+            399.5319291206954,
+            358.5055071629112
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 567.8443723820546,
+          "unit": "B/op",
+          "iterations": [
+            583.4283696312365,
+            565.3021731862253,
+            554.802574328702
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1168586.5510247855
+    },
+    {
+      "label": "consume-2-nospin",
+      "variant": "nospin",
+      "scenario": "consume",
+      "started": 1788967889.717846,
+      "ended": 1788967940.3182924,
+      "json": "consume-2-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-2-nospin.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 488.47368917409403,
+          "unit": "ms/s",
+          "iterations": [
+            480.73747753220425,
+            497.81562527140727,
+            486.86796471867046
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 490.321365786265,
+          "unit": "ms/s",
+          "iterations": [
+            482.0566571509044,
+            499.8756623006429,
+            489.03177790724766
+          ]
+        },
+        "records_per_s": {
+          "score": 1335360.2480910502,
+          "unit": "ops/s",
+          "iterations": [
+            1192157.911021287,
+            1463869.6471997807,
+            1350053.186052083
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 367.9859185130609,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            403.25285043594903,
+            340.07101884730946,
+            360.63388625592415
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 554.4503988431973,
+          "unit": "B/op",
+          "iterations": [
+            554.1357183098592,
+            554.4747702813439,
+            554.7407079383886
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1335360.2480910502
+    },
+    {
+      "label": "consume-2-condition",
+      "variant": "condition",
+      "scenario": "consume",
+      "started": 1788967940.3196077,
+      "ended": 1788967990.6857266,
+      "json": "consume-2-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-2-condition.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 477.11329254308004,
+          "unit": "ms/s",
+          "iterations": [
+            498.91479762586954,
+            478.7924988959,
+            453.6325811074706
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 478.2512191864045,
+          "unit": "ms/s",
+          "iterations": [
+            500.29566180823645,
+            479.22351210158666,
+            455.23448364939026
+          ]
+        },
+        "records_per_s": {
+          "score": 1085052.894904536,
+          "unit": "ops/s",
+          "iterations": [
+            897754.993984943,
+            1050451.8698791466,
+            1306951.8208495183
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 452.8785885763216,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            555.7411738500947,
+            455.7997906556285,
+            347.0948012232416
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 593.6701952259984,
+          "unit": "B/op",
+          "iterations": [
+            610.6920592493597,
+            611.1828322390332,
+            559.1356941896024
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1085052.894904536
+    },
+    {
+      "label": "consume-2-trunk",
+      "variant": "trunk",
+      "scenario": "consume",
+      "started": 1788967990.687047,
+      "ended": 1788968041.3959422,
+      "json": "consume-2-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-2-trunk.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 469.8720854186397,
+          "unit": "ms/s",
+          "iterations": [
+            477.9054828644036,
+            476.79679621436634,
+            454.91397717714915
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 470.9637957837383,
+          "unit": "ms/s",
+          "iterations": [
+            479.75641679835104,
+            477.78177643027755,
+            455.35319412258633
+          ]
+        },
+        "records_per_s": {
+          "score": 1114768.6447880862,
+          "unit": "ops/s",
+          "iterations": [
+            920925.4208126244,
+            1186005.806324178,
+            1237374.707227456
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 429.5381849377957,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            518.9447399848008,
+            402.02275600505686,
+            367.6470588235294
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 610.7755106757021,
+          "unit": "B/op",
+          "iterations": [
+            610.5743141895559,
+            610.7553658659924,
+            610.9968519715578
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1114768.6447880862
+    },
+    {
+      "label": "consume-3-condition",
+      "variant": "condition",
+      "scenario": "consume",
+      "started": 1788968041.3970551,
+      "ended": 1788968091.8504753,
+      "json": "consume-3-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-3-condition.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 488.5064542992893,
+          "unit": "ms/s",
+          "iterations": [
+            498.9367208535676,
+            487.70256936965245,
+            478.88007267464786
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 490.19535447480376,
+          "unit": "ms/s",
+          "iterations": [
+            500.6442042968574,
+            489.7660109577211,
+            480.1758481698329
+          ]
+        },
+        "records_per_s": {
+          "score": 1169956.7252319735,
+          "unit": "ops/s",
+          "iterations": [
+            893598.697809142,
+            1116927.4684843405,
+            1499344.009402438
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 438.1333639444303,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            558.3529148483831,
+            436.64996420901934,
+            319.39721277588853
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 567.1337342476314,
+          "unit": "B/op",
+          "iterations": [
+            585.8285984111,
+            560.4777752326414,
+            555.0948290991531
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1169956.7252319735
+    },
+    {
+      "label": "consume-3-trunk",
+      "variant": "trunk",
+      "scenario": "consume",
+      "started": 1788968091.851938,
+      "ended": 1788968142.6508162,
+      "json": "consume-3-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-3-trunk.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 484.8960443205545,
+          "unit": "ms/s",
+          "iterations": [
+            477.04380452856725,
+            479.6796014159594,
+            497.964727017137
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 486.1874177448603,
+          "unit": "ms/s",
+          "iterations": [
+            478.1470677106655,
+            480.4276017944174,
+            499.9875837294978
+          ]
+        },
+        "records_per_s": {
+          "score": 1373505.3567890304,
+          "unit": "ops/s",
+          "iterations": [
+            1156856.6511523745,
+            1427257.4748450492,
+            1536401.9443696672
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 357.5239203755728,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            412.37113402061857,
+            336.08738271950705,
+            324.1132443865929
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 554.8358185756407,
+          "unit": "B/op",
+          "iterations": [
+            554.5386762886598,
+            555.0625374597396,
+            554.9062419785226
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1373505.3567890304
+    },
+    {
+      "label": "consume-3-nospin",
+      "variant": "nospin",
+      "scenario": "consume",
+      "started": 1788968142.652192,
+      "ended": 1788968193.2582872,
+      "json": "consume-3-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/consume-3-nospin.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 469.77057638477953,
+          "unit": "ms/s",
+          "iterations": [
+            498.7610275316045,
+            456.75854519188255,
+            453.79215643085155
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 471.4565863805956,
+          "unit": "ms/s",
+          "iterations": [
+            500.31678211948616,
+            458.465143038524,
+            455.5878339837767
+          ]
+        },
+        "records_per_s": {
+          "score": 1130990.1873459986,
+          "unit": "ops/s",
+          "iterations": [
+            927362.3402461993,
+            1231056.885911239,
+            1234551.3358805578
+          ]
+        },
+        "process_cpu_ms_per_million_records": {
+          "score": 425.4816362166285,
+          "unit": "ms/Mrecord",
+          "iterations": [
+            537.8314291873248,
+            371.0319071202403,
+            367.58157234232044
+          ]
+        },
+        "allocated_bytes_per_record": {
+          "score": 610.4681439660586,
+          "unit": "B/op",
+          "iterations": [
+            610.290416900194,
+            610.5265658845498,
+            610.5874491134321
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 1130990.1873459986
+    },
+    {
+      "label": "idle-1-trunk",
+      "variant": "trunk",
+      "scenario": "idle",
+      "started": 1788968193.2587872,
+      "ended": 1788968243.9980443,
+      "json": "idle-1-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-1-trunk.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 33.599617022292755,
+          "unit": "ms/s",
+          "iterations": [
+            42.9092897443168,
+            32.938634862111,
+            24.950926460450454
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 35.7661858983854,
+          "unit": "ms/s",
+          "iterations": [
+            45.14805698946505,
+            35.056489269699696,
+            27.094011435991465
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9921958101570127
+    },
+    {
+      "label": "idle-1-nospin",
+      "variant": "nospin",
+      "scenario": "idle",
+      "started": 1788968243.9995391,
+      "ended": 1788968294.7956133,
+      "json": "idle-1-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-1-nospin.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 32.26993790054507,
+          "unit": "ms/s",
+          "iterations": [
+            40.913497455604414,
+            31.933047056380573,
+            23.9632691896502
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 34.06153395463081,
+          "unit": "ms/s",
+          "iterations": [
+            42.16814478123688,
+            34.138922072572115,
+            25.877535010083424
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.992580610385419
+    },
+    {
+      "label": "idle-1-condition",
+      "variant": "condition",
+      "scenario": "idle",
+      "started": 1788968294.7973392,
+      "ended": 1788968345.6311016,
+      "json": "idle-1-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-1-condition.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 37.210106992021416,
+          "unit": "ms/s",
+          "iterations": [
+            38.94415227473495,
+            35.9217013167687,
+            36.7644673845606
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 39.591927101595466,
+          "unit": "ms/s",
+          "iterations": [
+            41.822923982243495,
+            37.772566977115204,
+            39.180290345427686
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9868177588134404
+    },
+    {
+      "label": "idle-2-nospin",
+      "variant": "nospin",
+      "scenario": "idle",
+      "started": 1788968345.6329062,
+      "ended": 1788968396.4281797,
+      "json": "idle-2-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-2-nospin.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 31.59869260188802,
+          "unit": "ms/s",
+          "iterations": [
+            38.91684275115218,
+            33.91338445305575,
+            21.965850601456133
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 33.590162326695484,
+          "unit": "ms/s",
+          "iterations": [
+            40.599347586093664,
+            35.03731391192937,
+            25.13382548206341
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9918050552732782
+    },
+    {
+      "label": "idle-2-condition",
+      "variant": "condition",
+      "scenario": "idle",
+      "started": 1788968396.4293585,
+      "ended": 1788968446.9719477,
+      "json": "idle-2-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-2-condition.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 36.26228911142592,
+          "unit": "ms/s",
+          "iterations": [
+            35.922686031228565,
+            34.939380785775846,
+            37.92480051727336
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 38.19818844423899,
+          "unit": "ms/s",
+          "iterations": [
+            37.24653679671831,
+            37.51351470846732,
+            39.834513827531325
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9923666236185062
+    },
+    {
+      "label": "idle-2-trunk",
+      "variant": "trunk",
+      "scenario": "idle",
+      "started": 1788968446.9739385,
+      "ended": 1788968497.8232036,
+      "json": "idle-2-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-2-trunk.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 31.93245867318244,
+          "unit": "ms/s",
+          "iterations": [
+            40.90445252874302,
+            31.926226379806806,
+            22.96669711099749
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 34.049668989770375,
+          "unit": "ms/s",
+          "iterations": [
+            43.456990133493974,
+            33.66640525642115,
+            25.025611579396003
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9919971151701383
+    },
+    {
+      "label": "idle-3-condition",
+      "variant": "condition",
+      "scenario": "idle",
+      "started": 1788968497.8253367,
+      "ended": 1788968548.480852,
+      "json": "idle-3-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-3-condition.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 36.93763742573518,
+          "unit": "ms/s",
+          "iterations": [
+            39.943221310056074,
+            42.913707768927814,
+            27.955983198221663
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 38.92339264592902,
+          "unit": "ms/s",
+          "iterations": [
+            42.87525347032074,
+            44.98384507183682,
+            28.91107939562948
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9934441944841925
+    },
+    {
+      "label": "idle-3-trunk",
+      "variant": "trunk",
+      "scenario": "idle",
+      "started": 1788968548.482872,
+      "ended": 1788968599.2762814,
+      "json": "idle-3-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-3-trunk.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 31.612463144038546,
+          "unit": "ms/s",
+          "iterations": [
+            40.92181170922811,
+            31.95435281077583,
+            21.9612249121117
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 33.53374813322739,
+          "unit": "ms/s",
+          "iterations": [
+            42.23540186509433,
+            33.503639635335794,
+            24.862202899252054
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9933016950514353
+    },
+    {
+      "label": "idle-3-nospin",
+      "variant": "nospin",
+      "scenario": "idle",
+      "started": 1788968599.277539,
+      "ended": 1788968650.2670748,
+      "json": "idle-3-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.idle",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/idle-3-nospin.json",
+        "-p",
+        "server=127.0.0.1:43753",
+        "-p",
+        "topic=trunk-jmh-a1edbfedc8-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 32.269027215240996,
+          "unit": "ms/s",
+          "iterations": [
+            39.90306147366711,
+            31.942501032180996,
+            24.96151913987488
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 34.087793308165445,
+          "unit": "ms/s",
+          "iterations": [
+            41.25896750254232,
+            34.985623177390586,
+            26.01878924456342
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9924215199407214
+    },
+    {
+      "label": "unavailable-1-trunk",
+      "variant": "trunk",
+      "scenario": "unavailable",
+      "started": 1788968650.2677734,
+      "ended": 1788968700.88403,
+      "json": "unavailable-1-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-1-trunk.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 498.8728025895275,
+          "unit": "ms/s",
+          "iterations": [
+            498.4397820281702,
+            499.52432190370246,
+            498.65430383670986
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 500.3449634447058,
+          "unit": "ms/s",
+          "iterations": [
+            499.5501841961255,
+            501.7972064454995,
+            499.6874996924924
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.93369544606149
+    },
+    {
+      "label": "unavailable-1-nospin",
+      "variant": "nospin",
+      "scenario": "unavailable",
+      "started": 1788968700.8862019,
+      "ended": 1788968750.7257464,
+      "json": "unavailable-1-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-1-nospin.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 34.91817658906735,
+          "unit": "ms/s",
+          "iterations": [
+            40.90177638411043,
+            37.91880597751259,
+            25.93394740557902
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 36.84487957580871,
+          "unit": "ms/s",
+          "iterations": [
+            42.66524150884681,
+            39.33377615846293,
+            28.535621060116394
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.990670839943457
+    },
+    {
+      "label": "unavailable-1-condition",
+      "variant": "condition",
+      "scenario": "unavailable",
+      "started": 1788968750.7270184,
+      "ended": 1788968800.8654907,
+      "json": "unavailable-1-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-1-condition.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 1,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 35.918499934504744,
+          "unit": "ms/s",
+          "iterations": [
+            43.903494280406925,
+            37.89036019608217,
+            25.961645327025145
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 38.214199921968564,
+          "unit": "ms/s",
+          "iterations": [
+            46.30012616477305,
+            39.44226958053433,
+            28.900204020598313
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.9913804144973803
+    },
+    {
+      "label": "unavailable-2-nospin",
+      "variant": "nospin",
+      "scenario": "unavailable",
+      "started": 1788968800.8674812,
+      "ended": 1788968850.870619,
+      "json": "unavailable-2-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-2-nospin.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 32.57985825903401,
+          "unit": "ms/s",
+          "iterations": [
+            40.854774603113405,
+            33.92758995970229,
+            22.95721021428634
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 34.3532384506946,
+          "unit": "ms/s",
+          "iterations": [
+            42.704100851550436,
+            35.837813061462825,
+            24.517801439070546
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.990082255637459
+    },
+    {
+      "label": "unavailable-2-condition",
+      "variant": "condition",
+      "scenario": "unavailable",
+      "started": 1788968850.8717954,
+      "ended": 1788968900.914995,
+      "json": "unavailable-2-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-2-condition.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 37.23055954790407,
+          "unit": "ms/s",
+          "iterations": [
+            42.85543009075927,
+            40.89132665824015,
+            27.944921894712788
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 40.231319000650984,
+          "unit": "ms/s",
+          "iterations": [
+            46.687104196036785,
+            43.08270282734955,
+            30.924149978566614
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.989461976561024
+    },
+    {
+      "label": "unavailable-2-trunk",
+      "variant": "trunk",
+      "scenario": "unavailable",
+      "started": 1788968900.917489,
+      "ended": 1788968951.680973,
+      "json": "unavailable-2-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-2-trunk.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 2,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 498.5976891493319,
+          "unit": "ms/s",
+          "iterations": [
+            497.6694851304557,
+            497.83576510814385,
+            500.28781720939617
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 500.2544206262468,
+          "unit": "ms/s",
+          "iterations": [
+            499.4364100773641,
+            499.30894656453785,
+            502.0179052368385
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.946868518497469
+    },
+    {
+      "label": "unavailable-3-condition",
+      "variant": "condition",
+      "scenario": "unavailable",
+      "started": 1788968951.6832657,
+      "ended": 1788969001.6372936,
+      "json": "unavailable-3-condition.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/condition.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-3-condition.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 36.23809602863401,
+          "unit": "ms/s",
+          "iterations": [
+            42.869324041691684,
+            39.89081035929309,
+            25.954153684917245
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 37.59669964907783,
+          "unit": "ms/s",
+          "iterations": [
+            44.87481083802347,
+            40.73430154434034,
+            27.18098656486968
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.990054983912055
+    },
+    {
+      "label": "unavailable-3-trunk",
+      "variant": "trunk",
+      "scenario": "unavailable",
+      "started": 1788969001.6398923,
+      "ended": 1788969052.6035748,
+      "json": "unavailable-3-trunk.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/trunk.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-3-trunk.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 499.788333595044,
+          "unit": "ms/s",
+          "iterations": [
+            500.27954853811246,
+            498.78177949695424,
+            500.3036727500653
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 500.9166467647988,
+          "unit": "ms/s",
+          "iterations": [
+            501.7392287268451,
+            499.29573296875,
+            501.71497859880145
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.6573350629296093
+    },
+    {
+      "label": "unavailable-3-nospin",
+      "variant": "nospin",
+      "scenario": "unavailable",
+      "started": 1788969052.6053588,
+      "ended": 1788969102.5399473,
+      "json": "unavailable-3-nospin.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/trunk-jmh-a1edbfedc8/classes:/tmp/trunk-jmh-a1edbfedc8/variants/nospin.jar:/tmp/trunk-jmh-a1edbfedc8/slf4j.jar:/tmp/trunk-jmh-a1edbfedc8/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.unavailable",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "5s",
+        "-i",
+        "3",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/trunk-jmh-a1edbfedc8/results/unavailable-3-nospin.json",
+        "-p",
+        "server=127.0.0.1:35227"
+      ],
+      "repetition": 3,
+      "metrics": {
+        "process_cpu_ms_per_s": {
+          "score": 33.232414431742555,
+          "unit": "ms/s",
+          "iterations": [
+            41.838072834829944,
+            33.90747081838542,
+            23.951699642012297
+          ]
+        },
+        "cgroup_cpu_ms_per_s": {
+          "score": 35.088629305670906,
+          "unit": "ms/s",
+          "iterations": [
+            43.42532962661609,
+            35.709253980961215,
+            26.131304309435418
+          ]
+        }
+      },
+      "jmh_primary_unit": "ops/s",
+      "jmh_primary_score": 3.988662170833763
+    }
+  ]
+}

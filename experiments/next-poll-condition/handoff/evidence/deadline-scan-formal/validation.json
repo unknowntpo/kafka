@@ -1,0 +1,116 @@
+{
+  "status": "PASS",
+  "forks": 10,
+  "intervals": [
+    {
+      "metric": "throughput",
+      "paired_changes_percent": [
+        -8.072825034748954,
+        5.884356491244502,
+        0.2794293565628214,
+        -3.213617074289543,
+        -6.442540817173814
+      ],
+      "geometric_mean_change_percent": -2.439043485575576,
+      "exploratory_paired_log_t_95_percent_interval": [
+        -9.060328090959146,
+        4.664334456029184
+      ],
+      "assumption": "Five round log ratios treated as independent normal observations; exploratory, not equivalence proof."
+    },
+    {
+      "metric": "cpu_ms_million_records",
+      "paired_changes_percent": [
+        6.6353548390926775,
+        -3.9917152589868943,
+        1.7872205297471577,
+        7.389505988460243,
+        5.059000502112587
+      ],
+      "geometric_mean_change_percent": 3.2903285337055,
+      "exploratory_paired_log_t_95_percent_interval": [
+        -2.4157430822032477,
+        9.330052875107754
+      ],
+      "assumption": "Five round log ratios treated as independent normal observations; exploratory, not equivalence proof."
+    },
+    {
+      "metric": "bytes_op",
+      "paired_changes_percent": [
+        -1.680714050065324,
+        -0.12572578315834804,
+        0.006060814487796051,
+        0.6626187454248589,
+        7.925799132079003
+      ],
+      "geometric_mean_change_percent": 1.3030296968535637,
+      "exploratory_paired_log_t_95_percent_interval": [
+        -3.1786853967271322,
+        5.992196736964139
+      ],
+      "assumption": "Five round log ratios treated as independent normal observations; exploratory, not equivalence proof."
+    }
+  ],
+  "drift": [
+    {
+      "variant": "tree",
+      "round": 1,
+      "throughput_late2_vs_early2_percent": -3.9925216234908856,
+      "cpu_per_record_late2_vs_early2_percent": 4.24630924926046
+    },
+    {
+      "variant": "scan",
+      "round": 1,
+      "throughput_late2_vs_early2_percent": -7.650416848265918,
+      "cpu_per_record_late2_vs_early2_percent": 9.381190920194339
+    },
+    {
+      "variant": "scan",
+      "round": 2,
+      "throughput_late2_vs_early2_percent": -1.5213498837617356,
+      "cpu_per_record_late2_vs_early2_percent": 1.926888743878341
+    },
+    {
+      "variant": "tree",
+      "round": 2,
+      "throughput_late2_vs_early2_percent": 3.1922778751837244,
+      "cpu_per_record_late2_vs_early2_percent": -5.397706441549643
+    },
+    {
+      "variant": "tree",
+      "round": 3,
+      "throughput_late2_vs_early2_percent": -2.9285849567744937,
+      "cpu_per_record_late2_vs_early2_percent": 2.4479648430930423
+    },
+    {
+      "variant": "scan",
+      "round": 3,
+      "throughput_late2_vs_early2_percent": 0.674477941925411,
+      "cpu_per_record_late2_vs_early2_percent": 1.3095205801861853
+    },
+    {
+      "variant": "scan",
+      "round": 4,
+      "throughput_late2_vs_early2_percent": -15.280443600023897,
+      "cpu_per_record_late2_vs_early2_percent": 18.05205344370564
+    },
+    {
+      "variant": "tree",
+      "round": 4,
+      "throughput_late2_vs_early2_percent": 10.727382099355598,
+      "cpu_per_record_late2_vs_early2_percent": -2.6716959050269273
+    },
+    {
+      "variant": "tree",
+      "round": 5,
+      "throughput_late2_vs_early2_percent": -0.08093583789856584,
+      "cpu_per_record_late2_vs_early2_percent": -2.2408415298006634
+    },
+    {
+      "variant": "scan",
+      "round": 5,
+      "throughput_late2_vs_early2_percent": 9.26926984941112,
+      "cpu_per_record_late2_vs_early2_percent": -1.6560161345345659
+    }
+  ]
+}

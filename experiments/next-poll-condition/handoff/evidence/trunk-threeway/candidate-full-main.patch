@@ -1,0 +1,3379 @@
+--- a/clients/src/main/java/org/apache/kafka/clients/ApiVersions.java
++++ b/clients/src/main/java/org/apache/kafka/clients/ApiVersions.java
+@@ -17,7 +17,10 @@
+ package org.apache.kafka.clients;
+ 
+ import java.util.HashMap;
++import java.util.List;
+ import java.util.Map;
++import java.util.Objects;
++import java.util.concurrent.CopyOnWriteArrayList;
+ 
+ /**
+  * Maintains node api versions for access outside of NetworkClient (which is where the information is derived).
+@@ -28,6 +31,7 @@
+ public class ApiVersions {
+ 
+     private final Map<String, NodeApiVersions> nodeApiVersions = new HashMap<>();
++    private final List<Runnable> changeListeners = new CopyOnWriteArrayList<>();
+ 
+     // The maximum finalized feature epoch of all the node api versions.
+     private long maxFinalizedFeaturesEpoch = -1;
+@@ -48,10 +52,26 @@
+             this.maxFinalizedFeaturesEpoch = nodeApiVersions.finalizedFeaturesEpoch();
+             this.finalizedFeatures = nodeApiVersions.finalizedFeatures();
+         }
++        changeListeners.forEach(Runnable::run);
+     }
+ 
+     public synchronized void remove(String nodeId) {
+         this.nodeApiVersions.remove(nodeId);
++        // A failed first handshake has no cached entry, but is still a dependency change.
++        changeListeners.forEach(Runnable::run);
++    }
++
++    /**
++     * Observe cache publication on the updating thread. Listeners must only publish a notification:
++     * NetworkClient may finish updating connection state after this callback returns. They must not
++     * block, throw, or initiate transport work inline. Remove the listener when its owner closes.
++     */
++    public void addChangeListener(Runnable listener) {
++        changeListeners.add(Objects.requireNonNull(listener));
++    }
++
++    public void removeChangeListener(Runnable listener) {
++        changeListeners.remove(listener);
+     }
+ 
+     public synchronized NodeApiVersions get(String nodeId) {
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractHeartbeatRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractHeartbeatRequestManager.java
+@@ -91,6 +91,9 @@
+      * sending heartbeat until the next poll.
+      */
+     private final Timer pollTimer;
++    private final NextPollCondition.Signal inputChanged = new NextPollCondition.Signal();
++    private ApplicationPollWait applicationPollWait;
++    private long appliedWaitActivityMs = Long.MIN_VALUE;
+ 
+     /**
+      * Holding the heartbeat sensor to measure heartbeat timing and response latency
+@@ -162,12 +165,31 @@
+      */
+     @Override
+     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
++        NextPollCondition input = NextPollCondition.anyOf(inputChanged.await(),
++            NextPollCondition.anyOf(coordinatorRequestManager.stateChanged(), membershipManager().heartbeatStateChanged()));
++        NetworkClientDelegate.PollResult result = pollInternal(currentTimeMs);
++        // Skipped heartbeats cannot act on their timers. A state change will re-evaluate them.
++        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat())
++            return new NetworkClientDelegate.PollResult(result.timeUntilNextPollMs, result.unsentRequests, input);
++
++        // While a request is in flight its interval cannot cause another send. The poll deadline
++        // still matters unless the member is already leaving, when expiry has no further action.
++        long delayMs = heartbeatRequestState.requestInFlight() ? Long.MAX_VALUE :
++            heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
++        if (!membershipManager().isLeavingGroup())
++            delayMs = Math.min(delayMs, pollTimer.remainingMs());
++        NextPollCondition condition = delayMs == Long.MAX_VALUE ? input :
++            NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs, delayMs));
++        return new NetworkClientDelegate.PollResult(result.timeUntilNextPollMs, result.unsentRequests, condition);
++    }
++
++    private NetworkClientDelegate.PollResult pollInternal(long currentTimeMs) {
+         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
+             membershipManager().onHeartbeatRequestSkipped();
+             maybePropagateCoordinatorFatalErrorEvent();
+             return NetworkClientDelegate.PollResult.EMPTY;
+         }
+-        pollTimer.update(currentTimeMs);
++        updatePollTimer(currentTimeMs);
+         if (pollTimer.isExpired() && !membershipManager().isLeavingGroup()) {
+             logger.warn("Consumer poll timeout has expired. This means the time between " +
+                 "subsequent calls to poll() was longer than the configured max.poll.interval.ms, " +
+@@ -192,7 +214,10 @@
+             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
+ 
+         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
+-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
++            long delayMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
++            if (heartbeatRequestState.requestInFlight() && delayMs == 0L)
++                delayMs = membershipManager().isLeavingGroup() ? Long.MAX_VALUE : pollTimer.remainingMs();
++            return new NetworkClientDelegate.PollResult(delayMs);
+         }
+ 
+         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
+@@ -252,25 +277,54 @@
+      */
+     @Override
+     public long maximumTimeToWait(long currentTimeMs) {
+-        pollTimer.update(currentTimeMs);
++        updatePollTimer(currentTimeMs);
+         if (membershipManager().state() == MemberState.UNSUBSCRIBED) {
+             return Long.MAX_VALUE;
+         }
+         if (pollTimer.isExpired()) {
+             return 0L;
+         }
++        // Keep a positive delay even in the final millisecond before the poll timer expires.
++        long pollTimerWaitMs = Math.max(1L, pollTimer.remainingMs() / 2);
+         // KAFKA-20253: mirror the guard in poll(). A heartbeat is only sent when the coordinator is known
+         // and the member is in a state that heartbeats. When the coordinator is unavailable (e.g. after a
+         // re-authentication failure) or the member should skip heartbeats (FATAL/FENCED/STALE/UNSUBSCRIBED),
+         // poll() returns EMPTY, so falling through to the timer-based branches below would return 0 (the
+         // heartbeat timer is left permanently expired) and busy-spin both the application and network threads.
+         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
+-            return heartbeatRequestState.heartbeatIntervalMs();
++            long heartbeatIntervalMs = heartbeatRequestState.heartbeatIntervalMs();
++            // Before the first response the interval is zero, but a skipped heartbeat cannot progress.
++            return heartbeatIntervalMs > 0 ? Math.min(pollTimerWaitMs, heartbeatIntervalMs) : pollTimerWaitMs;
+         }
+         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
+             return 0L;
+         }
+-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
++        long heartbeatWaitMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
++        if (heartbeatRequestState.requestInFlight() && heartbeatWaitMs == 0L)
++            heartbeatWaitMs = Long.MAX_VALUE;
++        return Math.min(pollTimerWaitMs, heartbeatWaitMs);
++    }
++
++    void setApplicationPollWait(ApplicationPollWait applicationPollWait) {
++        this.applicationPollWait = applicationPollWait;
++    }
++
++    private void updatePollTimer(long nowMs) {
++        pollTimer.update(nowMs);
++        if (applicationPollWait != null) {
++            long currentMs = pollTimer.currentTimeMs();
++            long activityMs = Math.min(currentMs, applicationPollWait.activityMs(currentMs));
++            if (activityMs > appliedWaitActivityMs) {
++                appliedWaitActivityMs = activityMs;
++                long elapsedMs = currentMs - activityMs;
++                pollTimer.reset(elapsedMs >= maxPollIntervalMs ? 0L : maxPollIntervalMs - elapsedMs);
++            }
++        }
++    }
++
++    @Override
++    public void signalClose() {
++        inputChanged.publish();
+     }
+ 
+     /**
+@@ -279,6 +333,25 @@
+      * member to {@link MemberState#JOINING}, so that it rejoins the group.
+      */
+     public void resetPollTimer(final long pollMs) {
++        try {
++            resetPollTimerInternal(pollMs);
++        } finally {
++            inputChanged.publish();
++        }
++    }
++
++    private void resetPollTimerInternal(final long pollMs) {
++        if (applicationPollWait != null) {
++            pollTimer.update(pollMs);
++            boolean wasExpired = pollTimer.isExpired();
++            applicationPollWait.recordActivity(pollMs);
++            // Recompute from the activity timestamp, not from delivery time of a delayed event.
++            appliedWaitActivityMs = Long.MIN_VALUE;
++            updatePollTimer(pollTimer.currentTimeMs());
++            if (wasExpired && pollTimer.notExpired())
++                membershipManager().maybeRejoinStaleMember();
++            return;
++        }
+         pollTimer.update(pollMs);
+         if (pollTimer.isExpired()) {
+             logger.warn("Time between subsequent calls to poll() was longer than the configured " +
+@@ -310,12 +383,16 @@
+             return logResponse(request);
+         else
+             return request.whenComplete((response, exception) -> {
+-                long completionTimeMs = request.handler().completionTimeMs();
+-                if (response != null) {
+-                    metricsManager.recordRequestLatency(response.requestLatencyMs());
+-                    onResponse((R) response.responseBody(), completionTimeMs);
+-                } else {
+-                    onFailure(exception, completionTimeMs);
++                try {
++                    long completionTimeMs = request.handler().completionTimeMs();
++                    if (response != null) {
++                        metricsManager.recordRequestLatency(response.requestLatencyMs());
++                        onResponse((R) response.responseBody(), completionTimeMs);
++                    } else {
++                        onFailure(exception, completionTimeMs);
++                    }
++                } finally {
++                    inputChanged.publish();
+                 }
+             });
+     }
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractMembershipManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractMembershipManager.java
+@@ -60,6 +60,23 @@
+  * The class variable R is the response for the specific group's heartbeat RPC.
+  */
+ public abstract class AbstractMembershipManager<R extends AbstractResponse> implements RequestManager {
++
++    private final NextPollCondition.Signal heartbeatInputChanged = new NextPollCondition.Signal();
++
++    /** Capture on the network thread before reading heartbeat eligibility. */
++    NextPollCondition heartbeatStateChanged() {
++        return heartbeatInputChanged.await();
++    }
++
++    private Runnable positionStateChangeListener = () -> { };
++
++    /**
++     * Install a background-thread notification for subscription mutations. The listener must only
++     * publish readiness; retained position and fetch work is advanced on the next owner turn.
++     */
++    void setPositionStateChangeListener(Runnable listener) {
++        positionStateChangeListener = listener;
++    }
+ 
+     /**
+      * TopicPartition comparator based on topic name and partition.
+@@ -246,6 +263,7 @@
+ 
+         log.info("Member {} with epoch {} transitioned from {} to {}.", memberId, memberEpoch, state, nextState);
+         this.state = nextState;
++        heartbeatInputChanged.publish();
+         stateUpdatesListeners.forEach(listener -> listener.onMemberStateChange(nextState));
+     }
+ 
+@@ -564,6 +582,7 @@
+         }
+         currentAssignment = LocalAssignment.NONE;
+         clearPendingAssignmentsAndLocalNamesCache();
++        positionStateChangeListener.run();
+     }
+ 
+     /**
+@@ -598,6 +617,7 @@
+      */
+     public CompletableFuture<Void> leaveGroupOnClose(CloseOptions.GroupMembershipOperation membershipOperation) {
+         this.leaveGroupOperation = membershipOperation;
++        heartbeatInputChanged.publish();
+         return leaveGroup(false);
+     }
+ 
+@@ -631,6 +651,7 @@
+                 transitionTo(MemberState.UNSUBSCRIBED);
+             }
+             subscriptions.unsubscribe();
++            positionStateChangeListener.run();
+             notifyAssignmentChange(Collections.emptySet());
+             return CompletableFuture.completedFuture(null);
+         }
+@@ -1264,6 +1285,7 @@
+                 // if the first callback fails but the next one succeeds, polling can still retrieve data. To align with
+                 // this behavior, we rely on assignedPartitions to avoid such scenarios.
+                 subscriptions.enablePartitionsAwaitingCallback(assignedPartitions.topicPartitions());
++                positionStateChangeListener.run();
+             } else {
+                 // Keeping newly added partitions as non-fetchable after the callback failure.
+                 // They will be retried on the next reconciliation loop, until it succeeds or the
+@@ -1326,6 +1348,7 @@
+         // fetches or returning data from previous fetches to the user.
+         log.debug("Marking partitions pending for revocation: {}", partitionsToRevoke);
+         subscriptions.markPendingRevocation(partitionsToRevoke);
++        positionStateChangeListener.run();
+     }
+ 
+     /**
+--- /dev/null
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ApplicationPollWait.java
+@@ -0,0 +1,64 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.kafka.clients.consumer.internals;
++
++/**
++ * App wait registration, shared with the heartbeat owner. Publication revokes the registration
++ * before signalling the app; repeated publications cannot renew an unresponsive app.
++ * FetchBuffer serializes registration and publication with its condition lock.
++ */
++final class ApplicationPollWait {
++    private long epoch;
++    private boolean waiting;
++    private long deadlineMs;
++    private long lastActivityMs = Long.MIN_VALUE;
++
++    synchronized long begin(long nowMs, long deadlineMs) {
++        epoch++;
++        waiting = true;
++        this.deadlineMs = deadlineMs;
++        recordActivity(nowMs);
++        return epoch;
++    }
++
++    synchronized void signal(long nowMs) {
++        if (waiting) {
++            waiting = false;
++            recordActivity(Math.min(nowMs, deadlineMs));
++        }
++    }
++
++    synchronized void end(long expectedEpoch, long nowMs) {
++        if (expectedEpoch == epoch) {
++            waiting = false;
++            recordActivity(nowMs);
++        }
++    }
++
++    synchronized void recordActivity(long nowMs) {
++        lastActivityMs = Math.max(lastActivityMs, nowMs);
++    }
++
++    /** Zero means app work, notification, or expiry prevents a background auto-commit snapshot. */
++    synchronized long currentWaitEpoch(long nowMs) {
++        return waiting && nowMs < deadlineMs ? epoch : 0L;
++    }
++
++    synchronized long activityMs(long nowMs) {
++        return waiting ? Math.max(lastActivityMs, Math.min(nowMs, deadlineMs)) : lastActivityMs;
++    }
++}
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java
+@@ -46,10 +46,12 @@
+ import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+ import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
+ import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
++import org.apache.kafka.clients.consumer.internals.events.CancelAsyncPollEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CheckAndUpdatePositionsEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CommitEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CommitOnCloseEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CompletableApplicationEvent;
++import org.apache.kafka.clients.consumer.internals.events.CompletableBackgroundEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
+ import org.apache.kafka.clients.consumer.internals.events.ConsumerRebalanceListenerCallbackCompletedEvent;
+@@ -239,7 +241,9 @@
+             applyNewAssignment(event);
+ 
+             if (!subscriptions.hasRebalanceListener()) {
+-                event.future().complete(null);
++                // Completion runs membership continuations, which belong to the network thread.
++                applicationEventHandler.add(new ConsumerRebalanceListenerCallbackCompletedEvent(
++                    ON_PARTITIONS_ASSIGNED, event.future(), Optional.empty()));
+             } else {
+                 invokeRebalanceCallbackAndNotifyBackgroundThread(ON_PARTITIONS_ASSIGNED, event.addedPartitions(), event.future());
+             }
+@@ -509,14 +513,15 @@
+ 
+             ApiVersions apiVersions = new ApiVersions();
+             final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
++            // This FetchBuffer is shared between the application and network threads.
++            this.fetchBuffer = new FetchBuffer(logContext, time);
+             this.backgroundEventHandler = new BackgroundEventHandler(
+                 backgroundEventQueue,
+                 time,
+-                asyncConsumerMetrics
++                asyncConsumerMetrics,
++                fetchBuffer::wakeup
+             );
+ 
+-            // This FetchBuffer is shared between the application and network threads.
+-            this.fetchBuffer = new FetchBuffer(logContext);
+             this.positionsValidator = new PositionsValidator(logContext, time, subscriptions, metadata);
+             final Supplier<NetworkClientDelegate> networkClientDelegateSupplier = NetworkClientDelegate.supplier(time,
+                     logContext,
+@@ -530,7 +535,7 @@
+                     false,
+                     asyncConsumerMetrics
+             );
+-            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
++            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
+             this.groupMetadata.set(initializeGroupMetadata(config, groupRebalanceConfig));
+             final Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(time,
+                     logContext,
+@@ -655,11 +660,12 @@
+         this.asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
+         this.clientTelemetryReporter = Optional.empty();
+         this.autoCommitEnabled = autoCommitEnabled;
+-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
++        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
+         this.backgroundEventHandler = new BackgroundEventHandler(
+             backgroundEventQueue,
+             time,
+-            asyncConsumerMetrics
++            asyncConsumerMetrics,
++            fetchBuffer::wakeup
+         );
+         this.positionsValidator = positionsValidator;
+     }
+@@ -676,7 +682,7 @@
+         this.subscriptions = subscriptions;
+         this.clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
+         this.autoCommitEnabled = config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
+-        this.fetchBuffer = new FetchBuffer(logContext);
++        this.fetchBuffer = new FetchBuffer(logContext, time);
+         this.isolationLevel = IsolationLevel.READ_UNCOMMITTED;
+         this.time = time;
+         this.metrics = new Metrics(time);
+@@ -712,7 +718,8 @@
+         this.backgroundEventHandler = new BackgroundEventHandler(
+             backgroundEventQueue,
+             time,
+-            asyncConsumerMetrics
++            asyncConsumerMetrics,
++            fetchBuffer::wakeup
+         );
+         this.rebalanceCallbackMetricsManager = new RebalanceCallbackMetricsManager(metrics);
+         this.rebalanceListenerInvoker = new ConsumerRebalanceListenerInvoker(
+@@ -733,7 +740,7 @@
+             false,
+             asyncConsumerMetrics
+         );
+-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
++        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
+         Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(
+             time,
+             logContext,
+@@ -941,6 +948,8 @@
+                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
+             }
+ 
++            fetchBuffer.recordPollActivity(time.milliseconds());
++
+             // This distinguishes the first pass of the inner do/while loop from subsequent passes for the
+             // inflight poll event logic.
+             boolean firstPass = true;
+@@ -1002,7 +1011,13 @@
+         boolean newlySubmittedEvent = false;
+ 
+         if (inflightPoll == null) {
+-            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds());
++            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds(),
++                    fetchBuffer::wakeup, () -> {
++                        // Validation may release records that arrived before the application parked.
++                        // An empty buffer provides no app work, so it must not start a wake/resubmit loop.
++                        if (!fetchBuffer.isEmpty() || fetchBuffer.nextInLineFetch() != null)
++                            fetchBuffer.wakeup();
++                    });
+             newlySubmittedEvent = true;
+             log.trace("Inflight event {} submitted", inflightPoll);
+             applicationEventHandler.add(inflightPoll);
+@@ -1018,7 +1033,7 @@
+             // bubble it up to the user but make sure to clear out the inflight request because the error effectively
+             // renders it complete.
+             log.trace("Inflight event {} failed due to {}, clearing", inflightPoll, String.valueOf(t));
+-            inflightPoll = null;
++            clearInflightPoll();
+             throw ConsumerUtils.maybeWrapAsKafkaException(t);
+         } finally {
+             timer.update();
+@@ -1026,6 +1041,20 @@
+ 
+         if (inflightPoll != null) {
+             maybeClearCurrentInflightPoll(newlySubmittedEvent);
++        }
++    }
++
++    private void clearInflightPoll() {
++        AsyncPollEvent previous = inflightPoll;
++        inflightPoll = null;
++        if (previous != null && previous.requestCancellation()) {
++            try {
++                applicationEventHandler.add(new CancelAsyncPollEvent(previous));
++            } catch (RuntimeException e) {
++                // A dead network owner will release retained work during cleanup. Preserve the
++                // original poll error rather than replacing it with cancellation publication failure.
++                log.debug("Unable to publish cancellation for abandoned poll {}", previous, e);
++            }
+         }
+     }
+ 
+@@ -1038,7 +1067,7 @@
+                 // an error, throw it without delay.
+                 KafkaException error = errorOpt.get();
+                 log.trace("Previous inflight event {} completed with an error ({}), clearing", inflightPoll, error);
+-                inflightPoll = null;
++                clearInflightPoll();
+                 throw error;
+             } else {
+                 // Successful case...
+@@ -1046,7 +1075,7 @@
+                     // If it completed without error, but without populating the fetch buffer, clear the event
+                     // so that a new event will be enqueued below.
+                     log.trace("Previous inflight event {} completed without filling the buffer, clearing", inflightPoll);
+-                    inflightPoll = null;
++                    clearInflightPoll();
+                 } else {
+                     // However, if the event completed, and it populated the buffer, *don't* create a new event.
+                     // This is to prevent an edge case of starvation when poll() is called with a timeout of 0.
+@@ -1060,7 +1089,7 @@
+         } else if (inflightPoll.isExpired(time) && inflightPoll.isValidatePositionsComplete()) {
+             // The inflight event validated positions, but it has expired.
+             log.trace("Previous inflight event {} expired without completing, clearing", inflightPoll);
+-            inflightPoll = null;
++            clearInflightPoll();
+         }
+     }
+ 
+@@ -1072,17 +1101,17 @@
+                 // If the inflight event completed with an error, throw it without delay.
+                 KafkaException error = errorOpt.get();
+                 log.trace("Inflight event {} completed with an error ({}), clearing", inflightPoll, error);
+-                inflightPoll = null;
++                clearInflightPoll();
+                 throw error;
+             } else {
+                 log.trace("Inflight event {} completed without error, clearing", inflightPoll);
+-                inflightPoll = null;
++                clearInflightPoll();
+             }
+         } else if (!newlySubmittedEvent) {
+             if (inflightPoll.isExpired(time) && inflightPoll.isValidatePositionsComplete()) {
+                 // The inflight event validated positions, but it has expired.
+                 log.trace("Inflight event {} expired without completing, clearing", inflightPoll);
+-                inflightPoll = null;
++                clearInflightPoll();
+             }
+         }
+     }
+@@ -1668,8 +1697,12 @@
+ 
+         // close() can be called from inside one of the constructors. In that case, it's possible that neither
+         // the reaper nor the background event queue were constructed, so check them first to avoid NPE.
+-        if (backgroundEventReaper != null && backgroundEventQueue != null)
++        if (backgroundEventReaper != null && backgroundEventQueue != null) {
++            // Membership futures are terminalized by the network owner before shutdown. Never
++            // run their reconciliation continuations on this thread, even during close.
++            backgroundEventQueue.removeIf(event -> event instanceof CompletableBackgroundEvent);
+             backgroundEventReaper.reap(backgroundEventQueue);
++        }
+ 
+         closeQuietly(interceptors, "consumer interceptors", firstException);
+         closeQuietly(kafkaConsumerMetrics, "kafka consumer metrics", firstException);
+@@ -2376,17 +2409,22 @@
+             for (BackgroundEvent event : events) {
+                 asyncConsumerMetrics.recordBackgroundEventQueueTime(time.milliseconds() - event.enqueuedMs());
+                 try {
+-                    if (event instanceof CompletableEvent)
++                    // The background handler owns membership callback futures, including close.
++                    // Their completion may run network-thread-confined reconciliation work.
++                    if (event instanceof CompletableEvent && !(event instanceof CompletableBackgroundEvent))
+                         backgroundEventReaper.add((CompletableEvent<?>) event);
+ 
+                     // Skip assignment events if requested (e.g., during unsubscribe).
+                     // These events should only be processed from poll().
+                     // Complete them exceptionally to unblock the reconciliation in the background.
+                     if (skipAssignmentEvents && isAssignmentEvent(event)) {
+-                        if (event instanceof CompletableEvent) {
+-                            ((CompletableEvent<?>) event).future().completeExceptionally(
+-                                new KafkaException("Assignment event skipped because consumer is unsubscribing"));
+-                        }
++                        KafkaException error = new KafkaException("Assignment event skipped because consumer is unsubscribing");
++                        if (event instanceof PartitionsAssignedEvent)
++                            applicationEventHandler.add(new ConsumerRebalanceListenerCallbackCompletedEvent(
++                                ON_PARTITIONS_ASSIGNED, ((PartitionsAssignedEvent) event).future(), Optional.of(error)));
++                        else
++                            applicationEventHandler.add(new StreamsOnTasksAssignedCallbackCompletedEvent(
++                                ((StreamsTasksAssignedEvent) event).future(), Optional.of(error)));
+                         log.debug("Skipped processing {} during unsubscribe", event.type());
+                         continue;
+                     }
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java
+@@ -80,6 +80,7 @@
+     private final LogContext logContext;
+     private final Logger log;
+     private final Optional<AutoCommitState> autoCommitState;
++    private ApplicationPollWait applicationPollWait;
+     private final CoordinatorRequestManager coordinatorRequestManager;
+     private final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker;
+     private final OffsetCommitMetricsManager metricsManager;
+@@ -197,15 +198,17 @@
+             return drainPendingOffsetCommitRequests();
+         }
+ 
++        maybeAutoCommitWhileAppWaits(currentTimeMs);
++        long autoCommitDelayMs = timeToNextBackgroundAutoCommitMs(currentTimeMs);
+         if (!pendingRequests.hasUnsentRequests())
+-            return EMPTY;
++            return autoCommitDelayMs == Long.MAX_VALUE ? EMPTY : new NetworkClientDelegate.PollResult(autoCommitDelayMs);
+ 
+         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
+         // min of the remainingBackoffMs of all the request that are still backing off
+         final long timeUntilNextPoll = Math.min(
+             findMinTime(unsentOffsetCommitRequests(), currentTimeMs),
+             findMinTime(unsentOffsetFetchRequests(), currentTimeMs));
+-        return new NetworkClientDelegate.PollResult(timeUntilNextPoll, requests);
++        return new NetworkClientDelegate.PollResult(Math.min(timeUntilNextPoll, autoCommitDelayMs), requests);
+     }
+ 
+     @Override
+@@ -221,7 +224,37 @@
+      */
+     @Override
+     public long maximumTimeToWait(long currentTimeMs) {
++        if (applicationPollWait != null)
++            return Long.MAX_VALUE;
+         return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
++    }
++
++    void setApplicationPollWait(ApplicationPollWait applicationPollWait) {
++        this.applicationPollWait = applicationPollWait;
++    }
++
++    private void maybeAutoCommitWhileAppWaits(long currentTimeMs) {
++        if (applicationPollWait == null || !autoCommitEnabled())
++            return;
++        updateAutoCommitTimer(currentTimeMs);
++        if (!autoCommitState.get().shouldAutoCommit())
++            return;
++        long epoch = applicationPollWait.currentWaitEpoch(time.milliseconds());
++        if (epoch == 0)
++            return;
++        // Read only while the app is parked, then reject any snapshot overlapping a wake/new wait.
++        // No domain work or callbacks run under the shared wait-state lock.
++        Map<TopicPartition, OffsetAndMetadata> offsets = subscriptions.allConsumed();
++        if (applicationPollWait.currentWaitEpoch(time.milliseconds()) == epoch)
++            maybeAutoCommitAsync(offsets);
++    }
++
++    private long timeToNextBackgroundAutoCommitMs(long currentTimeMs) {
++        if (applicationPollWait == null || !autoCommitEnabled()
++                || autoCommitState.get().hasInflightCommit
++                || applicationPollWait.currentWaitEpoch(time.milliseconds()) == 0)
++            return Long.MAX_VALUE;
++        return autoCommitState.get().remainingMs(currentTimeMs);
+     }
+ 
+     private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
+@@ -275,10 +308,13 @@
+      * response for the in-flight is received.
+      */
+     private void maybeAutoCommitAsync() {
++        if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit())
++            maybeAutoCommitAsync(subscriptions.allConsumed());
++    }
++
++    private void maybeAutoCommitAsync(Map<TopicPartition, OffsetAndMetadata> offsets) {
+         if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit()) {
+-            OffsetCommitRequestState requestState = createOffsetCommitRequest(
+-                subscriptions.allConsumed(),
+-                Long.MAX_VALUE);
++            OffsetCommitRequestState requestState = createOffsetCommitRequest(offsets, Long.MAX_VALUE);
+             CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result = requestAutoCommit(requestState);
+             // Reset timer to the interval (even if no request was generated), but ensure that if
+             // the request completes with a retriable error, the timer is reset to send the next
+@@ -518,11 +554,21 @@
+     public CompletableFuture<OffsetFetchResult> fetchOffsets(
+         final Set<TopicPartition> partitions,
+         final long deadlineMs) {
++        return fetchOffsets(partitions, deadlineMs, null);
++    }
++
++    /**
++     * Fetch offsets within an immutable caller scope. Equal scopes may share a request; distinct
++     * scopes must never inherit an older request's response. Null preserves ordinary API deduplication.
++     */
++    public CompletableFuture<OffsetFetchResult> fetchOffsets(final Set<TopicPartition> partitions,
++                                                            final long deadlineMs,
++                                                            final Object deduplicationScope) {
+         if (partitions.isEmpty()) {
+             return CompletableFuture.completedFuture(new OffsetFetchResult(Collections.emptyMap(), Collections.emptyMap()));
+         }
+         CompletableFuture<OffsetFetchResult> result = new CompletableFuture<>();
+-        OffsetFetchRequestState request = createOffsetFetchRequest(partitions, deadlineMs);
++        OffsetFetchRequestState request = createOffsetFetchRequest(partitions, deadlineMs, deduplicationScope);
+         fetchOffsetsWithRetries(request, result);
+         return result;
+     }
+@@ -530,6 +576,12 @@
+     // Visible for testing
+     OffsetFetchRequestState createOffsetFetchRequest(final Set<TopicPartition> partitions,
+                                                              final long deadlineMs) {
++        return createOffsetFetchRequest(partitions, deadlineMs, null);
++    }
++
++    private OffsetFetchRequestState createOffsetFetchRequest(final Set<TopicPartition> partitions,
++                                                             final long deadlineMs,
++                                                             final Object deduplicationScope) {
+         return jitter.isPresent() ?
+             new OffsetFetchRequestState(
+                 partitions,
+@@ -537,13 +589,15 @@
+                 retryBackoffMaxMs,
+                 deadlineMs,
+                 jitter.getAsDouble(),
+-                memberInfo) :
++                memberInfo,
++                deduplicationScope) :
+             new OffsetFetchRequestState(
+                 partitions,
+                 retryBackoffMs,
+                 retryBackoffMaxMs,
+                 deadlineMs,
+-                memberInfo);
++                memberInfo,
++                deduplicationScope);
+     }
+ 
+     private void fetchOffsetsWithRetries(final OffsetFetchRequestState fetchRequest,
+@@ -1113,6 +1167,7 @@
+          * Partitions to get committed offsets for.
+          */
+         public final Set<TopicPartition> requestedPartitions;
++        private final Object deduplicationScope;
+ 
+         /**
+          * Map of topic ID to topic names for the topics included in a request when using topic IDs.
+@@ -1132,9 +1187,19 @@
+                                        final long retryBackoffMaxMs,
+                                        final long deadlineMs,
+                                        final MemberInfo memberInfo) {
++            this(partitions, retryBackoffMs, retryBackoffMaxMs, deadlineMs, memberInfo, null);
++        }
++
++        private OffsetFetchRequestState(final Set<TopicPartition> partitions,
++                                        final long retryBackoffMs,
++                                        final long retryBackoffMaxMs,
++                                        final long deadlineMs,
++                                        final MemberInfo memberInfo,
++                                        final Object deduplicationScope) {
+             super(logContext, CommitRequestManager.class.getSimpleName(), retryBackoffMs,
+                 retryBackoffMaxMs, memberInfo, deadlineTimer(time, deadlineMs));
+             this.requestedPartitions = partitions;
++            this.deduplicationScope = deduplicationScope;
+             this.future = new CompletableFuture<>();
+             this.topicNamesCache = new HashMap<>();
+         }
+@@ -1145,15 +1210,27 @@
+                                        final long deadlineMs,
+                                        final double jitter,
+                                        final MemberInfo memberInfo) {
++            this(partitions, retryBackoffMs, retryBackoffMaxMs, deadlineMs, jitter, memberInfo, null);
++        }
++
++        private OffsetFetchRequestState(final Set<TopicPartition> partitions,
++                                        final long retryBackoffMs,
++                                        final long retryBackoffMaxMs,
++                                        final long deadlineMs,
++                                        final double jitter,
++                                        final MemberInfo memberInfo,
++                                        final Object deduplicationScope) {
+             super(logContext, CommitRequestManager.class.getSimpleName(), retryBackoffMs, 2,
+                 retryBackoffMaxMs, jitter, memberInfo, deadlineTimer(time, deadlineMs));
+             this.requestedPartitions = partitions;
++            this.deduplicationScope = deduplicationScope;
+             this.future = new CompletableFuture<>();
+             this.topicNamesCache = new HashMap<>();
+         }
+ 
+         public boolean sameRequest(final OffsetFetchRequestState request) {
+-            return requestedPartitions.equals(request.requestedPartitions);
++            return requestedPartitions.equals(request.requestedPartitions)
++                    && Objects.equals(deduplicationScope, request.deduplicationScope);
+         }
+ 
+         public NetworkClientDelegate.UnsentRequest toUnsentRequest() {
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java
+@@ -20,7 +20,9 @@
+ import org.apache.kafka.clients.NetworkClient;
+ import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
+ import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
++import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+ import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
++import org.apache.kafka.clients.consumer.internals.events.CancelAsyncPollEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
+ import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
+ import org.apache.kafka.clients.consumer.internals.events.MetadataErrorNotifiableEvent;
+@@ -77,6 +79,8 @@
+     private ApplicationEventProcessor applicationEventProcessor;
+     private NetworkClientDelegate networkClientDelegate;
+     private RequestManagers requestManagers;
++    private final RequestManagerScheduler requestManagerScheduler = new RequestManagerScheduler();
++    private boolean managersRegistered;
+     private volatile boolean running;
+     private final IdempotentCloser closer = new IdempotentCloser();
+     private final CountDownLatch initializationLatch = new CountDownLatch(1);
+@@ -183,6 +187,8 @@
+         applicationEventProcessor = applicationEventProcessorSupplier.get();
+         networkClientDelegate = networkClientDelegateSupplier.get();
+         requestManagers = requestManagersSupplier.get();
++        requestManagerScheduler.close();
++        managersRegistered = false;
+     }
+ 
+     /**
+@@ -194,8 +200,9 @@
+      *         {@link ApplicationEventProcessor}
+      *     </li>
+      *     <li>
+-     *         Iterate through the {@link RequestManager} list and invoke {@link RequestManager#poll(long)} to get
+-     *         the {@link NetworkClientDelegate.UnsentRequest} list and the poll time for the network poll
++     *         Invoke {@link RequestManager#poll(long)} for ready and legacy managers, preserving manager order,
++     *         to get requests and the next network poll timeout. Waiting managers are activated by subscriptions
++     *         or deadline expiry.
+      *     </li>
+      *     <li>
+      *         Stage each {@link AbstractRequest.Builder request} to be sent via
+@@ -208,6 +215,10 @@
+      * </ol>
+      */
+     void runOnce() {
++        if (!managersRegistered) {
++            requestManagerScheduler.registerManagers(requestManagers.entries());
++            managersRegistered = true;
++        }
+         // The following code avoids use of the Java Collections Streams API to reduce overhead in this loop.
+         processApplicationEvents();
+ 
+@@ -217,13 +228,8 @@
+         }
+         lastPollTimeMs = currentTimeMs;
+ 
+-        long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
+-
+-        for (RequestManager rm : requestManagers.entries()) {
+-            NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
+-            long timeoutMs = networkClientDelegate.addAll(pollResult);
+-            pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
+-        }
++        long pollWaitTimeMs = Math.min(MAX_POLL_TIMEOUT_MS,
++                requestManagerScheduler.pollReady(currentTimeMs, networkClientDelegate::addAll));
+ 
+         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
+ 
+@@ -270,6 +276,8 @@
+                 log.error("Error processing event {}", t.getMessage(), t);
+                 if (event instanceof CompletableEvent) {
+                     ((CompletableEvent<?>) event).future().completeExceptionally(t);
++                } else {
++                    maybeFailAsyncPoll(event, ConsumerUtils.maybeWrapAsKafkaException(t));
+                 }
+             }
+         }
+@@ -410,6 +418,11 @@
+     }
+ 
+     void cleanup() {
++        requestManagerScheduler.close();
++        if (applicationEventProcessor != null)
++            applicationEventProcessor.closeFetchContinuations();
++        if (networkClientDelegate != null)
++            networkClientDelegate.closePendingBackgroundCallbacks();
+         log.trace("Closing the consumer network thread");
+         Timer timer = time.timer(closeTimeout);
+         try {
+@@ -427,12 +440,23 @@
+             if (networkClientDelegate != null)
+                 sendUnsentRequests(timer);
+ 
++            // AsyncPollEvent owns stage completion rather than a CompletableEvent future, so the
++            // generic reaper would otherwise discard accepted, unprocessed polls without terminating them.
++            for (ApplicationEvent event : applicationEventQueue)
++                maybeFailAsyncPoll(event, new KafkaException("Consumer closed before poll processing"));
+             asyncConsumerMetrics.recordApplicationEventExpiredSize(applicationEventReaper.reap(applicationEventQueue));
+ 
+             closeQuietly(requestManagers, "request managers");
+             closeQuietly(networkClientDelegate, "network client delegate");
+             log.debug("Closed the consumer network thread");
+         }
++    }
++
++    private void maybeFailAsyncPoll(ApplicationEvent event, KafkaException error) {
++        AsyncPollEvent poll = event instanceof AsyncPollEvent ? (AsyncPollEvent) event
++                : event instanceof CancelAsyncPollEvent ? ((CancelAsyncPollEvent) event).target() : null;
++        if (poll != null && !poll.isComplete())
++            poll.completeExceptionally(error);
+     }
+ 
+     /**
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CoordinatorRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CoordinatorRequestManager.java
+@@ -30,10 +30,9 @@
+ 
+ import org.slf4j.Logger;
+ 
++import java.util.Collections;
+ import java.util.Objects;
+ import java.util.Optional;
+-
+-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
+ 
+ /**
+  * This is responsible for timing to send the next {@link FindCoordinatorRequest} based on the following criteria:
+@@ -57,6 +56,7 @@
+     private long timeMarkedUnknownMs = -1L; // starting logging a warning only after unable to connect for a while
+     private long totalDisconnectedMin = 0;
+     private boolean closing = false;
++    private final NextPollCondition.Signal inputChanged = new NextPollCondition.Signal();
+     private Node coordinator;
+     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
+     // appropriate actions. 
+@@ -82,9 +82,18 @@
+         );
+     }
+ 
++    /**
++     * Capture before reading coordinator state so a change before registration is not lost.
++     * Network-thread callers use this only to request re-evaluation, not permission to send a request.
++     */
++    NextPollCondition stateChanged() {
++        return inputChanged.await();
++    }
++
+     @Override
+     public void signalClose() {
+         closing = true;
++        inputChanged.publish();
+     }
+ 
+     /**
+@@ -99,22 +108,18 @@
+      */
+     @Override
+     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
+-        if (closing || this.coordinator != null)
+-            return EMPTY;
++        NextPollCondition input = inputChanged.await();
++        if (closing || this.coordinator != null || coordinatorRequestState.requestInFlight())
++            return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, Collections.emptyList(), input);
+ 
+         if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
+             NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
+-            return new NetworkClientDelegate.PollResult(request);
+-        }
+-
+-        // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
+-        // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
+-        // backoff
+-        if (coordinatorRequestState.requestInFlight()) {
+-            return EMPTY;
+-        }
+-
+-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
++            return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, Collections.singletonList(request), input);
++        }
++
++        long backoffMs = coordinatorRequestState.remainingBackoffMs(currentTimeMs);
++        return new NetworkClientDelegate.PollResult(backoffMs, Collections.emptyList(),
++                NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs, backoffMs)));
+     }
+ 
+     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {
+@@ -128,12 +133,16 @@
+         );
+ 
+         return unsentRequest.whenComplete((clientResponse, throwable) -> {
+-            getAndClearFatalError();
+-            if (clientResponse != null) {
+-                FindCoordinatorResponse response = (FindCoordinatorResponse) clientResponse.responseBody();
+-                onResponse(clientResponse.receivedTimeMs(), response);
+-            } else {
+-                onFailedResponse(unsentRequest.handler().completionTimeMs(), throwable);
++            try {
++                getAndClearFatalError();
++                if (clientResponse != null) {
++                    FindCoordinatorResponse response = (FindCoordinatorResponse) clientResponse.responseBody();
++                    onResponse(clientResponse.receivedTimeMs(), response);
++                } else {
++                    onFailedResponse(unsentRequest.handler().completionTimeMs(), throwable);
++                }
++            } finally {
++                inputChanged.publish();
+             }
+         });
+     }
+@@ -178,6 +187,7 @@
+                 cause
+             );
+             coordinator = null;
++            inputChanged.publish();
+         } else {
+             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
+             long currDisconnectMin = durationOfOngoingDisconnectMs / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java
+@@ -19,6 +19,7 @@
+ import org.apache.kafka.common.TopicPartition;
+ import org.apache.kafka.common.errors.InterruptException;
+ import org.apache.kafka.common.internals.IdempotentCloser;
++import org.apache.kafka.common.utils.Time;
+ import org.apache.kafka.common.utils.Timer;
+ import org.apache.kafka.common.utils.internals.LogContext;
+ 
+@@ -50,6 +51,9 @@
+ public class FetchBuffer implements AutoCloseable {
+ 
+     private final Logger log;
++    private final Time time;
++    private final ApplicationPollWait applicationPollWait = new ApplicationPollWait();
++    private volatile Runnable onWaitRegistered = () -> { };
+     private final ConcurrentLinkedQueue<CompletedFetch> completedFetches;
+     private final Lock lock;
+     private final Condition blockingCondition;
+@@ -60,12 +64,29 @@
+     private CompletedFetch nextInLineFetch;
+ 
+     public FetchBuffer(final LogContext logContext) {
++        this(logContext, Time.SYSTEM);
++    }
++
++    FetchBuffer(final LogContext logContext, final Time time) {
++        this.time = time;
+         this.log = logContext.logger(FetchBuffer.class);
+         this.completedFetches = new ConcurrentLinkedQueue<>();
+         this.lock = new ReentrantLock();
+         this.blockingCondition = lock.newCondition();
+     }
+ 
++    void setWaitRegistrationListener(Runnable listener) {
++        onWaitRegistered = listener;
++    }
++
++    void recordPollActivity(long nowMs) {
++        applicationPollWait.recordActivity(nowMs);
++    }
++
++    ApplicationPollWait applicationPollWait() {
++        return applicationPollWait;
++    }
++
+     /**
+      * Returns {@code true} if there are no completed fetches pending to return to the user.
+      *
+@@ -106,6 +127,7 @@
+         try {
+             lock.lock();
+             this.completedFetches.addAll(completedFetches);
++            applicationPollWait.signal(time.milliseconds());
+             wokenup.set(true);
+             blockingCondition.signalAll();
+         } finally {
+@@ -163,14 +185,14 @@
+      * @param timer Timer that provides time to wait
+      */
+     void awaitWakeup(Timer timer) {
+-        try {
+-            lock.lock();
+-
++        long waitEpoch = 0;
++        lock.lock();
++        try {
+             while (!wokenup.compareAndSet(true, false)) {
+                 // Update the timer before we head into the loop in case it took a while to get the lock.
+                 timer.update();
+ 
+-                if (timer.isExpired()) {
++                if (timer.isExpired() || idempotentCloser.isClosed()) {
+                     // If the thread was interrupted before we start waiting, it still counts as
+                     // interrupted from the point of view of the KafkaConsumer.poll(Duration) contract.
+                     // We only need to check this when we are not going to wait because waiting
+@@ -181,6 +203,13 @@
+                     break;
+                 }
+ 
++                if (waitEpoch == 0) {
++                    long nowMs = timer.currentTimeMs();
++                    long deadlineMs = nowMs > Long.MAX_VALUE - timer.remainingMs()
++                            ? Long.MAX_VALUE : nowMs + timer.remainingMs();
++                    waitEpoch = applicationPollWait.begin(nowMs, deadlineMs);
++                    onWaitRegistered.run();
++                }
+                 if (!blockingCondition.await(timer.remainingMs(), TimeUnit.MILLISECONDS)) {
+                     break;
+                 }
+@@ -188,14 +217,27 @@
+         } catch (InterruptedException e) {
+             throw new InterruptException("Interrupted waiting for results from fetching records", e);
+         } finally {
+-            lock.unlock();
+-            timer.update();
++            try {
++                try {
++                    timer.update();
++                } finally {
++                    // A failed clock read leaves the timer's last valid timestamp available.
++                    // Revoke the wait even if cleanup cannot refresh that timestamp.
++                    if (waitEpoch != 0)
++                        applicationPollWait.end(waitEpoch, timer.currentTimeMs());
++                    else
++                        applicationPollWait.recordActivity(timer.currentTimeMs());
++                }
++            } finally {
++                lock.unlock();
++            }
+         }
+     }
+ 
+     void wakeup() {
+         try {
+             lock.lock();
++            applicationPollWait.signal(time.milliseconds());
+             wokenup.set(true);
+             blockingCondition.signalAll();
+         } finally {
+@@ -264,7 +306,10 @@
+             lock.lock();
+ 
+             idempotentCloser.close(
+-                    () -> retainAll(Collections.emptySet()),
++                    () -> {
++                        retainAll(Collections.emptySet());
++                        wakeup();
++                    },
+                     () -> log.warn("The fetch buffer was already closed")
+             );
+         } finally {
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java
+@@ -23,16 +23,22 @@
+ import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult;
+ import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.UnsentRequest;
+ import org.apache.kafka.clients.consumer.internals.events.CreateFetchRequestsEvent;
++import org.apache.kafka.common.KafkaException;
+ import org.apache.kafka.common.Node;
++import org.apache.kafka.common.errors.TimeoutException;
+ import org.apache.kafka.common.requests.FetchRequest;
+ import org.apache.kafka.common.utils.Time;
++import org.apache.kafka.common.utils.Timer;
+ import org.apache.kafka.common.utils.internals.LogContext;
+ 
++import java.util.ArrayDeque;
++import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Optional;
+ import java.util.concurrent.CompletableFuture;
+ import java.util.function.BiConsumer;
++import java.util.function.BooleanSupplier;
+ import java.util.function.Predicate;
+ import java.util.stream.Collectors;
+ 
+@@ -46,6 +52,79 @@
+     private final NetworkClientDelegate networkClientDelegate;
+     private final long retryBackoffMs;
+     private CompletableFuture<Void> pendingFetchRequestFuture;
++    private final ArrayDeque<FetchContinuation> continuations = new ArrayDeque<>();
++    private final NextPollCondition.Signal inputChanged = new NextPollCondition.Signal();
++    private int continuationBatchSize = -1;
++    private boolean continuationsClosed;
++    private final List<PendingFetchDemand> reconnectDemands = new ArrayList<>();
++    private long reconnectDeadlineMs = Long.MAX_VALUE;
++
++    private static final class PendingFetchDemand {
++        private final long deadlineMs;
++        private final BooleanSupplier canFetch;
++        private boolean attempted;
++        private final CompletableFuture<Void> future = new CompletableFuture<>();
++
++        private PendingFetchDemand(long deadlineMs, BooleanSupplier canFetch) {
++            this.deadlineMs = deadlineMs;
++            this.canFetch = canFetch;
++        }
++    }
++
++    /**
++     * Prepare requests, retaining work skipped by transport reconnect backoff until its actual
++     * deadline. Completion still describes preparation, not receipt of records. The no-argument
++     * createFetchRequests method remains a single attempt, including prefetch and close callers.
++     * The first attempt is preserved even for poll(Duration.ZERO); the deadline bounds retries.
++     * This does not yet retain work blocked on metadata, positions or buffer capacity.
++     */
++    public CompletableFuture<Void> createFetchRequestsWithReconnect(long deadlineMs, BooleanSupplier canFetch) {
++        PendingFetchDemand demand = new PendingFetchDemand(deadlineMs, canFetch);
++        if (continuationsClosed) {
++            demand.future.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
++        } else {
++            reconnectDemands.add(demand);
++            inputChanged.publish();
++        }
++        return demand.future;
++    }
++
++
++    /** Network-thread-confined operation handoff; the owner rechecks permission in advance. */
++    public interface FetchContinuation {
++        void advance();
++        void onClose();
++    }
++
++    public void enqueueFetchContinuation(FetchContinuation continuation) {
++        if (continuationsClosed) {
++            continuation.onClose();
++            return;
++        }
++        continuations.addLast(continuation);
++        inputChanged.publish();
++    }
++
++    /** Recheck retained work after an application poll loses permission, on the network owner. */
++    public void onPollDemandChanged() {
++        if (!continuationsClosed && (!continuations.isEmpty() || !reconnectDemands.isEmpty()))
++            inputChanged.publish();
++    }
++
++    @Override
++    public void onPollBatchStart() {
++        continuationBatchSize = continuations.size();
++    }
++
++    public void closeFetchContinuations() {
++        continuationsClosed = true;
++        List<PendingFetchDemand> closingDemands = new ArrayList<>(reconnectDemands);
++        reconnectDemands.clear();
++        closingDemands.forEach(demand -> demand.future.completeExceptionally(
++                new KafkaException("Consumer closed before fetch preparation")));
++        while (!continuations.isEmpty())
++            continuations.removeFirst().onClose();
++    }
+ 
+     FetchRequestManager(final LogContext logContext,
+                         final Time time,
+@@ -64,7 +143,14 @@
+ 
+     @Override
+     protected boolean isUnavailable(Node node) {
+-        return networkClientDelegate.isUnavailable(node);
++        boolean unavailable = networkClientDelegate.isUnavailable(node);
++        if (unavailable) {
++            long nowMs = time.milliseconds();
++            long delayMs = networkClientDelegate.connectionDelay(node, nowMs);
++            long deadlineMs = nowMs > Long.MAX_VALUE - delayMs ? Long.MAX_VALUE : nowMs + delayMs;
++            reconnectDeadlineMs = Math.min(reconnectDeadlineMs, deadlineMs);
++        }
++        return unavailable;
+     }
+ 
+     @Override
+@@ -108,6 +194,7 @@
+             pendingFetchRequestFuture = future;
+         }
+ 
++        inputChanged.publish();
+         return future;
+     }
+ 
+@@ -116,11 +203,28 @@
+      */
+     @Override
+     public PollResult poll(long currentTimeMs) {
+-        return pollInternal(
++        int batch = continuationBatchSize < 0 ? continuations.size() : continuationBatchSize;
++        continuationBatchSize = -1;
++        for (int i = 0; i < batch && !continuations.isEmpty(); i++)
++            continuations.removeFirst().advance();
++        NextPollCondition input = inputChanged.await();
++        reconnectDeadlineMs = Long.MAX_VALUE;
++        PollResult result = pollInternal(
+             this::prepareFetchRequests,
+             this::handleFetchSuccess,
+             this::handleFetchFailure
+         );
++        // Publications while executing this batch must survive condition registration.
++        if (!continuations.isEmpty())
++            inputChanged.publish();
++        if (!reconnectDemands.isEmpty()) {
++            long nowMs = time.milliseconds();
++            long nextDelayMs = Math.max(0, reconnectDeadlineMs - nowMs);
++            for (PendingFetchDemand demand : reconnectDemands)
++                nextDelayMs = Math.min(nextDelayMs, Math.max(0, demand.deadlineMs - nowMs));
++            input = NextPollCondition.anyOf(input, NextPollCondition.after(nowMs, nextDelayMs));
++        }
++        return new PollResult(result.timeUntilNextPollMs, result.unsentRequests, input);
+     }
+ 
+     /**
+@@ -128,6 +232,7 @@
+      */
+     @Override
+     public PollResult pollOnClose(long currentTimeMs) {
++        closeFetchContinuations();
+         // There needs to be a pending fetch request for pollInternal to create the requests.
+         createFetchRequests();
+ 
+@@ -152,7 +257,10 @@
+     private PollResult pollInternal(FetchRequestPreparer fetchRequestPreparer,
+                                     ResponseHandler<ClientResponse> successHandler,
+                                     ResponseHandler<Throwable> errorHandler) {
+-        if (pendingFetchRequestFuture == null) {
++        CompletableFuture<Void> currentFetchRequestFuture = pendingFetchRequestFuture;
++        pendingFetchRequestFuture = null;
++        List<PendingFetchDemand> currentDemands = takeActiveDemands();
++        if (currentFetchRequestFuture == null && currentDemands.isEmpty()) {
+             // If no explicit request for creating fetch requests was issued, just short-circuit.
+             return PollResult.EMPTY;
+         }
+@@ -168,7 +276,9 @@
+                     // the data in the fetch buffer is consumed.
+                     fetchBuffer.wakeup();
+                 }
+-                pendingFetchRequestFuture.complete(null);
++                if (currentFetchRequestFuture != null)
++                    currentFetchRequestFuture.complete(null);
++                finishFetchDemands(currentDemands);
+                 return PollResult.EMPTY;
+             }
+ 
+@@ -186,16 +296,58 @@
+                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
+             }).collect(Collectors.toList());
+ 
+-            pendingFetchRequestFuture.complete(null);
++            if (currentFetchRequestFuture != null)
++                currentFetchRequestFuture.complete(null);
++            finishFetchDemands(currentDemands);
+             return new PollResult(requests);
+         } catch (Throwable t) {
+             // A "dummy" poll result is returned here rather than rethrowing the error because any error
+             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
+             // request managers.
+-            pendingFetchRequestFuture.completeExceptionally(t);
++            if (currentFetchRequestFuture != null)
++                currentFetchRequestFuture.completeExceptionally(t);
++            currentDemands.forEach(demand -> demand.future.completeExceptionally(t));
+             return PollResult.EMPTY;
+-        } finally {
+-            pendingFetchRequestFuture = null;
++        }
++    }
++
++    private List<PendingFetchDemand> takeActiveDemands() {
++        List<PendingFetchDemand> currentDemands = reconnectDemands.isEmpty()
++                ? List.of() : new ArrayList<>(reconnectDemands);
++        reconnectDemands.clear();
++        if (!currentDemands.isEmpty())
++            currentDemands.removeIf(demand -> {
++                if (continuationsClosed)
++                    demand.future.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
++                else if (!demand.canFetch.getAsBoolean())
++                    demand.future.complete(null);
++                if (demand.attempted && time.milliseconds() >= demand.deadlineMs)
++                    demand.future.completeExceptionally(new TimeoutException("Fetch preparation deadline expired"));
++                demand.attempted = true;
++                return demand.future.isDone();
++            });
++        return currentDemands;
++    }
++
++    @Override
++    protected void closeInternal(Timer timer) {
++        closeFetchContinuations();
++        super.closeInternal(timer);
++    }
++
++    private void finishFetchDemands(List<PendingFetchDemand> demands) {
++        for (PendingFetchDemand demand : demands) {
++            if (demand.future.isDone())
++                continue;
++            if (continuationsClosed)
++                demand.future.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
++            else if (reconnectDeadlineMs != Long.MAX_VALUE) {
++                if (time.milliseconds() >= demand.deadlineMs)
++                    demand.future.completeExceptionally(new TimeoutException("Fetch preparation deadline expired"));
++                else
++                    reconnectDemands.add(demand);
++            } else
++                demand.future.complete(null);
+         }
+     }
+ 
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java
+@@ -119,6 +119,11 @@
+         return NetworkClientUtils.isUnavailable(client, node, time);
+     }
+ 
++    /** Remaining transport reconnect backoff; not an application recheck interval. */
++    public long connectionDelay(Node node, long nowMs) {
++        return client.connectionDelay(node, nowMs);
++    }
++
+     /**
+      * Checks for an authentication error on a given node and throws the exception if it exists.
+      *
+@@ -301,6 +306,10 @@
+         return client.connectionFailed(node) && client.connectionDelay(node, time.milliseconds()) > 0;
+     }
+ 
++    void closePendingBackgroundCallbacks() {
++        backgroundEventHandler.closePendingCallbacks();
++    }
++
+     public void close() throws IOException {
+         this.client.close();
+     }
+@@ -329,9 +338,17 @@
+         public static final long WAIT_FOREVER = Long.MAX_VALUE;
+         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
+         public final long timeUntilNextPollMs;
++        // Null retains legacy full-pass polling, including legacy finite delays.
++        public final NextPollCondition nextPollCondition;
+         public final List<UnsentRequest> unsentRequests;
+ 
+         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
++            this(timeUntilNextPollMs, unsentRequests, null);
++        }
++
++        public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests,
++                          final NextPollCondition nextPollCondition) {
++            this.nextPollCondition = nextPollCondition;
+             this.timeUntilNextPollMs = timeUntilNextPollMs;
+             this.unsentRequests = Collections.unmodifiableList(unsentRequests);
+         }
+--- /dev/null
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/NextPollCondition.java
+@@ -0,0 +1,186 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.kafka.clients.consumer.internals;
++
++import java.util.Objects;
++
++/**
++ * A one-shot condition for the next manager poll. Conditions and signals are confined to the
++ * consumer network thread. External input must use the existing event queue and network wakeup.
++ */
++public interface NextPollCondition {
++    /** Register once; subsequent input publication activates the subscriber directly. */
++    void register(Registration registration);
++
++    interface Registration {
++        void onSignal(Signal signal, long observed);
++
++        void onDeadline(long deadlineMs);
++    }
++
++    boolean isReady(long nowMs);
++
++    long remainingMs(long nowMs);
++
++    static NextPollCondition after(long nowMs, long delayMs) {
++        if (delayMs < 0)
++            throw new IllegalArgumentException("Negative delay");
++        long deadline = nowMs > Long.MAX_VALUE - delayMs ? Long.MAX_VALUE : nowMs + delayMs;
++        return new NextPollCondition() {
++            @Override
++            public void register(Registration registration) {
++                registration.onDeadline(deadline);
++            }
++
++            @Override
++            public boolean isReady(long now) {
++                return now >= deadline;
++            }
++
++            @Override
++            public long remainingMs(long now) {
++                if (isReady(now))
++                    return 0;
++                long remaining = deadline - now;
++                return remaining < 0 ? Long.MAX_VALUE : remaining;
++            }
++        };
++    }
++
++    /** Either child can activate the manager; nesting preserves the earliest deadline. */
++    static NextPollCondition anyOf(NextPollCondition first, NextPollCondition second) {
++        Objects.requireNonNull(first);
++        Objects.requireNonNull(second);
++        return new NextPollCondition() {
++            @Override
++            public void register(Registration registration) {
++                first.register(registration);
++                second.register(registration);
++            }
++
++            @Override
++            public boolean isReady(long now) {
++                return first.isReady(now) || second.isReady(now);
++            }
++
++            @Override
++            public long remainingMs(long now) {
++                return Math.min(first.remainingMs(now), second.remainingMs(now));
++            }
++        };
++    }
++
++    /** Capture before producing a poll result so publication before registration is not lost. */
++    final class Signal {
++        private static final Runnable NOOP = () -> { };
++        private long generation;
++        private Subscription first;
++        private Subscription last;
++        private int subscriberCount;
++
++        public void publish() {
++            generation++;
++            // Detach this generation. New registrations belong to a later publication.
++            Subscription current = first;
++            first = null;
++            last = null;
++            subscriberCount = 0;
++            while (current != null) {
++                Subscription next = current.next;
++                Runnable callback = current.callback;
++                current.callback = null;
++                current.previous = null;
++                current.next = null;
++                if (callback != null)
++                    callback.run();
++                current = next;
++            }
++        }
++
++        Runnable subscribe(long observed, Runnable subscriber) {
++            if (generation != observed) {
++                subscriber.run();
++                return NOOP;
++            }
++            Subscription subscription = new Subscription(subscriber);
++            subscription.previous = last;
++            if (last == null)
++                first = subscription;
++            else
++                last.next = subscription;
++            last = subscription;
++            subscriberCount++;
++            return subscription;
++        }
++
++        int subscriberCount() {
++            return subscriberCount;
++        }
++
++        /** The subscription is its own cancellation handle; no hash lookup or detach lambda. */
++        private final class Subscription implements Runnable {
++            private final long registeredGeneration = generation;
++            private Runnable callback;
++            private Subscription previous;
++            private Subscription next;
++
++            private Subscription(Runnable callback) {
++                this.callback = callback;
++            }
++
++            @Override
++            public void run() {
++                if (callback == null)
++                    return;
++                callback = null;
++                if (registeredGeneration != generation)
++                    return; // An in-progress publication owns the detached next pointers.
++                if (previous == null)
++                    first = next;
++                else
++                    previous.next = next;
++                if (next == null)
++                    last = previous;
++                else
++                    next.previous = previous;
++                previous = null;
++                next = null;
++                subscriberCount--;
++            }
++        }
++
++        public NextPollCondition await() {
++            long observed = generation;
++            return new NextPollCondition() {
++                @Override
++                public void register(Registration registration) {
++                    registration.onSignal(Signal.this, observed);
++                }
++
++                @Override
++                public boolean isReady(long now) {
++                    return generation != observed;
++                }
++
++                @Override
++                public long remainingMs(long now) {
++                    return isReady(now) ? 0 : Long.MAX_VALUE;
++                }
++            };
++        }
++    }
++}
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/OffsetCommitCallbackInvoker.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/OffsetCommitCallbackInvoker.java
+@@ -21,6 +21,7 @@
+ import org.apache.kafka.common.TopicPartition;
+ 
+ import java.util.Map;
++import java.util.Objects;
+ import java.util.concurrent.BlockingQueue;
+ import java.util.concurrent.LinkedBlockingQueue;
+ 
+@@ -32,9 +33,15 @@
+  */
+ public class OffsetCommitCallbackInvoker {
+     private final ConsumerInterceptors<?, ?> interceptors;
++    private final Runnable wakeupApplication;
+ 
+     OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors) {
++        this(interceptors, () -> { });
++    }
++
++    OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors, Runnable wakeupApplication) {
+         this.interceptors = interceptors;
++        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
+     }
+ 
+     // Thread-safe queue to store user-defined callbacks and interceptors to be executed
+@@ -47,6 +54,7 @@
+                 offsets,
+                 null
+             ));
++            wakeupApplication.run();
+         }
+     }
+ 
+@@ -54,6 +62,7 @@
+                                               final Map<TopicPartition, OffsetAndMetadata> offsets,
+                                               final Exception exception) {
+         callbackQueue.add(new OffsetCommitCallbackTask(callback, offsets, exception));
++        wakeupApplication.run();
+     }
+ 
+     public void executeCallbacks() {
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/OffsetsRequestManager.java
+@@ -29,8 +29,10 @@
+ import org.apache.kafka.common.ClusterResource;
+ import org.apache.kafka.common.ClusterResourceListener;
+ import org.apache.kafka.common.IsolationLevel;
++import org.apache.kafka.common.KafkaException;
+ import org.apache.kafka.common.Node;
+ import org.apache.kafka.common.TopicPartition;
++import org.apache.kafka.common.errors.RetriableException;
+ import org.apache.kafka.common.errors.TimeoutException;
+ import org.apache.kafka.common.message.ListOffsetsRequestData;
+ import org.apache.kafka.common.requests.AbstractRequest;
+@@ -44,6 +46,7 @@
+ import org.slf4j.Logger;
+ 
+ import java.util.ArrayList;
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.HashSet;
+ import java.util.List;
+@@ -56,6 +59,7 @@
+ import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicReference;
+ import java.util.function.BiConsumer;
++import java.util.function.BooleanSupplier;
+ import java.util.stream.Collectors;
+ 
+ import static java.util.Objects.requireNonNull;
+@@ -108,6 +112,74 @@
+      * kept to be used on the next attempt to update fetch positions (if partitions remain the same)
+      */
+     private PendingFetchCommittedRequest pendingOffsetFetchEvent;
++    private final Set<PendingFetchCommittedRequest> committedPositionRequests = new HashSet<>();
++    private final Set<PendingMetadataReset> positionResets = new HashSet<>();
++    private final NextPollCondition.Signal requestsAvailable = new NextPollCondition.Signal();
++    // Network-thread owned: metadata callbacks retry only these unresolved partitions.
++    private final List<PendingMetadataReset> pendingMetadataResets = new ArrayList<>();
++    private boolean positionResetsClosed;
++
++    // Futures are published only after the response has updated SubscriptionState/error caches.
++    private final Map<CompletableFuture<Void>, Map<TopicPartition, Object>> validationCompletions = new HashMap<>();
++    private final List<PositionValidationWait> validationWaits = new ArrayList<>();
++    private final Runnable apiVersionsChanged = this::onValidationDependencyChanged;
++    private long validationConnectRetryTimeMs = Long.MAX_VALUE;
++
++    private static final class PositionValidationWait {
++        private final long deadlineMs;
++        private final BooleanSupplier canProceed;
++        private final CompletableFuture<Void> result = new CompletableFuture<>();
++        private boolean ready;
++        private boolean awaitingCompletion;
++        private long retryAtMs = Long.MAX_VALUE;
++        private Throwable error;
++        private int attempt;
++        private Map<TopicPartition, Object> positionStates;
++
++        private PositionValidationWait(long deadlineMs, BooleanSupplier canProceed) {
++            this.deadlineMs = deadlineMs;
++            this.canProceed = canProceed;
++        }
++    }
++
++    private static final class PendingMetadataReset {
++        private final Map<TopicPartition, AutoOffsetResetStrategy> strategies;
++        private final CompletableFuture<Void> result = new CompletableFuture<>();
++        private final Map<TopicPartition, Object> positionStates;
++        private int outstandingRequests;
++
++        private PendingMetadataReset(Map<TopicPartition, AutoOffsetResetStrategy> strategies,
++                                     Map<TopicPartition, Object> positionStates) {
++            this.strategies = new HashMap<>(strategies);
++            this.positionStates = positionStates;
++        }
++    }
++
++    public void closePendingPositionResets() {
++        positionResetsClosed = true;
++        apiVersions.removeChangeListener(apiVersionsChanged);
++        for (PendingFetchCommittedRequest request : new ArrayList<>(committedPositionRequests))
++            request.result.completeExceptionally(new KafkaException("Consumer closed while fetching committed positions"));
++        pendingOffsetFetchEvent = null;
++        for (PendingMetadataReset reset : new ArrayList<>(positionResets))
++            reset.result.completeExceptionally(new KafkaException("Consumer closed while resetting positions"));
++        for (PositionValidationWait wait : new ArrayList<>(validationWaits))
++            wait.result.completeExceptionally(new KafkaException("Consumer closed during position validation"));
++        for (CompletableFuture<Void> completion : new ArrayList<>(validationCompletions.keySet()))
++            completion.completeExceptionally(new KafkaException("Consumer closed during position validation"));
++        validationCompletions.clear();
++        List<PendingMetadataReset> pending = new ArrayList<>(pendingMetadataResets);
++        pendingMetadataResets.clear();
++        for (PendingMetadataReset reset : pending)
++            reset.result.completeExceptionally(new KafkaException("Consumer closed while awaiting offset metadata"));
++    }
++
++    private void enqueueRequests(List<NetworkClientDelegate.UnsentRequest> requests) {
++        if (!requests.isEmpty()) {
++            requestsToSend.addAll(requests);
++            requestsAvailable.publish();
++        }
++    }
+ 
+     public OffsetsRequestManager(final SubscriptionState subscriptionState,
+                                  final ConsumerMetadata metadata,
+@@ -147,16 +219,19 @@
+         // initialized and the network thread started.
+         this.metadata.addClusterUpdateListener(this);
+         this.commitRequestManager = commitRequestManager;
++        this.apiVersions.addChangeListener(apiVersionsChanged);
+     }
+ 
+     private static class PendingFetchCommittedRequest {
+         final Set<TopicPartition> requestedPartitions;
+         final CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result;
++        final Map<TopicPartition, Object> positionStates;
+ 
+         private PendingFetchCommittedRequest(final Set<TopicPartition> requestedPartitions,
+-                                             final CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result) {
++                                             final Map<TopicPartition, Object> positionStates) {
+             this.requestedPartitions = Objects.requireNonNull(requestedPartitions);
+-            this.result = Objects.requireNonNull(result);
++            this.positionStates = positionStates;
++            this.result = new CompletableFuture<>();
+         }
+     }
+ 
+@@ -167,10 +242,20 @@
+      */
+     @Override
+     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
++        NextPollCondition input = requestsAvailable.await();
++        retireObsoletePositionPreparations();
++        completePositionValidationWaits();
++        for (PositionValidationWait wait : validationWaits) {
++            input = NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs,
++                    Math.max(0, wait.deadlineMs - currentTimeMs)));
++            if (!wait.awaitingCompletion && wait.retryAtMs != Long.MAX_VALUE)
++                input = NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs,
++                        Math.max(0, wait.retryAtMs - currentTimeMs)));
++        }
+         // Copy the outgoing request list and clear it.
+         List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>(requestsToSend);
+         requestsToSend.clear();
+-        return new NetworkClientDelegate.PollResult(unsentRequests);
++        return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, unsentRequests, input);
+     }
+ 
+     /**
+@@ -317,6 +402,153 @@
+         return result;
+     }
+ 
++    /**
++     * Like updateFetchPositions, but retains validation demand across dependency waits and RPCs.
++     * A response first updates positions/errors, then activates this owner to recheck before
++     * handing work to Fetch. Metadata/API-version publication activates the owner without an app
++     * recheck; only actual retry eligibility and the operation's API deadline register timers.
++     */
++    public CompletableFuture<Void> updateFetchPositionsAndAwaitValidation(long deadlineMs, BooleanSupplier canProceed) {
++        if (positionResetsClosed)
++            return CompletableFuture.failedFuture(new KafkaException("Consumer closed during position validation"));
++        if (!canProceed.getAsBoolean())
++            return CompletableFuture.completedFuture(null);
++        CompletableFuture<Void> preparation = updateFetchPositions(deadlineMs);
++        // Preserve the initial nonblocking poll(0) attempt, but never retain an expired wait.
++        if (preparation.isCompletedExceptionally() || !subscriptionState.hasPendingValidation()
++                || subscriptionState.hasAllFetchPositions() || time.milliseconds() >= deadlineMs)
++            return preparation;
++        PositionValidationWait wait = new PositionValidationWait(deadlineMs, canProceed);
++        validationWaits.add(wait);
++        wait.result.whenComplete((ignored, error) -> validationWaits.remove(wait));
++        awaitValidationBatch(wait, preparation);
++        requestsAvailable.publish();
++        return wait.result;
++    }
++
++    private void awaitValidationBatch(PositionValidationWait wait, CompletableFuture<Void> preparation) {
++        wait.awaitingCompletion = true;
++        int attempt = ++wait.attempt;
++        wait.positionStates = positionStateSnapshot(subscriptionState.assignedPartitions());
++        if (validationCompletions.isEmpty()) {
++            boolean preparationPending = !preparation.isDone();
++            long connectRetryTimeMs = validationConnectRetryTimeMs;
++            preparation.whenComplete((ignored, error) -> {
++                if (wait.result.isDone() || wait.attempt != attempt)
++                    return;
++                wait.awaitingCompletion = false;
++                if (!samePositionStates(wait.positionStates)) {
++                    wait.error = error;
++                    wait.ready = true;
++                    requestsAvailable.publish();
++                    return;
++                }
++                if (!wait.canProceed.getAsBoolean())
++                    wait.result.complete(null);
++                else if (time.milliseconds() >= wait.deadlineMs)
++                    wait.result.completeExceptionally(new TimeoutException("Position validation deadline expired"));
++                else if (error != null)
++                    wait.result.completeExceptionally(error);
++                else if (subscriptionState.hasPendingValidation()) {
++                    long nowMs = time.milliseconds();
++                    wait.retryAtMs = Math.min(subscriptionState.nextValidationRetryTimeMs(nowMs), connectRetryTimeMs);
++                    if (preparationPending) {
++                        // Another partition's preparation may outlast this partition's backoff.
++                        // Recheck once on completion, even if that eligibility time is now past.
++                        wait.ready = true;
++                        requestsAvailable.publish();
++                    }
++                } else
++                    wait.result.complete(null);
++            });
++            return;
++        }
++        List<CompletableFuture<Void>> batch = new ArrayList<>(validationCompletions.keySet());
++        batch.add(preparation);
++        CompletableFuture.allOf(batch.toArray(new CompletableFuture<?>[0])).whenComplete((ignored, error) -> {
++            if (wait.result.isDone() || wait.attempt != attempt)
++                return;
++            wait.awaitingCompletion = false;
++            wait.error = error;
++            wait.ready = true;
++            requestsAvailable.publish();
++        });
++    }
++
++    private void completePositionValidationWaits() {
++        if (validationWaits.isEmpty())
++            return;
++        retireObsoleteValidationRequests();
++        for (PositionValidationWait wait : new ArrayList<>(validationWaits)) {
++            if (wait.ready && !samePositionStates(wait.positionStates)) {
++                // The old batch may still finish, but it no longer owns this retained demand.
++                wait.attempt++;
++                wait.awaitingCompletion = false;
++            }
++            if (!wait.canProceed.getAsBoolean())
++                wait.result.complete(null);
++            else if (time.milliseconds() >= wait.deadlineMs)
++                wait.result.completeExceptionally(new TimeoutException("Position validation deadline expired"));
++            else if (!wait.awaitingCompletion && (wait.ready || time.milliseconds() >= wait.retryAtMs)) {
++                wait.ready = false;
++                wait.retryAtMs = Long.MAX_VALUE;
++                if (wait.error != null)
++                    wait.result.completeExceptionally(wait.error);
++                else
++                    awaitValidationBatch(wait, updateFetchPositions(wait.deadlineMs));
++            }
++        }
++    }
++
++    private Map<TopicPartition, Object> positionStateSnapshot(Set<TopicPartition> partitions) {
++        Map<TopicPartition, Object> result = new HashMap<>();
++        for (TopicPartition partition : partitions)
++            result.put(partition, subscriptionState.positionStateToken(partition));
++        return result;
++    }
++
++    private boolean isCurrentPositionState(TopicPartition partition, Map<TopicPartition, Object> snapshot) {
++        return snapshot.containsKey(partition)
++                && snapshot.get(partition) == subscriptionState.positionStateToken(partition);
++    }
++
++    private Set<TopicPartition> currentPositionStates(Map<TopicPartition, Object> snapshot) {
++        return snapshot.keySet().stream().filter(partition -> isCurrentPositionState(partition, snapshot))
++                .collect(Collectors.toSet());
++    }
++
++    private boolean samePositionStates(Map<TopicPartition, Object> snapshot) {
++        return snapshot.keySet().equals(subscriptionState.assignedPartitions())
++                && snapshot.keySet().stream().allMatch(partition -> isCurrentPositionState(partition, snapshot));
++    }
++
++    private void retireObsoletePositionPreparations() {
++        for (PendingMetadataReset reset : new ArrayList<>(positionResets)) {
++            reset.strategies.keySet().removeIf(partition -> !isCurrentPositionState(partition, reset.positionStates));
++            if (currentPositionStates(reset.positionStates).isEmpty()) {
++                pendingMetadataResets.remove(reset);
++                reset.result.complete(null);
++            }
++        }
++        for (PendingFetchCommittedRequest request : new ArrayList<>(committedPositionRequests)) {
++            if (currentPositionStates(request.positionStates).isEmpty()) {
++                if (pendingOffsetFetchEvent == request)
++                    pendingOffsetFetchEvent = null;
++                request.result.complete(Collections.emptyMap());
++            }
++        }
++    }
++
++    private void retireObsoleteValidationRequests() {
++        for (Map.Entry<CompletableFuture<Void>, Map<TopicPartition, Object>> entry :
++                new ArrayList<>(validationCompletions.entrySet())) {
++            if (entry.getValue().keySet().stream().noneMatch(partition -> isCurrentPositionState(partition, entry.getValue()))) {
++                validationCompletions.remove(entry.getKey());
++                entry.getKey().complete(null);
++            }
++        }
++    }
++
+     private boolean maybeCompleteWithPreviousException(CompletableFuture<Void> result) {
+         Throwable cachedException = cachedUpdatePositionsException.getAndSet(null);
+         if (cachedException != null) {
+@@ -338,11 +570,13 @@
+ 
+         CompletableFuture<Void> updatePositions;
+         final Set<TopicPartition> initializingPartitions = subscriptionState.initializingPartitions();
++        final Map<TopicPartition, Object> initialStates = positionStateSnapshot(initializingPartitions);
+         if (commitRequestManager != null) {
+             CompletableFuture<Void> refreshWithCommittedOffsets = initWithCommittedOffsetsIfNeeded(initializingPartitions, deadlineMs);
+ 
+             // Reset positions for all partitions that may still require it (or that are awaiting reset)
+-            updatePositions = refreshWithCommittedOffsets.thenCompose(__ -> initWithPartitionOffsetsIfNeeded(initializingPartitions));
++            updatePositions = refreshWithCommittedOffsets.thenCompose(__ -> initWithPartitionOffsetsIfNeeded(
++                    currentPositionStates(initialStates)));
+ 
+         } else {
+             updatePositions = initWithPartitionOffsetsIfNeeded(initializingPartitions);
+@@ -417,42 +651,64 @@
+      */
+     private CompletableFuture<Void> initWithCommittedOffsetsIfNeeded(Set<TopicPartition> initializingPartitions,
+                                                                      long deadlineMs) {
+-        if (initializingPartitions.isEmpty()) {
++        if (initializingPartitions.isEmpty())
+             return CompletableFuture.completedFuture(null);
+-        }
+-
+-        log.debug("Refreshing committed offsets for partitions {}", initializingPartitions);
+-        CompletableFuture<Void> result = new CompletableFuture<>();
+-
+-        // The shorter the timeout provided to poll(), the more likely the offsets fetch will time out. To handle
+-        // this case, on the first attempt to fetch the committed offsets, a FetchCommittedOffsetsEvent is created
+-        // (with potentially a longer timeout) and stored. The event is used for the first attempt, but in the
+-        // case it times out, subsequent attempts will also use the event in order to wait for the results.
+-        if (!canReusePendingOffsetFetchEvent(initializingPartitions)) {
+-            // Generate a new OffsetFetch request and update positions when a response is received
+-            final long fetchCommittedDeadlineMs = Math.max(deadlineMs, time.milliseconds() + defaultApiTimeoutMs);
+-            CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchOffsets =
+-                    commitRequestManager.fetchOffsets(initializingPartitions, fetchCommittedDeadlineMs);
+-            CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> fetchOffsetsAndRefresh =
+-                    fetchOffsets.thenApply(CommitRequestManager.OffsetFetchResult::toOffsetMapWithNulls)
+-                    .whenComplete((offsets, error) -> {
+-                        pendingOffsetFetchEvent = null;
+-                        // Update positions with the retrieved offsets
+-                        refreshOffsets(offsets, error, result);
+-                    });
+-            pendingOffsetFetchEvent = new PendingFetchCommittedRequest(initializingPartitions, fetchOffsetsAndRefresh);
+-        } else {
+-            // Reuse pending OffsetFetch request that will complete when positions are refreshed with the committed offsets retrieved
+-            pendingOffsetFetchEvent.result.whenComplete((__, error) -> {
+-                if (error == null) {
+-                    result.complete(null);
+-                } else {
+-                    result.completeExceptionally(error);
+-                }
++        if (canReusePendingOffsetFetchEvent(initializingPartitions))
++            return pendingOffsetFetchEvent.result.thenApply(ignored -> null);
++
++        PendingFetchCommittedRequest request = new PendingFetchCommittedRequest(initializingPartitions,
++                positionStateSnapshot(initializingPartitions));
++        pendingOffsetFetchEvent = request;
++        committedPositionRequests.add(request);
++        request.result.whenComplete((ignored, error) -> committedPositionRequests.remove(request));
++        long fetchCommittedDeadlineMs = Math.max(deadlineMs, time.milliseconds() + defaultApiTimeoutMs);
++        try {
++            commitRequestManager.fetchOffsets(initializingPartitions, fetchCommittedDeadlineMs,
++                    Collections.unmodifiableMap(request.positionStates)).whenComplete((fetched, error) ->
++                            completeCommittedPositionRequest(request, fetched, error, deadlineMs));
++        } catch (Throwable error) {
++            completeCommittedPositionRequest(request, null, error, deadlineMs);
++        }
++        return request.result.thenApply(ignored -> null);
++    }
++
++    private void completeCommittedPositionRequest(PendingFetchCommittedRequest request,
++                                                  CommitRequestManager.OffsetFetchResult fetched,
++                                                  Throwable error,
++                                                  long deadlineMs) {
++        if (request.result.isDone())
++            return;
++        if (pendingOffsetFetchEvent == request)
++            pendingOffsetFetchEvent = null;
++        Set<TopicPartition> current = currentPositionStates(request.positionStates);
++        if (error != null && !current.isEmpty() && !current.equals(request.requestedPartitions)) {
++            // OffsetFetch may aggregate a removed partition's authorization error. Obtain a
++            // result for the still-current subset before initializing or resetting any of it.
++            initWithCommittedOffsetsIfNeeded(current, deadlineMs).whenComplete((ignored, failure) -> {
++                if (failure == null)
++                    request.result.complete(Collections.emptyMap());
++                else
++                    request.result.completeExceptionally(failure);
+             });
+-        }
+-
+-        return result;
++            return;
++        }
++        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
++        if (error == null) {
++            offsets.putAll(fetched.toOffsetMapWithNulls());
++            offsets.keySet().retainAll(current);
++        }
++        CompletableFuture<Void> refreshed = new CompletableFuture<>();
++        try {
++            refreshOffsets(offsets, current.isEmpty() ? null : error, refreshed);
++        } catch (Throwable failure) {
++            refreshed.completeExceptionally(failure);
++        }
++        refreshed.whenComplete((ignored, failure) -> {
++            if (failure == null)
++                request.result.complete(offsets);
++            else
++                request.result.completeExceptionally(failure);
++        });
+     }
+ 
+     /**
+@@ -514,7 +770,8 @@
+             return false;
+         }
+ 
+-        return pendingOffsetFetchEvent.requestedPartitions.equals(partitions);
++        return pendingOffsetFetchEvent.requestedPartitions.equals(partitions)
++                && currentPositionStates(pendingOffsetFetchEvent.positionStates).equals(partitions);
+     }
+ 
+     /**
+@@ -557,6 +814,7 @@
+      * next call to this function.
+      */
+     void validatePositionsIfNeeded() {
++        validationConnectRetryTimeMs = Long.MAX_VALUE;
+         Map<TopicPartition, SubscriptionState.FetchPosition> partitionsToValidate = offsetFetcherUtils.refreshAndGetPartitionsToValidate();
+         if (partitionsToValidate.isEmpty()) {
+             return;
+@@ -575,7 +833,7 @@
+         try {
+             List<NetworkClientDelegate.UnsentRequest> unsentRequests = buildListOffsetsRequests(
+                     timestampsToSearch, requireTimestamps, listOffsetsRequestState);
+-            requestsToSend.addAll(unsentRequests);
++            enqueueRequests(unsentRequests);
+         } catch (StaleMetadataException e) {
+             if (listOffsetsRequestState.oneShot)
+                 listOffsetsRequestState.completeWithResultSoFar();
+@@ -586,6 +844,24 @@
+ 
+     @Override
+     public void onUpdate(ClusterResource clusterResource) {
++        onValidationDependencyChanged();
++        // Only metadata publication revisits these blocked resets; ordinary loop turns do not.
++        List<PendingMetadataReset> resets = new ArrayList<>(pendingMetadataResets);
++        pendingMetadataResets.clear();
++        for (PendingMetadataReset reset : resets) {
++            if (reset.result.isDone())
++                continue;
++            reset.strategies.entrySet().removeIf(entry ->
++                    !isCurrentPositionState(entry.getKey(), reset.positionStates)
++                    || !subscriptionState.isAssigned(entry.getKey())
++                    || !subscriptionState.isOffsetResetNeeded(entry.getKey())
++                    || !entry.getValue().equals(subscriptionState.resetStrategy(entry.getKey())));
++            try {
++                sendPositionResetRequests(reset);
++            } catch (RuntimeException e) {
++                reset.result.completeExceptionally(e);
++            }
++        }
+         // Retry requests that were awaiting a metadata update. Process a copy of the list to
+         // avoid errors, given that the list of requestsToRetry may be modified from the
+         // fetchOffsetsByTimes call if any of the requests being retried fails
+@@ -600,6 +876,25 @@
+     }
+ 
+     /**
++     * Called after an application event changes positions or assignment on the network thread.
++     * The event mutation must be visible before notifying retained validation demand.
++     */
++    public void onPositionStateChanged() {
++        onValidationDependencyChanged();
++        if (!positionResetsClosed && (!positionResets.isEmpty() || !committedPositionRequests.isEmpty()))
++            requestsAvailable.publish();
++    }
++
++    /** Network-thread notification only; validation/transport work runs in a later owner poll. */
++    private void onValidationDependencyChanged() {
++        if (positionResetsClosed || validationWaits.isEmpty())
++            return;
++        for (PositionValidationWait wait : validationWaits)
++            wait.ready = true;
++        requestsAvailable.publish();
++    }
++
++    /**
+      * Build ListOffsets requests to fetch offsets by target times for the specified partitions.
+      *
+      * @param timestampsToSearch the mapping between partitions and target time
+@@ -670,6 +965,15 @@
+             Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition> targetTimes,
+             boolean requireTimestamps,
+             List<NetworkClientDelegate.UnsentRequest> unsentRequests) {
++        return buildListOffsetRequestToNode(node, targetTimes, requireTimestamps, unsentRequests, null);
++    }
++
++    private CompletableFuture<ListOffsetResult> buildListOffsetRequestToNode(
++            Node node,
++            Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition> targetTimes,
++            boolean requireTimestamps,
++            List<NetworkClientDelegate.UnsentRequest> unsentRequests,
++            Map<TopicPartition, Object> positionStates) {
+         ListOffsetsRequest.Builder builder = ListOffsetsRequest.Builder
+                 .forConsumer(requireTimestamps, isolationLevel)
+                 .setTargetTimes(ListOffsetsRequest.toListOffsetsTopics(targetTimes))
+@@ -694,6 +998,12 @@
+                 ListOffsetsResponse lor = (ListOffsetsResponse) response.responseBody();
+                 log.trace("Received ListOffsetResponse {} from broker {}", lor, node);
+                 try {
++                    if (positionStates != null) {
++                        var currentData = lor.data().duplicate();
++                        currentData.topics().forEach(topic -> topic.partitions().removeIf(partition ->
++                                !isCurrentPositionState(new TopicPartition(topic.name(), partition.partitionIndex()), positionStates)));
++                        lor = new ListOffsetsResponse(currentData);
++                    }
+                     ListOffsetResult listOffsetResult = offsetFetcherUtils.handleListOffsetResponse(lor);
+                     result.complete(listOffsetResult);
+                 } catch (RuntimeException e) {
+@@ -715,13 +1025,35 @@
+      */
+     private CompletableFuture<Void> sendListOffsetsRequestsAndResetPositions(
+             final Map<TopicPartition, AutoOffsetResetStrategy> partitionAutoOffsetResetStrategyMap) {
++        if (positionResetsClosed)
++            return CompletableFuture.failedFuture(new KafkaException("Consumer closed while resetting positions"));
++        for (PendingMetadataReset pending : pendingMetadataResets) {
++            if (!pending.result.isDone() && pending.strategies.equals(partitionAutoOffsetResetStrategyMap)
++                    && currentPositionStates(pending.positionStates).containsAll(partitionAutoOffsetResetStrategyMap.keySet()))
++                return pending.result;
++        }
++        PendingMetadataReset reset = new PendingMetadataReset(partitionAutoOffsetResetStrategyMap,
++                positionStateSnapshot(partitionAutoOffsetResetStrategyMap.keySet()));
++        positionResets.add(reset);
++        reset.result.whenComplete((ignored, error) -> {
++            positionResets.remove(reset);
++            pendingMetadataResets.remove(reset);
++        });
++        sendPositionResetRequests(reset);
++        return reset.result;
++    }
++
++    private void sendPositionResetRequests(PendingMetadataReset reset) {
++        Map<TopicPartition, AutoOffsetResetStrategy> partitionAutoOffsetResetStrategyMap = new HashMap<>(reset.strategies);
+         Map<TopicPartition, Long> timestampsToSearch = partitionAutoOffsetResetStrategyMap.entrySet().stream()
+                 .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().timestamp().get()));
+         Map<Node, Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition>> timestampsToSearchByNode =
+                 groupListOffsetRequests(timestampsToSearch, Optional.empty());
+ 
+-        final AtomicInteger expectedResponses = new AtomicInteger(0);
+-        final CompletableFuture<Void> globalResult = new CompletableFuture<>();
++        timestampsToSearchByNode.values().forEach(partitions -> partitions.keySet().forEach(reset.strategies::remove));
++        if (!reset.strategies.isEmpty())
++            pendingMetadataResets.add(reset);
++        reset.outstandingRequests += timestampsToSearchByNode.size();
+         final List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>();
+ 
+         timestampsToSearchByNode.forEach((node, resetTimestamps) -> {
+@@ -732,36 +1064,57 @@
+                     node,
+                     resetTimestamps,
+                     false,
+-                    unsentRequests);
+-
+-            partialResult.whenComplete((result, error) -> {
++                    unsentRequests,
++                    reset.positionStates);
++
++            partialResult.whenComplete((result, error) -> completePositionResetRequest(reset,
++                    resetTimestamps, partitionAutoOffsetResetStrategyMap, result, error));
++        });
++
++        enqueueRequests(unsentRequests);
++        completePositionResetIfFinished(reset);
++    }
++
++    private void completePositionResetRequest(PendingMetadataReset reset,
++                                              Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition> resetTimestamps,
++                                              Map<TopicPartition, AutoOffsetResetStrategy> strategies,
++                                              ListOffsetResult result,
++                                              Throwable error) {
++        if (reset.result.isDone())
++            return;
++        Set<TopicPartition> current = currentPositionStates(reset.positionStates);
++        current.retainAll(resetTimestamps.keySet());
++        try {
++            if (!current.isEmpty()) {
+                 if (error == null) {
+-                    offsetFetcherUtils.onSuccessfulResponseForResettingPositions(result,
+-                            partitionAutoOffsetResetStrategyMap);
++                    var fetched = new HashMap<>(result.fetchedOffsets);
++                    fetched.keySet().retainAll(current);
++                    Set<TopicPartition> retries = new HashSet<>(result.partitionsToRetry);
++                    retries.retainAll(current);
++                    offsetFetcherUtils.onSuccessfulResponseForResettingPositions(
++                            new ListOffsetResult(fetched, retries), strategies);
+                 } else {
+-                    RuntimeException e;
+-                    if (error instanceof RuntimeException) {
+-                        e = (RuntimeException) error;
+-                    } else {
+-                        e = new RuntimeException("Unexpected failure in ListOffsets request for " +
+-                                "resetting positions", error);
++                    RuntimeException failure = error instanceof RuntimeException ? (RuntimeException) error
++                            : new RuntimeException("Unexpected failure in ListOffsets request for resetting positions", error);
++                    var currentRequests = new HashMap<>(resetTimestamps);
++                    currentRequests.keySet().retainAll(current);
++                    offsetFetcherUtils.onFailedResponseForResettingPositions(currentRequests, failure);
++                    if (!(failure instanceof RetriableException)) {
++                        pendingMetadataResets.remove(reset);
++                        reset.strategies.clear();
+                     }
+-                    offsetFetcherUtils.onFailedResponseForResettingPositions(resetTimestamps, e);
+                 }
+-                if (expectedResponses.decrementAndGet() == 0) {
+-                    globalResult.complete(null);
+-                }
+-            });
+-        });
+-
+-        if (unsentRequests.isEmpty()) {
+-            globalResult.complete(null);
+-        } else {
+-            expectedResponses.set(unsentRequests.size());
+-            requestsToSend.addAll(unsentRequests);
+-        }
+-
+-        return globalResult;
++            }
++            reset.outstandingRequests--;
++            completePositionResetIfFinished(reset);
++        } catch (Throwable failure) {
++            reset.result.completeExceptionally(failure);
++        }
++    }
++
++    private void completePositionResetIfFinished(PendingMetadataReset reset) {
++        if (reset.strategies.isEmpty() && reset.outstandingRequests == 0)
++            reset.result.complete(null);
+     }
+ 
+     /**
+@@ -791,7 +1144,14 @@
+ 
+             NodeApiVersions nodeApiVersions = apiVersions.get(node.idString());
+             if (nodeApiVersions == null) {
++                networkClientDelegate.maybeThrowAuthFailure(node);
+                 networkClientDelegate.tryConnect(node);
++                if (networkClientDelegate.isUnavailable(node)) {
++                    long nowMs = time.milliseconds();
++                    long delayMs = networkClientDelegate.connectionDelay(node, nowMs);
++                    long retryAtMs = nowMs > Long.MAX_VALUE - delayMs ? Long.MAX_VALUE : nowMs + delayMs;
++                    validationConnectRetryTimeMs = Math.min(validationConnectRetryTimeMs, retryAtMs);
++                }
+                 return;
+             }
+ 
+@@ -810,24 +1170,50 @@
+             CompletableFuture<OffsetsForLeaderEpochUtils.OffsetForEpochResult> partialResult =
+                     buildOffsetsForLeaderEpochRequestToNode(node, fetchPositions, unsentRequests);
+ 
+-            partialResult.whenComplete((offsetsResult, error) -> {
++            CompletableFuture<Void> completion = new CompletableFuture<>();
++            Map<TopicPartition, Object> requestStates = positionStateSnapshot(fetchPositions.keySet());
++            validationCompletions.put(completion, requestStates);
++            partialResult.whenComplete((offsetsResult, error) ->
++                    completeValidationRequest(completion, requestStates, fetchPositions, offsetsResult, error));
++        });
++
++        enqueueRequests(unsentRequests);
++    }
++
++    private void completeValidationRequest(CompletableFuture<Void> completion,
++                                           Map<TopicPartition, Object> requestStates,
++                                           Map<TopicPartition, SubscriptionState.FetchPosition> fetchPositions,
++                                           OffsetsForLeaderEpochUtils.OffsetForEpochResult offsetsResult,
++                                           Throwable error) {
++        if (completion.isDone())
++            return;
++        Map<TopicPartition, SubscriptionState.FetchPosition> currentPositions = new HashMap<>();
++        fetchPositions.forEach((partition, position) -> {
++            if (isCurrentPositionState(partition, requestStates))
++                currentPositions.put(partition, position);
++        });
++        try {
++            if (!currentPositions.isEmpty()) {
+                 if (error == null) {
+-                    offsetFetcherUtils.onSuccessfulResponseForValidatingPositions(fetchPositions,
+-                            offsetsResult);
++                    var endOffsets = new HashMap<>(offsetsResult.endOffsets());
++                    endOffsets.keySet().retainAll(currentPositions.keySet());
++                    Set<TopicPartition> retries = new HashSet<>(offsetsResult.partitionsToRetry());
++                    retries.retainAll(currentPositions.keySet());
++                    offsetFetcherUtils.onSuccessfulResponseForValidatingPositions(currentPositions,
++                            new OffsetsForLeaderEpochUtils.OffsetForEpochResult(endOffsets, retries));
+                 } else {
+-                    RuntimeException e;
+-                    if (error instanceof RuntimeException) {
+-                        e = (RuntimeException) error;
+-                    } else {
+-                        e = new RuntimeException("Unexpected failure in OffsetsForLeaderEpoch " +
+-                                "request for validating positions", error);
+-                    }
+-                    offsetFetcherUtils.onFailedResponseForValidatingPositions(fetchPositions, e);
++                    RuntimeException failure = error instanceof RuntimeException ? (RuntimeException) error
++                            : new RuntimeException("Unexpected failure in OffsetsForLeaderEpoch request for validating positions", error);
++                    offsetFetcherUtils.onFailedResponseForValidatingPositions(currentPositions, failure);
+                 }
+-            });
+-        });
+-
+-        requestsToSend.addAll(unsentRequests);
++            }
++            // Obsolete responses must not mutate retry state or cache errors for a new seek.
++            validationCompletions.remove(completion);
++            completion.complete(null);
++        } catch (Throwable failure) {
++            validationCompletions.remove(completion);
++            completion.completeExceptionally(failure);
++        }
+     }
+ 
+     /**
+@@ -838,6 +1224,7 @@
+             final Node node,
+             final Map<TopicPartition, SubscriptionState.FetchPosition> fetchPositions,
+             List<NetworkClientDelegate.UnsentRequest> unsentRequests) {
++        Map<TopicPartition, Object> requestStates = positionStateSnapshot(fetchPositions.keySet());
+         AbstractRequest.Builder<OffsetsForLeaderEpochRequest> builder =
+                 OffsetsForLeaderEpochUtils.prepareRequest(fetchPositions);
+ 
+@@ -859,8 +1246,10 @@
+                 OffsetsForLeaderEpochResponse offsetsForLeaderEpochResponse = (OffsetsForLeaderEpochResponse) response.responseBody();
+                 log.trace("Received OffsetsForLeaderEpoch response {} from broker {}", offsetsForLeaderEpochResponse, node);
+                 try {
++                    Map<TopicPartition, SubscriptionState.FetchPosition> currentPositions = new HashMap<>(fetchPositions);
++                    currentPositions.keySet().removeIf(partition -> !isCurrentPositionState(partition, requestStates));
+                     OffsetsForLeaderEpochUtils.OffsetForEpochResult listOffsetResult =
+-                            OffsetsForLeaderEpochUtils.handleResponse(fetchPositions, offsetsForLeaderEpochResponse);
++                            OffsetsForLeaderEpochUtils.handleResponse(currentPositions, offsetsForLeaderEpochResponse);
+                     result.complete(listOffsetResult);
+                 } catch (RuntimeException e) {
+                     result.completeExceptionally(e);
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManager.java
+@@ -45,6 +45,9 @@
+      */
+     PollResult poll(long currentTimeMs);
+ 
++    /** Freeze eligible local work before any ready manager executes in this batch. */
++    default void onPollBatchStart() { }
++
+     /**
+      * On shutdown of the {@link Consumer}, a request manager may need to send out network requests. Implementations
+      * can signal that by returning the {@link PollResult close} requests here. Like {@link #poll(long)}, this method
+--- /dev/null
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagerScheduler.java
+@@ -0,0 +1,233 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.kafka.clients.consumer.internals;
++
++import java.util.ArrayList;
++import java.util.BitSet;
++import java.util.Comparator;
++import java.util.IdentityHashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.TreeSet;
++import java.util.function.ToLongFunction;
++
++/** Network-thread-confined event subscriptions, ordered ready queue and deadline queue. */
++public final class RequestManagerScheduler implements AutoCloseable {
++    private final Map<RequestManager, Entry> entries = new IdentityHashMap<>();
++    private final List<Entry> entriesByOrder = new ArrayList<>();
++    private final BitSet ready = new BitSet();
++    private final BitSet legacy = new BitSet();
++    private final TreeSet<Waiting> timers = new TreeSet<>(Comparator
++            .comparingLong((Waiting wait) -> wait.deadline).thenComparingInt(wait -> wait.entry.order));
++
++    public void registerManagers(List<RequestManager> managers) {
++        for (RequestManager manager : managers)
++            entry(manager);
++    }
++
++    private Entry entry(RequestManager manager) {
++        Entry result = entries.get(manager);
++        if (result == null) {
++            result = new Entry(manager, entries.size());
++            entries.put(manager, result);
++            entriesByOrder.add(result);
++            ready.set(result.order);
++        }
++        return result;
++    }
++
++    /** Drain one ordered snapshot. Events raised during this pass never recursively drain it. */
++    public long pollReady(long nowMs, ToLongFunction<NetworkClientDelegate.PollResult> admit) {
++        expire(nowMs);
++        if (ready.isEmpty() && legacy.isEmpty())
++            return remainingMs(nowMs);
++        long delay = Long.MAX_VALUE;
++        BitSet snapshot = (BitSet) ready.clone();
++        snapshot.or(legacy);
++        for (int order = snapshot.nextSetBit(0); order >= 0; order = snapshot.nextSetBit(order + 1))
++            entriesByOrder.get(order).manager.onPollBatchStart();
++        for (int order = snapshot.nextSetBit(0); order >= 0; order = snapshot.nextSetBit(order + 1)) {
++            NetworkClientDelegate.PollResult result = pollPrepared(entriesByOrder.get(order).manager, nowMs);
++            if (result != null)
++                delay = Math.min(delay, admit.applyAsLong(result));
++        }
++        return Math.min(delay, remainingMs(nowMs));
++    }
++
++    /** Targeted polling for tests; production drains pollReady instead of visiting waiting managers. */
++    public NetworkClientDelegate.PollResult poll(RequestManager manager, long nowMs) {
++        manager.onPollBatchStart();
++        return pollPrepared(manager, nowMs);
++    }
++
++    private NetworkClientDelegate.PollResult pollPrepared(RequestManager manager, long nowMs) {
++        expire(nowMs);
++        Entry entry = entry(manager);
++        if (!ready.get(entry.order) && !legacy.get(entry.order))
++            return null;
++        ready.clear(entry.order);
++        if (entry.waiting != null)
++            entry.waiting.cancel();
++        final NetworkClientDelegate.PollResult result;
++        try {
++            result = manager.poll(nowMs);
++        } catch (RuntimeException | Error e) {
++            ready.set(entry.order);
++            throw e;
++        }
++        if (result.nextPollCondition == null) {
++            legacy.set(entry.order);
++        } else {
++            legacy.clear(entry.order);
++            if (entry.waiting == null)
++                entry.waiting = new Waiting(entry);
++            Waiting wait = entry.waiting;
++            wait.reset();
++            try {
++                result.nextPollCondition.register(wait);
++            } catch (RuntimeException | Error e) {
++                wait.cancel();
++                ready.set(entry.order);
++                throw e;
++            }
++            wait.armed = true;
++            if (wait.signalled || (wait.hasDeadline && wait.deadline <= nowMs))
++                wait.wake();
++            else if (wait.hasDeadline)
++                timers.add(wait);
++        }
++        return result;
++    }
++
++    /** Inspect only the ready queue and earliest timer, never all waiting conditions. */
++    public long remainingMs(long nowMs) {
++        expire(nowMs);
++        if (!ready.isEmpty())
++            return 0;
++        if (timers.isEmpty())
++            return Long.MAX_VALUE;
++        long remaining = timers.first().deadline - nowMs;
++        return remaining < 0 ? Long.MAX_VALUE : remaining;
++    }
++
++    private void expire(long nowMs) {
++        while (!timers.isEmpty() && timers.first().deadline <= nowMs)
++            timers.first().wake();
++    }
++
++    @Override
++    public void close() {
++        for (Entry entry : entries.values()) {
++            if (entry.waiting != null)
++                entry.waiting.cancel();
++        }
++        entries.clear();
++        entriesByOrder.clear();
++        ready.clear();
++        legacy.clear();
++        timers.clear();
++    }
++
++    private static final class Entry {
++        private final RequestManager manager;
++        private final int order;
++        private Waiting waiting;
++
++        private Entry(RequestManager manager, int order) {
++            this.manager = manager;
++            this.order = order;
++        }
++    }
++
++    private final class Waiting implements NextPollCondition.Registration, Runnable {
++        private final Entry entry;
++        private Runnable unsubscribe;
++        private List<Runnable> additionalSubscriptions;
++        private long deadline = Long.MAX_VALUE;
++        private boolean hasDeadline;
++        private boolean armed;
++        private boolean signalled;
++        private boolean active;
++
++        private Waiting(Entry entry) {
++            this.entry = entry;
++        }
++
++        /** Previous subscriptions and the timer must be detached before changing the timer key. */
++        private void reset() {
++            assert !active;
++            deadline = Long.MAX_VALUE;
++            hasDeadline = false;
++            armed = false;
++            signalled = false;
++            additionalSubscriptions = null;
++            active = true;
++        }
++
++        @Override
++        public void onSignal(NextPollCondition.Signal signal, long observed) {
++            Runnable cancellation = signal.subscribe(observed, this);
++            if (unsubscribe == null) {
++                unsubscribe = cancellation;
++            } else {
++                if (additionalSubscriptions == null)
++                    additionalSubscriptions = new ArrayList<>();
++                additionalSubscriptions.add(cancellation);
++            }
++        }
++
++        @Override
++        public void onDeadline(long deadlineMs) {
++            hasDeadline = true;
++            deadline = Math.min(deadline, deadlineMs);
++        }
++
++        @Override
++        public void run() {
++            wake();
++        }
++
++        private void wake() {
++            if (!active)
++                return;
++            if (!armed) {
++                signalled = true;
++                return;
++            }
++            cancel();
++            ready.set(entry.order);
++        }
++
++        private void cancel() {
++            if (!active)
++                return;
++            active = false;
++            if (unsubscribe != null) {
++                unsubscribe.run();
++                unsubscribe = null;
++            }
++            if (additionalSubscriptions != null) {
++                for (Runnable detach : additionalSubscriptions)
++                    detach.run();
++                additionalSubscriptions.clear();
++                additionalSubscriptions = null;
++            }
++            timers.remove(this);
++            // The entry retains this inactive slot for its next condition registration.
++        }
++    }
++}
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java
+@@ -302,6 +302,16 @@
+                     }
+                 }
+ 
++                if (commitRequestManager != null && commitRequestManager.autoCommitEnabled()) {
++                    commitRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
++                    // A new app wait may introduce an earlier commit deadline while network poll is blocked.
++                    fetchBuffer.setWaitRegistrationListener(networkClientDelegate::wakeup);
++                }
++                if (heartbeatRequestManager != null)
++                    heartbeatRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
++                if (streamsGroupHeartbeatRequestManager != null)
++                    streamsGroupHeartbeatRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
++
+                 final OffsetsRequestManager listOffsets = new OffsetsRequestManager(subscriptions,
+                     metadata,
+                     fetchConfig.isolationLevel,
+@@ -314,6 +324,8 @@
+                     commitRequestManager,
+                     positionsValidator,
+                     logContext);
++
++                wireMembershipPositionChanges(membershipManager, streamsMembershipManager, listOffsets, fetch);
+ 
+                 return new RequestManagers(
+                         logContext,
+@@ -330,6 +342,20 @@
+                 );
+             }
+         };
++    }
++
++    private static void wireMembershipPositionChanges(ConsumerMembershipManager consumerMembership,
++                                                      StreamsMembershipManager streamsMembership,
++                                                      OffsetsRequestManager offsets,
++                                                      FetchRequestManager fetch) {
++        Runnable positionChanged = () -> {
++            offsets.onPositionStateChanged();
++            fetch.onPollDemandChanged();
++        };
++        if (consumerMembership != null)
++            consumerMembership.setPositionStateChangeListener(positionChanged);
++        if (streamsMembership != null)
++            streamsMembership.setPositionStateChangeListener(positionChanged);
+     }
+ 
+     /**
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/StreamsGroupHeartbeatRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/StreamsGroupHeartbeatRequestManager.java
+@@ -383,6 +383,8 @@
+      * sending heartbeat until the next poll.
+      */
+     private final Timer pollTimer;
++    private ApplicationPollWait applicationPollWait;
++    private long appliedWaitActivityMs = Long.MIN_VALUE;
+ 
+     public StreamsGroupHeartbeatRequestManager(final LogContext logContext,
+                                                final Time time,
+@@ -454,7 +456,7 @@
+             maybePropagateCoordinatorFatalErrorEvent();
+             return NetworkClientDelegate.PollResult.EMPTY;
+         }
+-        pollTimer.update(currentTimeMs);
++        updatePollTimer(currentTimeMs);
+         if (pollTimer.isExpired() && !membershipManager.isLeavingGroup()) {
+             logger.warn("Consumer poll timeout has expired. This means the time between " +
+                 "subsequent calls to poll() was longer than the configured max.poll.interval.ms, " +
+@@ -529,7 +531,7 @@
+      */
+     @Override
+     public long maximumTimeToWait(long currentTimeMs) {
+-        pollTimer.update(currentTimeMs);
++        updatePollTimer(currentTimeMs);
+         if (pollTimer.isExpired() ||
+             membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
+ 
+@@ -538,7 +540,35 @@
+         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+     }
+ 
++    void setApplicationPollWait(ApplicationPollWait applicationPollWait) {
++        this.applicationPollWait = applicationPollWait;
++    }
++
++    private void updatePollTimer(long nowMs) {
++        pollTimer.update(nowMs);
++        if (applicationPollWait != null) {
++            long currentMs = pollTimer.currentTimeMs();
++            long activityMs = Math.min(currentMs, applicationPollWait.activityMs(currentMs));
++            if (activityMs > appliedWaitActivityMs) {
++                appliedWaitActivityMs = activityMs;
++                long elapsedMs = currentMs - activityMs;
++                pollTimer.reset(elapsedMs >= maxPollIntervalMs ? 0L : maxPollIntervalMs - elapsedMs);
++            }
++        }
++    }
++
+     public void resetPollTimer(final long pollMs) {
++        if (applicationPollWait != null) {
++            pollTimer.update(pollMs);
++            boolean wasExpired = pollTimer.isExpired();
++            applicationPollWait.recordActivity(pollMs);
++            // Recompute from the activity timestamp, not from delivery time of a delayed event.
++            appliedWaitActivityMs = Long.MIN_VALUE;
++            updatePollTimer(pollTimer.currentTimeMs());
++            if (wasExpired && pollTimer.notExpired())
++                membershipManager.maybeRejoinStaleMember();
++            return;
++        }
+         pollTimer.update(pollMs);
+         if (pollTimer.isExpired()) {
+             logger.warn("Time between subsequent calls to poll() was longer than the configured " +
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/StreamsMembershipManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/StreamsMembershipManager.java
+@@ -69,6 +69,16 @@
+  */
+ public class StreamsMembershipManager implements RequestManager {
+ 
++    private Runnable positionStateChangeListener = () -> { };
++
++    /**
++     * Install a background-thread notification for subscription mutations. The listener must only
++     * publish readiness; retained position and fetch work is advanced on the next owner turn.
++     */
++    void setPositionStateChangeListener(Runnable listener) {
++        positionStateChangeListener = listener;
++    }
++
+     /**
+      * A data structure to represent the current task assignment, and target task assignment of a member in a
+      * streams group.
+@@ -528,6 +538,7 @@
+ 
+         // Mark partitions as pending revocation to stop fetching before callback
+         subscriptionState.markPendingRevocation(subscriptionState.assignedPartitions());
++        positionStateChangeListener.run();
+ 
+         final CompletableFuture<Void> onAllTasksLostCallbackExecuted = requestOnAllTasksLostCallbackInvocation();
+         staleMemberAssignmentRelease = onAllTasksLostCallbackExecuted.whenComplete((result, error) -> {
+@@ -569,6 +580,7 @@
+ 
+         // Mark partitions as pending revocation to stop fetching before callback
+         subscriptionState.markPendingRevocation(subscriptionState.assignedPartitions());
++        positionStateChangeListener.run();
+ 
+         CompletableFuture<Void> onAllTasksLostCallbackExecuted = requestOnAllTasksLostCallbackInvocation();
+         onAllTasksLostCallbackExecuted.whenComplete((result, error) -> {
+@@ -661,6 +673,7 @@
+         notifyAssignmentChange(Collections.emptySet());
+         currentAssignment = LocalAssignment.NONE;
+         targetAssignment = LocalAssignment.NONE;
++        positionStateChangeListener.run();
+     }
+ 
+     /**
+@@ -884,6 +897,7 @@
+ 
+         // Mark partitions as pending revocation to stop fetching before callback
+         subscriptionState.markPendingRevocation(subscriptionState.assignedPartitions());
++        positionStateChangeListener.run();
+ 
+         CompletableFuture<Void> onAllTasksLostCallbackExecuted = requestOnAllTasksLostCallbackInvocation();
+         onAllTasksLostCallbackExecuted.whenComplete((result, error) -> {
+@@ -1028,6 +1042,7 @@
+                 transitionTo(MemberState.UNSUBSCRIBED);
+             }
+             subscriptionState.unsubscribe();
++            positionStateChangeListener.run();
+             notifyAssignmentChange(Collections.emptySet());
+             return CompletableFuture.completedFuture(null);
+         }
+@@ -1075,6 +1090,7 @@
+     private void leaving() {
+         clearTaskAndPartitionAssignment();
+         subscriptionState.unsubscribe();
++        positionStateChangeListener.run();
+         transitionToSendingLeaveGroup(false);
+     }
+ 
+@@ -1239,6 +1255,7 @@
+         final SortedSet<TopicPartition> partitionsToRevoke = topicPartitionsForActiveTasks(activeTasksToRevoke);
+         log.debug("Marking partitions pending for revocation: {}", partitionsToRevoke);
+         subscriptionState.markPendingRevocation(partitionsToRevoke);
++        positionStateChangeListener.run();
+ 
+         CompletableFuture<Void> tasksRevoked = new CompletableFuture<>();
+         CompletableFuture<Void> onTasksRevokedCallbackExecuted = requestOnTasksRevokedCallbackInvocation(activeTasksToRevoke);
+@@ -1291,6 +1308,7 @@
+         partitionsAssignedAndCallbackExecuted.whenComplete((__, callbackError) -> {
+             if (callbackError == null) {
+                 subscriptionState.enablePartitionsAwaitingCallback(partitionsToAssign);
++                positionStateChangeListener.run();
+             } else {
+                 if (!partitionsToAssignNotPreviouslyOwned.isEmpty() && subscriptionState.assignedPartitions().containsAll(partitionsToAssignNotPreviouslyOwned)) {
+                     log.warn("Leaving newly assigned partitions {} marked as non-fetchable and not " +
+@@ -1312,6 +1330,7 @@
+         final SortedSet<TopicPartition> partitionsToRelease = topicPartitionsForActiveTasks(activeTasksToRelease);
+         log.debug("Marking lost partitions pending for revocation: {}", partitionsToRelease);
+         subscriptionState.markPendingRevocation(partitionsToRelease);
++        positionStateChangeListener.run();
+ 
+         return requestOnAllTasksLostCallbackInvocation();
+     }
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/SubscriptionState.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/SubscriptionState.java
+@@ -176,6 +176,12 @@
+      *
+      * @return The current assignment Id
+      */
++    /** Identity of this partition's position operation, including repeated seeks to the same value. */
++    synchronized Object positionStateToken(TopicPartition partition) {
++        TopicPartitionState state = assignedStateOrNull(partition);
++        return state == null ? null : state.positionStateToken;
++    }
++
+     synchronized int assignmentId() {
+         return assignmentId;
+     }
+@@ -935,6 +941,28 @@
+         return result;
+     }
+ 
++    synchronized boolean hasPendingValidation() {
++        Iterator<TopicPartitionState> states = assignment.stateIterator();
++        while (states.hasNext()) {
++            TopicPartitionState state = states.next();
++            if (state.awaitingValidation() && state.position != null)
++                return true;
++        }
++        return false;
++    }
++
++    /** Only future eligibility times count; missing metadata is a signal dependency, not a timer. */
++    synchronized long nextValidationRetryTimeMs(long nowMs) {
++        long nextRetry = Long.MAX_VALUE;
++        Iterator<TopicPartitionState> states = assignment.stateIterator();
++        while (states.hasNext()) {
++            TopicPartitionState state = states.next();
++            if (state.awaitingValidation() && state.nextRetryTimeMs != null && state.nextRetryTimeMs > nowMs)
++                nextRetry = Math.min(nextRetry, state.nextRetryTimeMs);
++        }
++        return nextRetry;
++    }
++
+     public synchronized boolean isAssigned(TopicPartition tp) {
+         return assignment.contains(tp);
+     }
+@@ -1104,6 +1132,8 @@
+     }
+ 
+     private static class TopicPartitionState {
++        private Object positionStateToken = new Object();
++
+ 
+         private FetchState fetchState;
+         private FetchPosition position; // last consumed position
+@@ -1188,6 +1218,7 @@
+         }
+ 
+         private void reset(AutoOffsetResetStrategy strategy) {
++            positionStateToken = new Object();
+             transitionState(FetchStates.AWAIT_RESET, () -> {
+                 this.resetStrategy = strategy;
+                 this.nextRetryTimeMs = null;
+@@ -1223,6 +1254,8 @@
+          */
+         private void updatePositionLeaderNoValidation(Metadata.LeaderAndEpoch currentLeaderAndEpoch) {
+             if (position != null) {
++                if (awaitingValidation() || !position.currentLeader.equals(currentLeaderAndEpoch))
++                    positionStateToken = new Object();
+                 transitionState(FetchStates.FETCHING, () -> {
+                     this.position = new FetchPosition(position.offset, position.offsetEpoch, currentLeaderAndEpoch);
+                     this.nextRetryTimeMs = null;
+@@ -1231,6 +1264,7 @@
+         }
+ 
+         private void validatePosition(FetchPosition position) {
++            positionStateToken = new Object();
+             if (position.offsetEpoch.isPresent() && position.currentLeader.epoch.isPresent()) {
+                 transitionState(FetchStates.AWAIT_VALIDATION, () -> {
+                     this.position = position;
+@@ -1287,6 +1321,7 @@
+         }
+ 
+         private void seekValidated(FetchPosition position) {
++            positionStateToken = new Object();
+             transitionState(FetchStates.FETCHING, () -> {
+                 this.position = position;
+                 this.resetStrategy = null;
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/ApplicationEvent.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/ApplicationEvent.java
+@@ -28,7 +28,7 @@
+ public abstract class ApplicationEvent {
+ 
+     public enum Type {
+-        COMMIT_ASYNC, COMMIT_SYNC, ASYNC_POLL, FETCH_COMMITTED_OFFSETS, NEW_TOPICS_METADATA_UPDATE, ASSIGNMENT_CHANGE,
++        COMMIT_ASYNC, COMMIT_SYNC, ASYNC_POLL, CANCEL_ASYNC_POLL, FETCH_COMMITTED_OFFSETS, NEW_TOPICS_METADATA_UPDATE, ASSIGNMENT_CHANGE,
+         LIST_OFFSETS, CHECK_AND_UPDATE_POSITIONS, RESET_OFFSET, TOPIC_METADATA, ALL_TOPICS_METADATA,
+         TOPIC_SUBSCRIPTION_CHANGE, TOPIC_PATTERN_SUBSCRIPTION_CHANGE, TOPIC_RE2J_PATTERN_SUBSCRIPTION_CHANGE,
+         UPDATE_SUBSCRIPTION_METADATA, UNSUBSCRIBE,
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/ApplicationEventProcessor.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/ApplicationEventProcessor.java
+@@ -25,6 +25,7 @@
+ import org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager;
+ import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
+ import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
++import org.apache.kafka.clients.consumer.internals.FetchRequestManager.FetchContinuation;
+ import org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal;
+ import org.apache.kafka.clients.consumer.internals.RequestManagers;
+ import org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager;
+@@ -63,6 +64,64 @@
+     private final SubscriptionState subscriptions;
+     private final RequestManagers requestManagers;
+     private int metadataVersionSnapshot;
++    // Lifecycle ownership only: never scanned by the network loop.
++    private final Set<AsyncPollEvent> pendingPositionEvents = new HashSet<>();
++    private boolean asyncPollContinuationsClosed;
++
++    /** Only network-thread completions may enqueue; a snapshot bounds each scheduling turn. */
++    private final class PendingFetch implements FetchContinuation {
++        private final AsyncPollEvent event;
++        private final Throwable positionError;
++
++        private PendingFetch(AsyncPollEvent event, Throwable positionError) {
++            this.event = event;
++            this.positionError = positionError;
++        }
++
++        @Override
++        public void advance() {
++            if (!event.isActive())
++                return;
++            Throwable error = positionError;
++            while (error instanceof CompletionException && error.getCause() != null)
++                error = error.getCause();
++            if (!event.isComplete() && (error instanceof org.apache.kafka.common.errors.TimeoutException
++                    || error instanceof java.util.concurrent.TimeoutException)) {
++                event.completeSuccessfully();
++                return;
++            }
++            if (maybeCompleteAsyncPollEventExceptionally(event, error))
++                return;
++            try {
++                requestManagers.fetchRequestManager.createFetchRequestsWithReconnect(event.deadlineMs(), event::isActive).whenComplete((ignored, fetchError) -> {
++                    if (!maybeCompleteAsyncPollEventExceptionally(event, fetchError))
++                        event.completeSuccessfully();
++                });
++            } catch (RuntimeException e) {
++                event.completeExceptionally(ConsumerUtils.maybeWrapAsKafkaException(e));
++            }
++        }
++
++        @Override
++        public void onClose() {
++            if (!event.isComplete())
++                event.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
++        }
++    }
++
++    public void closeFetchContinuations() {
++        asyncPollContinuationsClosed = true;
++        Set<AsyncPollEvent> pending = new HashSet<>(pendingPositionEvents);
++        pendingPositionEvents.clear();
++        if (requestManagers.fetchRequestManager != null)
++            requestManagers.fetchRequestManager.closeFetchContinuations();
++        for (AsyncPollEvent event : pending) {
++            if (!event.isComplete())
++                event.completeExceptionally(new KafkaException("Consumer closed while awaiting positions"));
++        }
++        if (requestManagers.offsetsRequestManager != null)
++            requestManagers.offsetsRequestManager.closePendingPositionResets();
++    }
+ 
+     public ApplicationEventProcessor(final LogContext logContext,
+                                      final RequestManagers requestManagers,
+@@ -145,6 +204,10 @@
+ 
+             case CONSUMER_REBALANCE_LISTENER_CALLBACK_COMPLETED:
+                 process((ConsumerRebalanceListenerCallbackCompletedEvent) event);
++                return;
++
++            case CANCEL_ASYNC_POLL:
++                process((CancelAsyncPollEvent) event);
+                 return;
+ 
+             case COMMIT_ON_CLOSE:
+@@ -315,6 +378,7 @@
+             if (subscriptions.assignFromUser(new HashSet<>(event.partitions())))
+                 metadata.requestUpdateForNewTopics();
+ 
++            requestManagers.offsetsRequestManager.onPositionStateChanged();
+             event.future().complete(null);
+         } catch (Exception e) {
+             event.future().completeExceptionally(e);
+@@ -434,6 +498,7 @@
+         } else {
+             // If the consumer is not using the group management capabilities, we still need to clear all assignments it may have.
+             subscriptions.unsubscribe();
++            requestManagers.offsetsRequestManager.onPositionStateChanged();
+             event.future().complete(null);
+         }
+     }
+@@ -443,6 +508,7 @@
+             Collection<TopicPartition> parts = event.topicPartitions().isEmpty() ?
+                     subscriptions.assignedPartitions() : event.topicPartitions();
+             subscriptions.requestOffsetReset(parts, event.offsetResetStrategy());
++            requestManagers.offsetsRequestManager.onPositionStateChanged();
+             event.future().complete(null);
+         } catch (Exception e) {
+             event.future().completeExceptionally(e);
+@@ -624,6 +690,7 @@
+                 metadata.currentLeader(event.partition())
+             );
+             subscriptions.seekUnvalidated(event.partition(), newPosition);
++            requestManagers.offsetsRequestManager.onPositionStateChanged();
+             event.future().complete(null);
+         } catch (Exception e) {
+             event.future().completeExceptionally(e);
+@@ -719,13 +786,29 @@
+                     new IllegalStateException("No membership manager available when processing ApplyAssignmentEvent"));
+                 return;
+             }
++            requestManagers.offsetsRequestManager.onPositionStateChanged();
+             event.future().complete(null);
+         } catch (Exception e) {
+             event.future().completeExceptionally(e);
+         }
+     }
+ 
++    private void process(final CancelAsyncPollEvent event) {
++        AsyncPollEvent target = event.target();
++        target.requestCancellation();
++        pendingPositionEvents.remove(target);
++        target.completeSuccessfully();
++        requestManagers.offsetsRequestManager.onPositionStateChanged();
++        requestManagers.fetchRequestManager.onPollDemandChanged();
++    }
++
+     private void process(final AsyncPollEvent event) {
++        if (!event.isActive())
++            return;
++        if (asyncPollContinuationsClosed) {
++            event.completeExceptionally(new KafkaException("Consumer closed before position preparation"));
++            return;
++        }
+         // Trigger a reconciliation that can safely commit offsets if needed to rebalance,
+         // as we're processing before any new fetching starts
+         requestManagers.consumerMembershipManager.ifPresent(consumerMembershipManager ->
+@@ -753,27 +836,31 @@
+             });
+         }
+ 
+-        CompletableFuture<Void> updatePositionsFuture = requestManagers.offsetsRequestManager.updateFetchPositions(event.deadlineMs());
+-        event.markValidatePositionsComplete();
+-
+-        updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
+-            if (maybeCompleteAsyncPollEventExceptionally(event, updatePositionsError))
+-                return;
+-
+-            requestManagers.fetchRequestManager.createFetchRequests().whenComplete((___, fetchError) -> {
+-                if (maybeCompleteAsyncPollEventExceptionally(event, fetchError))
++        pendingPositionEvents.add(event);
++        try {
++            CompletableFuture<Void> updatePositionsFuture = requestManagers.offsetsRequestManager.updateFetchPositionsAndAwaitValidation(event.deadlineMs(), event::isActive);
++            event.markValidatePositionsComplete();
++
++            updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
++                pendingPositionEvents.remove(event);
++                if (!event.isActive())
+                     return;
+-
+-                event.completeSuccessfully();
++                requestManagers.fetchRequestManager.enqueueFetchContinuation(new PendingFetch(event, updatePositionsError));
+             });
+-        });
+-    }
+-
+-    /**
+-     * If there's an error to report to the user, the current event will be completed and this method will
+-     * return {@code true}. Otherwise, it will return {@code false}.
++        } catch (RuntimeException e) {
++            pendingPositionEvents.remove(event);
++            if (event.isActive())
++                event.completeExceptionally(ConsumerUtils.maybeWrapAsKafkaException(e));
++        }
++    }
++
++    /**
++     * Stop a continuation if its event has already completed, or complete it with an error to report.
++     * A late owner result must neither start another stage nor replace the event's terminal error.
+      */
+     private boolean maybeCompleteAsyncPollEventExceptionally(AsyncPollEvent event, Throwable t) {
++        if (!event.isActive())
++            return true;
+         if (t == null)
+             return false;
+ 
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/AsyncPollEvent.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/AsyncPollEvent.java
+@@ -24,6 +24,7 @@
+ import org.apache.kafka.common.utils.Time;
+ 
+ import java.time.Duration;
++import java.util.Objects;
+ import java.util.Optional;
+ import java.util.concurrent.CompletableFuture;
+ 
+@@ -45,8 +46,11 @@
+ 
+     private final long deadlineMs;
+     private final long pollTimeMs;
++    private final Runnable onError;
++    private final Runnable onPositionsValidated;
+     private volatile KafkaException error;
+     private volatile boolean isComplete;
++    private volatile boolean cancellationRequested;
+     private volatile boolean isValidatePositionsComplete;
+     private final CompletableFuture<Void> reconciliationCheckFuture = new CompletableFuture<>();
+ 
+@@ -58,9 +62,15 @@
+      * @param pollTimeMs        Time, in milliseconds, at which point the event was created
+      */
+     public AsyncPollEvent(long deadlineMs, long pollTimeMs) {
++        this(deadlineMs, pollTimeMs, () -> { }, () -> { });
++    }
++
++    public AsyncPollEvent(long deadlineMs, long pollTimeMs, Runnable onError, Runnable onPositionsValidated) {
+         super(Type.ASYNC_POLL);
+         this.deadlineMs = deadlineMs;
+         this.pollTimeMs = pollTimeMs;
++        this.onError = Objects.requireNonNull(onError);
++        this.onPositionsValidated = Objects.requireNonNull(onPositionsValidated);
+     }
+ 
+     public long deadlineMs() {
+@@ -85,6 +95,7 @@
+ 
+     public void markValidatePositionsComplete() {
+         this.isValidatePositionsComplete = true;
++        onPositionsValidated.run();
+     }
+ 
+     /**
+@@ -118,18 +129,34 @@
+         return isComplete;
+     }
+ 
++    /** App-thread cancellation revokes permission without running owner future continuations. */
++    public boolean requestCancellation() {
++        if (isComplete || cancellationRequested)
++            return false;
++        cancellationRequested = true;
++        return true;
++    }
++
++    public boolean isActive() {
++        return !isComplete && !cancellationRequested;
++    }
++
+     public void completeSuccessfully() {
+-        // Complete reconciliation future as safety net in case it wasn't already marked complete
++        if (isComplete)
++            return;
++        // Publish the result before completing a future that may run observers inline.
++        isComplete = true;
+         reconciliationCheckFuture.complete(null);
+-        isComplete = true;
+     }
+ 
+     public void completeExceptionally(KafkaException e) {
+-        // Complete reconciliation future to unblock any waiters - the error will be surfaced
+-        // through the normal checkInflightPoll() mechanism via the error field
+-        reconciliationCheckFuture.complete(null);
++        if (isComplete)
++            return;
++        // Publish the error before releasing observers; checkInflightPoll() reads these fields.
+         error = e;
+         isComplete = true;
++        reconciliationCheckFuture.complete(null);
++        onError.run();
+     }
+ 
+     @Override
+@@ -144,6 +171,7 @@
+             ", pollTimeMs=" + pollTimeMs +
+             ", error=" + error +
+             ", isComplete=" + isComplete +
++            ", cancellationRequested=" + cancellationRequested +
+             ", isValidatePositionsComplete=" + isValidatePositionsComplete +
+             ", isReconciliationCheckComplete=" + isReconciliationCheckComplete();
+     }
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/BackgroundEventHandler.java
+@@ -18,12 +18,16 @@
+ 
+ import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
+ import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
++import org.apache.kafka.common.KafkaException;
++import org.apache.kafka.common.errors.TimeoutException;
+ import org.apache.kafka.common.utils.Time;
+ 
+ import java.util.ArrayList;
+ import java.util.List;
+ import java.util.Objects;
++import java.util.Set;
+ import java.util.concurrent.BlockingQueue;
++import java.util.concurrent.ConcurrentHashMap;
+ 
+ /**
+  * An event handler that receives {@link BackgroundEvent background events} from the
+@@ -36,10 +40,23 @@
+     private final BlockingQueue<BackgroundEvent> backgroundEventQueue;
+     private final Time time;
+     private final AsyncConsumerMetrics asyncConsumerMetrics;
++    private final Runnable wakeupApplication;
++    // The network owner adds/closes callbacks. Completion bookkeeping is safe even if a future
++    // observer removes an entry from another thread; it never runs domain work or scheduler signals.
++    private final Set<CompletableBackgroundEvent<?>> pendingCallbacks = ConcurrentHashMap.newKeySet();
++    private boolean callbacksClosed;
+ 
+     public BackgroundEventHandler(final BlockingQueue<BackgroundEvent> backgroundEventQueue,
+                                   final Time time,
+                                   final AsyncConsumerMetrics asyncConsumerMetrics) {
++        this(backgroundEventQueue, time, asyncConsumerMetrics, () -> { });
++    }
++
++    public BackgroundEventHandler(final BlockingQueue<BackgroundEvent> backgroundEventQueue,
++                                  final Time time,
++                                  final AsyncConsumerMetrics asyncConsumerMetrics,
++                                  final Runnable wakeupApplication) {
++        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
+         this.backgroundEventQueue = backgroundEventQueue;
+         this.time = time;
+         this.asyncConsumerMetrics = asyncConsumerMetrics;
+@@ -52,9 +69,44 @@
+      */
+     public void add(BackgroundEvent event) {
+         Objects.requireNonNull(event, "BackgroundEvent provided to add must be non-null");
++        if (event instanceof CompletableBackgroundEvent) {
++            CompletableBackgroundEvent<?> callback = (CompletableBackgroundEvent<?>) event;
++            if (callback.deadlineMs() != Long.MAX_VALUE) {
++                IllegalArgumentException error = new IllegalArgumentException(
++                        "Background callback deadlines require network-owner timeout handling");
++                callback.future().completeExceptionally(error);
++                throw error;
++            }
++            if (callbacksClosed) {
++                callback.future().completeExceptionally(new KafkaException("Consumer closed before callback publication"));
++                return;
++            }
++            pendingCallbacks.add(callback);
++            callback.future().whenComplete((ignored, error) -> pendingCallbacks.remove(callback));
++        }
+         event.setEnqueuedMs(time.milliseconds());
+         asyncConsumerMetrics.recordBackgroundEventQueueSize(backgroundEventQueue.size() + 1);
+         backgroundEventQueue.add(event);
++        // Publish the event before waking its observer; the notifier must retain a wake before parking.
++        wakeupApplication.run();
++    }
++
++    /**
++     * Terminate callbacks on their network owner, including events already drained by the app.
++     * Close before completing the snapshot: completion may attempt to publish another callback.
++     */
++    public void closePendingCallbacks() {
++        callbacksClosed = true;
++        List<CompletableBackgroundEvent<?>> closing = new ArrayList<>(pendingCallbacks);
++        pendingCallbacks.clear();
++        for (CompletableBackgroundEvent<?> callback : closing)
++            callback.future().completeExceptionally(new TimeoutException(String.format(
++                    "%s could not be completed before the consumer closed", callback.getClass().getSimpleName())));
++    }
++
++    // Visible for lifecycle tests; this is bookkeeping, not an application-thread completion API.
++    public int pendingCallbackCount() {
++        return pendingCallbacks.size();
+     }
+ 
+     /**
+--- /dev/null
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/events/CancelAsyncPollEvent.java
+@@ -0,0 +1,33 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.kafka.clients.consumer.internals.events;
++
++import java.util.Objects;
++
++/** Terminalize an abandoned application poll and release its retained work on the network owner. */
++public final class CancelAsyncPollEvent extends ApplicationEvent {
++    private final AsyncPollEvent target;
++
++    public CancelAsyncPollEvent(AsyncPollEvent target) {
++        super(Type.CANCEL_ASYNC_POLL);
++        this.target = Objects.requireNonNull(target);
++    }
++
++    public AsyncPollEvent target() {
++        return target;
++    }
++}

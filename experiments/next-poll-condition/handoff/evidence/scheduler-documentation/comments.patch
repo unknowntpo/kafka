@@ -1,0 +1,394 @@
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagerScheduler.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagerScheduler.java
+@@ -25,15 +25,32 @@
+ import java.util.TreeSet;
+ import java.util.function.ToLongFunction;
+ 
+-/** Network-thread-confined event subscriptions, ordered ready queue and deadline queue. */
++/**
++ * Selects which request managers the network thread polls during normal operation. Managers still
++ * own protocol state and request construction; this class owns eligibility, subscriptions and deadlines.
++ * {@link ConsumerNetworkThread} drives {@link #pollReady(long, ToLongFunction)} and performs network I/O
++ * after the selected managers have returned their requests.
++ *
++ * <p>All access, including signal callbacks and close, belongs to the network thread. A signal makes a
++ * manager eligible; it does not execute that manager or wake a blocked network selector. Input from
++ * another thread must use the application's event/wakeup handoff before changing this scheduler.
++ * This class does not replace the separate scan of {@link RequestManager#maximumTimeToWait(long)}.
++ */
+ public final class RequestManagerScheduler implements AutoCloseable {
++    // Manager identity is stable even if an implementation defines value-based equality.
+     private final Map<RequestManager, Entry> entries = new IdentityHashMap<>();
++    // Bit indexes preserve registration order; eligibility does not introduce a new priority order.
+     private final List<Entry> entriesByOrder = new ArrayList<>();
++    // A bit grants one poll attempt. Initial registration, expiry and input publication set it.
+     private final BitSet ready = new BitSet();
++    // Managers without a condition retain full-pass polling. Their numeric delay still bounds I/O.
+     private final BitSet legacy = new BitSet();
++    // At most one active deadline per manager. Order breaks ties so equal deadlines remain distinct.
++    // Signal-only waits are absent; anyOf registrations contribute their earliest deadline.
+     private final TreeSet<Waiting> timers = new TreeSet<>(Comparator
+             .comparingLong((Waiting wait) -> wait.deadline).thenComparingInt(wait -> wait.entry.order));
+ 
++    /** Register in the consumer's existing manager order and make new entries eligible once. */
+     public void registerManagers(List<RequestManager> managers) {
+         for (RequestManager manager : managers)
+             entry(manager);
+@@ -50,7 +67,17 @@
+         return result;
+     }
+ 
+-    /** Drain one ordered snapshot. Events raised during this pass never recursively drain it. */
++    /**
++     * Poll one fixed snapshot of ready and legacy managers. Freeze each selected manager's local
++     * batch before polling any of them, so a cross-manager handoff cannot consume newly queued work
++     * merely because its recipient occurs later in this snapshot. Newly eligible managers outside
++     * the snapshot wait for the next pass; this is not an immutable snapshot of all protocol state.
++     *
++     * @param nowMs time used for this scheduling pass
++     * @param admit stages each result's requests and returns its numeric I/O delay; production passes
++     *              {@link NetworkClientDelegate#addAll(NetworkClientDelegate.PollResult)}
++     * @return the earliest numeric delay or registered deadline, or zero when work remains ready
++     */
+     public long pollReady(long nowMs, ToLongFunction<NetworkClientDelegate.PollResult> admit) {
+         expire(nowMs);
+         if (ready.isEmpty() && legacy.isEmpty())
+@@ -74,6 +101,7 @@
+         return pollPrepared(manager, nowMs);
+     }
+ 
++    /** Consume eligibility, poll the owner, then replace its previous one-shot wait. */
+     private NetworkClientDelegate.PollResult pollPrepared(RequestManager manager, long nowMs) {
+         expire(nowMs);
+         Entry entry = entry(manager);
+@@ -104,6 +132,8 @@
+                 ready.set(entry.order);
+                 throw e;
+             }
++            // subscribe() may have synchronously observed a publication. Finish collecting all
++            // cancellation handles before allowing wake() to detach this registration.
+             wait.armed = true;
+             if (wait.signalled || (wait.hasDeadline && wait.deadline <= nowMs))
+                 wait.wake();
+@@ -142,6 +172,7 @@
+         timers.clear();
+     }
+ 
++    /** Stable manager/index association; retains one lazily allocated Waiting across activations. */
+     private static final class Entry {
+         private final RequestManager manager;
+         private final int order;
+@@ -153,13 +184,22 @@
+         }
+     }
+ 
++    /**
++     * One active registration for one manager. Any signal or the earliest deadline wins, cancels
++     * the other subscriptions and marks the owner ready. Cancellation keeps this object reusable;
++     * it does not retain the old subscriptions or leave an old timer in the index.
++     */
+     private final class Waiting implements NextPollCondition.Registration, Runnable {
+         private final Entry entry;
++        // Keep the common single-signal case free of an additional cancellation-handle list.
+         private Runnable unsubscribe;
+         private List<Runnable> additionalSubscriptions;
+         private long deadline = Long.MAX_VALUE;
++        // Long.MAX_VALUE is also a valid deadline, so it cannot stand in for "no deadline".
+         private boolean hasDeadline;
++        // active covers registration construction too; armed permits actual detach-and-ready work.
+         private boolean armed;
++        // Remembers publication during construction until all handles have been registered.
+         private boolean signalled;
+         private boolean active;
+ 
+@@ -226,6 +266,7 @@
+                 additionalSubscriptions.clear();
+                 additionalSubscriptions = null;
+             }
++            // Remove using the old deadline key before reset() mutates it for a later registration.
+             timers.remove(this);
+             // The entry retains this inactive slot for its next condition registration.
+         }
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/NextPollCondition.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/NextPollCondition.java
+@@ -22,20 +22,33 @@
+  * A one-shot condition for the next manager poll. Conditions and signals are confined to the
+  * consumer network thread. External input must use the existing event queue and network wakeup.
+  */
++/**
++ * A manager's next opportunity to recheck its state, expressed as input publication, a deadline,
++ * or either of them. Readiness is permission to poll again, not a guarantee that a request can be sent.
++ * The scheduler registers these dependencies instead of repeatedly evaluating every condition.
++ *
++ * <p>Conditions, signals and registration callbacks are network-thread confined. They do not provide
++ * cross-thread signalling or interrupt network I/O; those remain the event queue and network wakeup's
++ * responsibility. A manager should capture signal generations before work that can publish input.
++ */
+ public interface NextPollCondition {
+-    /** Register once; subsequent input publication activates the subscriber directly. */
++    /** Register once; publication activates the registration callback, not manager.poll itself. */
+     void register(Registration registration);
+ 
++    /** Sink used to flatten a condition into signal subscriptions and its earliest deadline. */
+     interface Registration {
+         void onSignal(Signal signal, long observed);
+ 
+         void onDeadline(long deadlineMs);
+     }
+ 
++    /** Direct inspection for callers; production scheduling uses registration rather than a scan. */
+     boolean isReady(long nowMs);
+ 
++    /** Direct delay projection; scheduler deadlines are collected through Registration instead. */
+     long remainingMs(long nowMs);
+ 
++    /** Record an absolute deadline; this creates no independent timer thread or operating-system alarm. */
+     static NextPollCondition after(long nowMs, long delayMs) {
+         if (delayMs < 0)
+             throw new IllegalArgumentException("Negative delay");
+@@ -84,7 +97,11 @@
+         };
+     }
+ 
+-    /** Capture before producing a poll result so publication before registration is not lost. */
++    /**
++     * Network-thread-owned publication source with one-shot subscribers. A generation records that
++     * input changed even when no subscriber was installed yet; it carries no protocol-state payload.
++     * Owners update their state before publishing, and an awakened manager reads that state on its poll.
++     */
+     final class Signal {
+         private static final Runnable NOOP = () -> { };
+         private long generation;
+@@ -92,6 +109,7 @@
+         private Subscription last;
+         private int subscriberCount;
+ 
++        /** Detach and notify the current subscriber generation; re-registration belongs to a later one. */
+         public void publish() {
+             generation++;
+             // Detach this generation. New registrations belong to a later publication.
+@@ -111,6 +129,10 @@
+             }
+         }
+ 
++        /**
++         * Invoke immediately if publication occurred after capture, otherwise install a one-shot
++         * subscriber. The returned handle must also be collected in the immediate-callback case.
++         */
+         Runnable subscribe(long observed, Runnable subscriber) {
+             if (generation != observed) {
+                 subscriber.run();
+@@ -163,6 +185,7 @@
+             }
+         }
+ 
++        /** Capture now, before producing the poll result, so publication before registration is visible. */
+         public NextPollCondition await() {
+             long observed = generation;
+             return new NextPollCondition() {
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManager.java
+@@ -22,8 +22,11 @@
+ import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
+ 
+ /**
+- * {@code PollResult} consist of {@code UnsentRequest} if there are requests to send; otherwise, return the time till
+- * the next poll event.
++ * Owns one part of consumer protocol work and returns prepared requests in a {@link PollResult}.
++ * During normal operation, {@link ConsumerNetworkThread} delegates poll selection to
++ * {@link RequestManagerScheduler}; the manager itself decides what work is valid in its current state.
++ * A non-null condition opts into event/deadline eligibility. Legacy results retain polling on every
++ * network-loop pass, even when their request list is empty.
+  */
+ public interface RequestManager {
+ 
+@@ -45,7 +48,12 @@
+      */
+     PollResult poll(long currentTimeMs);
+ 
+-    /** Freeze eligible local work before any ready manager executes in this batch. */
++    /**
++     * Freeze eligible local work before any selected manager executes in this batch. The scheduler
++     * invokes this hook for the entire selected snapshot first, then calls poll in manager order.
++     * For example, a continuation queued by an earlier manager must not enter a later manager's
++     * already-open batch. Implementations without queued local work need no additional boundary.
++     */
+     default void onPollBatchStart() { }
+ 
+     /**
+@@ -73,6 +81,8 @@
+      * to results from the request managers. For example, the subscription state can change when heartbeats
+      * are sent, so blocking for longer than the heartbeat interval might mean the application thread is not
+      * responsive to changes.
++     * This application-wait bound is independent of the condition returned from poll. The network
++     * thread still queries every manager and publishes the minimum through its cached wait value.
+      *
+      * @param currentTimeMs The current system time at which the method was called; useful for determining if
+      *                      time-sensitive operations should be performed
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java
+@@ -79,6 +79,7 @@
+     private ApplicationEventProcessor applicationEventProcessor;
+     private NetworkClientDelegate networkClientDelegate;
+     private RequestManagers requestManagers;
++    // Owns normal poll eligibility only; this thread still owns I/O, app-wait bounds and close polling.
+     private final RequestManagerScheduler requestManagerScheduler = new RequestManagerScheduler();
+     private boolean managersRegistered;
+     private volatile boolean running;
+@@ -200,17 +201,21 @@
+      *         {@link ApplicationEventProcessor}
+      *     </li>
+      *     <li>
+-     *         Invoke {@link RequestManager#poll(long)} for ready and legacy managers, preserving manager order,
+-     *         to get requests and the next network poll timeout. Waiting managers are activated by subscriptions
+-     *         or deadline expiry.
+-     *     </li>
+-     *     <li>
+-     *         Stage each {@link AbstractRequest.Builder request} to be sent via
+-     *         {@link NetworkClientDelegate#addAll(List)}
++     *         Invoke {@link RequestManagerScheduler#pollReady(long, java.util.function.ToLongFunction)},
++     *         which calls {@link RequestManager#onPollBatchStart()} and then {@link RequestManager#poll(long)}
++     *         for its ready/legacy snapshot. Waiting managers become eligible through input publication or expiry.
++     *     </li>
++     *     <li>
++     *         Supply {@link NetworkClientDelegate#addAll(NetworkClientDelegate.PollResult)} as the scheduler's
++     *         admission callback. It stages the returned requests; it does not perform the network poll.
+      *     </li>
+      *     <li>
+      *         Poll the client via {@link KafkaClient#poll(long, long)} to send the requests, as well as
+      *         retrieve any available responses
++     *     </li>
++     *     <li>
++     *         Query every manager's application-wait bound separately, then reap expired events. This scan is
++     *         not filtered by scheduler eligibility and does not replace notification of the application.
+      *     </li>
+      * </ol>
+      */
+@@ -331,6 +336,7 @@
+     }
+ 
+     public void wakeup() {
++        // Interrupt I/O so the owner can process input; no manager is made ready by this call alone.
+         // The network client can be null if the initializeResources method has not yet been called.
+         if (networkClientDelegate != null)
+             networkClientDelegate.wakeup();
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java
+@@ -334,11 +334,18 @@
+         unsentRequests.add(r);
+     }
+ 
++    /**
++     * Carries prepared requests plus two independent scheduling hints. The delegate stages requests
++     * and returns the numeric delay to its caller; only RequestManagerScheduler registers the condition.
++     * A request-free result can still require a future poll. In particular, EMPTY is a legacy result,
++     * not a declaration that a manager has subscribed to all inputs it may need.
++     */
+     public static class PollResult {
+         public static final long WAIT_FOREVER = Long.MAX_VALUE;
+         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
++        // An upper bound contributed to the current network poll, not permission to skip the manager.
+         public final long timeUntilNextPollMs;
+-        // Null retains legacy full-pass polling, including legacy finite delays.
++        // Non-null opts into one-shot eligibility; null retains full-pass polling, including finite delays.
+         public final NextPollCondition nextPollCondition;
+         public final List<UnsentRequest> unsentRequests;
+ 
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java
+@@ -91,6 +91,8 @@
+         this.streamsMembershipManager = streamsMembershipManager;
+         this.shareMembershipManager = Optional.empty();
+ 
++        // The scheduler uses this order for both initial registration and each eligible poll batch.
++        // Presence in this list does not imply condition migration: legacy managers remain valid entries.
+         List<RequestManager> list = new ArrayList<>();
+         coordinatorRequestManager.ifPresent(list::add);
+         commitRequestManager.ifPresent(list::add);
+@@ -304,7 +306,9 @@
+ 
+                 if (commitRequestManager != null && commitRequestManager.autoCommitEnabled()) {
+                     commitRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
+-                    // A new app wait may introduce an earlier commit deadline while network poll is blocked.
++                    // Called by the application thread while registering a wait. Interrupting I/O lets
++                    // the network owner recompute an auto-commit deadline. Commit is currently legacy;
++                    // a future condition-based commit manager also needs owner-side ready publication.
+                     fetchBuffer.setWaitRegistrationListener(networkClientDelegate::wakeup);
+                 }
+                 if (heartbeatRequestManager != null)
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ApplicationPollWait.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ApplicationPollWait.java
+@@ -17,16 +17,23 @@
+ package org.apache.kafka.clients.consumer.internals;
+ 
+ /**
+- * App wait registration, shared with the heartbeat owner. Publication revokes the registration
+- * before signalling the app; repeated publications cannot renew an unresponsive app.
+- * FetchBuffer serializes registration and publication with its condition lock.
++ * Shared application-wait state read by the network-owned heartbeat and auto-commit managers.
++ * Unlike NextPollCondition.Signal, this object crosses threads and synchronizes its own state.
++ * FetchBuffer additionally serializes wait registration and notification with its condition lock.
++ *
++ * <p>Notification revokes a registration before waking the application. Background activity can
++ * therefore acknowledge the existing bounded wait, but repeated notifications cannot indefinitely
++ * renew an application that never resumes. This object neither marks managers ready nor performs I/O.
+  */
+ final class ApplicationPollWait {
++    // A returning older wait must not revoke a newer registration.
+     private long epoch;
+     private boolean waiting;
+     private long deadlineMs;
++    // Monotonic activity evidence, not the latest time at which any background thread happened to run.
+     private long lastActivityMs = Long.MIN_VALUE;
+ 
++    /** Publish one bounded application wait before releasing FetchBuffer's lock to park. */
+     synchronized long begin(long nowMs, long deadlineMs) {
+         epoch++;
+         waiting = true;
+@@ -35,6 +42,7 @@
+         return epoch;
+     }
+ 
++    /** Revoke before wakeup; a late notification cannot credit activity beyond the registered deadline. */
+     synchronized void signal(long nowMs) {
+         if (waiting) {
+             waiting = false;
+@@ -42,6 +50,7 @@
+         }
+     }
+ 
++    /** The application has resumed; credit that real progress only to the matching wait generation. */
+     synchronized void end(long expectedEpoch, long nowMs) {
+         if (expectedEpoch == epoch) {
+             waiting = false;
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java
+@@ -207,6 +207,8 @@
+                     long nowMs = timer.currentTimeMs();
+                     long deadlineMs = nowMs > Long.MAX_VALUE - timer.remainingMs()
+                             ? Long.MAX_VALUE : nowMs + timer.remainingMs();
++                    // Publish the bounded wait before its listener wakes the network owner. The listener
++                    // is not a NextPollCondition signal and must not mutate scheduler state on this thread.
+                     waitEpoch = applicationPollWait.begin(nowMs, deadlineMs);
+                     onWaitRegistered.run();
+                 }
+@@ -234,6 +236,7 @@
+         }
+     }
+ 
++    /** Wake the application waiter after revoking its registration; this does not wake network I/O. */
+     void wakeup() {
+         try {
+             lock.lock();
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java
+@@ -52,7 +52,9 @@
+     private final NetworkClientDelegate networkClientDelegate;
+     private final long retryBackoffMs;
+     private CompletableFuture<Void> pendingFetchRequestFuture;
++    // Network-owner handoffs, drained only up to the boundary captured by onPollBatchStart().
+     private final ArrayDeque<FetchContinuation> continuations = new ArrayDeque<>();
++    // Local demand/continuation changes activate this manager; network wakeup alone does not.
+     private final NextPollCondition.Signal inputChanged = new NextPollCondition.Signal();
+     private int continuationBatchSize = -1;
+     private boolean continuationsClosed;

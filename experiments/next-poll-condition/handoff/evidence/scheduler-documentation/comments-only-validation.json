@@ -1,0 +1,59 @@
+{
+  "status": "PASS",
+  "files": [
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagerScheduler.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "4879c509fef71f507279a136ebc6417671fe83b9013317d9ef767acabacc96ea",
+      "sha256_after": "187c142793de2b11092e1cf8aeb0e6fa23787beb137857dd05622dde14b2cc99"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NextPollCondition.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "dc6bb45699691b861505e9de8c53fe495cbe6863eb8fb1ca9b33ce39c217fb5b",
+      "sha256_after": "d1371e23e4aec83f3bf5848017c07dda7a1c3d5b4ba472ce48a3957de8cb0516"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManager.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "7d432d4ccd982ecf7b23747185f872cbb794d441544163e8d514658037de5953",
+      "sha256_after": "773fb641101df6eb3262fc71ceb453545f784d77ccfc5fbc462a753c6c73070f"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ConsumerNetworkThread.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "214529d5ce9c30c351678207006182996938e81420df625c204d792c8d037e35",
+      "sha256_after": "83cb4c95773b3e3ae827a4f9ccda00494186c7fa5c107520b86162a78c445c03"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/NetworkClientDelegate.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "c7e24f49db4173fb8c95e9df7a2b95a78912fee20cd2d8dfba1fccc745b205e5",
+      "sha256_after": "a17a3bba57733a7a3e58cbdd141b4e19a4d070612829f07e3fd93ed3f7831b8d"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "f27399e1e5d6fe0fffa10f66cc5609646252630126cc63f4e2351db12c9d69a2",
+      "sha256_after": "3d4d747d6fdfa077dfc57052f264576bb504b7667f50ea0863a2a21ff1d5adc1"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/ApplicationPollWait.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "1f0e66d5eec48ecb77a2e0d44cf48f2c4c7dd9468443bf6ff63f17628ad2c990",
+      "sha256_after": "7f5cdf6482a85c8d2fb73945da624067f3808d8d3d699e70ea454841c0b108d9"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "ef7e673ddab441f35d873c246b1323a21deb96de5a7ad0284f50ddb344df8898",
+      "sha256_after": "cf5d1f9ca8083095d98caaefa34c3cd865cdee47fd7bf1031505a2a5dfd4ac7a"
+    },
+    {
+      "file": "clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchRequestManager.java",
+      "code_tokens_unchanged": true,
+      "sha256_before": "efbafed0bf1ccd5ee617e2fcaf5fe87e59b0f7801a5b6ad5132bd153073d7bf1",
+      "sha256_after": "0c81f6be4fb1acabaac29fae0935f06b65336c43f275dc8755d28a8fb9e415bd"
+    }
+  ]
+}

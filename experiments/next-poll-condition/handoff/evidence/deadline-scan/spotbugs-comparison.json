@@ -1,0 +1,49 @@
+{
+  "same_findings": true,
+  "findings": {
+    "tree": [
+      [
+        "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread",
+        "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread.initializeResources()",
+        "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread.managersRegistered"
+      ],
+      [
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.validatePositionsIfNeeded()",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.validationConnectRetryTimeMs"
+      ],
+      [
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.closePendingPositionResets()",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.positionResetsClosed"
+      ],
+      [
+        "org.apache.kafka.clients.consumer.internals.RequestManagerScheduler$Waiting",
+        "org.apache.kafka.clients.consumer.internals.RequestManagerScheduler$Waiting.cancel()",
+        "org.apache.kafka.clients.consumer.internals.RequestManagerScheduler$Waiting.active"
+      ]
+    ],
+    "scan": [
+      [
+        "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread",
+        "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread.initializeResources()",
+        "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread.managersRegistered"
+      ],
+      [
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.validatePositionsIfNeeded()",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.validationConnectRetryTimeMs"
+      ],
+      [
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.closePendingPositionResets()",
+        "org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.positionResetsClosed"
+      ],
+      [
+        "org.apache.kafka.clients.consumer.internals.RequestManagerScheduler$Waiting",
+        "org.apache.kafka.clients.consumer.internals.RequestManagerScheduler$Waiting.cancel()",
+        "org.apache.kafka.clients.consumer.internals.RequestManagerScheduler$Waiting.active"
+      ]
+    ]
+  }
+}

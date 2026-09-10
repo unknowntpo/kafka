@@ -1,0 +1,1112 @@
+{
+  "summary": {
+    "formal/consume": {
+      "tree": {
+        "throughput": {
+          "fork_means": [
+            1573240.028713559,
+            1523657.3908879682,
+            1507182.4830132648,
+            1483175.5406282656,
+            1559081.4519528872
+          ],
+          "median": 1523657.3908879682
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            477.0382702029354,
+            473.3622159204341,
+            464.14572162911963,
+            459.235886367115,
+            482.10662564568514
+          ],
+          "median": 473.3622159204341
+        },
+        "bytes_op": {
+          "fork_means": [
+            578.2955045875769,
+            567.438314519222,
+            578.3037246310085,
+            566.9681479754845,
+            566.9363584311212
+          ],
+          "median": 567.438314519222
+        },
+        "cpu_ms_million_records": {
+          "fork_means": [
+            303.70489016294266,
+            311.0572331191468,
+            308.100158521853,
+            309.97956212072006,
+            309.3987934775963
+          ],
+          "median": 309.3987934775963
+        }
+      },
+      "scan": {
+        "throughput": {
+          "fork_means": [
+            1446235.1138188792,
+            1613314.823473011,
+            1511393.9933277764,
+            1435511.9582129493,
+            1458636.9930378364
+          ],
+          "median": 1458636.9930378364
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            464.37094500385535,
+            481.11625807711164,
+            473.14642777977434,
+            468.8547632450086,
+            472.464695985419
+          ],
+          "median": 472.464695985419
+        },
+        "bytes_op": {
+          "fork_means": [
+            568.5760107910774,
+            566.7248982543522,
+            578.3387745469345,
+            570.7249852045583,
+            611.8705954070954
+          ],
+          "median": 570.7249852045583
+        },
+        "cpu_ms_million_records": {
+          "fork_means": [
+            323.8567872889306,
+            298.6407140805474,
+            313.6065878071391,
+            332.8855204266335,
+            325.05127999315823
+          ],
+          "median": 323.8567872889306
+        }
+      }
+    }
+  },
+  "pairs": [
+    {
+      "phase": "formal",
+      "scenario": "consume",
+      "metric": "throughput",
+      "changes_percent": [
+        -8.072825034748954,
+        5.884356491244502,
+        0.2794293565628214,
+        -3.213617074289543,
+        -6.442540817173814
+      ]
+    },
+    {
+      "phase": "formal",
+      "scenario": "consume",
+      "metric": "process_cpu_ms_s",
+      "changes_percent": [
+        -2.65541068511993,
+        1.6380779656441469,
+        1.9391983446627181,
+        2.0945394651070925,
+        -1.9999579236963827
+      ]
+    },
+    {
+      "phase": "formal",
+      "scenario": "consume",
+      "metric": "bytes_op",
+      "changes_percent": [
+        -1.680714050065324,
+        -0.12572578315834804,
+        0.006060814487796051,
+        0.6626187454248589,
+        7.925799132079003
+      ]
+    },
+    {
+      "phase": "formal",
+      "scenario": "consume",
+      "metric": "cpu_ms_million_records",
+      "changes_percent": [
+        6.6353548390926775,
+        -3.9917152589868943,
+        1.7872205297471577,
+        7.389505988460243,
+        5.059000502112587
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "label": "consume-1-tree",
+      "variant": "tree",
+      "scenario": "consume",
+      "started": 1788998595.356658,
+      "ended": 1788998711.045043,
+      "json": "consume-1-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/tree.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-1-tree.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1577370.655292891,
+            1695574.494496742,
+            1450982.886818876,
+            1618297.6304934165,
+            1523974.4764658695
+          ],
+          "mean": 1573240.028713559,
+          "first_last_change_percent": -3.385138340684213
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            456.8096385615044,
+            497.84028083995577,
+            474.9261631344323,
+            498.68742501596216,
+            456.92784346282224
+          ],
+          "mean": 477.0382702029354,
+          "first_last_change_percent": 0.025876183718454016
+        },
+        "bytes_op": {
+          "iterations": [
+            555.7856157160963,
+            555.8940727551442,
+            555.5488765159868,
+            612.1071702587537,
+            612.1417876919039
+          ],
+          "mean": 578.2955045875769,
+          "first_last_change_percent": 10.139911934064006
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            289.6070975918885,
+            293.61476328046695,
+            327.31532524807056,
+            308.1578459828321,
+            299.82941871145516
+          ],
+          "mean": 303.70489016294266,
+          "first_last_change_percent": 3.529720509119527
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-1-scan",
+      "variant": "scan",
+      "scenario": "consume",
+      "started": 1788998711.0458379,
+      "ended": 1788998826.7610884,
+      "json": "consume-1-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/scan.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-1-scan.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1635496.6430126145,
+            1384985.896282269,
+            1421289.9955897748,
+            1219956.2979273822,
+            1569446.7362823556
+          ],
+          "mean": 1446235.1138188792,
+          "first_last_change_percent": -4.038522916720499
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            477.90659664440403,
+            454.82741400940995,
+            454.5743151553808,
+            456.7181585849318,
+            477.82824062515004
+          ],
+          "mean": 464.37094500385535,
+          "first_last_change_percent": -0.016395676436387063
+        },
+        "bytes_op": {
+          "iterations": [
+            555.4640264090965,
+            557.1824467701191,
+            555.3398459159285,
+            562.7361389366757,
+            612.1575959235669
+          ],
+          "mean": 568.5760107910774,
+          "first_last_change_percent": 10.20652406258904
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            292.2117618290745,
+            328.4012991699747,
+            319.83691831857163,
+            374.3753584009175,
+            304.45859872611464
+          ],
+          "mean": 323.8567872889306,
+          "first_last_change_percent": 4.191082802547763
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-2-scan",
+      "variant": "scan",
+      "scenario": "consume",
+      "started": 1788998826.762008,
+      "ended": 1788998942.3290966,
+      "json": "consume-2-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/scan.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-2-scan.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1614979.5839927522,
+            1674179.7051457006,
+            1538295.1601101947,
+            1659896.2864064272,
+            1579223.3817099798
+          ],
+          "mean": 1613314.823473011,
+          "first_last_change_percent": -2.214034321992575
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            477.8717633512406,
+            474.6490378088927,
+            497.18007016368426,
+            477.9372473173645,
+            477.94317174437623
+          ],
+          "mean": 481.11625807711164,
+          "first_last_change_percent": 0.014943003251510767
+        },
+        "bytes_op": {
+          "iterations": [
+            555.50323635013,
+            555.4993496478453,
+            555.1658016806723,
+            555.554453346184,
+            611.9016502469292
+          ],
+          "mean": 566.7248982543522,
+          "first_last_change_percent": 10.152670624811911
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            295.9019437910115,
+            283.51438462456724,
+            323.2062055591467,
+            287.93446177941087,
+            302.64657464860073
+          ],
+          "mean": 298.6407140805474,
+          "first_last_change_percent": 2.279346587311637
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-2-tree",
+      "variant": "tree",
+      "scenario": "consume",
+      "started": 1788998942.3301733,
+      "ended": 1788999058.08516,
+      "json": "consume-2-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/tree.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-2-tree.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 2,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1565425.159757458,
+            1477251.5793623964,
+            1435802.7798438477,
+            1575017.8882416685,
+            1564789.5472344705
+          ],
+          "mean": 1523657.3908879682,
+          "first_last_change_percent": -0.040603188151511205
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.8120277437152,
+            455.82779058543855,
+            478.797644123752,
+            455.9429069659726,
+            476.4307101832921
+          ],
+          "mean": 473.3622159204341,
+          "first_last_change_percent": -4.678022188856201
+        },
+        "bytes_op": {
+          "iterations": [
+            555.774685568327,
+            557.4543678440925,
+            555.5376546922863,
+            556.1243910614526,
+            612.3004734299517
+          ],
+          "mean": 567.438314519222,
+          "first_last_change_percent": 10.170630172517182
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            319.28480204342276,
+            308.5667884693463,
+            333.4725703146756,
+            289.48704926358556,
+            304.4749555047038
+          ],
+          "mean": 311.0572331191468,
+          "first_last_change_percent": -4.638443935926773
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-3-tree",
+      "variant": "tree",
+      "scenario": "consume",
+      "started": 1788999058.0857008,
+      "ended": 1788999174.197593,
+      "json": "consume-3-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/tree.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-3-tree.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1464469.0868541978,
+            1582955.1459621256,
+            1530310.3570850366,
+            1460969.5428774224,
+            1497208.2822875418
+          ],
+          "mean": 1507182.4830132648,
+          "first_last_change_percent": 2.235567532782179
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            453.86243955937385,
+            457.89498897110553,
+            501.0973776542744,
+            451.0882933161037,
+            456.7855086447408
+          ],
+          "mean": 464.14572162911963,
+          "first_last_change_percent": 0.6440429589645635
+        },
+        "bytes_op": {
+          "iterations": [
+            555.7222734657656,
+            555.9396030757964,
+            555.4461469956383,
+            612.1356813990027,
+            612.2749182188397
+          ],
+          "mean": 578.3037246310085,
+          "first_last_change_percent": 10.176422190239599
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            309.9187657860605,
+            289.27132918344927,
+            327.4526398020962,
+            308.76425985381513,
+            305.09379798384407
+          ],
+          "mean": 308.100158521853,
+          "first_last_change_percent": -1.5568491923935723
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-3-scan",
+      "variant": "scan",
+      "scenario": "consume",
+      "started": 1788999174.198728,
+      "ended": 1788999290.899185,
+      "json": "consume-3-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/scan.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-3-scan.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 3,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1594306.4298219464,
+            1457210.0966433983,
+            1433355.1078429758,
+            1472403.4071411307,
+            1599694.9251894315
+          ],
+          "mean": 1511393.9933277764,
+          "first_last_change_percent": 0.33798366905457566
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            479.54542436202087,
+            456.49896435758114,
+            475.68285630767707,
+            476.0701004749883,
+            477.9347933966042
+          ],
+          "mean": 473.14642777977434,
+          "first_last_change_percent": -0.33586619402310447
+        },
+        "bytes_op": {
+          "iterations": [
+            555.5098393282366,
+            556.8544688785303,
+            555.3458717744081,
+            611.8031034666667,
+            612.1805892868305
+          ],
+          "mean": 578.3387745469345,
+          "first_last_change_percent": 10.20157447204253
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            300.7895726281489,
+            313.27118179325475,
+            331.87017823889335,
+            323.3333333333333,
+            298.76867304206513
+          ],
+          "mean": 313.6065878071391,
+          "first_last_change_percent": -0.6718649082234296
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-4-scan",
+      "variant": "scan",
+      "scenario": "consume",
+      "started": 1788999290.900491,
+      "ended": 1788999406.604816,
+      "json": "consume-4-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/scan.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-4-scan.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 4,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1467850.808274097,
+            1537848.7819374425,
+            1625444.8413100915,
+            1063970.8576644296,
+            1482444.501878686
+          ],
+          "mean": 1435511.9582129493,
+          "first_last_change_percent": 0.994221859764366
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            456.8885321737839,
+            478.7304867999399,
+            498.85682669393975,
+            456.940889806636,
+            452.8570807507433
+          ],
+          "mean": 468.8547632450086,
+          "first_last_change_percent": -0.8823708933686225
+        },
+        "bytes_op": {
+          "iterations": [
+            555.8550998501566,
+            556.0347904074869,
+            556.0073859400948,
+            573.2735547410957,
+            612.4540950839571
+          ],
+          "mean": 570.7249852045583,
+          "first_last_change_percent": 10.182329036660454
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            311.26549516414656,
+            311.3017482290245,
+            306.90694384648504,
+            429.4709143877455,
+            305.48250050576576
+          ],
+          "mean": 332.8855204266335,
+          "first_last_change_percent": -1.857897758738447
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-4-tree",
+      "variant": "tree",
+      "scenario": "consume",
+      "started": 1788999406.6061494,
+      "ended": 1788999522.324159,
+      "json": "consume-4-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/tree.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-4-tree.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 4,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1445598.767232795,
+            1337224.116953209,
+            1551707.8908343797,
+            1553113.5545605326,
+            1528233.3735604119
+          ],
+          "mean": 1483175.5406282656,
+          "first_last_change_percent": 5.7162892083671535
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            457.8061086292356,
+            427.7096956792951,
+            455.911273784866,
+            498.77530247439825,
+            455.97705126777987
+          ],
+          "mean": 459.235886367115,
+          "first_last_change_percent": -0.3995266395488528
+        },
+        "bytes_op": {
+          "iterations": [
+            556.6122522472687,
+            555.2908247058823,
+            555.5355298969072,
+            555.354918264899,
+            612.0472147624656
+          ],
+          "mean": 566.9681479754845,
+          "first_last_change_percent": 9.959350030723101
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            316.6920204674319,
+            319.8529411764706,
+            293.8144329896907,
+            321.1481529154331,
+            298.390263054574
+          ],
+          "mean": 309.97956212072006,
+          "first_last_change_percent": -5.779039644208539
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-5-tree",
+      "variant": "tree",
+      "scenario": "consume",
+      "started": 1788999522.3248043,
+      "ended": 1788999638.0887635,
+      "json": "consume-5-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/tree.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-5-tree.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 5,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1579100.8889648167,
+            1577724.6313844677,
+            1484311.2222517573,
+            1564480.5734981447,
+            1589789.9436652493
+          ],
+          "mean": 1559081.4519528872,
+          "first_last_change_percent": 0.6769076488481796
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            477.8154773145338,
+            498.87775050611623,
+            479.83923298394376,
+            475.27962679118724,
+            478.72104063264464
+          ],
+          "mean": 482.10662564568514,
+          "first_last_change_percent": 0.18952155405269622
+        },
+        "bytes_op": {
+          "iterations": [
+            555.336258276888,
+            555.469678220645,
+            556.612916487069,
+            555.2963086309902,
+            611.9666305400139
+          ],
+          "mean": 566.9363584311212,
+          "first_last_change_percent": 10.197492315527912
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            302.58909919604986,
+            316.2030289588746,
+            323.2758620689655,
+            303.8006864115927,
+            301.1252907524989
+          ],
+          "mean": 309.3987934775963,
+          "first_last_change_percent": -0.4837611293467381
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "consume-5-scan",
+      "variant": "scan",
+      "scenario": "consume",
+      "started": 1788999638.0897615,
+      "ended": 1788999753.9026022,
+      "json": "consume-5-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-formal-3d37d8696f/classes:/tmp/deadline-scan-formal-3d37d8696f/variants/scan.jar:/tmp/deadline-scan-formal-3d37d8696f/slf4j.jar:/tmp/deadline-scan-formal-3d37d8696f/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "10s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-formal-3d37d8696f/results/consume-5-scan.json",
+        "-p",
+        "server=127.0.0.1:59915",
+        "-p",
+        "topic=deadline-scan-formal-3d37d8696f-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 5,
+      "phase": "formal",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1455604.5816327508,
+            1390898.2681487927,
+            1336329.235208666,
+            1459808.1508449693,
+            1650544.7293540027
+          ],
+          "mean": 1458636.9930378364,
+          "first_last_change_percent": 13.39238349350258
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            455.83820610905445,
+            453.93115884314005,
+            476.79323193986403,
+            476.932100178455,
+            498.82878285658126
+          ],
+          "mean": 472.464695985419,
+          "first_last_change_percent": 9.43110431977301
+        },
+        "bytes_op": {
+          "iterations": [
+            611.9000035711833,
+            611.8428575947092,
+            611.6395865060962,
+            611.9392246575343,
+            612.0313047059536
+          ],
+          "mean": 611.8705954070954,
+          "first_last_change_percent": 0.02145793986010336
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            313.16530458072936,
+            326.3604341887715,
+            356.79557184531376,
+            326.71232876712327,
+            302.2227605838532
+          ],
+          "mean": 325.05127999315823,
+          "first_last_change_percent": -3.4941750688270545
+        }
+      },
+      "primary_unit": "ops/s"
+    }
+  ]
+}

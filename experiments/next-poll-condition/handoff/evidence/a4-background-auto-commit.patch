@@ -1,0 +1,213 @@
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ApplicationPollWait.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/ApplicationPollWait.java
+@@ -53,6 +53,11 @@
+         lastActivityMs = Math.max(lastActivityMs, nowMs);
+     }
+ 
++    /** Zero means app work, notification, or expiry prevents a background auto-commit snapshot. */
++    synchronized long currentWaitEpoch(long nowMs) {
++        return waiting && nowMs < deadlineMs ? epoch : 0L;
++    }
++
+     synchronized long activityMs(long nowMs) {
+         return waiting ? Math.max(lastActivityMs, Math.min(nowMs, deadlineMs)) : lastActivityMs;
+     }
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java
+@@ -531,7 +531,7 @@
+                     false,
+                     asyncConsumerMetrics
+             );
+-            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
++            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
+             this.groupMetadata.set(initializeGroupMetadata(config, groupRebalanceConfig));
+             final Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(time,
+                     logContext,
+@@ -656,7 +656,7 @@
+         this.asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
+         this.clientTelemetryReporter = Optional.empty();
+         this.autoCommitEnabled = autoCommitEnabled;
+-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
++        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
+         this.backgroundEventHandler = new BackgroundEventHandler(
+             backgroundEventQueue,
+             time,
+@@ -736,7 +736,7 @@
+             false,
+             asyncConsumerMetrics
+         );
+-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
++        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
+         Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(
+             time,
+             logContext,
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java
+@@ -80,6 +80,7 @@
+     private final LogContext logContext;
+     private final Logger log;
+     private final Optional<AutoCommitState> autoCommitState;
++    private ApplicationPollWait applicationPollWait;
+     private final CoordinatorRequestManager coordinatorRequestManager;
+     private final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker;
+     private final OffsetCommitMetricsManager metricsManager;
+@@ -197,15 +198,17 @@
+             return drainPendingOffsetCommitRequests();
+         }
+ 
++        maybeAutoCommitWhileAppWaits(currentTimeMs);
++        long autoCommitDelayMs = timeToNextBackgroundAutoCommitMs(currentTimeMs);
+         if (!pendingRequests.hasUnsentRequests())
+-            return EMPTY;
++            return autoCommitDelayMs == Long.MAX_VALUE ? EMPTY : new NetworkClientDelegate.PollResult(autoCommitDelayMs);
+ 
+         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
+         // min of the remainingBackoffMs of all the request that are still backing off
+         final long timeUntilNextPoll = Math.min(
+             findMinTime(unsentOffsetCommitRequests(), currentTimeMs),
+             findMinTime(unsentOffsetFetchRequests(), currentTimeMs));
+-        return new NetworkClientDelegate.PollResult(timeUntilNextPoll, requests);
++        return new NetworkClientDelegate.PollResult(Math.min(timeUntilNextPoll, autoCommitDelayMs), requests);
+     }
+ 
+     @Override
+@@ -221,7 +224,37 @@
+      */
+     @Override
+     public long maximumTimeToWait(long currentTimeMs) {
++        if (applicationPollWait != null)
++            return Long.MAX_VALUE;
+         return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
++    }
++
++    void setApplicationPollWait(ApplicationPollWait applicationPollWait) {
++        this.applicationPollWait = applicationPollWait;
++    }
++
++    private void maybeAutoCommitWhileAppWaits(long currentTimeMs) {
++        if (applicationPollWait == null || !autoCommitEnabled())
++            return;
++        updateAutoCommitTimer(currentTimeMs);
++        if (!autoCommitState.get().shouldAutoCommit())
++            return;
++        long epoch = applicationPollWait.currentWaitEpoch(time.milliseconds());
++        if (epoch == 0)
++            return;
++        // Read only while the app is parked, then reject any snapshot overlapping a wake/new wait.
++        // No domain work or callbacks run under the shared wait-state lock.
++        Map<TopicPartition, OffsetAndMetadata> offsets = subscriptions.allConsumed();
++        if (applicationPollWait.currentWaitEpoch(time.milliseconds()) == epoch)
++            maybeAutoCommitAsync(offsets);
++    }
++
++    private long timeToNextBackgroundAutoCommitMs(long currentTimeMs) {
++        if (applicationPollWait == null || !autoCommitEnabled()
++                || autoCommitState.get().hasInflightCommit
++                || applicationPollWait.currentWaitEpoch(time.milliseconds()) == 0)
++            return Long.MAX_VALUE;
++        return autoCommitState.get().remainingMs(currentTimeMs);
+     }
+ 
+     private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
+@@ -275,10 +308,13 @@
+      * response for the in-flight is received.
+      */
+     private void maybeAutoCommitAsync() {
++        if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit())
++            maybeAutoCommitAsync(subscriptions.allConsumed());
++    }
++
++    private void maybeAutoCommitAsync(Map<TopicPartition, OffsetAndMetadata> offsets) {
+         if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit()) {
+-            OffsetCommitRequestState requestState = createOffsetCommitRequest(
+-                subscriptions.allConsumed(),
+-                Long.MAX_VALUE);
++            OffsetCommitRequestState requestState = createOffsetCommitRequest(offsets, Long.MAX_VALUE);
+             CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result = requestAutoCommit(requestState);
+             // Reset timer to the interval (even if no request was generated), but ensure that if
+             // the request completes with a retriable error, the timer is reset to send the next
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchBuffer.java
+@@ -53,6 +53,7 @@
+     private final Logger log;
+     private final Time time;
+     private final ApplicationPollWait applicationPollWait = new ApplicationPollWait();
++    private volatile Runnable onWaitRegistered = () -> { };
+     private final ConcurrentLinkedQueue<CompletedFetch> completedFetches;
+     private final Lock lock;
+     private final Condition blockingCondition;
+@@ -72,6 +73,10 @@
+         this.completedFetches = new ConcurrentLinkedQueue<>();
+         this.lock = new ReentrantLock();
+         this.blockingCondition = lock.newCondition();
++    }
++
++    void setWaitRegistrationListener(Runnable listener) {
++        onWaitRegistered = listener;
+     }
+ 
+     void recordPollActivity(long nowMs) {
+@@ -204,6 +209,7 @@
+                     long deadlineMs = nowMs > Long.MAX_VALUE - timer.remainingMs()
+                             ? Long.MAX_VALUE : nowMs + timer.remainingMs();
+                     waitEpoch = applicationPollWait.begin(nowMs, deadlineMs);
++                    onWaitRegistered.run();
+                 }
+                 if (!blockingCondition.await(timer.remainingMs(), TimeUnit.MILLISECONDS)) {
+                     break;
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/OffsetCommitCallbackInvoker.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/OffsetCommitCallbackInvoker.java
+@@ -21,6 +21,7 @@
+ import org.apache.kafka.common.TopicPartition;
+ 
+ import java.util.Map;
++import java.util.Objects;
+ import java.util.concurrent.BlockingQueue;
+ import java.util.concurrent.LinkedBlockingQueue;
+ 
+@@ -32,9 +33,15 @@
+  */
+ public class OffsetCommitCallbackInvoker {
+     private final ConsumerInterceptors<?, ?> interceptors;
++    private final Runnable wakeupApplication;
+ 
+     OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors) {
++        this(interceptors, () -> { });
++    }
++
++    OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors, Runnable wakeupApplication) {
+         this.interceptors = interceptors;
++        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
+     }
+ 
+     // Thread-safe queue to store user-defined callbacks and interceptors to be executed
+@@ -47,6 +54,7 @@
+                 offsets,
+                 null
+             ));
++            wakeupApplication.run();
+         }
+     }
+ 
+@@ -54,6 +62,7 @@
+                                               final Map<TopicPartition, OffsetAndMetadata> offsets,
+                                               final Exception exception) {
+         callbackQueue.add(new OffsetCommitCallbackTask(callback, offsets, exception));
++        wakeupApplication.run();
+     }
+ 
+     public void executeCallbacks() {
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagers.java
+@@ -302,6 +302,11 @@
+                     }
+                 }
+ 
++                if (commitRequestManager != null && commitRequestManager.autoCommitEnabled()) {
++                    commitRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
++                    // A new app wait may introduce an earlier commit deadline while network poll is blocked.
++                    fetchBuffer.setWaitRegistrationListener(networkClientDelegate::wakeup);
++                }
+                 if (heartbeatRequestManager != null)
+                     heartbeatRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
+                 if (streamsGroupHeartbeatRequestManager != null)

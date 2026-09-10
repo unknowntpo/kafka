@@ -1,0 +1,2720 @@
+{
+  "summary": {
+    "micro/DUE": {
+      "tree": {
+        "throughput": {
+          "fork_means": [
+            959575.873551392,
+            941596.3833342481,
+            944796.550263807
+          ],
+          "median": 944796.550263807
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            498.3707895142892,
+            495.5205055332713,
+            494.34551773636866
+          ],
+          "median": 495.5205055332713
+        },
+        "bytes_op": {
+          "fork_means": [
+            640.0419796296743,
+            640.0425440083027,
+            640.0423930253734
+          ],
+          "median": 640.0423930253734
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            519.393291642908,
+            526.2890580321696,
+            523.2198856490241
+          ],
+          "median": 523.2198856490241
+        }
+      },
+      "scan": {
+        "throughput": {
+          "fork_means": [
+            1031431.5552315777,
+            1288510.3488911956,
+            1289028.8196947917
+          ],
+          "median": 1288510.3488911956
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            499.3669482928022,
+            498.3210496282967,
+            498.59700396375865
+          ],
+          "median": 498.59700396375865
+        },
+        "bytes_op": {
+          "fork_means": [
+            360.0390551860484,
+            584.0312608159328,
+            584.0312838216055
+          ],
+          "median": 584.0312608159328
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            484.17147889482936,
+            386.74496383131753,
+            386.82106666805464
+          ],
+          "median": 386.82106666805464
+        }
+      }
+    },
+    "micro/IDLE": {
+      "tree": {
+        "throughput": {
+          "fork_means": [
+            40683458.33730193,
+            42441623.82508236,
+            40646526.295247816
+          ],
+          "median": 40683458.33730193
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            499.3194987517006,
+            499.4537896345273,
+            493.48314872449777
+          ],
+          "median": 499.3194987517006
+        },
+        "bytes_op": {
+          "fork_means": [
+            0.000990473712922462,
+            0.0009488417533958893,
+            0.0009855251113500972
+          ],
+          "median": 0.0009855251113500972
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            12.275129893110345,
+            11.768300289141976,
+            12.14066291682716
+          ],
+          "median": 12.14066291682716
+        }
+      },
+      "scan": {
+        "throughput": {
+          "fork_means": [
+            8833656.782730538,
+            8843353.558741298,
+            8490728.843226999
+          ],
+          "median": 8833656.782730538
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            498.32055618621956,
+            498.0282557799533,
+            499.64665592656974
+          ],
+          "median": 498.32055618621956
+        },
+        "bytes_op": {
+          "fork_means": [
+            0.004561201195408317,
+            0.004552729500473804,
+            0.004747562899361284
+          ],
+          "median": 0.004561201195408317
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            56.41524368300403,
+            56.31925011381612,
+            58.851395368634
+          ],
+          "median": 56.41524368300403
+        }
+      }
+    },
+    "micro/MIXED": {
+      "tree": {
+        "throughput": {
+          "fork_means": [
+            4180016.009129783,
+            4126066.7605717313,
+            4226466.888078375
+          ],
+          "median": 4180016.009129783
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            498.3564823563742,
+            498.3132216902157,
+            498.51107352566453
+          ],
+          "median": 498.3564823563742
+        },
+        "bytes_op": {
+          "fork_means": [
+            133.86678979905395,
+            133.86689716159364,
+            133.86669669025608
+          ],
+          "median": 133.86678979905395
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            119.2245954322681,
+            120.78837239387926,
+            117.96425133098185
+          ],
+          "median": 119.2245954322681
+        }
+      },
+      "scan": {
+        "throughput": {
+          "fork_means": [
+            2638717.9788965164,
+            2596313.7958428185,
+            2799368.0366561473
+          ],
+          "median": 2638717.9788965164
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            499.4736073955461,
+            499.4795690133398,
+            499.42511906797614
+          ],
+          "median": 499.4736073955461
+        },
+        "bytes_op": {
+          "fork_means": [
+            97.01525258306376,
+            97.0155108259473,
+            97.01439653840754
+          ],
+          "median": 97.01525258306376
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            189.29111597977698,
+            192.3841158829361,
+            178.4066252333994
+          ],
+          "median": 189.29111597977698
+        }
+      }
+    },
+    "micro/SIGNAL": {
+      "tree": {
+        "throughput": {
+          "fork_means": [
+            4264628.9192780405,
+            4133747.749996439,
+            4098098.7595778448
+          ],
+          "median": 4133747.749996439
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            499.65324345941764,
+            500.30908552429486,
+            495.6538731988638
+          ],
+          "median": 499.65324345941764
+        },
+        "bytes_op": {
+          "fork_means": [
+            152.00945422687124,
+            152.00974715613623,
+            152.00978722188688
+          ],
+          "median": 152.00974715613623
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            117.1629757763755,
+            121.05464251411664,
+            120.95207909822432
+          ],
+          "median": 120.95207909822432
+        }
+      },
+      "scan": {
+        "throughput": {
+          "fork_means": [
+            3690007.9493440213,
+            3608895.2852404322,
+            3541533.2992819627
+          ],
+          "median": 3608895.2852404322
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            498.1365337919895,
+            495.42775863299767,
+            497.6599153788617
+          ],
+          "median": 497.6599153788617
+        },
+        "bytes_op": {
+          "fork_means": [
+            112.01092121438451,
+            112.01110537827557,
+            192.01131829933632
+          ],
+          "median": 112.01110537827557
+        },
+        "cpu_ns_pass": {
+          "fork_means": [
+            134.9982848629083,
+            137.28727187608783,
+            140.52185928168444
+          ],
+          "median": 137.28727187608783
+        }
+      }
+    },
+    "pilot/consume": {
+      "tree": {
+        "throughput": {
+          "fork_means": [
+            1574113.462537441
+          ],
+          "median": 1574113.462537441
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            472.3296967641838
+          ],
+          "median": 472.3296967641838
+        },
+        "bytes_op": {
+          "fork_means": [
+            555.7444574042785
+          ],
+          "median": 555.7444574042785
+        },
+        "cpu_ms_million_records": {
+          "fork_means": [
+            300.1617451783005
+          ],
+          "median": 300.1617451783005
+        }
+      },
+      "scan": {
+        "throughput": {
+          "fork_means": [
+            1468177.8347653162
+          ],
+          "median": 1468177.8347653162
+        },
+        "process_cpu_ms_s": {
+          "fork_means": [
+            464.98501300338705
+          ],
+          "median": 464.98501300338705
+        },
+        "bytes_op": {
+          "fork_means": [
+            556.1822691341989
+          ],
+          "median": 556.1822691341989
+        },
+        "cpu_ms_million_records": {
+          "fork_means": [
+            318.8072771625121
+          ],
+          "median": 318.8072771625121
+        }
+      }
+    }
+  },
+  "pairs": [
+    {
+      "phase": "micro",
+      "scenario": "DUE",
+      "metric": "throughput",
+      "changes_percent": [
+        7.4882751495457756,
+        36.843170991004115,
+        36.43453919628177
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "DUE",
+      "metric": "process_cpu_ms_s",
+      "changes_percent": [
+        0.19988305885341173,
+        0.5651721904043949,
+        0.8600232175377531
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "DUE",
+      "metric": "bytes_op",
+      "changes_percent": [
+        -43.74758740131928,
+        -8.751181263919749,
+        -8.751156144362993
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "DUE",
+      "metric": "cpu_ns_pass",
+      "changes_percent": [
+        -6.7813376327344415,
+        -26.514724574099425,
+        -26.06911983319874
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "IDLE",
+      "metric": "throughput",
+      "changes_percent": [
+        -78.28685872894164,
+        -79.16348913701316,
+        -79.1108131072453
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "IDLE",
+      "metric": "process_cpu_ms_s",
+      "changes_percent": [
+        -0.20006079633949625,
+        -0.2854185680755572,
+        1.2489802778479442
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "IDLE",
+      "metric": "bytes_op",
+      "changes_percent": [
+        360.5070418224603,
+        379.8196837543942,
+        381.72926744174686
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "IDLE",
+      "metric": "cpu_ns_pass",
+      "changes_percent": [
+        359.58978987805403,
+        378.56741186132956,
+        384.74614419172275
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "MIXED",
+      "metric": "throughput",
+      "changes_percent": [
+        -36.87301739674776,
+        -37.07533235639991,
+        -33.765764389345044
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "MIXED",
+      "metric": "process_cpu_ms_s",
+      "changes_percent": [
+        0.22416183569837766,
+        0.23405907617060073,
+        0.1833551130262956
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "MIXED",
+      "metric": "bytes_op",
+      "changes_percent": [
+        -27.52851343586237,
+        -27.528378648503537,
+        -27.52910250494809
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "MIXED",
+      "metric": "cpu_ns_pass",
+      "changes_percent": [
+        58.76851189427092,
+        59.273704968546156,
+        51.237873525623876
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "SIGNAL",
+      "metric": "throughput",
+      "changes_percent": [
+        -13.474114179934249,
+        -12.69677049734007,
+        -13.58106509744571
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "SIGNAL",
+      "metric": "process_cpu_ms_s",
+      "changes_percent": [
+        -0.30355245108126816,
+        -0.9756622521019831,
+        0.4047264206877399
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "SIGNAL",
+      "metric": "bytes_op",
+      "changes_percent": [
+        -26.313187700016126,
+        -26.313208544960087,
+        26.31510234210097
+      ]
+    },
+    {
+      "phase": "micro",
+      "scenario": "SIGNAL",
+      "metric": "cpu_ns_pass",
+      "changes_percent": [
+        15.222649449066882,
+        13.409340629028943,
+        16.179779900738733
+      ]
+    },
+    {
+      "phase": "pilot",
+      "scenario": "consume",
+      "metric": "throughput",
+      "changes_percent": [
+        -6.729859714264719
+      ]
+    },
+    {
+      "phase": "pilot",
+      "scenario": "consume",
+      "metric": "process_cpu_ms_s",
+      "changes_percent": [
+        -1.5549908911324795
+      ]
+    },
+    {
+      "phase": "pilot",
+      "scenario": "consume",
+      "metric": "bytes_op",
+      "changes_percent": [
+        0.07877932457758252
+      ]
+    },
+    {
+      "phase": "pilot",
+      "scenario": "consume",
+      "metric": "cpu_ms_million_records",
+      "changes_percent": [
+        6.211828217195325
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "label": "micro-IDLE-1-tree",
+      "variant": "tree",
+      "scenario": "IDLE",
+      "json": "micro-IDLE-1-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-IDLE-1-tree.json",
+        "-p",
+        "workload=IDLE"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            41148037.25984792,
+            40892059.35531515,
+            40010278.396742724
+          ],
+          "mean": 40683458.33730193,
+          "first_last_change_percent": -2.76503799177662
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.52908427469197,
+            498.6283646179268,
+            499.8010473624831
+          ],
+          "mean": 499.3194987517006,
+          "first_last_change_percent": 0.054443894530376014
+        },
+        "bytes_op": {
+          "iterations": [
+            0.0009484230156684121,
+            0.0009528192069127941,
+            0.0010701789161861796
+          ],
+          "mean": 0.000990473712922462,
+          "first_last_change_percent": 12.837720985920885
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            12.139803439959708,
+            12.193769951405372,
+            12.491816287965953
+          ],
+          "mean": 12.275129893110345,
+          "first_last_change_percent": 2.8996585467566227
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-IDLE-1-scan",
+      "variant": "scan",
+      "scenario": "IDLE",
+      "json": "micro-IDLE-1-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-IDLE-1-scan.json",
+        "-p",
+        "workload=IDLE"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            8853096.125634147,
+            8931547.291368559,
+            8716326.931188907
+          ],
+          "mean": 8833656.782730538,
+          "first_last_change_percent": -1.5448741604558447
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.5350219782838,
+            499.79387367783414,
+            495.6327729025407
+          ],
+          "mean": 498.32055618621956,
+          "first_last_change_percent": -0.7811762747463091
+        },
+        "bytes_op": {
+          "iterations": [
+            0.004408119058336331,
+            0.00437256648029812,
+            0.004902918047590499
+          ],
+          "mean": 0.004561201195408317,
+          "first_last_change_percent": 11.224719267017957
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            56.42489530096479,
+            55.95826315120501,
+            56.86257259684228
+          ],
+          "mean": 56.41524368300403,
+          "first_last_change_percent": 0.7756811838869337
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-IDLE-2-scan",
+      "variant": "scan",
+      "scenario": "IDLE",
+      "json": "micro-IDLE-2-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-IDLE-2-scan.json",
+        "-p",
+        "workload=IDLE"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            8867382.92576916,
+            8892330.329849077,
+            8770347.420605654
+          ],
+          "mean": 8843353.558741298,
+          "first_last_change_percent": -1.094296998063704
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            498.91649805201547,
+            496.215567184256,
+            498.9527021035886
+          ],
+          "mean": 498.0282557799533,
+          "first_last_change_percent": 0.0072565352547959705
+        },
+        "bytes_op": {
+          "iterations": [
+            0.0043955816422349735,
+            0.0043899358824710105,
+            0.004872670976715428
+          ],
+          "mean": 0.004552729500473804,
+          "first_last_change_percent": 10.853838543148386
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            56.26423288906735,
+            55.802646637923296,
+            56.890870814457706
+          ],
+          "mean": 56.31925011381612,
+          "first_last_change_percent": 1.11374116950258
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-IDLE-2-tree",
+      "variant": "tree",
+      "scenario": "IDLE",
+      "json": "micro-IDLE-2-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-IDLE-2-tree.json",
+        "-p",
+        "workload=IDLE"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            42142459.40614937,
+            42519728.68720568,
+            42662683.381892025
+          ],
+          "mean": 42441623.82508236,
+          "first_last_change_percent": 1.2344414233848466
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.0855083214716,
+            499.54813323653275,
+            499.7277273455776
+          ],
+          "mean": 499.4537896345273,
+          "first_last_change_percent": 0.12867915685750297
+        },
+        "bytes_op": {
+          "iterations": [
+            0.0009252385112086159,
+            0.0009180362742912991,
+            0.0010032504746877529
+          ],
+          "mean": 0.0009488417533958893,
+          "first_last_change_percent": 8.43155170629808
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            11.84281874751348,
+            11.748619962075354,
+            11.713462157837093
+          ],
+          "mean": 11.768300289141976,
+          "first_last_change_percent": -1.0922787254811883
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-IDLE-3-tree",
+      "variant": "tree",
+      "scenario": "IDLE",
+      "json": "micro-IDLE-3-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-IDLE-3-tree.json",
+        "-p",
+        "workload=IDLE"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            40735010.03113595,
+            40726980.04596124,
+            40477588.80864626
+          ],
+          "mean": 40646526.295247816,
+          "first_last_change_percent": -0.6319409821991528
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            496.3149742362797,
+            496.2438791223368,
+            487.89059281487675
+          ],
+          "mean": 493.48314872449777,
+          "first_last_change_percent": -1.6973861073537488
+        },
+        "bytes_op": {
+          "iterations": [
+            0.0009585085261923968,
+            0.0009584954493464252,
+            0.0010395713585114694
+          ],
+          "mean": 0.0009855251113500972,
+          "first_last_change_percent": 8.457184271598361
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            12.183990475439176,
+            12.184647095422134,
+            12.053351179620174
+          ],
+          "mean": 12.14066291682716,
+          "first_last_change_percent": -1.0722209286222584
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-IDLE-3-scan",
+      "variant": "scan",
+      "scenario": "IDLE",
+      "json": "micro-IDLE-3-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-IDLE-3-scan.json",
+        "-p",
+        "workload=IDLE"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            8517972.121616533,
+            8570963.4989383,
+            8383250.9091261625
+          ],
+          "mean": 8490728.843226999,
+          "first_last_change_percent": -1.5816113338582238
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.5474857426192,
+            499.5676777951324,
+            499.8248042419577
+          ],
+          "mean": 499.64665592656974,
+          "first_last_change_percent": 0.05551394156777523
+        },
+        "bytes_op": {
+          "iterations": [
+            0.00458166788600505,
+            0.0045544573922871485,
+            0.005106563419791653
+          ],
+          "mean": 0.004747562899361284,
+          "first_last_change_percent": 11.456429118093103
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            58.64629263987489,
+            58.2860582543625,
+            59.62183521166462
+          ],
+          "mean": 58.851395368634,
+          "first_last_change_percent": 1.66343434150249
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-DUE-1-tree",
+      "variant": "tree",
+      "scenario": "DUE",
+      "json": "micro-DUE-1-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-DUE-1-tree.json",
+        "-p",
+        "workload=DUE"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            962396.1134769004,
+            950237.7763613687,
+            966093.7308159069
+          ],
+          "mean": 959575.873551392,
+          "first_last_change_percent": 0.38420950450932523
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            496.22707531073337,
+            499.14525999638363,
+            499.7400332357506
+          ],
+          "mean": 498.3707895142892,
+          "first_last_change_percent": 0.7079335449033053
+        },
+        "bytes_op": {
+          "iterations": [
+            640.0405493696258,
+            640.0410656678074,
+            640.0443238515899
+          ],
+          "mean": 640.0419796296743,
+          "first_last_change_percent": 0.0005897254428344212
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            515.6162502755618,
+            525.2845891979802,
+            517.279035455182
+          ],
+          "mean": 519.393291642908,
+          "first_last_change_percent": 0.3224850222877107
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-DUE-1-scan",
+      "variant": "scan",
+      "scenario": "DUE",
+      "json": "micro-DUE-1-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-DUE-1-scan.json",
+        "-p",
+        "workload=DUE"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1033366.1264928298,
+            1022146.7616342638,
+            1038781.7775676395
+          ],
+          "mean": 1031431.5552315777,
+          "first_last_change_percent": 0.5240786335033221
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.51638372228797,
+            499.3567697229503,
+            499.2276914331683
+          ],
+          "mean": 499.3669482928022,
+          "first_last_change_percent": -0.05779435840891356
+        },
+        "bytes_op": {
+          "iterations": [
+            360.03779239704835,
+            360.0381930850922,
+            360.04118007600476
+          ],
+          "mean": 360.0390551860484,
+          "first_last_change_percent": 0.0009409231552792718
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            483.3876115308817,
+            488.53725166095677,
+            480.5895734926496
+          ],
+          "mean": 484.17147889482936,
+          "first_last_change_percent": -0.5788394181991507
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-DUE-2-scan",
+      "variant": "scan",
+      "scenario": "DUE",
+      "json": "micro-DUE-2-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-DUE-2-scan.json",
+        "-p",
+        "workload=DUE"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1280403.214623541,
+            1291788.886709203,
+            1293338.9453408427
+          ],
+          "mean": 1288510.3488911956,
+          "first_last_change_percent": 1.0102857107481489
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            496.34043797967666,
+            499.49962142574043,
+            499.123089479473
+          ],
+          "mean": 498.3210496282967,
+          "first_last_change_percent": 0.5606336471642104
+        },
+        "bytes_op": {
+          "iterations": [
+            584.0304852809448,
+            584.0302291859201,
+            584.0330679809333
+          ],
+          "mean": 584.0312608159328,
+          "first_last_change_percent": 0.0004422200644560448
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            387.6438549286278,
+            386.6727965884597,
+            385.9182399768651
+          ],
+          "mean": 386.74496383131753,
+          "first_last_change_percent": -0.445154728966457
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-DUE-2-tree",
+      "variant": "tree",
+      "scenario": "DUE",
+      "json": "micro-DUE-2-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-DUE-2-tree.json",
+        "-p",
+        "workload=DUE"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            934993.3511823926,
+            933483.1775340384,
+            956312.6212863134
+          ],
+          "mean": 941596.3833342481,
+          "first_last_change_percent": 2.2801520542323095
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            487.6388029120497,
+            499.2675546929857,
+            499.6551589947785
+          ],
+          "mean": 495.5205055332713,
+          "first_last_change_percent": 2.4641919410371527
+        },
+        "bytes_op": {
+          "iterations": [
+            640.041038781018,
+            640.0418125026742,
+            640.044780741216
+          ],
+          "mean": 640.0425440083027,
+          "first_last_change_percent": 0.0005846437917567116
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            521.5425353510608,
+            534.8436551496188,
+            522.480983595829
+          ],
+          "mean": 526.2890580321696,
+          "first_last_change_percent": 0.17993704849721404
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-DUE-3-tree",
+      "variant": "tree",
+      "scenario": "DUE",
+      "json": "micro-DUE-3-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-DUE-3-tree.json",
+        "-p",
+        "workload=DUE"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            939139.7263903524,
+            942119.3908034313,
+            953130.5335976373
+          ],
+          "mean": 944796.550263807,
+          "first_last_change_percent": 1.4897471392313122
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            486.9315721326432,
+            496.24637757920976,
+            499.85860349725294
+          ],
+          "mean": 494.34551773636866,
+          "first_last_change_percent": 2.6547942471654595
+        },
+        "bytes_op": {
+          "iterations": [
+            640.0407756050694,
+            640.0414549681338,
+            640.044948502917
+          ],
+          "mean": 640.0423930253734,
+          "first_last_change_percent": 0.0006519737502097556
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            518.4868219814297,
+            526.7340662164008,
+            524.4387687492421
+          ],
+          "mean": 523.2198856490241,
+          "first_last_change_percent": 1.1479456208870698
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-DUE-3-scan",
+      "variant": "scan",
+      "scenario": "DUE",
+      "json": "micro-DUE-3-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-DUE-3-scan.json",
+        "-p",
+        "workload=DUE"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1297939.278126396,
+            1290704.0654702957,
+            1278443.115487683
+          ],
+          "mean": 1289028.8196947917,
+          "first_last_change_percent": -1.5020858808476811
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            496.5209951855082,
+            499.6776061763438,
+            499.59241052942406
+          ],
+          "mean": 498.59700396375865,
+          "first_last_change_percent": 0.6185872045085139
+        },
+        "bytes_op": {
+          "iterations": [
+            584.0301008625371,
+            584.0302651452192,
+            584.0334854570602
+          ],
+          "mean": 584.0312838216055,
+          "first_last_change_percent": 0.0005795239865546975
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            382.5456271746758,
+            387.13568783427945,
+            390.78188499520866
+          ],
+          "mean": 386.82106666805464,
+          "first_last_change_percent": 2.153013192534048
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-SIGNAL-1-tree",
+      "variant": "tree",
+      "scenario": "SIGNAL",
+      "json": "micro-SIGNAL-1-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-SIGNAL-1-tree.json",
+        "-p",
+        "workload=SIGNAL"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            4278930.400991777,
+            4227708.885385199,
+            4287247.471457144
+          ],
+          "mean": 4264628.9192780405,
+          "first_last_change_percent": 0.19437265124573333
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.6528615110385,
+            496.2809061948656,
+            503.02596267234884
+          ],
+          "mean": 499.65324345941764,
+          "first_last_change_percent": 0.6750889309648844
+        },
+        "bytes_op": {
+          "iterations": [
+            152.00912688542698,
+            152.00924374580958,
+            152.00999204937716
+          ],
+          "mean": 152.00945422687124,
+          "first_last_change_percent": 0.0005691526343998277
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            116.7705044688804,
+            117.38767253120551,
+            117.3307503290406
+          ],
+          "mean": 117.1629757763755,
+          "first_last_change_percent": 0.47978371139905107
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-SIGNAL-1-scan",
+      "variant": "scan",
+      "scenario": "SIGNAL",
+      "json": "micro-SIGNAL-1-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-SIGNAL-1-scan.json",
+        "-p",
+        "workload=SIGNAL"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            3715497.3030171506,
+            3659296.810912813,
+            3695229.7341021006
+          ],
+          "mean": 3690007.9493440213,
+          "first_last_change_percent": -0.5454873806150173
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.31020661117486,
+            495.2430999505587,
+            499.85629481423496
+          ],
+          "mean": 498.1365337919895,
+          "first_last_change_percent": 0.10936852398160113
+        },
+        "bytes_op": {
+          "iterations": [
+            112.01050946312182,
+            112.01065752209705,
+            112.01159665793466
+          ],
+          "mean": 112.01092121438451,
+          "first_last_change_percent": 0.0009706185768232345
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            134.38583475910815,
+            135.33832469496238,
+            135.27069513465432
+          ],
+          "mean": 134.9982848629083,
+          "first_last_change_percent": 0.6584476534541972
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-SIGNAL-2-scan",
+      "variant": "scan",
+      "scenario": "SIGNAL",
+      "json": "micro-SIGNAL-2-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-SIGNAL-2-scan.json",
+        "-p",
+        "workload=SIGNAL"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            3622197.8306080885,
+            3557630.935218989,
+            3646857.089894219
+          ],
+          "mean": 3608895.2852404322,
+          "first_last_change_percent": 0.6807816811593259
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.2033092914213,
+            491.2007724652165,
+            495.8791941423552
+          ],
+          "mean": 495.42775863299767,
+          "first_last_change_percent": -0.6658840370638686
+        },
+        "bytes_op": {
+          "iterations": [
+            112.01077786619676,
+            112.01080301490275,
+            112.01173525372722
+          ],
+          "mean": 112.01110537827557,
+          "first_last_change_percent": 0.0008547280437642968
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            137.8177925769493,
+            138.0696259419559,
+            135.97439710935828
+          ],
+          "mean": 137.28727187608783,
+          "first_last_change_percent": -1.3375598557506807
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-SIGNAL-2-tree",
+      "variant": "tree",
+      "scenario": "SIGNAL",
+      "json": "micro-SIGNAL-2-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-SIGNAL-2-tree.json",
+        "-p",
+        "workload=SIGNAL"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            4180305.109823273,
+            4056090.8585035075,
+            4164847.2816625373
+          ],
+          "mean": 4133747.749996439,
+          "first_last_change_percent": -0.36977751036428863
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.970480076288,
+            501.3896806930466,
+            499.56709580354993
+          ],
+          "mean": 500.30908552429486,
+          "first_last_change_percent": -0.08068161797802897
+        },
+        "bytes_op": {
+          "iterations": [
+            152.00935336037716,
+            152.00960502085994,
+            152.01028308717162
+          ],
+          "mean": 152.00974715613623,
+          "first_last_change_percent": 0.0006116247282861309
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            119.60143265653278,
+            123.61401610170883,
+            119.94847878410829
+          ],
+          "mean": 121.05464251411664,
+          "first_last_change_percent": 0.29016887161557037
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-SIGNAL-3-tree",
+      "variant": "tree",
+      "scenario": "SIGNAL",
+      "json": "micro-SIGNAL-3-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-SIGNAL-3-tree.json",
+        "-p",
+        "workload=SIGNAL"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            4114391.515281394,
+            4083053.806675321,
+            4096850.956776819
+          ],
+          "mean": 4098098.7595778448,
+          "first_last_change_percent": -0.42632205611514706
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            488.0698840970226,
+            499.25729021020277,
+            499.6344452893659
+          ],
+          "mean": 495.6538731988638,
+          "first_last_change_percent": 2.3694478125276808
+        },
+        "bytes_op": {
+          "iterations": [
+            152.00934211408403,
+            152.00956435896998,
+            152.01045519260663
+          ],
+          "mean": 152.00978722188688,
+          "first_last_change_percent": 0.0007322434970813418
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            118.62504632441188,
+            122.27546190892092,
+            121.95572906134014
+          ],
+          "mean": 120.95207909822432,
+          "first_last_change_percent": 2.8077398830425926
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-SIGNAL-3-scan",
+      "variant": "scan",
+      "scenario": "SIGNAL",
+      "json": "micro-SIGNAL-3-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-SIGNAL-3-scan.json",
+        "-p",
+        "workload=SIGNAL"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            3495489.690474011,
+            3576009.4099407075,
+            3553100.797431169
+          ],
+          "mean": 3541533.2992819627,
+          "first_last_change_percent": 1.6481555392413583
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            490.621151635147,
+            499.66558398450604,
+            502.693010516932
+          ],
+          "mean": 497.6599153788617,
+          "first_last_change_percent": 2.460525568771721
+        },
+        "bytes_op": {
+          "iterations": [
+            192.01097682761224,
+            192.01092941478615,
+            192.01204865561058
+          ],
+          "mean": 192.01131829933632,
+          "first_last_change_percent": 0.0005582118356217691
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            140.35834606298485,
+            139.72714461978745,
+            141.48008716228102
+          ],
+          "mean": 140.52185928168444,
+          "first_last_change_percent": 0.7991980033683177
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-MIXED-1-tree",
+      "variant": "tree",
+      "scenario": "MIXED",
+      "json": "micro-MIXED-1-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-MIXED-1-tree.json",
+        "-p",
+        "workload=MIXED"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            4195967.088173129,
+            4152073.8376333453,
+            4192007.101582876
+          ],
+          "mean": 4180016.009129783,
+          "first_last_change_percent": -0.09437601647102056
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.59003591693653,
+            496.284417159457,
+            499.19499399272905
+          ],
+          "mean": 498.3564823563742,
+          "first_last_change_percent": -0.07907321920110899
+        },
+        "bytes_op": {
+          "iterations": [
+            133.8664576167484,
+            133.86657108667185,
+            133.8673406937416
+          ],
+          "mean": 133.86678979905395,
+          "first_last_change_percent": 0.0006596700987904214
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            119.06433616343062,
+            119.52687658424107,
+            119.0825735491326
+          ],
+          "mean": 119.2245954322681,
+          "first_last_change_percent": 0.015317253083191318
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-MIXED-1-scan",
+      "variant": "scan",
+      "scenario": "MIXED",
+      "json": "micro-MIXED-1-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-MIXED-1-scan.json",
+        "-p",
+        "workload=MIXED"
+      ],
+      "phase": "micro",
+      "repetition": 1,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            2633038.3615049464,
+            2618574.3783069057,
+            2664541.1968776966
+          ],
+          "mean": 2638717.9788965164,
+          "first_last_change_percent": 1.1964442232715644
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            496.2428539309669,
+            499.2463063234568,
+            502.9316619322145
+          ],
+          "mean": 499.4736073955461,
+          "first_last_change_percent": 1.347890039778421
+        },
+        "bytes_op": {
+          "iterations": [
+            97.014817565742,
+            97.0148792126109,
+            97.01606097083835
+          ],
+          "mean": 97.01525258306376,
+          "first_last_change_percent": 0.0012816651389302436
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            188.4677645362269,
+            190.65576691629244,
+            188.7498164868116
+          ],
+          "mean": 189.29111597977698,
+          "first_last_change_percent": 0.14965527461885397
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-MIXED-2-scan",
+      "variant": "scan",
+      "scenario": "MIXED",
+      "json": "micro-MIXED-2-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-MIXED-2-scan.json",
+        "-p",
+        "workload=MIXED"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            2600694.2019420685,
+            2581008.7148579154,
+            2607238.470728471
+          ],
+          "mean": 2596313.7958428185,
+          "first_last_change_percent": 0.25163545877540106
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.53809427503177,
+            499.68343571952977,
+            499.21717704545784
+          ],
+          "mean": 499.4795690133398,
+          "first_last_change_percent": -0.06424279414358747
+        },
+        "bytes_op": {
+          "iterations": [
+            97.01495557863662,
+            97.01516152576816,
+            97.01641537343711
+          ],
+          "mean": 97.0155108259473,
+          "first_last_change_percent": 0.0015047110951016407
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            192.07875108961355,
+            193.60005754457026,
+            191.47353901462452
+          ],
+          "mean": 192.3841158829361,
+          "first_last_change_percent": -0.3150853863614911
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-MIXED-2-tree",
+      "variant": "tree",
+      "scenario": "MIXED",
+      "json": "micro-MIXED-2-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-MIXED-2-tree.json",
+        "-p",
+        "workload=MIXED"
+      ],
+      "phase": "micro",
+      "repetition": 2,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            4121639.1097353026,
+            4062353.223713694,
+            4194207.948266197
+          ],
+          "mean": 4126066.7605717313,
+          "first_last_change_percent": 1.7606791035995162
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.3248404136589,
+            496.1371695645787,
+            499.4776550924096
+          ],
+          "mean": 498.3132216902157,
+          "first_last_change_percent": 0.030604261270905653
+        },
+        "bytes_op": {
+          "iterations": [
+            133.86660343224938,
+            133.8667287001349,
+            133.86735935239665
+          ],
+          "mean": 133.86689716159364,
+          "first_last_change_percent": 0.0005646816516602371
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            121.14715216920732,
+            122.13048502735155,
+            119.0874799850789
+          ],
+          "mean": 120.78837239387926,
+          "first_last_change_percent": -1.700140818210616
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-MIXED-3-tree",
+      "variant": "tree",
+      "scenario": "MIXED",
+      "json": "micro-MIXED-3-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-MIXED-3-tree.json",
+        "-p",
+        "workload=MIXED"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            4284627.281970946,
+            4191485.6118047917,
+            4203287.7704593865
+          ],
+          "mean": 4226466.888078375,
+          "first_last_change_percent": -1.8984034353191848
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            496.546143000653,
+            499.44611309520315,
+            499.54096448113745
+          ],
+          "mean": 498.51107352566453,
+          "first_last_change_percent": 0.6031305494362815
+        },
+        "bytes_op": {
+          "iterations": [
+            133.86629573000232,
+            133.86646804739473,
+            133.8673262933712
+          ],
+          "mean": 133.86669669025608,
+          "first_last_change_percent": 0.0007698452872517692
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            115.89016040906124,
+            119.1573010983447,
+            118.8452924855396
+          ],
+          "mean": 117.96425133098185,
+          "first_last_change_percent": 2.5499421745966533
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "micro-MIXED-3-scan",
+      "variant": "scan",
+      "scenario": "MIXED",
+      "json": "micro-MIXED-3-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.DeadlineIndexBenchmark.deadlineLoop",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "3",
+        "-w",
+        "2s",
+        "-i",
+        "3",
+        "-r",
+        "3s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/micro-MIXED-3-scan.json",
+        "-p",
+        "workload=MIXED"
+      ],
+      "phase": "micro",
+      "repetition": 3,
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            2798711.2771693957,
+            2803457.1601726394,
+            2795935.672626407
+          ],
+          "mean": 2799368.0366561473,
+          "first_last_change_percent": -0.09917437949498176
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            499.17580002110947,
+            499.4383256656964,
+            499.6612315171226
+          ],
+          "mean": 499.42511906797614,
+          "first_last_change_percent": 0.0972466004947714
+        },
+        "bytes_op": {
+          "iterations": [
+            97.01396910807678,
+            97.01393002078808,
+            97.01529048635777
+          ],
+          "mean": 97.01439653840754,
+          "first_last_change_percent": 0.0013620494998090038
+        },
+        "cpu_ns_pass": {
+          "iterations": [
+            178.35916269504358,
+            178.15086770754885,
+            178.7098452976058
+          ],
+          "mean": 178.4066252333994,
+          "first_last_change_percent": 0.1966159726606298
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "pilot-consume-tree",
+      "variant": "tree",
+      "scenario": "consume",
+      "started": 1788998288.8288543,
+      "ended": 1788998379.5300028,
+      "json": "pilot-consume-tree.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/tree.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "5s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/pilot-consume-tree.json",
+        "-p",
+        "server=127.0.0.1:38077",
+        "-p",
+        "topic=deadline-scan-pilot-94bcea098d-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "phase": "pilot",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1469879.8113572118,
+            1608570.5234691454,
+            1540089.6610098432,
+            1685086.9989753482,
+            1566940.3178756558
+          ],
+          "mean": 1574113.462537441,
+          "first_last_change_percent": 6.603295437388401
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            453.64885555306296,
+            496.98923918899305,
+            453.72599360203094,
+            499.3665737754487,
+            457.9178217013832
+          ],
+          "mean": 472.3296967641838,
+          "first_last_change_percent": 0.9410287485715818
+        },
+        "bytes_op": {
+          "iterations": [
+            555.5913462950374,
+            555.5718178434049,
+            555.915961064244,
+            555.6755599810336,
+            555.9676018376723
+          ],
+          "mean": 555.7444574042785,
+          "first_last_change_percent": 0.06772163482098303
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            308.6335825968729,
+            308.97133639409356,
+            294.6138870863076,
+            296.34898055950686,
+            292.2409392547218
+          ],
+          "mean": 300.1617451783005,
+          "first_last_change_percent": -5.311360871432647
+        }
+      },
+      "primary_unit": "ops/s"
+    },
+    {
+      "label": "pilot-consume-scan",
+      "variant": "scan",
+      "scenario": "consume",
+      "started": 1788998379.5320108,
+      "ended": 1788998470.5400565,
+      "json": "pilot-consume-scan.json",
+      "command": [
+        "java",
+        "-Xms32m",
+        "-Xmx64m",
+        "-XX:ActiveProcessorCount=1",
+        "-cp",
+        "/tmp/deadline-scan-pilot-94bcea098d/classes:/tmp/deadline-scan-pilot-94bcea098d/variants/scan.jar:/tmp/deadline-scan-pilot-94bcea098d/slf4j.jar:/tmp/deadline-scan-pilot-94bcea098d/lib/*",
+        "org.openjdk.jmh.Main",
+        "org.apache.kafka.jmh.consumer.AsyncConsumerBrokerBenchmark.consume",
+        "-f",
+        "1",
+        "-t",
+        "1",
+        "-wi",
+        "6",
+        "-w",
+        "10s",
+        "-i",
+        "5",
+        "-r",
+        "5s",
+        "-foe",
+        "true",
+        "-jvmArgs",
+        "-Xms64m -Xmx256m -XX:ActiveProcessorCount=1",
+        "-prof",
+        "gc",
+        "-prof",
+        "org.apache.kafka.jmh.consumer.ConsumerCpuProfiler",
+        "-rf",
+        "json",
+        "-rff",
+        "/tmp/deadline-scan-pilot-94bcea098d/results/pilot-consume-scan.json",
+        "-p",
+        "server=127.0.0.1:38077",
+        "-p",
+        "topic=deadline-scan-pilot-94bcea098d-data",
+        "-p",
+        "records=5000000"
+      ],
+      "repetition": 1,
+      "phase": "pilot",
+      "metrics": {
+        "throughput": {
+          "iterations": [
+            1182306.21341799,
+            1606932.4852053942,
+            1694617.8550746643,
+            1441371.366057893,
+            1415661.2540706391
+          ],
+          "mean": 1468177.8347653162,
+          "first_last_change_percent": 19.73727601228037
+        },
+        "process_cpu_ms_s": {
+          "iterations": [
+            413.38454026461335,
+            500.3528146538288,
+            499.70157951593717,
+            455.79467817132416,
+            455.69145241123186
+          ],
+          "mean": 464.98501300338705,
+          "first_last_change_percent": 10.234275360064803
+        },
+        "bytes_op": {
+          "iterations": [
+            558.5652027972028,
+            555.5434671938713,
+            555.71170653456,
+            555.4772404993065,
+            555.6137286460539
+          ],
+          "mean": 556.1822691341989,
+          "first_last_change_percent": -0.5284027963733506
+        },
+        "cpu_ms_million_records": {
+          "iterations": [
+            349.65034965034965,
+            311.38020511553196,
+            294.88086812927577,
+            316.2274618585298,
+            321.89750105887333
+          ],
+          "mean": 318.8072771625121,
+          "first_last_change_percent": -7.937314697162224
+        }
+      },
+      "primary_unit": "ops/s"
+    }
+  ]
+}

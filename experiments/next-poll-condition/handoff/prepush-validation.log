@@ -1,0 +1,932 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.7.1/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+> Task :api-checker:gradle-plugins:pluginDescriptors UP-TO-DATE
+> Task :api-checker:core:compileJava UP-TO-DATE
+> Task :api-checker:gradle-plugins:processResources UP-TO-DATE
+> Task :api-checker:core:processResources NO-SOURCE
+> Task :api-checker:core:classes UP-TO-DATE
+> Task :api-checker:core:jar UP-TO-DATE
+> Task :api-checker:gradle-plugins:compileJava UP-TO-DATE
+> Task :api-checker:gradle-plugins:classes UP-TO-DATE
+> Task :api-checker:gradle-plugins:jar UP-TO-DATE
+
+> Configure project :
+Starting build with version 4.5.0-SNAPSHOT (commit id unknown) using Gradle 9.7.1, Java 17 and Scala 2.13.18
+Build properties: ignoreFailures=false, maxParallelForks=8, maxScalacThreads=8, maxTestRetries=0
+
+> Task :clients:processResources UP-TO-DATE
+> Task :test-common:test-common-util:compileJava UP-TO-DATE
+> Task :generator:compileJava UP-TO-DATE
+> Task :generator:processResources NO-SOURCE
+> Task :generator:classes UP-TO-DATE
+> Task :clients:processTestResources UP-TO-DATE
+> Task :generator:jar UP-TO-DATE
+> Task :test-common:test-common-util:processResources UP-TO-DATE
+> Task :test-common:test-common-util:classes UP-TO-DATE
+> Task :test-common:test-common-util:jar UP-TO-DATE
+> Task :clients:spotlessJava UP-TO-DATE
+> Task :clients:processMessages UP-TO-DATE
+> Task :clients:compileJava
+> Task :clients:classes
+> Task :clients:compileTestFixturesJava UP-TO-DATE
+> Task :clients:processTestMessages UP-TO-DATE
+> Task :clients:compileTestJava UP-TO-DATE
+> Task :clients:testClasses UP-TO-DATE
+> Task :clients:checkstyleTest
+> Task :clients:spotlessJavaCheck UP-TO-DATE
+> Task :clients:createVersionFile UP-TO-DATE
+> Task :clients:shadowJar
+> Task :clients:jar SKIPPED
+> Task :clients:processTestFixturesResources NO-SOURCE
+> Task :clients:testFixturesClasses UP-TO-DATE
+> Task :clients:testFixturesJar UP-TO-DATE
+> Task :clients:checkstyleMain
+
+> Task :clients:test
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncTimeoutNotReturnedOnPollAndFails() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testSuccessfulOffsetFetch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutocommitInterceptorsInvoked() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollEnsureEmptyPendingRequestAfterPoll() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollSkipIfCoordinatorUnknown() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitAsyncFailedWithRetriableThrowsRetriableCommitException() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testSyncOffsetFetchFailsWithStaleEpochAndRetriesWithNewEpoch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > ApplicationPollWaitTest > testRepeatedNotificationsDoNotRenewUnresponsiveApp() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > ApplicationPollWaitTest > testOldWaitCleanupCannotEndNewWait() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > ApplicationPollWaitTest > testWaitingStopsAtApiDeadline() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > ApplicationPollWaitTest > testAppReturningThenBlockingInCallbackExpiresNormally() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollWithClosingAndPendingRequests() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testFetchOffsetsWithTopicIdsDoesNotFailOnUnsubscribedTopics() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > timerQueueActivatesOnlyDueManagersAlongsideLegacyPolling() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > completionWakesCoordinatorAndBackoffDoesNotSlide() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > anyOfNotificationRemovesOtherSubscriptionsAndTimer() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > idlePassesNeverEvaluateWaitingConditions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > publicationBeforeRegistrationIsRetained() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > legacyManagersStillPollEveryPass() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > deadlinesSaturateAndRejectNegativeDelays() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > unrelatedSignalsDoNotWakeWaiters() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > notificationIntoLaterBitmapWordWaitsForNextSnapshot() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > failedLegacyManagerInBothSetsIsPolledOnceOnRetry() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > failedLegacyAtBitmapBoundaryRemainsUniqueOnRetry() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestStateToStringBase() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > invalidationWakesKnownCoordinator() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > publicationBeforeArmEnqueuesExactlyOnce() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > coordinatorCompletionActivatesOnlyDependentsAfterStateUpdate() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > signalPublicationSkipsCancelledSiblingAndDefersNewSubscription() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > closeDoesNotAdmitAnotherDiscovery() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > lateCoordinatorCompletionDoesNotActivateNewRegistrationAfterClose() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > cancellationUnlinksHeadMiddleAndTailWithoutAffectingOtherOwners() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > readySnapshotPreservesOrderAndDefersReentrantNotification() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > throwingManagerDoesNotLoseUnprocessedReadyEntries() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > legacyManagerCanSwitchToDeadlineAndBack() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > closeClearsAllBitmapWordsAndRegistrationOrder() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > readyManagersAcrossBitmapWordsPreserveOrder() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > mergedSnapshotPreservesInterleavedOrderAndDefersNewlyReadyManager() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > nestedConditionsPreserveEarliestDeadline() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > laterManagerPublicationPreventsNetworkSleep() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > NextPollConditionTest > closeDuringBackoffCancelsDeadlineWithoutAnotherDiscovery() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > SignalFanoutTest > broadcastAfterCloseCannotActivateReusedManagerSlots() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors(Errors, boolean) > "testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors(Errors, boolean).error=NOT_COORDINATOR, shouldRediscoverCoordinator=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors(Errors, boolean) > "testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors(Errors, boolean).error=COORDINATOR_NOT_AVAILABLE, shouldRediscoverCoordinator=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors(Errors, boolean) > "testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors(Errors, boolean).error=COORDINATOR_LOAD_IN_PROGRESS, shouldRediscoverCoordinator=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > SignalFanoutTest > broadcastAndMultipleInputsCoalesceWithoutLosingLatestState(int) > "broadcastAndMultipleInputsCoalesceWithoutLosingLatestState(int).managerCount=1" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > SignalFanoutTest > broadcastAndMultipleInputsCoalesceWithoutLosingLatestState(int) > "broadcastAndMultipleInputsCoalesceWithoutLosingLatestState(int).managerCount=8" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 4 > SignalFanoutTest > broadcastAndMultipleInputsCoalesceWithoutLosingLatestState(int) > "broadcastAndMultipleInputsCoalesceWithoutLosingLatestState(int).managerCount=64" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncWithEmptyOffsets() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitAsyncWithEmptyOffsets() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollEnsureManualCommitSent() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRetryPreservesDeduplicationScope(boolean) > "testOffsetFetchRetryPreservesDeduplicationScope(boolean).partitionError=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRetryPreservesDeduplicationScope(boolean) > "testOffsetFetchRetryPreservesDeduplicationScope(boolean).partitionError=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutocommitInterceptorsNotInvokedOnError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutocommitEnsureOnlyOneInflightRequest() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAsyncCommitWhileCoordinatorUnknownIsSentOutWhenCoordinatorDiscovered() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean) > "testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean).firstAlreadyInflight=false, oldDefaultScope=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean) > "testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean).firstAlreadyInflight=false, oldDefaultScope=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean) > "testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean).firstAlreadyInflight=true, oldDefaultScope=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean) > "testOffsetFetchDistinctScopesHaveIndependentResponses(boolean, boolean).firstAlreadyInflight=true, oldDefaultScope=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitAsyncFailsWithStaleMemberEpochContinuesToCommitOnTheInterval() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncFailsWithCommitFailedExceptionOnStaleMemberEpoch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testLastEpochSentOnCommit() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestShouldSucceedWithTopicId() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=NOT_COORDINATOR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=COORDINATOR_LOAD_IN_PROGRESS" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=COORDINATOR_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=REQUEST_TIMED_OUT" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=UNKNOWN_TOPIC_OR_PARTITION" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=UNKNOWN_TOPIC_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=GROUP_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=OFFSET_METADATA_TOO_LARGE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=INVALID_COMMIT_OFFSET_SIZE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=TOPIC_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=UNKNOWN_MEMBER_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=STALE_MEMBER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors) > "testAutoCommitSyncBeforeRevocationRetriesOnRetriableAndStaleEpoch(Errors).error=UNKNOWN_SERVER_ERROR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=NOT_COORDINATOR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=COORDINATOR_LOAD_IN_PROGRESS" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=COORDINATOR_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=REQUEST_TIMED_OUT" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=UNSTABLE_OFFSET_COMMIT" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=UNKNOWN_TOPIC_OR_PARTITION" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=UNKNOWN_TOPIC_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=GROUP_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=OFFSET_METADATA_TOO_LARGE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=INVALID_COMMIT_OFFSET_SIZE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=TOPIC_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=UNKNOWN_MEMBER_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=STALE_MEMBER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestErroredRequests(Errors) > "testOffsetFetchRequestErroredRequests(Errors).error=UNKNOWN_SERVER_ERROR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitBeforeRevocationNotBlockedByAutoCommitOnIntervalInflightRequest() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollEnsureAutocommitSent() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testSignalClose() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitEmptyDoesNotLeaveInflightRequestFlagOn() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestPartitionDataError(Errors, boolean) > "testOffsetFetchRequestPartitionDataError(Errors, boolean).error=UNSTABLE_OFFSET_COMMIT, isRetriable=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestPartitionDataError(Errors, boolean) > "testOffsetFetchRequestPartitionDataError(Errors, boolean).error=UNKNOWN_TOPIC_OR_PARTITION, isRetriable=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestPartitionDataError(Errors, boolean) > "testOffsetFetchRequestPartitionDataError(Errors, boolean).error=UNKNOWN_TOPIC_ID, isRetriable=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestPartitionDataError(Errors, boolean) > "testOffsetFetchRequestPartitionDataError(Errors, boolean).error=TOPIC_AUTHORIZATION_FAILED, isRetriable=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestPartitionDataError(Errors, boolean) > "testOffsetFetchRequestPartitionDataError(Errors, boolean).error=UNKNOWN_SERVER_ERROR, isRetriable=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollWithFatalErrorDuringCoordinatorIsEmptyAndClosing() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=NOT_COORDINATOR, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=COORDINATOR_LOAD_IN_PROGRESS, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=COORDINATOR_NOT_AVAILABLE, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=REQUEST_TIMED_OUT, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=UNSTABLE_OFFSET_COMMIT, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=UNKNOWN_TOPIC_OR_PARTITION, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=UNKNOWN_TOPIC_ID, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=GROUP_AUTHORIZATION_FAILED, expectedExceptionClass=class org.apache.kafka.common.errors.GroupAuthorizationException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=OFFSET_METADATA_TOO_LARGE, expectedExceptionClass=class org.apache.kafka.common.KafkaException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=INVALID_COMMIT_OFFSET_SIZE, expectedExceptionClass=class org.apache.kafka.common.KafkaException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=TOPIC_AUTHORIZATION_FAILED, expectedExceptionClass=class org.apache.kafka.common.KafkaException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=UNKNOWN_MEMBER_ID, expectedExceptionClass=class org.apache.kafka.common.errors.UnknownMemberIdException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=STALE_MEMBER_EPOCH, expectedExceptionClass=class org.apache.kafka.common.errors.StaleMemberEpochException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestTimeoutRequests(Errors, Class) > "testOffsetFetchRequestTimeoutRequests(Errors, Class).error=UNKNOWN_SERVER_ERROR, expectedExceptionClass=class org.apache.kafka.common.KafkaException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchMarksCoordinatorUnknownOnCoordinatorDisconnectedAndRetries() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=NOT_COORDINATOR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=COORDINATOR_LOAD_IN_PROGRESS" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=COORDINATOR_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=REQUEST_TIMED_OUT" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=UNKNOWN_TOPIC_OR_PARTITION" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=UNKNOWN_TOPIC_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=GROUP_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=OFFSET_METADATA_TOO_LARGE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=INVALID_COMMIT_OFFSET_SIZE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=TOPIC_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=UNKNOWN_MEMBER_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=STALE_MEMBER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncRetriedAfterExpectedRetriableException(Errors) > "testCommitSyncRetriedAfterExpectedRetriableException(Errors).error=UNKNOWN_SERVER_ERROR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSync() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncFailsWithCommitFailedExceptionIfUnknownMemberId() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testSyncOffsetFetchFailsWithStaleEpochAndNotRetriedIfMemberNotInGroupAnymore() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitAsync() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testEnsureCommitSensorRecordsMetric() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAsyncAutocommitNotRetriedAfterException() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean) > "testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean).defaultScope=false, firstAlreadyInflight=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean) > "testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean).defaultScope=false, firstAlreadyInflight=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean) > "testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean).defaultScope=true, firstAlreadyInflight=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean) > "testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean, boolean).defaultScope=true, firstAlreadyInflight=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncShouldSucceedWithTopicId() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitOnIntervalSkippedIfPreviousOneInFlight() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testAutoCommitEmptyOffsetsDoesNotGenerateRequest() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=NOT_COORDINATOR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=COORDINATOR_LOAD_IN_PROGRESS" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=COORDINATOR_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=REQUEST_TIMED_OUT" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=UNKNOWN_TOPIC_OR_PARTITION" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=UNKNOWN_TOPIC_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=GROUP_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=OFFSET_METADATA_TOO_LARGE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=INVALID_COMMIT_OFFSET_SIZE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=TOPIC_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=UNKNOWN_MEMBER_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=STALE_MEMBER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors) > "testOffsetCommitRequestErroredRequestsNotRetriedForAsyncCommit(Errors).error=UNKNOWN_SERVER_ERROR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitAsyncFailsWithRetriableOnCoordinatorDisconnected() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testCommitSyncShouldSucceedWithUnknownOffsetAndMetadata() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testDuplicatedOffsetFetchFailsWithStaleEpochAndRetriesWithNewEpoch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testEnsureBackoffRetryOnOffsetCommitRequestTimeout() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollWithFatalErrorShouldFailAllUnsentRequests() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testPollEnsureCorrectInflightRequestBufferSize() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetFetchRequestEnsureDuplicatedRequestSucceed() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=NOT_COORDINATOR, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=COORDINATOR_LOAD_IN_PROGRESS, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=COORDINATOR_NOT_AVAILABLE, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=REQUEST_TIMED_OUT, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=UNKNOWN_TOPIC_OR_PARTITION, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=UNKNOWN_TOPIC_ID, expectedExceptionClass=class org.apache.kafka.common.errors.TimeoutException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=GROUP_AUTHORIZATION_FAILED, expectedExceptionClass=class org.apache.kafka.common.errors.GroupAuthorizationException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=OFFSET_METADATA_TOO_LARGE, expectedExceptionClass=class org.apache.kafka.common.errors.OffsetMetadataTooLarge" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=INVALID_COMMIT_OFFSET_SIZE, expectedExceptionClass=class org.apache.kafka.common.errors.InvalidCommitOffsetSizeException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=TOPIC_AUTHORIZATION_FAILED, expectedExceptionClass=class org.apache.kafka.common.errors.TopicAuthorizationException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=UNKNOWN_MEMBER_ID, expectedExceptionClass=class org.apache.kafka.clients.consumer.CommitFailedException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=STALE_MEMBER_EPOCH, expectedExceptionClass=class org.apache.kafka.clients.consumer.CommitFailedException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class) > "testOffsetCommitSyncFailedWithRetriableThrowsTimeoutWhenRetryTimeExpires(Errors, Class).error=UNKNOWN_SERVER_ERROR, expectedExceptionClass=class org.apache.kafka.common.KafkaException" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=NOT_COORDINATOR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=COORDINATOR_LOAD_IN_PROGRESS" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=COORDINATOR_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=REQUEST_TIMED_OUT" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=UNKNOWN_TOPIC_OR_PARTITION" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=UNKNOWN_TOPIC_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=GROUP_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=OFFSET_METADATA_TOO_LARGE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=INVALID_COMMIT_OFFSET_SIZE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=TOPIC_AUTHORIZATION_FAILED" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=UNKNOWN_MEMBER_ID" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=STALE_MEMBER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors) > "testOffsetCommitSingleFailedAttemptPerRequestWhenPartitionErrors(Errors).error=UNKNOWN_SERVER_ERROR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > BackgroundAutoCommitTest > emptyOffsetsRescheduleAndCloseDoesNotAdmitNewCommit() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > BackgroundAutoCommitTest > commitsAtDeadlineWithoutAppPollAndDoesNotDuplicateInflight() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > BackgroundAutoCommitTest > retriesOnlyAfterBackoffAndCoordinatorAvailability() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > BackgroundAutoCommitTest > doesNotReadOffsetsWhileAppIsActiveOrNotifiedOrWaitExpired() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > CommitRequestManagerTest > BackgroundAutoCommitTest > rejectsSnapshotWhenAppStartsAnotherWait() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testSendUnsentRequests() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testNetworkClientDelegateAndRequestManagersInitializeResourcesError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testEnsureCloseStopsRunningThread() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testProcessEventFailureCompletesFutureExceptionally() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testNetworkClientDelegateInitializeResourcesError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testStartupAndTearDown() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testRunOnceRecordTimeBetweenNetworkThreadPoll(String) > "testRunOnceRecordTimeBetweenNetworkThreadPoll(String).groupName=consumer-metrics" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testRunOnceRecordTimeBetweenNetworkThreadPoll(String) > "testRunOnceRecordTimeBetweenNetworkThreadPoll(String).groupName=consumer-share-metrics" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testCleanupTerminatesCallbacksBeforeDrainingAndClosingTransport() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime(String) > "testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime(String).groupName=consumer-metrics" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime(String) > "testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime(String).groupName=consumer-share-metrics" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testCleanupInvokesReaper() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testRunOnceInvokesReaper() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testRequestManagersInitializeResourcesError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testConsumerNetworkThreadPollTimeComputations(long) > "testConsumerNetworkThreadPollTimeComputations(long).exampleTime=4999" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testConsumerNetworkThreadPollTimeComputations(long) > "testConsumerNetworkThreadPollTimeComputations(long).exampleTime=5000" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testConsumerNetworkThreadPollTimeComputations(long) > "testConsumerNetworkThreadPollTimeComputations(long).exampleTime=5001" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testMaximumTimeToWait() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testQueuedCancellationTargetTerminatesOnFailureOrShutdown(boolean) > "testQueuedCancellationTargetTerminatesOnFailureOrShutdown(boolean).shutdown=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testQueuedCancellationTargetTerminatesOnFailureOrShutdown(boolean) > "testQueuedCancellationTargetTerminatesOnFailureOrShutdown(boolean).shutdown=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testCleanupCompletesOnlyPendingQueuedAsyncPoll(int) > "testCleanupCompletesOnlyPendingQueuedAsyncPoll(int).terminalState=0" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testCleanupCompletesOnlyPendingQueuedAsyncPoll(int) > "testCleanupCompletesOnlyPendingQueuedAsyncPoll(int).terminalState=1" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testCleanupCompletesOnlyPendingQueuedAsyncPoll(int) > "testCleanupCompletesOnlyPendingQueuedAsyncPoll(int).terminalState=2" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testAsyncPollProcessingFailureCompletesOnlyPendingEvent(int) > "testAsyncPollProcessingFailureCompletesOnlyPendingEvent(int).terminalState=0" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testAsyncPollProcessingFailureCompletesOnlyPendingEvent(int) > "testAsyncPollProcessingFailureCompletesOnlyPendingEvent(int).terminalState=1" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testAsyncPollProcessingFailureCompletesOnlyPendingEvent(int) > "testAsyncPollProcessingFailureCompletesOnlyPendingEvent(int).terminalState=2" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > ConsumerNetworkThreadTest > testRequestsTransferFromManagersToClientOnThreadRun() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testCloseShouldBeIdempotent() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testMultipleAbortMarkers() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPositionCallbackHandsOffToRealFetchManager(boolean) > "testPositionCallbackHandsOffToRealFetchManager(boolean).terminateBeforeFetch=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPositionCallbackHandsOffToRealFetchManager(boolean) > "testPositionCallbackHandsOffToRealFetchManager(boolean).terminateBeforeFetch=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReconnectDemandDeadlinesRemainIndependentOfSingleAttempt() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestedFromCompletionSurvivesUntilNextActivation() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReturnAbortedTransactionsInUncommittedMode() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation(Errors) > "testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation(Errors).error=NOT_LEADER_OR_FOLLOWER" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation(Errors) > "testWhenFetchResponseReturnsALeaderShipChangeErrorButNoNewLeaderInformation(Errors).error=FENCED_LEADER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchTopicIdUpgradeDowngrade() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitionPaused() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testMaximumTimeToWaitBoundedWhenPartitionsSkippedDueToBackoff() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testCloseRejectsQueuedAndLateContinuations() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testClearBufferedDataForTopicPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testConsumerPositionUpdatedWhenSkippingAbortedTransactions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testCompletedFetchRemoval() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitionPendingAssignment() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFailedFetchResponseWakesUpBuffer() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchingPendingPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReconnectDemandRechecksPermissionAndSubscription(int) > "testReconnectDemandRechecksPermissionAndSubscription(int).change=0" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReconnectDemandRechecksPermissionAndSubscription(int) > "testReconnectDemandRechecksPermissionAndSubscription(int).change=1" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReconnectDemandRechecksPermissionAndSubscription(int) > "testReconnectDemandRechecksPermissionAndSubscription(int).change=2" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReconnectDemandRechecksPermissionAndSubscription(int) > "testReconnectDemandRechecksPermissionAndSubscription(int).change=3" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testUpdatePositionWithLastRecordMissingFromBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testUpdatePositionOnEmptyBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testMaximumTimeToWaitUnboundedWhenFetchSent() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitionResetOffset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchOffsetOutOfRange() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchDiscardedAfterPausedPartitionResumedAndSeekedToNewOffset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchWithNoTopicId() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchedRecordsRaisesOnSerializationErrors() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testInflightFetchResultNotProcessedForPartitionsAwaitingCallbackCompletion() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testWhenFetchResponseReturnsALeaderShipChangeErrorAndNewLeaderInformation(Errors) > "testWhenFetchResponseReturnsALeaderShipChangeErrorAndNewLeaderInformation(Errors).error=NOT_LEADER_OR_FOLLOWER" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testWhenFetchResponseReturnsALeaderShipChangeErrorAndNewLeaderInformation(Errors) > "testWhenFetchResponseReturnsALeaderShipChangeErrorAndNewLeaderInformation(Errors).error=FENCED_LEADER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReconnectDemandRunsAtTransportDeadlineWithoutAppRedrive() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testQuotaMetrics() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchMaxPollRecords() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testMaximumTimeToWaitUnboundedWhenPartitionsSkippedDueToInflight() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPreferredReadReplicaOffsetError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testEarlierManagerHandoffToAlreadyReadyFetchWaitsForNextBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testParseInvalidRecordBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testZeroTimeoutAllowsInitialPreparationButDoesNotRetainReconnect(boolean) > "testZeroTimeoutAllowsInitialPreparationButDoesNotRetainReconnect(boolean).backoff=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testZeroTimeoutAllowsInitialPreparationButDoesNotRetainReconnect(boolean) > "testZeroTimeoutAllowsInitialPreparationButDoesNotRetainReconnect(boolean).backoff=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testSeekBeforeException() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchResponseMetricsWithSkippedOffset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testConsumingViaIncrementalFetchRequests() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchOnCompletedFetchesForPausedAndResumedPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testEmptyFetchResponseWakesUpBuffer() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchDisconnectedShouldClearPreferredReadReplica() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testSkippingAbortedTransactions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testEpochSetInFetchRequest() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHandleFetchResponseError(Errors, long, boolean, boolean) > "testHandleFetchResponseError(Errors, long, boolean, boolean).error=NOT_LEADER_OR_FOLLOWER, highWatermark=100, hasTopLevelError=false, shouldRequestMetadataUpdate=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHandleFetchResponseError(Errors, long, boolean, boolean) > "testHandleFetchResponseError(Errors, long, boolean, boolean).error=UNKNOWN_TOPIC_OR_PARTITION, highWatermark=100, hasTopLevelError=false, shouldRequestMetadataUpdate=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHandleFetchResponseError(Errors, long, boolean, boolean) > "testHandleFetchResponseError(Errors, long, boolean, boolean).error=UNKNOWN_TOPIC_ID, highWatermark=-1, hasTopLevelError=false, shouldRequestMetadataUpdate=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHandleFetchResponseError(Errors, long, boolean, boolean) > "testHandleFetchResponseError(Errors, long, boolean, boolean).error=FETCH_SESSION_TOPIC_ID_ERROR, highWatermark=-1, hasTopLevelError=true, shouldRequestMetadataUpdate=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHandleFetchResponseError(Errors, long, boolean, boolean) > "testHandleFetchResponseError(Errors, long, boolean, boolean).error=INCONSISTENT_TOPIC_ID, highWatermark=-1, hasTopLevelError=false, shouldRequestMetadataUpdate=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHandleFetchResponseError(Errors, long, boolean, boolean) > "testHandleFetchResponseError(Errors, long, boolean, boolean).error=FENCED_LEADER_EPOCH, highWatermark=100, hasTopLevelError=false, shouldRequestMetadataUpdate=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHandleFetchResponseError(Errors, long, boolean, boolean) > "testHandleFetchResponseError(Errors, long, boolean, boolean).error=UNKNOWN_LEADER_EPOCH, highWatermark=100, hasTopLevelError=false, shouldRequestMetadataUpdate=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testMaximumTimeToWaitBoundedWhenNoInflightRequest() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchNonContinuousRecords() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPollWithCreateFetchRequestsError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchErrorShouldClearPreferredReadReplica() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitionNotAssigned() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestInternalError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReadCommittedWithCompactedTopic() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testQueuedHandoffUsesCurrentSubscriptionState(String) > "testQueuedHandoffUsesCurrentSubscriptionState(String).change=unassigned" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testQueuedHandoffUsesCurrentSubscriptionState(String) > "testQueuedHandoffUsesCurrentSubscriptionState(String).change=paused" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testQueuedHandoffUsesCurrentSubscriptionState(String) > "testQueuedHandoffUsesCurrentSubscriptionState(String).change=revoking" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testQueuedHandoffUsesCurrentSubscriptionState(String) > "testQueuedHandoffUsesCurrentSubscriptionState(String).change=seek" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchNormal() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReadCommittedAbortMarkerWithNoData() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchSessionIdError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPollWithoutCreateFetchRequests() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testUnauthorizedTopic() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchForgetTopicIdWhenReplaced() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchOnCompletedFetchesForSomePausedPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchPositionAfterException() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchedRecordsAfterSeek() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchOffsetOutOfRangeException() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetcherCloseClosesFetchSessionsInBroker() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchSessionErrorResponseWakesUpBuffer() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchDuringCooperativeRebalance() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchResponseMetricsWithOnePartitionAtTheWrongOffset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchOnPausedPartition() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReconnectDemandRetainsSkippedNodeWhenAnotherNodeCanFetch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testParseCorruptedRecord() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testHeaders() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchWithTopicId() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testLeaderEpochInConsumerRecord() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testInvalidDefaultRecordBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchResponseMetrics() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testContinuationActivatesOnlyFetchAndReturnsToWaiting() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchDuringEagerRebalance() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchResponseMetricsWithOnePartitionError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testMissingLeaderEpochInRecords() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testStaleOutOfRangeError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReadCommittedWithCommittedAndAbortedTransactions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testInFlightFetchOnPausedPartition() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testAsyncPollReconnectSendsWhileApplicationRemainsParked() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testCancelledReconnectDemandIsReleasedOnSignalBeforeBackoff() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchResponseWithUnexpectedPartitionIsIgnored() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitionPendingRevocation() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchResultNotProcessedForPartitionsAwaitingCallbackCompletion() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetcherMetricsTemplates() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReturnCommittedTransactions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testRecordLatencyOnFetchResponseLevelError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPollWithCreateFetchRequests() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitionMissingPosition() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testReadCommittedLagMetric() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchDisconnected() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchSkipsBlackedOutNodes() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testInflightFetchOnPendingPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPartialFetchWithPausedPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchAfterPartitionWithFetchedRecordsIsUnassigned() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testNoFetchablePartitionsDoesNotWakeUpBuffer() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testContinuationPublishedDuringDrainWaitsForNextBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testEmptyControlBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchDisconnectedShouldNotClearPreferredReadReplicaIfUnassigned() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPreferredReadReplica() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testCorruptMessageError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchCompletedBeforeHandlerAdded() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPartitionsSkippedDueToBackoffDoesNotWakeUpBuffer() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testSubscriptionPositionUpdatedWithEpoch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchOnCompletedFetchesForAllPausedPartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetcherIgnoresControlRecords() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testPollWithRedundantCreateFetchRequests() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetcherMetrics() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetcherLeadMetric() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchForgetTopicIdWhenUnassigned() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > FetchRequestManagerTest > testFetchRequestWithBufferedPartitionMissingLeader() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > HeartbeatNextPollConditionTest > testRealCoordinatorAndMembershipActivateOnlyHeartbeatOnNextBatch() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > NetworkLoopConditionTest > legacyPollingAndApplicationWaitContractRemainActive() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > NetworkLoopConditionTest > completionSuccessInvalidationAndCloseUseActualCoordinator() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > NetworkLoopConditionTest > exceptionPreservesOtherReadyManagersForNextIteration() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > NetworkLoopConditionTest > realCompletionFailureHonorsBackoffAcrossNetworkIterations() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > NetworkLoopConditionTest > laterManagerWakesEarlierManagerWithoutRecursiveDrain() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > NetworkLoopConditionTest > earlierManagerWakesLaterManagerOnNextLoopWithoutSleeping() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testListOffsetsRequestUnknownOffset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailedResponse_NonRetriableAuthError() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFails_AuthenticationException() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRepeatedResetReusesPendingMetadataWork() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testListOffsetsRequestEmpty() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testUpdatePositionsDoesNotApplyOffsetsIfPartitionNotInitializingAnymore() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testMetadataDoesNotRestartObsoleteReset(boolean) > "testMetadataDoesNotRestartObsoleteReset(boolean).revoked=true" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testMetadataDoesNotRestartObsoleteReset(boolean) > "testMetadataDoesNotRestartObsoleteReset(boolean).revoked=false" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testResetPositionsMissingLeader() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestNotSupportedErrorReturnsNullOffset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testListOffsetsRequest_Success() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testListOffsetsWaitingForMetadataUpdate_Timeout() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testFatalResetErrorDoesNotWaitForUnrelatedMetadata() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testResetOffsetsAuthorizationFailure() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=NOT_LEADER_OR_FOLLOWER" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=REPLICA_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=KAFKA_STORAGE_ERROR" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=OFFSET_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=LEADER_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=FENCED_LEADER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=BROKER_NOT_AVAILABLE" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=INVALID_REQUEST" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=UNKNOWN_LEADER_EPOCH" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailsWithRetriableError_RetrySucceeds(Errors) > "testRequestFailsWithRetriableError_RetrySucceeds(Errors).error=UNKNOWN_TOPIC_OR_PARTITION" PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testValidatePositionsMissingLeader() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testCloseFailsMetadataWaitAndIgnoresLateMetadata() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testValidatePositionsSuccess() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testListOffsetsWaitingForMetadataUpdate_RetrySucceeds() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testResetPositionsSuccess_NoLeaderEpochInResponse() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestWithUnknownOffsetInResponseReturnsNullOffset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testPartialResetWaitsForMissingPartitionWithoutResendingKnownPartition() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testListOffsetsRequestMultiplePartitions() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testResetWaitsForMetadataWithoutSchedulerRedrive() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testUpdatePositionsWithCommittedOffsets() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testValidatePositionsAbortIfNoApiVersionsToCheckAgainstThenRecovers() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testUpdatePositionsWithCommittedOffsetsReusesRequest() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testValidatePositionsFailureWithUnrecoverableAuthException() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testFetchOffsetsRegroupSkipsNullLeaderPartitionNoNPE() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestFailedResponse_NonRetriableErrorTimeout() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRequestPartiallyFailsWithRetriableError_RetrySucceeds() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testResetPositionsSendNoRequestIfNoPartitionsNeedingReset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testResetPositionsSuccess_LeaderEpochInResponse() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > testRemoteListOffsetsRequestTimeoutMs() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > reconnectBackoffExpiringDuringCheckDoesNotStrandDemand() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > closeFencesLateCommittedOffsetResponse() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > obsoleteMetadataResetDoesNotSendAfterSameStrategyReset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > validSeekActivatesParkedValidationWithoutNetworkPublication() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > closedOrTerminatedWaitCannotStartAnotherStage() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > seekReleasesResetWaitingForMetadata() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > partialObsoleteCommittedErrorRefetchesCurrentPartitionBeforeReset() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > failedFirstHandshakeActivatesReconnectAtTransportBackoff() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > seekStillNeedingValidationRechecksOnceThenParks() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > samePositionSeekDoesNotAcceptOldValidationResponse() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > apiVersionsPublicationActivatesOwnerWithoutInlineRequest() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > retriableValidationResponseWaitsForActualBackoff() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > repeatedResetRejectsOldResponseEvenWithSameStrategy() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > apiDeadlineExpiresWithoutResponseAndLateResponseCannotRestartWork() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > delayedResetPastValidationRetryDeadlineActivatesRetainedDemand() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > missingVersionsDeadlineAndLatePublicationDoNotRestartDemand() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > reassignedPartitionDoesNotReuseOrApplyOldCommittedOffsets() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > sameTopicAssignmentActivatesParkedValidationWithoutMetadataUpdate() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > reassignedSamePartitionRejectsOldValidationFailure() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > validSeekDetachesFromObsoleteValidationRpc() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > stalePartitionAuthorizationErrorDoesNotPoisonUnchangedPartition() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > waitsForExistingValidationWithoutDuplicateRpc() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > validSeekDoesNotWaitForStaleValidationRpc() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > cachedValidationErrorReachesWaitingOperation() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > missingLeaderWaitsForMetadataInsteadOfAnotherApplicationPoll() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > terminalGuardPreventsInitialConnectionAttempt() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > closeFailsPendingWaitAndLateResponseCannotReopenIt() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > responsePublishesPositionsBeforeOwnerCompletesFuture() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > OffsetsRequestManagerTest > ValidationCompletionTest > authenticationFailureAfterMissingVersionsReachesRetainedOperation() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > WaitingReuseTest > failedRegistrationDetachesInputsBeforeReusingSlot() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > WaitingReuseTest > resetsDeadlineAndSignalStateAcrossDifferentWaits() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > WaitingReuseTest > publicationBeforeRegistrationDoesNotLeaveNextWaitSignalled() PASSED
+
+Gradle Test Run :clients:test > Gradle Test Executor 3 > WaitingReuseTest > returningThroughLegacyModeDoesNotKeepOldDeadline() PASSED
+
+> Task :clients:copyTestXml SKIPPED
+
+[Incubating] Problems report is available at: file:///Users/unknowntpo/Documents/Codex/2026-09-07/kafka-next-poll-condition-validation/next-poll-condition-trunk/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.7.1/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 59s
+26 actionable tasks: 5 executed, 21 up-to-date
+The build is running offline. A build scan will not be published at this time, but it can be published if you run the 'buildScanPublishPrevious' task in the next build.
+Consider enabling configuration cache to speed up this build: https://docs.gradle.org/9.7.1/userguide/configuration_cache_enabling.html

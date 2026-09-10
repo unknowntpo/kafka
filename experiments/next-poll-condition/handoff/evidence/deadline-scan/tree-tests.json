@@ -1,0 +1,102 @@
+[
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.SignalFanoutTest",
+    "tests": "4",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:55.250Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.008"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumerTest",
+    "tests": "143",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:54.358Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "2.792"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.ConsumerNetworkThreadTest",
+    "tests": "27",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:53.650Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.843"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.NextPollConditionTest",
+    "tests": "27",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:54.494Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.106"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.WaitingReuseTest",
+    "tests": "4",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:57.598Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.003"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.DeadlineIndexTest",
+    "tests": "4",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:57.546Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.003"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManagerTest",
+    "tests": "42",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:54.600Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.65"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.HeartbeatNextPollConditionTest",
+    "tests": "1",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:57.549Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.006"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.NetworkLoopConditionTest",
+    "tests": "6",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:57.555Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.043"
+  },
+  {
+    "name": "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManagerTest",
+    "tests": "84",
+    "skipped": "0",
+    "failures": "0",
+    "errors": "0",
+    "timestamp": "2026-09-09T23:49:57.152Z",
+    "hostname": "unknowntpo-MacBook-Pro-2.local",
+    "time": "0.394"
+  }
+]

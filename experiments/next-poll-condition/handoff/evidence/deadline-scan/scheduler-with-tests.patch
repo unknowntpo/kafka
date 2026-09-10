@@ -1,0 +1,214 @@
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagerScheduler.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/RequestManagerScheduler.java
+@@ -18,21 +18,17 @@
+ 
+ import java.util.ArrayList;
+ import java.util.BitSet;
+-import java.util.Comparator;
+ import java.util.IdentityHashMap;
+ import java.util.List;
+ import java.util.Map;
+-import java.util.TreeSet;
+ import java.util.function.ToLongFunction;
+ 
+-/** Network-thread-confined event subscriptions, ordered ready queue and deadline queue. */
++/** Network-thread-confined event subscriptions, ordered ready queue and deadline scan. */
+ public final class RequestManagerScheduler implements AutoCloseable {
+     private final Map<RequestManager, Entry> entries = new IdentityHashMap<>();
+     private final List<Entry> entriesByOrder = new ArrayList<>();
+     private final BitSet ready = new BitSet();
+     private final BitSet legacy = new BitSet();
+-    private final TreeSet<Waiting> timers = new TreeSet<>(Comparator
+-            .comparingLong((Waiting wait) -> wait.deadline).thenComparingInt(wait -> wait.entry.order));
+ 
+     public void registerManagers(List<RequestManager> managers) {
+         for (RequestManager manager : managers)
+@@ -107,26 +103,36 @@
+             wait.armed = true;
+             if (wait.signalled || (wait.hasDeadline && wait.deadline <= nowMs))
+                 wait.wake();
+-            else if (wait.hasDeadline)
+-                timers.add(wait);
+         }
+         return result;
+     }
+ 
+-    /** Inspect only the ready queue and earliest timer, never all waiting conditions. */
++    /** Inspect registered deadlines without evaluating waiting conditions. */
+     public long remainingMs(long nowMs) {
+         expire(nowMs);
+         if (!ready.isEmpty())
+             return 0;
+-        if (timers.isEmpty())
++        long earliest = Long.MAX_VALUE;
++        boolean found = false;
++        for (Entry entry : entriesByOrder) {
++            Waiting wait = entry.waiting;
++            if (wait != null && wait.active && wait.armed && wait.hasDeadline) {
++                earliest = Math.min(earliest, wait.deadline);
++                found = true;
++            }
++        }
++        if (!found)
+             return Long.MAX_VALUE;
+-        long remaining = timers.first().deadline - nowMs;
++        long remaining = earliest - nowMs;
+         return remaining < 0 ? Long.MAX_VALUE : remaining;
+     }
+ 
+     private void expire(long nowMs) {
+-        while (!timers.isEmpty() && timers.first().deadline <= nowMs)
+-            timers.first().wake();
++        for (Entry entry : entriesByOrder) {
++            Waiting wait = entry.waiting;
++            if (wait != null && wait.active && wait.armed && wait.hasDeadline && wait.deadline <= nowMs)
++                wait.wake();
++        }
+     }
+ 
+     @Override
+@@ -139,7 +145,6 @@
+         entriesByOrder.clear();
+         ready.clear();
+         legacy.clear();
+-        timers.clear();
+     }
+ 
+     private static final class Entry {
+@@ -167,7 +172,7 @@
+             this.entry = entry;
+         }
+ 
+-        /** Previous subscriptions and the timer must be detached before changing the timer key. */
++        /** Previous subscriptions must be detached before reusing the waiting slot. */
+         private void reset() {
+             assert !active;
+             deadline = Long.MAX_VALUE;
+@@ -226,7 +231,6 @@
+                 additionalSubscriptions.clear();
+                 additionalSubscriptions = null;
+             }
+-            timers.remove(this);
+             // The entry retains this inactive slot for its next condition registration.
+         }
+     }
+--- /dev/null
++++ b/clients/src/test/java/org/apache/kafka/clients/consumer/internals/DeadlineIndexTest.java
+@@ -0,0 +1,117 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements. See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License. You may obtain a copy of the License at
++ *
++ *    http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.kafka.clients.consumer.internals;
++
++import org.junit.jupiter.api.Test;
++
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.List;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++
++public class DeadlineIndexTest {
++    private static NetworkClientDelegate.PollResult result(NextPollCondition condition) {
++        return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, Collections.emptyList(), condition);
++    }
++
++    @Test
++    public void expirationUsesManagerOrderAndRearmsEarliestDeadline() {
++        List<Integer> trace = new ArrayList<>();
++        List<RequestManager> managers = new ArrayList<>();
++        for (int i = 0; i < 7; i++) {
++            final int id = i;
++            managers.add(now -> {
++                trace.add(id);
++                return result(NextPollCondition.after(now, id % 2 == 0 ? 10 : 5));
++            });
++        }
++        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
++            scheduler.registerManagers(managers);
++            assertEquals(5, scheduler.pollReady(0, r -> r.timeUntilNextPollMs));
++            assertEquals(List.of(0, 1, 2, 3, 4, 5, 6), trace);
++            trace.clear();
++            assertEquals(1, scheduler.pollReady(4, r -> r.timeUntilNextPollMs));
++            assertEquals(Collections.emptyList(), trace);
++            assertEquals(5, scheduler.pollReady(5, r -> r.timeUntilNextPollMs));
++            assertEquals(List.of(1, 3, 5), trace);
++            trace.clear();
++            assertEquals(5, scheduler.pollReady(10, r -> r.timeUntilNextPollMs));
++            assertEquals(List.of(0, 1, 2, 3, 4, 5, 6), trace);
++        }
++    }
++
++    @Test
++    public void signalCancellationRemovesOldEarliestDeadline() {
++        NextPollCondition.Signal signal = new NextPollCondition.Signal();
++        int[] polls = {0};
++        RequestManager first = now -> result(polls[0]++ == 0
++            ? NextPollCondition.anyOf(signal.await(), NextPollCondition.after(now, 5))
++            : signal.await());
++        RequestManager second = now -> result(NextPollCondition.after(now, 10));
++        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
++            scheduler.registerManagers(List.of(first, second));
++            assertEquals(5, scheduler.pollReady(0, r -> r.timeUntilNextPollMs));
++            signal.publish();
++            assertEquals(9, scheduler.pollReady(1, r -> r.timeUntilNextPollMs));
++            assertEquals(5, scheduler.remainingMs(5));
++            assertEquals(2, polls[0]);
++        }
++        assertEquals(0, signal.subscriberCount());
++    }
++
++    @Test
++    public void signalDuringBatchDefersNewReadyManager() {
++        NextPollCondition.Signal signal = new NextPollCondition.Signal();
++        List<Integer> trace = new ArrayList<>();
++        RequestManager first = now -> {
++            trace.add(0);
++            if (now > 0)
++                signal.publish();
++            return result(NextPollCondition.after(now, 10));
++        };
++        RequestManager second = now -> {
++            trace.add(1);
++            return result(signal.await());
++        };
++        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
++            scheduler.registerManagers(List.of(first, second));
++            scheduler.pollReady(0, r -> r.timeUntilNextPollMs);
++            trace.clear();
++            assertEquals(0, scheduler.pollReady(10, r -> r.timeUntilNextPollMs));
++            assertEquals(List.of(0), trace);
++            scheduler.pollReady(10, r -> r.timeUntilNextPollMs);
++            assertEquals(List.of(0, 1), trace);
++        }
++    }
++
++    @Test
++    public void maximumDeadlineIsNotTreatedAsMissing() {
++        int[] polls = {0};
++        RequestManager manager = now -> {
++            polls[0]++;
++            return result(NextPollCondition.after(now, Long.MAX_VALUE));
++        };
++        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
++            scheduler.registerManagers(List.of(manager));
++            assertEquals(Long.MAX_VALUE - 10, scheduler.pollReady(10, r -> r.timeUntilNextPollMs));
++            assertEquals(1, scheduler.remainingMs(Long.MAX_VALUE - 1));
++            assertEquals(0, scheduler.pollReady(Long.MAX_VALUE, r -> r.timeUntilNextPollMs));
++            assertEquals(2, polls[0]);
++        }
++    }
++}

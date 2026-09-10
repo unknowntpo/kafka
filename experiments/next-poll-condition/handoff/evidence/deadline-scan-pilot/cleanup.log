@@ -1,0 +1,7 @@
+{"root": "/tmp/deadline-scan-pilot-94bcea098d", "removed": true, "remaining_java": [], "broker_data_removed": true}
+warning Skipping preferred cache folder "/Users/unknowntpo/Library/Caches/Yarn" because it is not writable.
+warning Selected the next writable cache folder in the list, will be "/var/folders/yt/l_0c2zg96r32wyfdnm81y8zm0000gn/T/.yarn-cache-501".
+warning Cannot find a suitable global folder. Tried these: "/usr/local, /Users/unknowntpo/.yarn"
+warning Skipping preferred cache folder "/Users/unknowntpo/Library/Caches/Yarn" because it is not writable.
+warning Selected the next writable cache folder in the list, will be "/var/folders/yt/l_0c2zg96r32wyfdnm81y8zm0000gn/T/.yarn-cache-501".
+warning Cannot find a suitable global folder. Tried these: "/usr/local, /Users/unknowntpo/.yarn"

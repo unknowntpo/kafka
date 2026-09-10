@@ -1,0 +1,27 @@
+{
+  "baseline_commit": "820533b870106cc0e0ac60e2076b8644d68bd85f",
+  "build": "archived same trunk source, JDK 17, Gradle 9.7.1 offline; runtime jars frozen after each build",
+  "live_worktrees_modified": false,
+  "no_spin_production_scope": "AbstractHeartbeatRequestManager only",
+  "candidate_scope": "entire current NextPollCondition prototype, Waiting reuse, shared no-spin wait policy, notification/application-wait changes",
+  "optional_spotbugs": "not run",
+  "power_measurement": "unavailable: RAPL energy_uj is root-readable only; noninteractive sudo requires a password; no permission or host setting changed",
+  "patch_sha256": {
+    "nospin.patch": "603f5103d511173f341967c565c8ab096c422e29d3af2cffed3013947a794db9",
+    "candidate-full-main.patch": "4b5c90c9bb4995fe8710b54fb539f1078cc4112380691163dfbc9ffd2f1d65d4"
+  },
+  "tests": {
+    "nospin": {
+      "tests": 251,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "candidate": {
+      "tests": 338,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  }
+}
