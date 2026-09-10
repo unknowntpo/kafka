@@ -19,6 +19,7 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.clients.consumer.internals.events.CancelAsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.PausePartitionsEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
@@ -36,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InOrder;
 
 import java.time.Duration;
 import java.util.Collections;
@@ -43,6 +45,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
@@ -55,6 +58,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -163,11 +167,13 @@ public class ConsumerNetworkThreadTest {
         List<RequestManager> list = List.of(coordinatorRequestManager, heartbeatRequestManager, offsetsRequestManager);
 
         when(requestManagers.entries()).thenReturn(list);
-        when(coordinatorRequestManager.poll(anyLong())).thenReturn(mock(NetworkClientDelegate.PollResult.class));
+        when(coordinatorRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
+        when(offsetsRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         consumerNetworkThread.runOnce();
         requestManagers.entries().forEach(rm -> verify(rm).poll(anyLong()));
         requestManagers.entries().forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));
-        verify(networkClientDelegate).addAll(any(NetworkClientDelegate.PollResult.class));
+        verify(networkClientDelegate, times(3)).addAll(NetworkClientDelegate.PollResult.EMPTY);
         verify(networkClientDelegate).poll(anyLong(), anyLong());
     }
 
@@ -178,6 +184,7 @@ public class ConsumerNetworkThreadTest {
         assertEquals(ConsumerNetworkThread.MAX_POLL_TIMEOUT_MS, consumerNetworkThread.maximumTimeToWait());
 
         when(requestManagers.entries()).thenReturn(List.of(heartbeatRequestManager));
+        when(heartbeatRequestManager.poll(anyLong())).thenReturn(NetworkClientDelegate.PollResult.EMPTY);
         when(heartbeatRequestManager.maximumTimeToWait(time.milliseconds())).thenReturn((long) defaultHeartbeatIntervalMs);
 
         consumerNetworkThread.runOnce();
@@ -191,8 +198,21 @@ public class ConsumerNetworkThreadTest {
         when(networkClientDelegate.unsentRequests()).thenReturn(queue);
         when(applicationEventReaper.reap(applicationEventQueue)).thenReturn(1L);
         consumerNetworkThread.cleanup();
+        verify(networkClientDelegate).closePendingBackgroundCallbacks();
         verify(applicationEventReaper).reap(applicationEventQueue);
         verify(asyncConsumerMetrics).recordApplicationEventExpiredSize(1L);
+    }
+
+    @Test
+    public void testCleanupTerminatesCallbacksBeforeDrainingAndClosingTransport() throws Exception {
+        when(networkClientDelegate.hasAnyPendingRequests()).thenReturn(true).thenReturn(false);
+
+        consumerNetworkThread.cleanup();
+
+        InOrder order = inOrder(networkClientDelegate);
+        order.verify(networkClientDelegate).closePendingBackgroundCallbacks();
+        order.verify(networkClientDelegate).poll(anyLong(), anyLong(), eq(true));
+        order.verify(networkClientDelegate).close();
     }
 
     @Test
@@ -335,6 +355,100 @@ public class ConsumerNetworkThreadTest {
 
         KafkaException thrown = assertThrows(KafkaException.class, () -> ConsumerUtils.getResult(event.future()));
         assertEquals(processingError, thrown.getCause());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    public void testAsyncPollProcessingFailureCompletesOnlyPendingEvent(int terminalState) {
+        KafkaException processingError = new KafkaException("Failed before position preparation");
+        KafkaException originalError = new KafkaException("Original terminal error");
+        AtomicInteger notifications = new AtomicInteger();
+        AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 1000,
+                time.milliseconds(), notifications::incrementAndGet, () -> { });
+        if (terminalState == 1)
+            event.completeSuccessfully();
+        else if (terminalState == 2)
+            event.completeExceptionally(originalError);
+        event.setEnqueuedMs(time.milliseconds());
+        applicationEventQueue.add(event);
+        doThrow(processingError).when(applicationEventProcessor).process(event);
+
+        consumerNetworkThread.runOnce();
+
+        assertTrue(event.isComplete());
+        assertTrue(event.reconciliationCheckFuture().isDone());
+        if (terminalState == 1) {
+            assertTrue(event.error().isEmpty());
+            assertEquals(0, notifications.get());
+        } else {
+            assertEquals(terminalState == 2 ? originalError : processingError, event.error().orElseThrow());
+            assertEquals(1, notifications.get());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    public void testCleanupCompletesOnlyPendingQueuedAsyncPoll(int terminalState) {
+        KafkaException originalError = new KafkaException("Original terminal error");
+        AtomicInteger notifications = new AtomicInteger();
+        AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 1000,
+                time.milliseconds(), notifications::incrementAndGet, () -> { });
+        if (terminalState == 1)
+            event.completeSuccessfully();
+        else if (terminalState == 2)
+            event.completeExceptionally(originalError);
+        applicationEventQueue.add(event);
+        CompletableEventReaper realReaper = new CompletableEventReaper(new LogContext());
+        when(applicationEventReaper.reap(applicationEventQueue)).thenAnswer(invocation ->
+                realReaper.reap(applicationEventQueue));
+
+        consumerNetworkThread.cleanup();
+
+        assertTrue(applicationEventQueue.isEmpty());
+        assertTrue(event.isComplete());
+        assertTrue(event.reconciliationCheckFuture().isDone());
+        verify(applicationEventProcessor, times(0)).process(event);
+        if (terminalState == 1) {
+            assertTrue(event.error().isEmpty());
+            assertEquals(0, notifications.get());
+        } else {
+            if (terminalState == 2)
+                assertEquals(originalError, event.error().orElseThrow());
+            else
+                assertTrue(event.error().orElseThrow().getMessage().contains("closed"));
+            assertEquals(1, notifications.get());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testQueuedCancellationTargetTerminatesOnFailureOrShutdown(boolean shutdown) {
+        KafkaException error = new KafkaException("Cancellation processing failed");
+        AtomicInteger notifications = new AtomicInteger();
+        AsyncPollEvent target = new AsyncPollEvent(time.milliseconds() + 1000,
+                time.milliseconds(), notifications::incrementAndGet, () -> { });
+        target.requestCancellation();
+        CancelAsyncPollEvent cancellation = new CancelAsyncPollEvent(target);
+        cancellation.setEnqueuedMs(time.milliseconds());
+        applicationEventQueue.add(cancellation);
+
+        if (shutdown) {
+            consumerNetworkThread.cleanup();
+        } else {
+            doThrow(error).when(applicationEventProcessor).process(cancellation);
+            consumerNetworkThread.runOnce();
+        }
+
+        assertTrue(target.isComplete());
+        assertTrue(target.reconciliationCheckFuture().isDone());
+        assertTrue(target.error().isPresent());
+        assertEquals(1, notifications.get());
+        KafkaException terminalError = target.error().orElseThrow();
+        // A remaining cancel event on shutdown must not overwrite an already-terminal result.
+        applicationEventQueue.add(cancellation);
+        consumerNetworkThread.cleanup();
+        assertEquals(terminalError, target.error().orElseThrow());
+        assertEquals(1, notifications.get());
     }
 
     /**

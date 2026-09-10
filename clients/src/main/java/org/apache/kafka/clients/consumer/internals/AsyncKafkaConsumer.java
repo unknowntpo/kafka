@@ -46,10 +46,12 @@ import org.apache.kafka.clients.consumer.internals.events.AsyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.CancelAsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.CheckAndUpdatePositionsEvent;
 import org.apache.kafka.clients.consumer.internals.events.CommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.CommitOnCloseEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableApplicationEvent;
+import org.apache.kafka.clients.consumer.internals.events.CompletableBackgroundEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.ConsumerRebalanceListenerCallbackCompletedEvent;
@@ -239,7 +241,9 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             applyNewAssignment(event);
 
             if (!subscriptions.hasRebalanceListener()) {
-                event.future().complete(null);
+                // Completion runs membership continuations, which belong to the network thread.
+                applicationEventHandler.add(new ConsumerRebalanceListenerCallbackCompletedEvent(
+                    ON_PARTITIONS_ASSIGNED, event.future(), Optional.empty()));
             } else {
                 invokeRebalanceCallbackAndNotifyBackgroundThread(ON_PARTITIONS_ASSIGNED, event.addedPartitions(), event.future());
             }
@@ -509,14 +513,15 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
             ApiVersions apiVersions = new ApiVersions();
             final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
+            // This FetchBuffer is shared between the application and network threads.
+            this.fetchBuffer = new FetchBuffer(logContext, time);
             this.backgroundEventHandler = new BackgroundEventHandler(
                 backgroundEventQueue,
                 time,
-                asyncConsumerMetrics
+                asyncConsumerMetrics,
+                fetchBuffer::wakeup
             );
 
-            // This FetchBuffer is shared between the application and network threads.
-            this.fetchBuffer = new FetchBuffer(logContext);
             this.positionsValidator = new PositionsValidator(logContext, time, subscriptions, metadata);
             final Supplier<NetworkClientDelegate> networkClientDelegateSupplier = NetworkClientDelegate.supplier(time,
                     logContext,
@@ -530,7 +535,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     false,
                     asyncConsumerMetrics
             );
-            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
+            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
             this.groupMetadata.set(initializeGroupMetadata(config, groupRebalanceConfig));
             final Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(time,
                     logContext,
@@ -655,11 +660,12 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
         this.clientTelemetryReporter = Optional.empty();
         this.autoCommitEnabled = autoCommitEnabled;
-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
+        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
         this.backgroundEventHandler = new BackgroundEventHandler(
             backgroundEventQueue,
             time,
-            asyncConsumerMetrics
+            asyncConsumerMetrics,
+            fetchBuffer::wakeup
         );
         this.positionsValidator = positionsValidator;
     }
@@ -676,7 +682,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.subscriptions = subscriptions;
         this.clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
         this.autoCommitEnabled = config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
-        this.fetchBuffer = new FetchBuffer(logContext);
+        this.fetchBuffer = new FetchBuffer(logContext, time);
         this.isolationLevel = IsolationLevel.READ_UNCOMMITTED;
         this.time = time;
         this.metrics = new Metrics(time);
@@ -712,7 +718,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.backgroundEventHandler = new BackgroundEventHandler(
             backgroundEventQueue,
             time,
-            asyncConsumerMetrics
+            asyncConsumerMetrics,
+            fetchBuffer::wakeup
         );
         this.rebalanceCallbackMetricsManager = new RebalanceCallbackMetricsManager(metrics);
         this.rebalanceListenerInvoker = new ConsumerRebalanceListenerInvoker(
@@ -733,7 +740,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             false,
             asyncConsumerMetrics
         );
-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
+        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
         Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(
             time,
             logContext,
@@ -941,6 +948,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
 
+            fetchBuffer.recordPollActivity(time.milliseconds());
+
             // This distinguishes the first pass of the inner do/while loop from subsequent passes for the
             // inflight poll event logic.
             boolean firstPass = true;
@@ -1002,7 +1011,13 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         boolean newlySubmittedEvent = false;
 
         if (inflightPoll == null) {
-            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds());
+            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds(),
+                    fetchBuffer::wakeup, () -> {
+                        // Validation may release records that arrived before the application parked.
+                        // An empty buffer provides no app work, so it must not start a wake/resubmit loop.
+                        if (!fetchBuffer.isEmpty() || fetchBuffer.nextInLineFetch() != null)
+                            fetchBuffer.wakeup();
+                    });
             newlySubmittedEvent = true;
             log.trace("Inflight event {} submitted", inflightPoll);
             applicationEventHandler.add(inflightPoll);
@@ -1018,7 +1033,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             // bubble it up to the user but make sure to clear out the inflight request because the error effectively
             // renders it complete.
             log.trace("Inflight event {} failed due to {}, clearing", inflightPoll, String.valueOf(t));
-            inflightPoll = null;
+            clearInflightPoll();
             throw ConsumerUtils.maybeWrapAsKafkaException(t);
         } finally {
             timer.update();
@@ -1026,6 +1041,20 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
         if (inflightPoll != null) {
             maybeClearCurrentInflightPoll(newlySubmittedEvent);
+        }
+    }
+
+    private void clearInflightPoll() {
+        AsyncPollEvent previous = inflightPoll;
+        inflightPoll = null;
+        if (previous != null && previous.requestCancellation()) {
+            try {
+                applicationEventHandler.add(new CancelAsyncPollEvent(previous));
+            } catch (RuntimeException e) {
+                // A dead network owner will release retained work during cleanup. Preserve the
+                // original poll error rather than replacing it with cancellation publication failure.
+                log.debug("Unable to publish cancellation for abandoned poll {}", previous, e);
+            }
         }
     }
 
@@ -1038,7 +1067,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 // an error, throw it without delay.
                 KafkaException error = errorOpt.get();
                 log.trace("Previous inflight event {} completed with an error ({}), clearing", inflightPoll, error);
-                inflightPoll = null;
+                clearInflightPoll();
                 throw error;
             } else {
                 // Successful case...
@@ -1046,7 +1075,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     // If it completed without error, but without populating the fetch buffer, clear the event
                     // so that a new event will be enqueued below.
                     log.trace("Previous inflight event {} completed without filling the buffer, clearing", inflightPoll);
-                    inflightPoll = null;
+                    clearInflightPoll();
                 } else {
                     // However, if the event completed, and it populated the buffer, *don't* create a new event.
                     // This is to prevent an edge case of starvation when poll() is called with a timeout of 0.
@@ -1060,7 +1089,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         } else if (inflightPoll.isExpired(time) && inflightPoll.isValidatePositionsComplete()) {
             // The inflight event validated positions, but it has expired.
             log.trace("Previous inflight event {} expired without completing, clearing", inflightPoll);
-            inflightPoll = null;
+            clearInflightPoll();
         }
     }
 
@@ -1072,17 +1101,17 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 // If the inflight event completed with an error, throw it without delay.
                 KafkaException error = errorOpt.get();
                 log.trace("Inflight event {} completed with an error ({}), clearing", inflightPoll, error);
-                inflightPoll = null;
+                clearInflightPoll();
                 throw error;
             } else {
                 log.trace("Inflight event {} completed without error, clearing", inflightPoll);
-                inflightPoll = null;
+                clearInflightPoll();
             }
         } else if (!newlySubmittedEvent) {
             if (inflightPoll.isExpired(time) && inflightPoll.isValidatePositionsComplete()) {
                 // The inflight event validated positions, but it has expired.
                 log.trace("Inflight event {} expired without completing, clearing", inflightPoll);
-                inflightPoll = null;
+                clearInflightPoll();
             }
         }
     }
@@ -1668,8 +1697,12 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
         // close() can be called from inside one of the constructors. In that case, it's possible that neither
         // the reaper nor the background event queue were constructed, so check them first to avoid NPE.
-        if (backgroundEventReaper != null && backgroundEventQueue != null)
+        if (backgroundEventReaper != null && backgroundEventQueue != null) {
+            // Membership futures are terminalized by the network owner before shutdown. Never
+            // run their reconciliation continuations on this thread, even during close.
+            backgroundEventQueue.removeIf(event -> event instanceof CompletableBackgroundEvent);
             backgroundEventReaper.reap(backgroundEventQueue);
+        }
 
         closeQuietly(interceptors, "consumer interceptors", firstException);
         closeQuietly(kafkaConsumerMetrics, "kafka consumer metrics", firstException);
@@ -2376,17 +2409,22 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             for (BackgroundEvent event : events) {
                 asyncConsumerMetrics.recordBackgroundEventQueueTime(time.milliseconds() - event.enqueuedMs());
                 try {
-                    if (event instanceof CompletableEvent)
+                    // The background handler owns membership callback futures, including close.
+                    // Their completion may run network-thread-confined reconciliation work.
+                    if (event instanceof CompletableEvent && !(event instanceof CompletableBackgroundEvent))
                         backgroundEventReaper.add((CompletableEvent<?>) event);
 
                     // Skip assignment events if requested (e.g., during unsubscribe).
                     // These events should only be processed from poll().
                     // Complete them exceptionally to unblock the reconciliation in the background.
                     if (skipAssignmentEvents && isAssignmentEvent(event)) {
-                        if (event instanceof CompletableEvent) {
-                            ((CompletableEvent<?>) event).future().completeExceptionally(
-                                new KafkaException("Assignment event skipped because consumer is unsubscribing"));
-                        }
+                        KafkaException error = new KafkaException("Assignment event skipped because consumer is unsubscribing");
+                        if (event instanceof PartitionsAssignedEvent)
+                            applicationEventHandler.add(new ConsumerRebalanceListenerCallbackCompletedEvent(
+                                ON_PARTITIONS_ASSIGNED, ((PartitionsAssignedEvent) event).future(), Optional.of(error)));
+                        else
+                            applicationEventHandler.add(new StreamsOnTasksAssignedCallbackCompletedEvent(
+                                ((StreamsTasksAssignedEvent) event).future(), Optional.of(error)));
                         log.debug("Skipped processing {} during unsubscribe", event.type());
                         continue;
                     }

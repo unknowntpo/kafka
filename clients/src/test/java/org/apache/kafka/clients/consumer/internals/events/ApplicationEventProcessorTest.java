@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals.events;
 
+import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.SubscriptionPattern;
@@ -28,6 +29,8 @@ import org.apache.kafka.clients.consumer.internals.CoordinatorRequestManager;
 import org.apache.kafka.clients.consumer.internals.FetchRequestManager;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
 import org.apache.kafka.clients.consumer.internals.OffsetsRequestManager;
+import org.apache.kafka.clients.consumer.internals.PositionsValidator;
+import org.apache.kafka.clients.consumer.internals.RequestManagerScheduler;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
 import org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager;
 import org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManager;
@@ -38,7 +41,9 @@ import org.apache.kafka.clients.consumer.internals.StreamsMembershipManager;
 import org.apache.kafka.clients.consumer.internals.SubscriptionState;
 import org.apache.kafka.clients.consumer.internals.TopicMetadataRequestManager;
 import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.LogCaptureAppender;
 import org.apache.kafka.common.utils.MockTime;
@@ -53,6 +58,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.verification.VerificationMode;
 
+import java.util.ArrayDeque;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
@@ -61,6 +67,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -70,15 +78,18 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -101,8 +112,29 @@ public class ApplicationEventProcessorTest {
     private final ShareHeartbeatRequestManager shareHeartbeatRequestManager = mock(ShareHeartbeatRequestManager.class);
     private final ShareMembershipManager shareMembershipManager = mock(ShareMembershipManager.class);
     private ApplicationEventProcessor processor;
+    private final ArrayDeque<FetchRequestManager.FetchContinuation> fetchContinuations = new ArrayDeque<>();
+    private boolean fetchContinuationsClosed;
+
+    private void processFetchContinuations(int count) {
+        for (int i = 0; i < count && !fetchContinuations.isEmpty(); i++)
+            fetchContinuations.removeFirst().advance();
+    }
 
     private void setupProcessor(boolean withGroupId) {
+        lenient().doAnswer(invocation -> {
+            FetchRequestManager.FetchContinuation continuation = invocation.getArgument(0);
+            if (fetchContinuationsClosed)
+                continuation.onClose();
+            else
+                fetchContinuations.addLast(continuation);
+            return null;
+        }).when(fetchRequestManager).enqueueFetchContinuation(any());
+        lenient().doAnswer(invocation -> {
+            fetchContinuationsClosed = true;
+            while (!fetchContinuations.isEmpty())
+                fetchContinuations.removeFirst().onClose();
+            return null;
+        }).when(fetchRequestManager).closeFetchContinuations();
         RequestManagers requestManagers = new RequestManagers(
                 new LogContext(),
                 offsetsRequestManager,
@@ -183,8 +215,11 @@ public class ApplicationEventProcessorTest {
     @Test
     public void testProcessUnsubscribeEventWithoutGroupId() {
         setupProcessor(false);
-        processor.process(new UnsubscribeEvent(0));
+        UnsubscribeEvent event = new UnsubscribeEvent(0);
+        expectPositionNotificationBeforeCompletion(event, () -> verify(subscriptionState).unsubscribe());
+        processor.process(event);
         verify(subscriptionState).unsubscribe();
+        verify(offsetsRequestManager).onPositionStateChanged();
     }
 
     @ParameterizedTest
@@ -223,6 +258,8 @@ public class ApplicationEventProcessorTest {
 
         setupProcessor(withGroupId);
         doReturn(true).when(subscriptionState).assignFromUser(Collections.singleton(tp));
+        expectPositionNotificationBeforeCompletion(event,
+                () -> verify(subscriptionState).assignFromUser(Collections.singleton(tp)));
         processor.process(event);
         if (withGroupId) {
             verify(commitRequestManager).updateTimerAndMaybeCommit(currentTimeMs);
@@ -231,6 +268,7 @@ public class ApplicationEventProcessorTest {
         }
         verify(metadata).requestUpdateForNewTopics();
         verify(subscriptionState).assignFromUser(Collections.singleton(tp));
+        verify(offsetsRequestManager).onPositionStateChanged();
         assertDoesNotThrow(() -> event.future().get());
     }
 
@@ -241,6 +279,7 @@ public class ApplicationEventProcessorTest {
         setupProcessor(false);
         doThrow(new IllegalStateException()).when(subscriptionState).assignFromUser(any());
         processor.process(event);
+        verify(offsetsRequestManager, never()).onPositionStateChanged();
 
         ExecutionException e = assertThrows(ExecutionException.class, () -> event.future().get());
         assertInstanceOf(IllegalStateException.class, e.getCause());
@@ -253,8 +292,11 @@ public class ApplicationEventProcessorTest {
         ResetOffsetEvent event = new ResetOffsetEvent(tp, strategy, 12345);
 
         setupProcessor(false);
+        expectPositionNotificationBeforeCompletion(event,
+                () -> verify(subscriptionState).requestOffsetReset(event.topicPartitions(), event.offsetResetStrategy()));
         processor.process(event);
         verify(subscriptionState).requestOffsetReset(event.topicPartitions(), event.offsetResetStrategy());
+        verify(offsetsRequestManager).onPositionStateChanged();
     }
 
     @Test
@@ -268,10 +310,13 @@ public class ApplicationEventProcessorTest {
         setupProcessor(false);
         doReturn(Metadata.LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(tp);
         doNothing().when(subscriptionState).seekUnvalidated(eq(tp), any());
+        expectPositionNotificationBeforeCompletion(event,
+                () -> verify(subscriptionState).seekUnvalidated(tp, position));
         processor.process(event);
         verify(metadata).updateLastSeenEpochIfNewer(tp, offsetEpoch.get());
         verify(metadata).currentLeader(tp);
         verify(subscriptionState).seekUnvalidated(tp, position);
+        verify(offsetsRequestManager).onPositionStateChanged();
         assertDoesNotThrow(() -> event.future().get());
     }
 
@@ -284,9 +329,174 @@ public class ApplicationEventProcessorTest {
         doReturn(Metadata.LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(tp);
         doThrow(new IllegalStateException()).when(subscriptionState).seekUnvalidated(eq(tp), any());
         processor.process(event);
+        verify(offsetsRequestManager, never()).onPositionStateChanged();
 
         ExecutionException e = assertThrows(ExecutionException.class, () -> event.future().get());
         assertInstanceOf(IllegalStateException.class, e.getCause());
+    }
+
+    private void expectPositionNotificationBeforeCompletion(CompletableApplicationEvent<?> event, Runnable verifyMutation) {
+        doAnswer(invocation -> {
+            verifyMutation.run();
+            assertFalse(event.future().isDone(), "publish the state change before completing the event");
+            return null;
+        }).when(offsetsRequestManager).onPositionStateChanged();
+    }
+
+    @Test
+    public void testAssignmentChangeWithoutNewTopicsNotifiesPositions() {
+        setupProcessor(false);
+        TopicPartition tp = new TopicPartition("topic", 1);
+        AssignmentChangeEvent event = new AssignmentChangeEvent(12345, 12345, Set.of(tp));
+        when(subscriptionState.assignFromUser(Set.of(tp))).thenReturn(false);
+        expectPositionNotificationBeforeCompletion(event,
+                () -> verify(subscriptionState).assignFromUser(Set.of(tp)));
+        processor.process(event);
+        verify(metadata, never()).requestUpdateForNewTopics();
+        verify(offsetsRequestManager).onPositionStateChanged();
+        assertDoesNotThrow(() -> event.future().get());
+    }
+
+    @Test
+    public void testFailedResetDoesNotNotifyPositions() {
+        setupProcessor(false);
+        ResetOffsetEvent event = new ResetOffsetEvent(Set.of(new TopicPartition("topic", 0)),
+                AutoOffsetResetStrategy.EARLIEST, 12345);
+        doThrow(new IllegalStateException()).when(subscriptionState).requestOffsetReset(eq(event.topicPartitions()), eq(event.offsetResetStrategy()));
+        processor.process(event);
+        assertFutureThrows(IllegalStateException.class, event.future());
+        verify(offsetsRequestManager, never()).onPositionStateChanged();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testApplyAssignmentNotifiesPositions(boolean streams) {
+        if (streams)
+            setupStreamProcessor(true);
+        else
+            setupProcessor(true);
+        ApplyAssignmentEvent event = new ApplyAssignmentEvent(Set.of(new TopicPartition("topic", 0)),
+                Collections.emptySortedSet());
+        expectPositionNotificationBeforeCompletion(event, () -> {
+            if (streams)
+                verify(streamsMembershipManager).applyAssignment(event.assignedPartitions(), event.addedPartitions());
+            else
+                verify(membershipManager).applyAssignment(event.assignedPartitions(), event.addedPartitions());
+        });
+        processor.process(event);
+        verify(offsetsRequestManager).onPositionStateChanged();
+        assertDoesNotThrow(() -> event.future().get());
+    }
+
+    @Test
+    public void testFailedApplyAssignmentDoesNotNotifyPositions() {
+        setupProcessor(true);
+        ApplyAssignmentEvent event = new ApplyAssignmentEvent(Set.of(new TopicPartition("topic", 0)),
+                Collections.emptySortedSet());
+        doThrow(new IllegalStateException()).when(membershipManager).applyAssignment(any(), any());
+        processor.process(event);
+        assertFutureThrows(IllegalStateException.class, event.future());
+        verify(offsetsRequestManager, never()).onPositionStateChanged();
+    }
+
+    @Test
+    public void testSeekActivatesRealRetainedValidationOwner() {
+        LogContext context = new LogContext();
+        Time clock = new MockTime(0, 0, 0);
+        TopicPartition tp = new TopicPartition("topic", 0);
+        Node leader = new Node(1, "localhost", 9092);
+        Metadata.LeaderAndEpoch leaderEpoch = new Metadata.LeaderAndEpoch(Optional.of(leader), Optional.of(3));
+        when(metadata.currentLeader(tp)).thenReturn(leaderEpoch);
+        SubscriptionState subscriptions = new SubscriptionState(context, AutoOffsetResetStrategy.EARLIEST);
+        subscriptions.assignFromUser(Set.of(tp));
+        subscriptions.seekUnvalidated(tp, new SubscriptionState.FetchPosition(5, Optional.of(2), leaderEpoch));
+        OffsetsRequestManager offsets = new OffsetsRequestManager(subscriptions, metadata,
+                IsolationLevel.READ_UNCOMMITTED, clock, 100, 1000, 5000, new ApiVersions(),
+                mock(NetworkClientDelegate.class), null,
+                new PositionsValidator(context, clock, subscriptions, metadata), context);
+        RequestManagers managers = new RequestManagers(context, offsets, mock(TopicMetadataRequestManager.class),
+                fetchRequestManager, Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty());
+        ApplicationEventProcessor eventProcessor = new ApplicationEventProcessor(context, managers, metadata, subscriptions);
+        CompletableFuture<Void> positionReady = offsets.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            assertTrue(scheduler.poll(offsets, 0).unsentRequests.isEmpty());
+            assertNull(scheduler.poll(offsets, 1));
+            SeekUnvalidatedEvent seek = new SeekUnvalidatedEvent(5000, tp, 20, Optional.empty());
+            eventProcessor.process(seek);
+            assertDoesNotThrow(() -> seek.future().get());
+            assertFalse(positionReady.isDone(), "event notification must defer owner work");
+            assertTrue(scheduler.poll(offsets, 1).unsentRequests.isEmpty());
+            assertTrue(positionReady.isDone());
+            assertFalse(positionReady.isCompletedExceptionally());
+            assertEquals(20, subscriptions.position(tp).offset);
+        } finally {
+            offsets.closePendingPositionResets();
+        }
+    }
+
+    @Test
+    public void testCancelledAsyncPollBeforeProcessingDoesNoPreparation() {
+        setupProcessor(false);
+        AsyncPollEvent event = new AsyncPollEvent(5000, 0);
+        event.requestCancellation();
+        processor.process(event);
+        verify(offsetsRequestManager, never()).updateFetchPositionsAndAwaitValidation(anyLong(), any());
+        verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+        assertFalse(event.isComplete(), "only the cancellation event terminalizes the abandoned poll");
+        processor.process(new CancelAsyncPollEvent(event));
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    public void testCancellationRevokesPositionAndFetchContinuationBeforeOwnerCompletion(int stage) {
+        setupProcessor(false);
+        CompletableFuture<Void> positions = new CompletableFuture<>();
+        CompletableFuture<Void> fetch = new CompletableFuture<>();
+        AtomicReference<BooleanSupplier> positionPermission = new AtomicReference<>();
+        AtomicReference<BooleanSupplier> fetchPermission = new AtomicReference<>();
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenAnswer(invocation -> {
+            positionPermission.set(invocation.getArgument(1));
+            return positions;
+        });
+        when(fetchRequestManager.createFetchRequestsWithReconnect(anyLong(), any())).thenAnswer(invocation -> {
+            fetchPermission.set(invocation.getArgument(1));
+            return fetch;
+        });
+        AsyncPollEvent event = new AsyncPollEvent(5000, 0);
+        processor.process(event);
+        if (stage > 0)
+            positions.complete(null);
+        if (stage == 2)
+            processFetchContinuations(1);
+
+        event.requestCancellation();
+        assertFalse(positionPermission.get().getAsBoolean());
+        if (stage == 0)
+            positions.complete(null);
+        if (stage == 1)
+            processFetchContinuations(1);
+        if (stage == 2) {
+            assertFalse(fetchPermission.get().getAsBoolean());
+            fetch.completeExceptionally(new KafkaException("late abandoned fetch failure"));
+        } else {
+            verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+        }
+        assertEquals(0, fetchContinuations.size());
+        assertFalse(event.isComplete());
+        doAnswer(invocation -> {
+            assertTrue(event.isComplete(), "terminal result must precede retained-owner notification");
+            return null;
+        }).when(offsetsRequestManager).onPositionStateChanged();
+
+        processor.process(new CancelAsyncPollEvent(event));
+
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isEmpty());
+        verify(offsetsRequestManager).onPositionStateChanged();
+        verify(fetchRequestManager).onPollDemandChanged();
     }
 
     @Test
@@ -295,15 +505,191 @@ public class ApplicationEventProcessorTest {
 
         setupProcessor(true);
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
-        when(offsetsRequestManager.updateFetchPositions(event.deadlineMs())).thenReturn(CompletableFuture.completedFuture(null));
-        when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(eq(event.deadlineMs()), any())).thenReturn(CompletableFuture.completedFuture(null));
+        when(fetchRequestManager.createFetchRequestsWithReconnect(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
         processor.process(event);
+        assertFalse(event.isComplete());
+        verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+        processFetchContinuations(fetchContinuations.size());
         assertTrue(event.isComplete());
         verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());
         verify(membershipManager).onConsumerPoll();
         verify(heartbeatRequestManager).resetPollTimer(event.pollTimeMs());
-        verify(offsetsRequestManager).updateFetchPositions(event.deadlineMs());
-        verify(fetchRequestManager).createFetchRequests();
+        verify(offsetsRequestManager).updateFetchPositionsAndAwaitValidation(eq(event.deadlineMs()), any());
+        verify(fetchRequestManager).createFetchRequestsWithReconnect(anyLong(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testCompletedAsyncPollDoesNotStartFetchAfterLatePositions(boolean failedPositions) {
+        setupProcessor(true);
+        when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
+        CompletableFuture<Void> positions = new CompletableFuture<>();
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(positions);
+        when(fetchRequestManager.createFetchRequestsWithReconnect(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345);
+        processor.process(event);
+        KafkaException original = new KafkaException("metadata error");
+        event.onMetadataError(original);
+        if (failedPositions)
+            positions.completeExceptionally(new KafkaException("late position error"));
+        else
+            positions.complete(null);
+        processFetchContinuations(fetchContinuations.size());
+        assertTrue(event.isComplete());
+        assertEquals(original, event.error().orElseThrow());
+        verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+    }
+
+    @Test
+    public void testCompletedAsyncPollKeepsErrorAfterLateFetchFailure() {
+        setupProcessor(true);
+        when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        CompletableFuture<Void> fetch = new CompletableFuture<>();
+        when(fetchRequestManager.createFetchRequestsWithReconnect(anyLong(), any())).thenReturn(fetch);
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345);
+        processor.process(event);
+        processFetchContinuations(fetchContinuations.size());
+        verify(fetchRequestManager).createFetchRequestsWithReconnect(anyLong(), any());
+        KafkaException original = new KafkaException("metadata error");
+        event.onMetadataError(original);
+        fetch.completeExceptionally(new KafkaException("late fetch error"));
+        assertEquals(original, event.error().orElseThrow());
+        assertTrue(event.isComplete());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testAsyncPollResultPublishedBeforeCompletionObserver(boolean failed) {
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345);
+        KafkaException error = new KafkaException("test");
+        CompletableFuture<Void> observed = event.reconciliationCheckFuture().thenRun(() -> {
+            assertTrue(event.isComplete());
+            assertEquals(failed ? Optional.of(error) : Optional.empty(), event.error());
+        });
+        if (failed)
+            event.completeExceptionally(error);
+        else
+            event.completeSuccessfully();
+        observed.join();
+    }
+
+    @Test
+    public void testPositionCompletionOnlyQueuesFetchAndRechecksTerminalState() {
+        setupProcessor(true);
+        when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
+        CompletableFuture<Void> positions = new CompletableFuture<>();
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(positions);
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345);
+        processor.process(event);
+        positions.complete(null);
+        assertEquals(1, fetchContinuations.size());
+        verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+        KafkaException error = new org.apache.kafka.common.errors.TimeoutException("operation ended");
+        event.completeExceptionally(error);
+        processFetchContinuations(1);
+        verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+        assertEquals(error, event.error().orElseThrow());
+        assertEquals(0, fetchContinuations.size());
+    }
+
+    @Test
+    public void testNewFetchContinuationsWaitForNextBatch() {
+        setupProcessor(true);
+        when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        when(fetchRequestManager.createFetchRequestsWithReconnect(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        AsyncPollEvent first = new AsyncPollEvent(12346, 12345);
+        AsyncPollEvent second = new AsyncPollEvent(12347, 12345);
+        processor.process(first);
+        int batch = fetchContinuations.size();
+        processor.process(second);
+        processFetchContinuations(batch);
+        assertTrue(first.isComplete());
+        assertFalse(second.isComplete());
+        verify(fetchRequestManager).createFetchRequestsWithReconnect(anyLong(), any());
+        assertEquals(1, fetchContinuations.size());
+        processFetchContinuations(1);
+        assertTrue(second.isComplete());
+        verify(fetchRequestManager, times(2)).createFetchRequestsWithReconnect(anyLong(), any());
+    }
+
+    @Test
+    public void testSynchronousFetchFailureReachesOriginalEvent() {
+        setupProcessor(true);
+        when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        KafkaException error = new KafkaException("fetch entry failure");
+        when(fetchRequestManager.createFetchRequestsWithReconnect(anyLong(), any())).thenThrow(error);
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345);
+        processor.process(event);
+        processFetchContinuations(1);
+        assertTrue(event.isComplete());
+        assertEquals(error, event.error().orElseThrow());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testCloseRejectsQueuedAndLateFetchContinuations(boolean completeBeforeClose) {
+        setupProcessor(true);
+        when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
+        CompletableFuture<Void> positions = new CompletableFuture<>();
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(positions);
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345);
+        processor.process(event);
+        if (completeBeforeClose)
+            positions.complete(null);
+        processor.closeFetchContinuations();
+        assertTrue(event.isComplete(), "close must not depend on the position callback arriving");
+        positions.complete(null);
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isPresent());
+        assertEquals(0, fetchContinuations.size());
+        verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+    }
+
+    @Test
+    public void testClosedProcessorRejectsNewAsyncPollWithoutStartingPositions() {
+        setupProcessor(false);
+        processor.closeFetchContinuations();
+        AsyncPollEvent event = new AsyncPollEvent(1000, 0);
+        processor.process(event);
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isPresent());
+        verify(offsetsRequestManager, never()).updateFetchPositionsAndAwaitValidation(anyLong(), any());
+        verify(fetchRequestManager, never()).enqueueFetchContinuation(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testPositionTimeoutDoesNotStartFetch(boolean wrapped) {
+        setupProcessor(false);
+        Throwable timeout = new org.apache.kafka.common.errors.TimeoutException("position deadline expired");
+        if (wrapped)
+            timeout = new java.util.concurrent.CompletionException(timeout);
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any()))
+                .thenReturn(CompletableFuture.failedFuture(timeout));
+        AsyncPollEvent event = new AsyncPollEvent(1000, 0);
+        processor.process(event);
+        processFetchContinuations(fetchContinuations.size());
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isEmpty());
+        verify(fetchRequestManager, never()).createFetchRequestsWithReconnect(anyLong(), any());
+    }
+
+    @Test
+    public void testSynchronousPositionFailureTerminatesOriginalEvent() {
+        setupProcessor(false);
+        KafkaException error = new KafkaException("position entry failure");
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenThrow(error);
+        AsyncPollEvent event = new AsyncPollEvent(1000, 0);
+        processor.process(event);
+        assertTrue(event.isComplete());
+        assertEquals(error, event.error().orElseThrow());
+        processor.closeFetchContinuations();
+        assertEquals(error, event.error().orElseThrow());
+        verify(fetchRequestManager, never()).enqueueFetchContinuation(any());
     }
 
     @Test
@@ -725,7 +1111,7 @@ public class ApplicationEventProcessorTest {
         when(cluster.topics()).thenReturn(Set.of(topic));
 
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
-        when(offsetsRequestManager.updateFetchPositions(anyLong())).thenReturn(CompletableFuture.completedFuture(null));
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
 
         setupProcessor(true);
         processor.process(new AsyncPollEvent(110, 100));
@@ -747,7 +1133,7 @@ public class ApplicationEventProcessorTest {
     }
 
     private void testUpdateFetchPositionsWithFetchCommittedOffsetsTimeout() {
-        when(offsetsRequestManager.updateFetchPositions(anyLong())).thenReturn(
+        when(offsetsRequestManager.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(
             CompletableFuture.failedFuture(new Throwable("Intentional failure"))
         );
         when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
@@ -755,7 +1141,9 @@ public class ApplicationEventProcessorTest {
         // Verify that the poll completes even when the update fetch positions throws an error.
         AsyncPollEvent event = new AsyncPollEvent(110, 100);
         processor.process(event);
-        verify(offsetsRequestManager).updateFetchPositions(anyLong());
+        verify(offsetsRequestManager).updateFetchPositionsAndAwaitValidation(anyLong(), any());
+        assertFalse(event.isComplete());
+        processFetchContinuations(fetchContinuations.size());
         assertTrue(event.isComplete());
         assertFalse(event.error().isEmpty());
     }

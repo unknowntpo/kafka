@@ -21,6 +21,7 @@ import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.common.TopicPartition;
 
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -32,9 +33,15 @@ import java.util.concurrent.LinkedBlockingQueue;
  */
 public class OffsetCommitCallbackInvoker {
     private final ConsumerInterceptors<?, ?> interceptors;
+    private final Runnable wakeupApplication;
 
     OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors) {
+        this(interceptors, () -> { });
+    }
+
+    OffsetCommitCallbackInvoker(ConsumerInterceptors<?, ?> interceptors, Runnable wakeupApplication) {
         this.interceptors = interceptors;
+        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
     }
 
     // Thread-safe queue to store user-defined callbacks and interceptors to be executed
@@ -47,6 +54,7 @@ public class OffsetCommitCallbackInvoker {
                 offsets,
                 null
             ));
+            wakeupApplication.run();
         }
     }
 
@@ -54,6 +62,7 @@ public class OffsetCommitCallbackInvoker {
                                               final Map<TopicPartition, OffsetAndMetadata> offsets,
                                               final Exception exception) {
         callbackQueue.add(new OffsetCommitCallbackTask(callback, offsets, exception));
+        wakeupApplication.run();
     }
 
     public void executeCallbacks() {

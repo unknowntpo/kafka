@@ -91,6 +91,8 @@ public class RequestManagers implements Closeable {
         this.streamsMembershipManager = streamsMembershipManager;
         this.shareMembershipManager = Optional.empty();
 
+        // The scheduler uses this order for both initial registration and each eligible poll batch.
+        // Presence in this list does not imply condition migration: legacy managers remain valid entries.
         List<RequestManager> list = new ArrayList<>();
         coordinatorRequestManager.ifPresent(list::add);
         commitRequestManager.ifPresent(list::add);
@@ -302,6 +304,18 @@ public class RequestManagers implements Closeable {
                     }
                 }
 
+                if (commitRequestManager != null && commitRequestManager.autoCommitEnabled()) {
+                    commitRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
+                    // Called by the application thread while registering a wait. Interrupting I/O lets
+                    // the network owner recompute an auto-commit deadline. Commit is currently legacy;
+                    // a future condition-based commit manager also needs owner-side ready publication.
+                    fetchBuffer.setWaitRegistrationListener(networkClientDelegate::wakeup);
+                }
+                if (heartbeatRequestManager != null)
+                    heartbeatRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
+                if (streamsGroupHeartbeatRequestManager != null)
+                    streamsGroupHeartbeatRequestManager.setApplicationPollWait(fetchBuffer.applicationPollWait());
+
                 final OffsetsRequestManager listOffsets = new OffsetsRequestManager(subscriptions,
                     metadata,
                     fetchConfig.isolationLevel,
@@ -314,6 +328,8 @@ public class RequestManagers implements Closeable {
                     commitRequestManager,
                     positionsValidator,
                     logContext);
+
+                wireMembershipPositionChanges(membershipManager, streamsMembershipManager, listOffsets, fetch);
 
                 return new RequestManagers(
                         logContext,
@@ -330,6 +346,20 @@ public class RequestManagers implements Closeable {
                 );
             }
         };
+    }
+
+    private static void wireMembershipPositionChanges(ConsumerMembershipManager consumerMembership,
+                                                      StreamsMembershipManager streamsMembership,
+                                                      OffsetsRequestManager offsets,
+                                                      FetchRequestManager fetch) {
+        Runnable positionChanged = () -> {
+            offsets.onPositionStateChanged();
+            fetch.onPollDemandChanged();
+        };
+        if (consumerMembership != null)
+            consumerMembership.setPositionStateChangeListener(positionChanged);
+        if (streamsMembership != null)
+            streamsMembership.setPositionStateChangeListener(positionChanged);
     }
 
     /**

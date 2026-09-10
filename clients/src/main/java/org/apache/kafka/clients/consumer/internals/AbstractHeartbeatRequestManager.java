@@ -91,6 +91,9 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      * sending heartbeat until the next poll.
      */
     private final Timer pollTimer;
+    private final NextPollCondition.Signal inputChanged = new NextPollCondition.Signal();
+    private ApplicationPollWait applicationPollWait;
+    private long appliedWaitActivityMs = Long.MIN_VALUE;
 
     /**
      * Holding the heartbeat sensor to measure heartbeat timing and response latency
@@ -162,12 +165,31 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      */
     @Override
     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
+        NextPollCondition input = NextPollCondition.anyOf(inputChanged.await(),
+            NextPollCondition.anyOf(coordinatorRequestManager.stateChanged(), membershipManager().heartbeatStateChanged()));
+        NetworkClientDelegate.PollResult result = pollInternal(currentTimeMs);
+        // Skipped heartbeats cannot act on their timers. A state change will re-evaluate them.
+        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat())
+            return new NetworkClientDelegate.PollResult(result.timeUntilNextPollMs, result.unsentRequests, input);
+
+        // While a request is in flight its interval cannot cause another send. The poll deadline
+        // still matters unless the member is already leaving, when expiry has no further action.
+        long delayMs = heartbeatRequestState.requestInFlight() ? Long.MAX_VALUE :
+            heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
+        if (!membershipManager().isLeavingGroup())
+            delayMs = Math.min(delayMs, pollTimer.remainingMs());
+        NextPollCondition condition = delayMs == Long.MAX_VALUE ? input :
+            NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs, delayMs));
+        return new NetworkClientDelegate.PollResult(result.timeUntilNextPollMs, result.unsentRequests, condition);
+    }
+
+    private NetworkClientDelegate.PollResult pollInternal(long currentTimeMs) {
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
             membershipManager().onHeartbeatRequestSkipped();
             maybePropagateCoordinatorFatalErrorEvent();
             return NetworkClientDelegate.PollResult.EMPTY;
         }
-        pollTimer.update(currentTimeMs);
+        updatePollTimer(currentTimeMs);
         if (pollTimer.isExpired() && !membershipManager().isLeavingGroup()) {
             logger.warn("Consumer poll timeout has expired. This means the time between " +
                 "subsequent calls to poll() was longer than the configured max.poll.interval.ms, " +
@@ -192,7 +214,10 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
 
         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+            long delayMs = heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs);
+            if (heartbeatRequestState.requestInFlight() && delayMs == 0L)
+                delayMs = membershipManager().isLeavingGroup() ? Long.MAX_VALUE : pollTimer.remainingMs();
+            return new NetworkClientDelegate.PollResult(delayMs);
         }
 
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
@@ -252,7 +277,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        pollTimer.update(currentTimeMs);
+        updatePollTimer(currentTimeMs);
         if (membershipManager().state() == MemberState.UNSUBSCRIBED) {
             return Long.MAX_VALUE;
         }
@@ -273,12 +298,53 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
 
+    void setApplicationPollWait(ApplicationPollWait applicationPollWait) {
+        this.applicationPollWait = applicationPollWait;
+    }
+
+    private void updatePollTimer(long nowMs) {
+        pollTimer.update(nowMs);
+        if (applicationPollWait != null) {
+            long currentMs = pollTimer.currentTimeMs();
+            long activityMs = Math.min(currentMs, applicationPollWait.activityMs(currentMs));
+            if (activityMs > appliedWaitActivityMs) {
+                appliedWaitActivityMs = activityMs;
+                long elapsedMs = currentMs - activityMs;
+                pollTimer.reset(elapsedMs >= maxPollIntervalMs ? 0L : maxPollIntervalMs - elapsedMs);
+            }
+        }
+    }
+
+    @Override
+    public void signalClose() {
+        inputChanged.publish();
+    }
+
     /**
      * Reset the poll timer, indicating that the user has called consumer.poll(). If the member
      * is in {@link MemberState#STALE} state due to expired poll timer, this will transition the
      * member to {@link MemberState#JOINING}, so that it rejoins the group.
      */
     public void resetPollTimer(final long pollMs) {
+        try {
+            resetPollTimerInternal(pollMs);
+        } finally {
+            inputChanged.publish();
+        }
+    }
+
+    private void resetPollTimerInternal(final long pollMs) {
+        if (applicationPollWait != null) {
+            pollTimer.update(pollMs);
+            boolean wasExpired = pollTimer.isExpired();
+            applicationPollWait.recordActivity(pollMs);
+            // Recompute from the activity timestamp, not from delivery time of a delayed event.
+            appliedWaitActivityMs = Long.MIN_VALUE;
+            updatePollTimer(pollTimer.currentTimeMs());
+            if (wasExpired && pollTimer.notExpired())
+                membershipManager().maybeRejoinStaleMember();
+            return;
+        }
         pollTimer.update(pollMs);
         if (pollTimer.isExpired()) {
             logger.warn("Time between subsequent calls to poll() was longer than the configured " +
@@ -310,12 +376,16 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             return logResponse(request);
         else
             return request.whenComplete((response, exception) -> {
-                long completionTimeMs = request.handler().completionTimeMs();
-                if (response != null) {
-                    metricsManager.recordRequestLatency(response.requestLatencyMs());
-                    onResponse((R) response.responseBody(), completionTimeMs);
-                } else {
-                    onFailure(exception, completionTimeMs);
+                try {
+                    long completionTimeMs = request.handler().completionTimeMs();
+                    if (response != null) {
+                        metricsManager.recordRequestLatency(response.requestLatencyMs());
+                        onResponse((R) response.responseBody(), completionTimeMs);
+                    } else {
+                        onFailure(exception, completionTimeMs);
+                    }
+                } finally {
+                    inputChanged.publish();
                 }
             });
     }

@@ -33,11 +33,14 @@ import org.apache.kafka.clients.consumer.OffsetCommitCallback;
 import org.apache.kafka.clients.consumer.SubscriptionPattern;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.ApplyAssignmentEvent;
 import org.apache.kafka.clients.consumer.internals.events.AssignmentChangeEvent;
 import org.apache.kafka.clients.consumer.internals.events.AsyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
+import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.CancelAsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.CommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.CommitOnCloseEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableApplicationEvent;
@@ -55,7 +58,9 @@ import org.apache.kafka.clients.consumer.internals.events.PartitionsRemovedEvent
 import org.apache.kafka.clients.consumer.internals.events.PausePartitionsEvent;
 import org.apache.kafka.clients.consumer.internals.events.ResetOffsetEvent;
 import org.apache.kafka.clients.consumer.internals.events.SeekUnvalidatedEvent;
+import org.apache.kafka.clients.consumer.internals.events.StreamsOnAllTasksLostCallbackNeededEvent;
 import org.apache.kafka.clients.consumer.internals.events.StreamsOnTasksAssignedCallbackCompletedEvent;
+import org.apache.kafka.clients.consumer.internals.events.StreamsOnTasksRevokedCallbackNeededEvent;
 import org.apache.kafka.clients.consumer.internals.events.StreamsTasksAssignedEvent;
 import org.apache.kafka.clients.consumer.internals.events.SyncCommitEvent;
 import org.apache.kafka.clients.consumer.internals.events.TopicPatternSubscriptionChangeEvent;
@@ -259,6 +264,15 @@ public class AsyncKafkaConsumerTest {
         ConsumerInterceptors<String, String> interceptors,
         ConsumerRebalanceListenerInvoker rebalanceListenerInvoker,
         SubscriptionState subscriptions) {
+        return newConsumer(fetchBuffer, interceptors, rebalanceListenerInvoker, subscriptions, 100L);
+    }
+
+    private AsyncKafkaConsumer<String, String> newConsumer(
+        FetchBuffer fetchBuffer,
+        ConsumerInterceptors<String, String> interceptors,
+        ConsumerRebalanceListenerInvoker rebalanceListenerInvoker,
+        SubscriptionState subscriptions,
+        long retryBackoffMs) {
         int requestTimeoutMs = 30000;
         int defaultApiTimeoutMs = 1000;
         return new AsyncKafkaConsumer<>(
@@ -278,7 +292,7 @@ public class AsyncKafkaConsumerTest {
             metrics,
             subscriptions,
             metadata,
-            100L,
+            retryBackoffMs,
             requestTimeoutMs,
             defaultApiTimeoutMs,
             "group-id",
@@ -558,6 +572,65 @@ public class AsyncKafkaConsumerTest {
 
         // A fresh poll event on each of the two passes; the bug submits only one (the second pass is starved).
         verify(applicationEventHandler, times(2)).add(isA(AsyncPollEvent.class));
+        verify(applicationEventHandler, never()).add(isA(CancelAsyncPollEvent.class));
+    }
+
+    @Test
+    public void testExpiredInflightPollIsCancelledBeforeReplacement() {
+        FetchBuffer buffer = mock(FetchBuffer.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.EARLIEST);
+        TopicPartition tp = new TopicPartition("topic", 0);
+        subscriptions.assignFromUser(Set.of(tp));
+        subscriptions.seek(tp, 0);
+        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class),
+                mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
+        when(buffer.isEmpty()).thenReturn(true);
+        when(fetchCollector.collectFetch(any(FetchBuffer.class))).thenReturn(Fetch.empty());
+        List<AsyncPollEvent> submitted = new ArrayList<>();
+        doAnswer(invocation -> {
+            AsyncPollEvent event = invocation.getArgument(0);
+            event.markValidatePositionsComplete();
+            submitted.add(event);
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+
+        consumer.poll(Duration.ZERO);
+        AsyncPollEvent previous = submitted.get(0);
+        assertTrue(previous.isActive());
+        consumer.poll(Duration.ZERO);
+
+        assertEquals(2, submitted.size());
+        ArgumentCaptor<CancelAsyncPollEvent> cancellation = ArgumentCaptor.forClass(CancelAsyncPollEvent.class);
+        verify(applicationEventHandler).add(cancellation.capture());
+        assertSame(previous, cancellation.getValue().target());
+        assertFalse(previous.isActive());
+        assertFalse(previous.isComplete(), "app detach must not execute owner completion");
+        assertFalse(previous.reconciliationCheckFuture().isDone());
+        assertTrue(submitted.get(1).isActive());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testBackgroundErrorCancelsInflightWithoutReplacingOriginalError(boolean publicationFails) {
+        consumer = newConsumer();
+        completeAssignmentChangeEventSuccessfully();
+        consumer.assign(Set.of(new TopicPartition("topic", 0)));
+        AtomicReference<AsyncPollEvent> submitted = new AtomicReference<>();
+        doAnswer(invocation -> {
+            submitted.set(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        if (publicationFails)
+            doThrow(new KafkaException("network owner unavailable")).when(applicationEventHandler).add(isA(CancelAsyncPollEvent.class));
+        KafkaException original = new KafkaException("background failure");
+        backgroundEventQueue.add(new ErrorEvent(original));
+
+        assertSame(original, assertThrows(KafkaException.class, () -> consumer.poll(Duration.ZERO)));
+
+        assertFalse(submitted.get().isActive());
+        assertFalse(submitted.get().isComplete());
+        assertFalse(submitted.get().reconciliationCheckFuture().isDone());
+        verify(applicationEventHandler).add(isA(CancelAsyncPollEvent.class));
     }
 
     /**
@@ -2167,6 +2240,192 @@ public class AsyncKafkaConsumerTest {
         verify(fetchBuffer, times(1)).awaitWakeup(any(Timer.class));
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testLongPollObservesAsyncPollErrorWithoutShortWait(boolean beforeWait) throws Exception {
+        time = Time.SYSTEM;
+        FetchBuffer buffer = spy(new FetchBuffer(new LogContext()));
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        subscriptions.subscribe(singleton("topic1"));
+        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class),
+                mock(ConsumerRebalanceListenerInvoker.class), subscriptions, 60_000);
+        doReturn(Long.MAX_VALUE).when(applicationEventHandler).maximumTimeToWait();
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+        CompletableFuture<AsyncPollEvent> submitted = new CompletableFuture<>();
+        doAnswer(invocation -> {
+            submitted.complete(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        KafkaException error = new KafkaException("async position or metadata failure");
+        AtomicReference<Long> firstWaitMs = new AtomicReference<>();
+        doAnswer(invocation -> {
+            firstWaitMs.compareAndSet(null, invocation.getArgument(0, Timer.class).remainingMs());
+            if (beforeWait)
+                submitted.getNow(null).onMetadataError(error);
+            return invocation.callRealMethod();
+        }).when(buffer).awaitWakeup(any(Timer.class));
+        CompletableFuture<Throwable> result = new CompletableFuture<>();
+        Thread app = new Thread(() -> {
+            try {
+                consumer.poll(Duration.ofMinutes(1));
+                result.complete(null);
+            } catch (Throwable t) {
+                result.complete(t);
+            }
+        }, "long-poll-operation-error-app");
+        try {
+            app.start();
+            AsyncPollEvent event = submitted.get(5, TimeUnit.SECONDS);
+            if (!beforeWait) {
+                TestUtils.waitForCondition(() -> firstWaitMs.get() != null && app.getState() == Thread.State.TIMED_WAITING,
+                        "app should be parked before operation error publication");
+                event.completeExceptionally(error);
+            }
+            assertSame(error, result.get(5, TimeUnit.SECONDS));
+            assertTrue(firstWaitMs.get() > 30_000, "no short retry timer may hide a missing notification");
+            verify(applicationEventHandler, times(1)).add(isA(AsyncPollEvent.class));
+        } finally {
+            app.interrupt();
+            buffer.wakeup();
+            app.join(5000);
+            assertFalse(app.isAlive());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2})
+    public void testPositionValidationNotifiesOnlyWhenBufferedWorkExists(int bufferedKind) {
+        FetchBuffer buffer = spy(new FetchBuffer(new LogContext()));
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        subscriptions.subscribe(singleton("topic1"));
+        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class),
+                mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+        AtomicReference<AsyncPollEvent> submitted = new AtomicReference<>();
+        doAnswer(invocation -> {
+            submitted.set(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+        consumer.poll(Duration.ZERO);
+        assertNotNull(submitted.get());
+        if (bufferedKind == 1)
+            buffer.add(mock(CompletedFetch.class));
+        else if (bufferedKind == 2)
+            buffer.setNextInLineFetch(mock(CompletedFetch.class));
+        clearInvocations(buffer);
+        submitted.get().markValidatePositionsComplete();
+        assertTrue(submitted.get().isValidatePositionsComplete());
+        verify(buffer, times(bufferedKind == 0 ? 0 : 1)).wakeup();
+        // Preparation success without data is not itself a reason to wake and resubmit a poll.
+        submitted.get().completeSuccessfully();
+        verify(buffer, times(bufferedKind == 0 ? 0 : 1)).wakeup();
+    }
+
+    @Test
+    public void testPublicPollRecordsActivityWithoutResubmittingPendingOperation() {
+        FetchBuffer buffer = new FetchBuffer(new LogContext(), time);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        subscriptions.subscribe(singleton("topic1"));
+        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class),
+                mock(ConsumerRebalanceListenerInvoker.class), subscriptions);
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+        consumer.poll(Duration.ZERO);
+        time.sleep(1000);
+        consumer.poll(Duration.ZERO);
+        assertEquals(time.milliseconds(), buffer.applicationPollWait().activityMs(time.milliseconds()));
+        verify(applicationEventHandler, times(1)).add(isA(AsyncPollEvent.class));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testLongPollObservesAssignmentWithoutShortWaitAndReturnsCallbackCompletion(boolean hasListener) throws Exception {
+        time = Time.SYSTEM;
+        FetchBuffer buffer = spy(new FetchBuffer(new LogContext()));
+        SubscriptionState subscriptions = spy(new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE));
+        subscriptions.subscribe(singleton("topic1"));
+        doReturn(hasListener).when(subscriptions).hasRebalanceListener();
+        ConsumerRebalanceListenerInvoker invoker = mock(ConsumerRebalanceListenerInvoker.class);
+        consumer = newConsumer(buffer, mock(ConsumerInterceptors.class), invoker, subscriptions, 60_000);
+        doReturn(Long.MAX_VALUE).when(applicationEventHandler).maximumTimeToWait();
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+        doReturn(LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(any());
+        AtomicReference<Long> firstWaitMs = new AtomicReference<>();
+        doAnswer(invocation -> {
+            firstWaitMs.compareAndSet(null, invocation.getArgument(0, Timer.class).remainingMs());
+            return invocation.callRealMethod();
+        }).when(buffer).awaitWakeup(any(Timer.class));
+        CompletableFuture<ApplyAssignmentEvent> applyReceived = new CompletableFuture<>();
+        when(applicationEventHandler.addAndGet(any(ApplyAssignmentEvent.class))).thenAnswer(invocation -> {
+            ApplyAssignmentEvent event = invocation.getArgument(0);
+            applyReceived.complete(event);
+            return event.future().get(5, TimeUnit.SECONDS);
+        });
+        CompletableFuture<ConsumerRebalanceListenerCallbackCompletedEvent> callbackReceived = new CompletableFuture<>();
+        doAnswer(invocation -> {
+            callbackReceived.complete(invocation.getArgument(0));
+            return null;
+        }).when(applicationEventHandler).add(isA(ConsumerRebalanceListenerCallbackCompletedEvent.class));
+        AtomicReference<Thread> callbackThread = new AtomicReference<>();
+        doAnswer(invocation -> {
+            callbackThread.set(Thread.currentThread());
+            assertEquals(Set.of(new TopicPartition("topic1", 0)), subscriptions.assignedPartitions());
+            return null;
+        }).when(invoker).invokePartitionsAssigned(any());
+        BackgroundEventHandler publisher = new BackgroundEventHandler(backgroundEventQueue, time,
+                consumer.asyncConsumerMetrics(), buffer::wakeup);
+        CompletableFuture<Throwable> pollResult = new CompletableFuture<>();
+        Thread app = new Thread(() -> {
+            try {
+                consumer.poll(Duration.ofMinutes(1));
+                pollResult.complete(null);
+            } catch (Throwable t) {
+                pollResult.complete(t);
+            }
+        }, "long-poll-assignment-app");
+        try {
+            app.start();
+            TestUtils.waitForCondition(() -> firstWaitMs.get() != null && app.getState() == Thread.State.TIMED_WAITING,
+                    "app should be parked in FetchBuffer before assignment publication");
+            assertTrue(firstWaitMs.get() > 30_000, "test must not depend on a short retry or maximum wait");
+            SortedSet<TopicPartition> added = new TreeSet<>(TOPIC_PARTITION_COMPARATOR);
+            added.add(new TopicPartition("topic1", 0));
+            PartitionsAssignedEvent assigned = new PartitionsAssignedEvent(Set.copyOf(added), added);
+            AtomicReference<Thread> completionThread = new AtomicReference<>();
+            assigned.future().whenComplete((ignored, error) -> completionThread.set(Thread.currentThread()));
+            publisher.add(assigned);
+            ApplyAssignmentEvent apply = applyReceived.get(5, TimeUnit.SECONDS);
+            // Controlled background endpoint: apply state before acknowledging the application's request.
+            subscriptions.assignFromSubscribed(apply.assignedPartitions());
+            apply.future().complete(null);
+            ConsumerRebalanceListenerCallbackCompletedEvent completed = callbackReceived.get(5, TimeUnit.SECONDS);
+            if (hasListener) {
+                assertSame(app, callbackThread.get());
+            } else {
+                assertNull(callbackThread.get());
+                verify(invoker, never()).invokePartitionsAssigned(any());
+            }
+            assertEquals(ON_PARTITIONS_ASSIGNED, completed.methodName());
+            assertTrue(completed.error().isEmpty());
+            assertSame(assigned.future(), completed.future());
+            assertFalse(assigned.future().isDone(), "callback result still requires background processing");
+            verify(backgroundEventReaper, never()).add(assigned);
+            assertNull(completionThread.get(), "membership continuation must not execute on the app thread");
+            Thread background = completeMembershipEventOnBackground(completed, false);
+            assertTrue(assigned.future().isDone());
+            assertSame(background, completionThread.get(),
+                    "background membership manager must execute the continuation");
+            KafkaException stop = new KafkaException("end long-poll notification test");
+            publisher.add(new ErrorEvent(stop));
+            assertSame(stop, pollResult.get(5, TimeUnit.SECONDS));
+            verify(applicationEventHandler, times(1)).add(isA(AsyncPollEvent.class));
+        } finally {
+            app.interrupt();
+            buffer.wakeup();
+            app.join(5000);
+            assertFalse(app.isAlive());
+        }
+    }
+
     /**
      * Tests {@link AsyncKafkaConsumer#processBackgroundEvents(Future, Timer, Predicate, boolean) processBackgroundEvents}
      * handles the case where the {@link Future} takes a bit of time to complete, but does within the timeout.
@@ -2276,6 +2535,37 @@ public class AsyncKafkaConsumerTest {
         verify(backgroundEventReaper).reap(backgroundEventQueue);
     }
 
+    private static Stream<CompletableBackgroundEvent<?>> membershipCallbackEventsSource() {
+        return Stream.concat(assignmentEventsSource(), Stream.of(
+                new PartitionsRemovedEvent(ON_PARTITIONS_REVOKED, new TreeSet<>(TOPIC_PARTITION_COMPARATOR)),
+                new StreamsOnTasksRevokedCallbackNeededEvent(Set.of()),
+                new StreamsOnAllTasksLostCallbackNeededEvent()));
+    }
+
+    @ParameterizedTest
+    @MethodSource("membershipCallbackEventsSource")
+    void testAppCloseReaperDoesNotCompleteMembershipCallbacks(CompletableBackgroundEvent<?> callback) {
+        consumer = newConsumer();
+        completeUnsubscribeApplicationEventSuccessfully();
+        assertEquals(Long.MAX_VALUE, callback.deadlineMs());
+        doAnswer(invocation -> {
+            // Model a callback left queued when the controlled network endpoint shuts down.
+            // BackgroundEventHandler/ConsumerNetworkThread tests cover owner terminalization.
+            backgroundEventQueue.add(callback);
+            return null;
+        }).when(applicationEventHandler).close(any(Duration.class));
+        doAnswer(invocation -> {
+            Collection<?> remaining = invocation.getArgument(0);
+            assertFalse(remaining.contains(callback));
+            return 0L;
+        }).when(backgroundEventReaper).reap(backgroundEventQueue);
+
+        consumer.close();
+
+        verify(backgroundEventReaper).reap(backgroundEventQueue);
+        assertFalse(callback.future().isDone(), "app close must not execute membership continuations");
+    }
+
     @Test
     void testReaperInvokedInUnsubscribe() {
         consumer = newConsumer();
@@ -2357,7 +2647,7 @@ public class AsyncKafkaConsumerTest {
      */
     @ParameterizedTest
     @MethodSource("assignmentEventsSource")
-    public void testUnsubscribeWithPendingAssignmentEvent(CompletableBackgroundEvent<?> assignedEvent) {
+    public void testUnsubscribeWithPendingAssignmentEvent(CompletableBackgroundEvent<?> assignedEvent) throws Exception {
         consumer = newConsumer(requiredConsumerConfigAndGroupId("consumerGroup"));
         completeTopicSubscriptionChangeEventSuccessfully();
         consumer.subscribe(singletonList("topic"));
@@ -2366,12 +2656,74 @@ public class AsyncKafkaConsumerTest {
         // Add assignment event to the background queue (simulating an ongoing reconciliation
         // that completed just before unsubscribe was called)
         backgroundEventQueue.add(assignedEvent);
+        AtomicReference<Thread> completionThread = new AtomicReference<>();
+        assignedEvent.future().whenComplete((ignored, error) -> completionThread.set(Thread.currentThread()));
 
-        // The call to unsubscribe should complete successfully (assignment event not processed and completed exceptionally)
+        // Skip the assignment and send its failure back to the owner without running reconciliation inline.
         assertDoesNotThrow(() -> consumer.unsubscribe());
         verify(applicationEventHandler, never().description("Reconciled assignment updates shouldn't be processed while unsubscribing"))
                 .addAndGet(any(ApplyAssignmentEvent.class));
+        assertFalse(assignedEvent.future().isDone());
+        verify(backgroundEventReaper, never()).add(assignedEvent);
+        assertNull(completionThread.get());
+        KafkaException failure;
+        ApplicationEvent completion;
+        if (assignedEvent instanceof PartitionsAssignedEvent) {
+            ArgumentCaptor<ConsumerRebalanceListenerCallbackCompletedEvent> captured =
+                    ArgumentCaptor.forClass(ConsumerRebalanceListenerCallbackCompletedEvent.class);
+            verify(applicationEventHandler).add(captured.capture());
+            assertSame(assignedEvent.future(), captured.getValue().future());
+            assertEquals(ON_PARTITIONS_ASSIGNED, captured.getValue().methodName());
+            failure = captured.getValue().error().orElseThrow();
+            completion = captured.getValue();
+        } else {
+            ArgumentCaptor<StreamsOnTasksAssignedCallbackCompletedEvent> captured =
+                    ArgumentCaptor.forClass(StreamsOnTasksAssignedCallbackCompletedEvent.class);
+            verify(applicationEventHandler).add(captured.capture());
+            assertSame(assignedEvent.future(), captured.getValue().future());
+            failure = captured.getValue().error().orElseThrow();
+            completion = captured.getValue();
+        }
+        assertEquals("Assignment event skipped because consumer is unsubscribing", failure.getMessage());
+        Thread background = completeMembershipEventOnBackground(completion, assignedEvent instanceof StreamsTasksAssignedEvent);
         assertTrue(assignedEvent.future().isCompletedExceptionally());
+        assertSame(background, completionThread.get());
+    }
+
+    private Thread completeMembershipEventOnBackground(ApplicationEvent completion, boolean streams) throws Exception {
+        CompletableFuture<Void> processed = new CompletableFuture<>();
+        Thread background = new Thread(() -> {
+            try (Metrics backgroundMetrics = new Metrics()) {
+                LogContext context = new LogContext();
+                SubscriptionState subscriptions = new SubscriptionState(context, AutoOffsetResetStrategy.NONE);
+                BackgroundEventHandler publisher = mock(BackgroundEventHandler.class);
+                ConsumerMembershipManager membership = streams ? null : new ConsumerMembershipManager(
+                        "group", Optional.empty(), Optional.empty(), 1000, Optional.empty(), subscriptions,
+                        mock(CommitRequestManager.class), metadata, context, publisher, time, backgroundMetrics, false);
+                StreamsMembershipManager streamsMembership = streams ? new StreamsMembershipManager(
+                        "group", Optional.empty(), mock(StreamsRebalanceData.class), subscriptions,
+                        publisher, context, time, backgroundMetrics) : null;
+                ConsumerHeartbeatRequestManager heartbeat = streams ? null : mock(ConsumerHeartbeatRequestManager.class);
+                if (heartbeat != null)
+                    when(heartbeat.membershipManager()).thenReturn(membership);
+                RequestManagers managers = new RequestManagers(context, mock(OffsetsRequestManager.class),
+                        mock(TopicMetadataRequestManager.class), mock(FetchRequestManager.class), Optional.empty(),
+                        Optional.empty(), Optional.ofNullable(heartbeat), Optional.ofNullable(membership), Optional.empty(),
+                        Optional.empty(), Optional.ofNullable(streamsMembership));
+                new ApplicationEventProcessor(context, managers, metadata, subscriptions).process(completion);
+                processed.complete(null);
+            } catch (Throwable error) {
+                processed.completeExceptionally(error);
+            }
+        }, "membership-background-completion");
+        background.start();
+        try {
+            processed.get(5, TimeUnit.SECONDS);
+        } finally {
+            background.join(5000);
+        }
+        assertFalse(background.isAlive());
+        return background;
     }
 
     @Test

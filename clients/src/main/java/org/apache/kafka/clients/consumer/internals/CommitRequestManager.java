@@ -80,6 +80,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     private final LogContext logContext;
     private final Logger log;
     private final Optional<AutoCommitState> autoCommitState;
+    private ApplicationPollWait applicationPollWait;
     private final CoordinatorRequestManager coordinatorRequestManager;
     private final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker;
     private final OffsetCommitMetricsManager metricsManager;
@@ -197,15 +198,17 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             return drainPendingOffsetCommitRequests();
         }
 
+        maybeAutoCommitWhileAppWaits(currentTimeMs);
+        long autoCommitDelayMs = timeToNextBackgroundAutoCommitMs(currentTimeMs);
         if (!pendingRequests.hasUnsentRequests())
-            return EMPTY;
+            return autoCommitDelayMs == Long.MAX_VALUE ? EMPTY : new NetworkClientDelegate.PollResult(autoCommitDelayMs);
 
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
         // min of the remainingBackoffMs of all the request that are still backing off
         final long timeUntilNextPoll = Math.min(
             findMinTime(unsentOffsetCommitRequests(), currentTimeMs),
             findMinTime(unsentOffsetFetchRequests(), currentTimeMs));
-        return new NetworkClientDelegate.PollResult(timeUntilNextPoll, requests);
+        return new NetworkClientDelegate.PollResult(Math.min(timeUntilNextPoll, autoCommitDelayMs), requests);
     }
 
     @Override
@@ -221,7 +224,37 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
+        if (applicationPollWait != null)
+            return Long.MAX_VALUE;
         return autoCommitState.map(ac -> ac.remainingMs(currentTimeMs)).orElse(Long.MAX_VALUE);
+    }
+
+    void setApplicationPollWait(ApplicationPollWait applicationPollWait) {
+        this.applicationPollWait = applicationPollWait;
+    }
+
+    private void maybeAutoCommitWhileAppWaits(long currentTimeMs) {
+        if (applicationPollWait == null || !autoCommitEnabled())
+            return;
+        updateAutoCommitTimer(currentTimeMs);
+        if (!autoCommitState.get().shouldAutoCommit())
+            return;
+        long epoch = applicationPollWait.currentWaitEpoch(time.milliseconds());
+        if (epoch == 0)
+            return;
+        // Read only while the app is parked, then reject any snapshot overlapping a wake/new wait.
+        // No domain work or callbacks run under the shared wait-state lock.
+        Map<TopicPartition, OffsetAndMetadata> offsets = subscriptions.allConsumed();
+        if (applicationPollWait.currentWaitEpoch(time.milliseconds()) == epoch)
+            maybeAutoCommitAsync(offsets);
+    }
+
+    private long timeToNextBackgroundAutoCommitMs(long currentTimeMs) {
+        if (applicationPollWait == null || !autoCommitEnabled()
+                || autoCommitState.get().hasInflightCommit
+                || applicationPollWait.currentWaitEpoch(time.milliseconds()) == 0)
+            return Long.MAX_VALUE;
+        return autoCommitState.get().remainingMs(currentTimeMs);
     }
 
     private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
@@ -275,10 +308,13 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      * response for the in-flight is received.
      */
     private void maybeAutoCommitAsync() {
+        if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit())
+            maybeAutoCommitAsync(subscriptions.allConsumed());
+    }
+
+    private void maybeAutoCommitAsync(Map<TopicPartition, OffsetAndMetadata> offsets) {
         if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit()) {
-            OffsetCommitRequestState requestState = createOffsetCommitRequest(
-                subscriptions.allConsumed(),
-                Long.MAX_VALUE);
+            OffsetCommitRequestState requestState = createOffsetCommitRequest(offsets, Long.MAX_VALUE);
             CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result = requestAutoCommit(requestState);
             // Reset timer to the interval (even if no request was generated), but ensure that if
             // the request completes with a retriable error, the timer is reset to send the next
@@ -518,11 +554,21 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     public CompletableFuture<OffsetFetchResult> fetchOffsets(
         final Set<TopicPartition> partitions,
         final long deadlineMs) {
+        return fetchOffsets(partitions, deadlineMs, null);
+    }
+
+    /**
+     * Fetch offsets within an immutable caller scope. Equal scopes may share a request; distinct
+     * scopes must never inherit an older request's response. Null preserves ordinary API deduplication.
+     */
+    public CompletableFuture<OffsetFetchResult> fetchOffsets(final Set<TopicPartition> partitions,
+                                                            final long deadlineMs,
+                                                            final Object deduplicationScope) {
         if (partitions.isEmpty()) {
             return CompletableFuture.completedFuture(new OffsetFetchResult(Collections.emptyMap(), Collections.emptyMap()));
         }
         CompletableFuture<OffsetFetchResult> result = new CompletableFuture<>();
-        OffsetFetchRequestState request = createOffsetFetchRequest(partitions, deadlineMs);
+        OffsetFetchRequestState request = createOffsetFetchRequest(partitions, deadlineMs, deduplicationScope);
         fetchOffsetsWithRetries(request, result);
         return result;
     }
@@ -530,6 +576,12 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     // Visible for testing
     OffsetFetchRequestState createOffsetFetchRequest(final Set<TopicPartition> partitions,
                                                              final long deadlineMs) {
+        return createOffsetFetchRequest(partitions, deadlineMs, null);
+    }
+
+    private OffsetFetchRequestState createOffsetFetchRequest(final Set<TopicPartition> partitions,
+                                                             final long deadlineMs,
+                                                             final Object deduplicationScope) {
         return jitter.isPresent() ?
             new OffsetFetchRequestState(
                 partitions,
@@ -537,13 +589,15 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 retryBackoffMaxMs,
                 deadlineMs,
                 jitter.getAsDouble(),
-                memberInfo) :
+                memberInfo,
+                deduplicationScope) :
             new OffsetFetchRequestState(
                 partitions,
                 retryBackoffMs,
                 retryBackoffMaxMs,
                 deadlineMs,
-                memberInfo);
+                memberInfo,
+                deduplicationScope);
     }
 
     private void fetchOffsetsWithRetries(final OffsetFetchRequestState fetchRequest,
@@ -1113,6 +1167,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * Partitions to get committed offsets for.
          */
         public final Set<TopicPartition> requestedPartitions;
+        private final Object deduplicationScope;
 
         /**
          * Map of topic ID to topic names for the topics included in a request when using topic IDs.
@@ -1132,9 +1187,19 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                                        final long retryBackoffMaxMs,
                                        final long deadlineMs,
                                        final MemberInfo memberInfo) {
+            this(partitions, retryBackoffMs, retryBackoffMaxMs, deadlineMs, memberInfo, null);
+        }
+
+        private OffsetFetchRequestState(final Set<TopicPartition> partitions,
+                                        final long retryBackoffMs,
+                                        final long retryBackoffMaxMs,
+                                        final long deadlineMs,
+                                        final MemberInfo memberInfo,
+                                        final Object deduplicationScope) {
             super(logContext, CommitRequestManager.class.getSimpleName(), retryBackoffMs,
                 retryBackoffMaxMs, memberInfo, deadlineTimer(time, deadlineMs));
             this.requestedPartitions = partitions;
+            this.deduplicationScope = deduplicationScope;
             this.future = new CompletableFuture<>();
             this.topicNamesCache = new HashMap<>();
         }
@@ -1145,15 +1210,27 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                                        final long deadlineMs,
                                        final double jitter,
                                        final MemberInfo memberInfo) {
+            this(partitions, retryBackoffMs, retryBackoffMaxMs, deadlineMs, jitter, memberInfo, null);
+        }
+
+        private OffsetFetchRequestState(final Set<TopicPartition> partitions,
+                                        final long retryBackoffMs,
+                                        final long retryBackoffMaxMs,
+                                        final long deadlineMs,
+                                        final double jitter,
+                                        final MemberInfo memberInfo,
+                                        final Object deduplicationScope) {
             super(logContext, CommitRequestManager.class.getSimpleName(), retryBackoffMs, 2,
                 retryBackoffMaxMs, jitter, memberInfo, deadlineTimer(time, deadlineMs));
             this.requestedPartitions = partitions;
+            this.deduplicationScope = deduplicationScope;
             this.future = new CompletableFuture<>();
             this.topicNamesCache = new HashMap<>();
         }
 
         public boolean sameRequest(final OffsetFetchRequestState request) {
-            return requestedPartitions.equals(request.requestedPartitions);
+            return requestedPartitions.equals(request.requestedPartitions)
+                    && Objects.equals(deduplicationScope, request.deduplicationScope);
         }
 
         public NetworkClientDelegate.UnsentRequest toUnsentRequest() {

@@ -176,6 +176,12 @@ public class SubscriptionState {
      *
      * @return The current assignment Id
      */
+    /** Identity of this partition's position operation, including repeated seeks to the same value. */
+    synchronized Object positionStateToken(TopicPartition partition) {
+        TopicPartitionState state = assignedStateOrNull(partition);
+        return state == null ? null : state.positionStateToken;
+    }
+
     synchronized int assignmentId() {
         return assignmentId;
     }
@@ -935,6 +941,28 @@ public class SubscriptionState {
         return result;
     }
 
+    synchronized boolean hasPendingValidation() {
+        Iterator<TopicPartitionState> states = assignment.stateIterator();
+        while (states.hasNext()) {
+            TopicPartitionState state = states.next();
+            if (state.awaitingValidation() && state.position != null)
+                return true;
+        }
+        return false;
+    }
+
+    /** Only future eligibility times count; missing metadata is a signal dependency, not a timer. */
+    synchronized long nextValidationRetryTimeMs(long nowMs) {
+        long nextRetry = Long.MAX_VALUE;
+        Iterator<TopicPartitionState> states = assignment.stateIterator();
+        while (states.hasNext()) {
+            TopicPartitionState state = states.next();
+            if (state.awaitingValidation() && state.nextRetryTimeMs != null && state.nextRetryTimeMs > nowMs)
+                nextRetry = Math.min(nextRetry, state.nextRetryTimeMs);
+        }
+        return nextRetry;
+    }
+
     public synchronized boolean isAssigned(TopicPartition tp) {
         return assignment.contains(tp);
     }
@@ -1104,6 +1132,8 @@ public class SubscriptionState {
     }
 
     private static class TopicPartitionState {
+        private Object positionStateToken = new Object();
+
 
         private FetchState fetchState;
         private FetchPosition position; // last consumed position
@@ -1188,6 +1218,7 @@ public class SubscriptionState {
         }
 
         private void reset(AutoOffsetResetStrategy strategy) {
+            positionStateToken = new Object();
             transitionState(FetchStates.AWAIT_RESET, () -> {
                 this.resetStrategy = strategy;
                 this.nextRetryTimeMs = null;
@@ -1223,6 +1254,8 @@ public class SubscriptionState {
          */
         private void updatePositionLeaderNoValidation(Metadata.LeaderAndEpoch currentLeaderAndEpoch) {
             if (position != null) {
+                if (awaitingValidation() || !position.currentLeader.equals(currentLeaderAndEpoch))
+                    positionStateToken = new Object();
                 transitionState(FetchStates.FETCHING, () -> {
                     this.position = new FetchPosition(position.offset, position.offsetEpoch, currentLeaderAndEpoch);
                     this.nextRetryTimeMs = null;
@@ -1231,6 +1264,7 @@ public class SubscriptionState {
         }
 
         private void validatePosition(FetchPosition position) {
+            positionStateToken = new Object();
             if (position.offsetEpoch.isPresent() && position.currentLeader.epoch.isPresent()) {
                 transitionState(FetchStates.AWAIT_VALIDATION, () -> {
                     this.position = position;
@@ -1287,6 +1321,7 @@ public class SubscriptionState {
         }
 
         private void seekValidated(FetchPosition position) {
+            positionStateToken = new Object();
             transitionState(FetchStates.FETCHING, () -> {
                 this.position = position;
                 this.resetStrategy = null;

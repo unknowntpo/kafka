@@ -22,8 +22,11 @@ import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollRes
 import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
- * {@code PollResult} consist of {@code UnsentRequest} if there are requests to send; otherwise, return the time till
- * the next poll event.
+ * Owns one part of consumer protocol work and returns prepared requests in a {@link PollResult}.
+ * During normal operation, {@link ConsumerNetworkThread} delegates poll selection to
+ * {@link RequestManagerScheduler}; the manager itself decides what work is valid in its current state.
+ * A non-null condition opts into event/deadline eligibility. Legacy results retain polling on every
+ * network-loop pass, even when their request list is empty.
  */
 public interface RequestManager {
 
@@ -44,6 +47,14 @@ public interface RequestManager {
      *                      useful for determining if time-sensitive operations should be performed
      */
     PollResult poll(long currentTimeMs);
+
+    /**
+     * Freeze eligible local work before any selected manager executes in this batch. The scheduler
+     * invokes this hook for the entire selected snapshot first, then calls poll in manager order.
+     * For example, a continuation queued by an earlier manager must not enter a later manager's
+     * already-open batch. Implementations without queued local work need no additional boundary.
+     */
+    default void onPollBatchStart() { }
 
     /**
      * On shutdown of the {@link Consumer}, a request manager may need to send out network requests. Implementations
@@ -70,6 +81,8 @@ public interface RequestManager {
      * to results from the request managers. For example, the subscription state can change when heartbeats
      * are sent, so blocking for longer than the heartbeat interval might mean the application thread is not
      * responsive to changes.
+     * This application-wait bound is independent of the condition returned from poll. The network
+     * thread still queries every manager and publishes the minimum through its cached wait value.
      *
      * @param currentTimeMs The current system time at which the method was called; useful for determining if
      *                      time-sensitive operations should be performed

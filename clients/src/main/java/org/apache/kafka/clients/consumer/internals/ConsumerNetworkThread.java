@@ -20,7 +20,9 @@ import org.apache.kafka.clients.KafkaClient;
 import org.apache.kafka.clients.NetworkClient;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
+import org.apache.kafka.clients.consumer.internals.events.CancelAsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.MetadataErrorNotifiableEvent;
@@ -77,6 +79,9 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private ApplicationEventProcessor applicationEventProcessor;
     private NetworkClientDelegate networkClientDelegate;
     private RequestManagers requestManagers;
+    // Owns normal poll eligibility only; this thread still owns I/O, app-wait bounds and close polling.
+    private final RequestManagerScheduler requestManagerScheduler = new RequestManagerScheduler();
+    private boolean managersRegistered;
     private volatile boolean running;
     private final IdempotentCloser closer = new IdempotentCloser();
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
@@ -183,6 +188,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         applicationEventProcessor = applicationEventProcessorSupplier.get();
         networkClientDelegate = networkClientDelegateSupplier.get();
         requestManagers = requestManagersSupplier.get();
+        requestManagerScheduler.close();
+        managersRegistered = false;
     }
 
     /**
@@ -194,20 +201,29 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      *         {@link ApplicationEventProcessor}
      *     </li>
      *     <li>
-     *         Iterate through the {@link RequestManager} list and invoke {@link RequestManager#poll(long)} to get
-     *         the {@link NetworkClientDelegate.UnsentRequest} list and the poll time for the network poll
+     *         Invoke {@link RequestManagerScheduler#pollReady(long, java.util.function.ToLongFunction)},
+     *         which calls {@link RequestManager#onPollBatchStart()} and then {@link RequestManager#poll(long)}
+     *         for its ready/legacy snapshot. Waiting managers become eligible through input publication or expiry.
      *     </li>
      *     <li>
-     *         Stage each {@link AbstractRequest.Builder request} to be sent via
-     *         {@link NetworkClientDelegate#addAll(List)}
+     *         Supply {@link NetworkClientDelegate#addAll(NetworkClientDelegate.PollResult)} as the scheduler's
+     *         admission callback. It stages the returned requests; it does not perform the network poll.
      *     </li>
      *     <li>
      *         Poll the client via {@link KafkaClient#poll(long, long)} to send the requests, as well as
      *         retrieve any available responses
      *     </li>
+     *     <li>
+     *         Query every manager's application-wait bound separately, then reap expired events. This scan is
+     *         not filtered by scheduler eligibility and does not replace notification of the application.
+     *     </li>
      * </ol>
      */
     void runOnce() {
+        if (!managersRegistered) {
+            requestManagerScheduler.registerManagers(requestManagers.entries());
+            managersRegistered = true;
+        }
         // The following code avoids use of the Java Collections Streams API to reduce overhead in this loop.
         processApplicationEvents();
 
@@ -217,13 +233,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         }
         lastPollTimeMs = currentTimeMs;
 
-        long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
-
-        for (RequestManager rm : requestManagers.entries()) {
-            NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
-            long timeoutMs = networkClientDelegate.addAll(pollResult);
-            pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
-        }
+        long pollWaitTimeMs = Math.min(MAX_POLL_TIMEOUT_MS,
+                requestManagerScheduler.pollReady(currentTimeMs, networkClientDelegate::addAll));
 
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
@@ -270,6 +281,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
                 log.error("Error processing event {}", t.getMessage(), t);
                 if (event instanceof CompletableEvent) {
                     ((CompletableEvent<?>) event).future().completeExceptionally(t);
+                } else {
+                    maybeFailAsyncPoll(event, ConsumerUtils.maybeWrapAsKafkaException(t));
                 }
             }
         }
@@ -323,6 +336,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     }
 
     public void wakeup() {
+        // Interrupt I/O so the owner can process input; no manager is made ready by this call alone.
         // The network client can be null if the initializeResources method has not yet been called.
         if (networkClientDelegate != null)
             networkClientDelegate.wakeup();
@@ -410,6 +424,11 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     }
 
     void cleanup() {
+        requestManagerScheduler.close();
+        if (applicationEventProcessor != null)
+            applicationEventProcessor.closeFetchContinuations();
+        if (networkClientDelegate != null)
+            networkClientDelegate.closePendingBackgroundCallbacks();
         log.trace("Closing the consumer network thread");
         Timer timer = time.timer(closeTimeout);
         try {
@@ -427,12 +446,23 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
             if (networkClientDelegate != null)
                 sendUnsentRequests(timer);
 
+            // AsyncPollEvent owns stage completion rather than a CompletableEvent future, so the
+            // generic reaper would otherwise discard accepted, unprocessed polls without terminating them.
+            for (ApplicationEvent event : applicationEventQueue)
+                maybeFailAsyncPoll(event, new KafkaException("Consumer closed before poll processing"));
             asyncConsumerMetrics.recordApplicationEventExpiredSize(applicationEventReaper.reap(applicationEventQueue));
 
             closeQuietly(requestManagers, "request managers");
             closeQuietly(networkClientDelegate, "network client delegate");
             log.debug("Closed the consumer network thread");
         }
+    }
+
+    private void maybeFailAsyncPoll(ApplicationEvent event, KafkaException error) {
+        AsyncPollEvent poll = event instanceof AsyncPollEvent ? (AsyncPollEvent) event
+                : event instanceof CancelAsyncPollEvent ? ((CancelAsyncPollEvent) event).target() : null;
+        if (poll != null && !poll.isComplete())
+            poll.completeExceptionally(error);
     }
 
     /**

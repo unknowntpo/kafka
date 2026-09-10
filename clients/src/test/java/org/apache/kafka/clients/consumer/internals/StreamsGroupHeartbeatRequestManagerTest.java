@@ -44,6 +44,7 @@ import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.apache.logging.log4j.Level;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -2480,6 +2481,29 @@ class StreamsGroupHeartbeatRequestManagerTest {
         assertEquals(MEMBER_ID, streamsRequest.data().memberId());
         assertEquals(LEAVE_GROUP_STATIC_MEMBER_EPOCH, streamsRequest.data().memberEpoch());
         assertEquals(INSTANCE_ID, streamsRequest.data().instanceId());
+    }
+
+    @Nested
+    class InternalWaitTest {
+        @Test
+        public void testInternalWaitStopsProtectingStreamsAppAfterNotification() {
+            try (MockedConstruction<StreamsGroupHeartbeatRequestManager.HeartbeatState> ignored =
+                    mockConstruction(StreamsGroupHeartbeatRequestManager.HeartbeatState.class)) {
+                StreamsGroupHeartbeatRequestManager manager = createStreamsGroupHeartbeatRequestManager();
+                when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+                ApplicationPollWait wait = new ApplicationPollWait();
+                manager.setApplicationPollWait(wait);
+                manager.resetPollTimer(time.milliseconds());
+                wait.begin(time.milliseconds(), time.milliseconds() + 10 * DEFAULT_MAX_POLL_INTERVAL_MS);
+                time.sleep(2 * DEFAULT_MAX_POLL_INTERVAL_MS);
+                assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+                verify(membershipManager, never()).onPollTimerExpired();
+                wait.signal(time.milliseconds());
+                time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
+                manager.poll(time.milliseconds());
+                verify(membershipManager).onPollTimerExpired();
+            }
+        }
     }
 
     @Test

@@ -17,7 +17,13 @@
 package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.internals.events.BackgroundEvent;
+import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
+import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
+import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.serialization.StringSerializer;
@@ -29,21 +35,32 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.createFetchMetricsManager;
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.createMetrics;
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.createSubscriptionState;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 
 /**
  * This tests the {@link FetchBuffer} functionality in addition to what {@link FetcherTest} covers in its tests.
@@ -81,6 +98,47 @@ public class FetchBufferTest {
 
         Metrics metrics = createMetrics(config, time);
         metricsManager = createFetchMetricsManager(metrics);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testBackgroundEventWakesAppBeforeOrAfterParking(boolean publishBeforeParking) throws Exception {
+        BlockingQueue<BackgroundEvent> events = new LinkedBlockingQueue<>();
+        ErrorEvent event = new ErrorEvent(new KafkaException("background failure"));
+        try (FetchBuffer buffer = new FetchBuffer(logContext)) {
+            BackgroundEventHandler handler = new BackgroundEventHandler(events, time,
+                    mock(AsyncConsumerMetrics.class), () -> {
+                        assertSame(event, events.peek(), "event must be visible before notification");
+                        buffer.wakeup();
+                    });
+            CompletableFuture<Void> observed = new CompletableFuture<>();
+            Thread waiter = new Thread(() -> {
+                try {
+                    buffer.awaitWakeup(Time.SYSTEM.timer(60_000));
+                    assertSame(event, events.peek());
+                    observed.complete(null);
+                } catch (Throwable t) {
+                    observed.completeExceptionally(t);
+                }
+            });
+            try {
+                if (publishBeforeParking)
+                    handler.add(event);
+                waiter.start();
+                if (!publishBeforeParking) {
+                    org.apache.kafka.test.TestUtils.waitForCondition(
+                            () -> waiter.getState() == Thread.State.TIMED_WAITING,
+                            "application should park before publication");
+                    handler.add(event);
+                }
+                observed.get(5, TimeUnit.SECONDS);
+                assertEquals(1, handler.drainEvents().size());
+                assertTrue(handler.drainEvents().isEmpty());
+            } finally {
+                waiter.interrupt();
+                waiter.join(5000);
+            }
+        }
     }
 
     /**
@@ -183,6 +241,142 @@ public class FetchBufferTest {
             fetchBuffer.wakeup();
             waitingThread.join(Duration.ofSeconds(30).toMillis());
             assertFalse(waitingThread.isAlive());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2, 3})
+    public void testRealConditionWaitRegistersAndEndsActivity(int completion) throws Exception {
+        try (FetchBuffer buffer = new FetchBuffer(logContext, time)) {
+            CompletableFuture<Throwable> result = new CompletableFuture<>();
+            Thread app = new Thread(() -> {
+                try {
+                    buffer.awaitWakeup(time.timer(60_000));
+                    result.complete(null);
+                } catch (Throwable t) {
+                    result.complete(t);
+                }
+            }, "registered-poll-wait-test");
+            try {
+                app.start();
+                org.apache.kafka.test.TestUtils.waitForCondition(() -> app.getState() == Thread.State.TIMED_WAITING,
+                        "app should enter the condition wait");
+                time.sleep(1000);
+                assertEquals(1000, buffer.applicationPollWait().activityMs(time.milliseconds()));
+                if (completion == 0)
+                    buffer.wakeup();
+                else if (completion == 1)
+                    buffer.add(completedFetch(topicAPartition0));
+                else if (completion == 2)
+                    app.interrupt();
+                else
+                    buffer.close();
+                Throwable error = result.get(5, TimeUnit.SECONDS);
+                if (completion == 2)
+                    assertInstanceOf(InterruptException.class, error);
+                else
+                    assertNull(error);
+                time.sleep(10_000);
+                assertEquals(1000, buffer.applicationPollWait().activityMs(time.milliseconds()),
+                        "leaving await must not keep a subsequent user callback healthy");
+            } finally {
+                app.interrupt();
+                buffer.wakeup();
+                app.join(5000);
+                assertFalse(app.isAlive());
+            }
+        }
+    }
+
+    @Test
+    public void testNotificationBeforeWaitRecordsResponseWithoutOngoingWait() {
+        try (FetchBuffer buffer = new FetchBuffer(logContext, time)) {
+            buffer.wakeup();
+            buffer.awaitWakeup(time.timer(60_000));
+            long respondedMs = time.milliseconds();
+            time.sleep(1000);
+            assertEquals(respondedMs, buffer.applicationPollWait().activityMs(time.milliseconds()));
+        }
+    }
+
+    @Test
+    public void testWaitRegistrationNotifiesBackgroundAfterPublishingEpoch() throws Exception {
+        try (FetchBuffer buffer = new FetchBuffer(logContext, time)) {
+            CompletableFuture<Long> registration = new CompletableFuture<>();
+            buffer.setWaitRegistrationListener(() -> registration.complete(
+                buffer.applicationPollWait().currentWaitEpoch(time.milliseconds())));
+            buffer.wakeup();
+            buffer.awaitWakeup(time.timer(60_000));
+            assertFalse(registration.isDone(), "a retained notification must not register a new wait");
+            Thread app = new Thread(() -> buffer.awaitWakeup(time.timer(60_000)));
+            app.start();
+            try {
+                assertTrue(registration.get(5, TimeUnit.SECONDS) > 0);
+                buffer.wakeup();
+                app.join(5000);
+                assertFalse(app.isAlive());
+                assertEquals(0, buffer.applicationPollWait().currentWaitEpoch(time.milliseconds()));
+            } finally {
+                buffer.wakeup();
+                app.join(5000);
+            }
+        }
+    }
+
+    @Test
+    public void testWaitRegistrationFailureReleasesLockAndEndsActivity() throws Exception {
+        RuntimeException failure = new RuntimeException("wait registration failed");
+        try (FetchBuffer buffer = new FetchBuffer(logContext, time)) {
+            buffer.setWaitRegistrationListener(() -> {
+                assertTrue(buffer.applicationPollWait().currentWaitEpoch(time.milliseconds()) > 0);
+                throw failure;
+            });
+
+            assertSame(failure, assertThrows(RuntimeException.class,
+                    () -> buffer.awaitWakeup(time.timer(60_000))));
+            assertEquals(0, buffer.applicationPollWait().currentWaitEpoch(time.milliseconds()));
+            time.sleep(1000);
+            assertEquals(0, buffer.applicationPollWait().activityMs(time.milliseconds()));
+            assertBufferAccessibleFromAnotherThread(buffer);
+        }
+    }
+
+    @Test
+    public void testWaitCleanupClockFailureReleasesLockAndEndsActivity() throws Exception {
+        Time failingTime = spy(new MockTime(0, 100, 0));
+        RuntimeException failure = new RuntimeException("cleanup clock read failed");
+        Timer timer = failingTime.timer(1);
+        try (FetchBuffer buffer = new FetchBuffer(logContext, time)) {
+            buffer.setWaitRegistrationListener(() -> {
+                assertTrue(buffer.applicationPollWait().currentWaitEpoch(100) > 0);
+                doThrow(failure).when(failingTime).milliseconds();
+            });
+
+            assertSame(failure, assertThrows(RuntimeException.class, () -> buffer.awaitWakeup(timer)));
+            assertEquals(100, timer.currentTimeMs(), "failed clock read must retain the cached timestamp");
+            assertEquals(0, buffer.applicationPollWait().currentWaitEpoch(100));
+            assertEquals(100, buffer.applicationPollWait().activityMs(200),
+                    "failed cleanup must not leave ongoing wait activity");
+            assertBufferAccessibleFromAnotherThread(buffer);
+        }
+    }
+
+    private void assertBufferAccessibleFromAnotherThread(FetchBuffer buffer) throws Exception {
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        Thread observer = new Thread(() -> {
+            try {
+                result.complete(buffer.isEmpty());
+            } catch (Throwable t) {
+                result.completeExceptionally(t);
+            }
+        }, "fetch-buffer-lock-observer");
+        // A regression must fail the bounded assertion without keeping the test process alive.
+        observer.setDaemon(true);
+        observer.start();
+        try {
+            assertTrue(result.get(5, TimeUnit.SECONDS));
+        } finally {
+            observer.join(5000);
         }
     }
 

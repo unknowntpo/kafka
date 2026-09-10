@@ -30,10 +30,9 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.slf4j.Logger;
 
+import java.util.Collections;
 import java.util.Objects;
 import java.util.Optional;
-
-import static org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult.EMPTY;
 
 /**
  * This is responsible for timing to send the next {@link FindCoordinatorRequest} based on the following criteria:
@@ -57,6 +56,7 @@ public class CoordinatorRequestManager implements RequestManager {
     private long timeMarkedUnknownMs = -1L; // starting logging a warning only after unable to connect for a while
     private long totalDisconnectedMin = 0;
     private boolean closing = false;
+    private final NextPollCondition.Signal inputChanged = new NextPollCondition.Signal();
     private Node coordinator;
     // Hold the latest fatal error received. It is exposed so that managers requiring a coordinator can access it and take 
     // appropriate actions. 
@@ -82,9 +82,18 @@ public class CoordinatorRequestManager implements RequestManager {
         );
     }
 
+    /**
+     * Capture before reading coordinator state so a change before registration is not lost.
+     * Network-thread callers use this only to request re-evaluation, not permission to send a request.
+     */
+    NextPollCondition stateChanged() {
+        return inputChanged.await();
+    }
+
     @Override
     public void signalClose() {
         closing = true;
+        inputChanged.publish();
     }
 
     /**
@@ -99,22 +108,18 @@ public class CoordinatorRequestManager implements RequestManager {
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
-        if (closing || this.coordinator != null)
-            return EMPTY;
+        NextPollCondition input = inputChanged.await();
+        if (closing || this.coordinator != null || coordinatorRequestState.requestInFlight())
+            return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, Collections.emptyList(), input);
 
         if (coordinatorRequestState.canSendRequest(currentTimeMs)) {
             NetworkClientDelegate.UnsentRequest request = makeFindCoordinatorRequest(currentTimeMs);
-            return new NetworkClientDelegate.PollResult(request);
+            return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, Collections.singletonList(request), input);
         }
 
-        // When a request is in flight, remainingBackoffMs() can be 0, and returning 0 tells the network thread to
-        // poll again immediately which causes a busy spin. Wait instead by returning a PollResult with a Long.MAX_VALUE
-        // backoff
-        if (coordinatorRequestState.requestInFlight()) {
-            return EMPTY;
-        }
-
-        return new NetworkClientDelegate.PollResult(coordinatorRequestState.remainingBackoffMs(currentTimeMs));
+        long backoffMs = coordinatorRequestState.remainingBackoffMs(currentTimeMs);
+        return new NetworkClientDelegate.PollResult(backoffMs, Collections.emptyList(),
+                NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs, backoffMs)));
     }
 
     NetworkClientDelegate.UnsentRequest makeFindCoordinatorRequest(final long currentTimeMs) {
@@ -128,12 +133,16 @@ public class CoordinatorRequestManager implements RequestManager {
         );
 
         return unsentRequest.whenComplete((clientResponse, throwable) -> {
-            getAndClearFatalError();
-            if (clientResponse != null) {
-                FindCoordinatorResponse response = (FindCoordinatorResponse) clientResponse.responseBody();
-                onResponse(clientResponse.receivedTimeMs(), response);
-            } else {
-                onFailedResponse(unsentRequest.handler().completionTimeMs(), throwable);
+            try {
+                getAndClearFatalError();
+                if (clientResponse != null) {
+                    FindCoordinatorResponse response = (FindCoordinatorResponse) clientResponse.responseBody();
+                    onResponse(clientResponse.receivedTimeMs(), response);
+                } else {
+                    onFailedResponse(unsentRequest.handler().completionTimeMs(), throwable);
+                }
+            } finally {
+                inputChanged.publish();
             }
         });
     }
@@ -178,6 +187,7 @@ public class CoordinatorRequestManager implements RequestManager {
                 cause
             );
             coordinator = null;
+            inputChanged.publish();
         } else {
             long durationOfOngoingDisconnectMs = Math.max(0, currentTimeMs - timeMarkedUnknownMs);
             long currDisconnectMin = durationOfOngoingDisconnectMs / COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;

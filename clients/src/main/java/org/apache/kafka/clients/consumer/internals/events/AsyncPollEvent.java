@@ -24,6 +24,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.utils.Time;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -45,8 +46,11 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
 
     private final long deadlineMs;
     private final long pollTimeMs;
+    private final Runnable onError;
+    private final Runnable onPositionsValidated;
     private volatile KafkaException error;
     private volatile boolean isComplete;
+    private volatile boolean cancellationRequested;
     private volatile boolean isValidatePositionsComplete;
     private final CompletableFuture<Void> reconciliationCheckFuture = new CompletableFuture<>();
 
@@ -58,9 +62,15 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
      * @param pollTimeMs        Time, in milliseconds, at which point the event was created
      */
     public AsyncPollEvent(long deadlineMs, long pollTimeMs) {
+        this(deadlineMs, pollTimeMs, () -> { }, () -> { });
+    }
+
+    public AsyncPollEvent(long deadlineMs, long pollTimeMs, Runnable onError, Runnable onPositionsValidated) {
         super(Type.ASYNC_POLL);
         this.deadlineMs = deadlineMs;
         this.pollTimeMs = pollTimeMs;
+        this.onError = Objects.requireNonNull(onError);
+        this.onPositionsValidated = Objects.requireNonNull(onPositionsValidated);
     }
 
     public long deadlineMs() {
@@ -85,6 +95,7 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
 
     public void markValidatePositionsComplete() {
         this.isValidatePositionsComplete = true;
+        onPositionsValidated.run();
     }
 
     /**
@@ -118,18 +129,34 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
         return isComplete;
     }
 
+    /** App-thread cancellation revokes permission without running owner future continuations. */
+    public boolean requestCancellation() {
+        if (isComplete || cancellationRequested)
+            return false;
+        cancellationRequested = true;
+        return true;
+    }
+
+    public boolean isActive() {
+        return !isComplete && !cancellationRequested;
+    }
+
     public void completeSuccessfully() {
-        // Complete reconciliation future as safety net in case it wasn't already marked complete
-        reconciliationCheckFuture.complete(null);
+        if (isComplete)
+            return;
+        // Publish the result before completing a future that may run observers inline.
         isComplete = true;
+        reconciliationCheckFuture.complete(null);
     }
 
     public void completeExceptionally(KafkaException e) {
-        // Complete reconciliation future to unblock any waiters - the error will be surfaced
-        // through the normal checkInflightPoll() mechanism via the error field
-        reconciliationCheckFuture.complete(null);
+        if (isComplete)
+            return;
+        // Publish the error before releasing observers; checkInflightPoll() reads these fields.
         error = e;
         isComplete = true;
+        reconciliationCheckFuture.complete(null);
+        onError.run();
     }
 
     @Override
@@ -144,6 +171,7 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
             ", pollTimeMs=" + pollTimeMs +
             ", error=" + error +
             ", isComplete=" + isComplete +
+            ", cancellationRequested=" + cancellationRequested +
             ", isValidatePositionsComplete=" + isValidatePositionsComplete +
             ", isReconciliationCheckComplete=" + isReconciliationCheckComplete();
     }

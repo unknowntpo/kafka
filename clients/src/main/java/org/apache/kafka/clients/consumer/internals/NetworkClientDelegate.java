@@ -119,6 +119,11 @@ public class NetworkClientDelegate implements AutoCloseable {
         return NetworkClientUtils.isUnavailable(client, node, time);
     }
 
+    /** Remaining transport reconnect backoff; not an application recheck interval. */
+    public long connectionDelay(Node node, long nowMs) {
+        return client.connectionDelay(node, nowMs);
+    }
+
     /**
      * Checks for an authentication error on a given node and throws the exception if it exists.
      *
@@ -301,6 +306,10 @@ public class NetworkClientDelegate implements AutoCloseable {
         return client.connectionFailed(node) && client.connectionDelay(node, time.milliseconds()) > 0;
     }
 
+    void closePendingBackgroundCallbacks() {
+        backgroundEventHandler.closePendingCallbacks();
+    }
+
     public void close() throws IOException {
         this.client.close();
     }
@@ -325,13 +334,28 @@ public class NetworkClientDelegate implements AutoCloseable {
         unsentRequests.add(r);
     }
 
+    /**
+     * Carries prepared requests plus two independent scheduling hints. The delegate stages requests
+     * and returns the numeric delay to its caller; only RequestManagerScheduler registers the condition.
+     * A request-free result can still require a future poll. In particular, EMPTY is a legacy result,
+     * not a declaration that a manager has subscribed to all inputs it may need.
+     */
     public static class PollResult {
         public static final long WAIT_FOREVER = Long.MAX_VALUE;
         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
+        // An upper bound contributed to the current network poll, not permission to skip the manager.
         public final long timeUntilNextPollMs;
+        // Non-null opts into one-shot eligibility; null retains full-pass polling, including finite delays.
+        public final NextPollCondition nextPollCondition;
         public final List<UnsentRequest> unsentRequests;
 
         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
+            this(timeUntilNextPollMs, unsentRequests, null);
+        }
+
+        public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests,
+                          final NextPollCondition nextPollCondition) {
+            this.nextPollCondition = nextPollCondition;
             this.timeUntilNextPollMs = timeUntilNextPollMs;
             this.unsentRequests = Collections.unmodifiableList(unsentRequests);
         }

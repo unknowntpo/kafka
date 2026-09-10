@@ -53,10 +53,13 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -95,6 +98,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -729,6 +733,131 @@ public class CommitRequestManagerTest {
             mockOffsetCommitResponse(t1p.topic(), t1p.partition(), (short) 1, Errors.NONE));
         commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds());
         assertPoll(1, commitRequestManager);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    public void testOffsetFetchDistinctScopesHaveIndependentResponses(boolean firstAlreadyInflight, boolean oldDefaultScope) {
+        CommitRequestManager manager = create(false, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("t1", 0);
+        Set<TopicPartition> partitions = Set.of(partition);
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> oldResult = oldDefaultScope
+                ? manager.fetchOffsets(partitions, deadlineMs)
+                : manager.fetchOffsets(partitions, deadlineMs, Map.of(partition, new Object()));
+        NetworkClientDelegate.UnsentRequest oldRequest = null;
+        if (firstAlreadyInflight)
+            oldRequest = manager.poll(time.milliseconds()).unsentRequests.get(0);
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> newResult = manager.fetchOffsets(
+                partitions, deadlineMs, Map.of(partition, new Object()));
+        NetworkClientDelegate.PollResult poll = manager.poll(time.milliseconds());
+        assertEquals(firstAlreadyInflight ? 1 : 2, poll.unsentRequests.size());
+        if (!firstAlreadyInflight)
+            oldRequest = poll.unsentRequests.get(0);
+        NetworkClientDelegate.UnsentRequest newRequest = poll.unsentRequests.get(poll.unsentRequests.size() - 1);
+
+        completeScopedOffsetFetch(oldRequest, partition, 10L);
+        assertTrue(oldResult.isDone());
+        assertEquals(10L, oldResult.join().offsets().get(partition).offset());
+        assertFalse(newResult.isDone(), "A new position generation must not inherit the old wire response");
+        completeScopedOffsetFetch(newRequest, partition, 20L);
+        assertTrue(newResult.isDone());
+        assertEquals(20L, newResult.join().offsets().get(partition).offset());
+        assertEmptyPendingRequests(manager);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    public void testOffsetFetchEqualOrDefaultScopesStillDeduplicate(boolean defaultScope, boolean firstAlreadyInflight) {
+        CommitRequestManager manager = create(false, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("t1", 0);
+        Set<TopicPartition> partitions = Set.of(partition);
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        Map<TopicPartition, Object> scope = Map.of(partition, new Object());
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> first = defaultScope
+                ? manager.fetchOffsets(partitions, deadlineMs)
+                : manager.fetchOffsets(partitions, deadlineMs, scope);
+        NetworkClientDelegate.UnsentRequest request = null;
+        if (firstAlreadyInflight)
+            request = manager.poll(time.milliseconds()).unsentRequests.get(0);
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> second = defaultScope
+                ? manager.fetchOffsets(partitions, deadlineMs)
+                : manager.fetchOffsets(partitions, deadlineMs, Collections.unmodifiableMap(new HashMap<>(scope)));
+        NetworkClientDelegate.PollResult poll = manager.poll(time.milliseconds());
+        assertEquals(firstAlreadyInflight ? 0 : 1, poll.unsentRequests.size());
+        if (!firstAlreadyInflight)
+            request = poll.unsentRequests.get(0);
+
+        completeScopedOffsetFetch(request, partition, 30L);
+        assertTrue(first.isDone());
+        assertEquals(30L, first.join().offsets().get(partition).offset());
+        assertTrue(second.isDone());
+        assertEquals(30L, second.join().offsets().get(partition).offset());
+        assertEmptyPendingRequests(manager);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testOffsetFetchRetryPreservesDeduplicationScope(boolean partitionError) {
+        CommitRequestManager manager = create(false, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        TopicPartition partition = new TopicPartition("t1", 0);
+        Set<TopicPartition> partitions = Set.of(partition);
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        Map<TopicPartition, Object> scope = Map.of(partition, new Object());
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> first = manager.fetchOffsets(partitions, deadlineMs, scope);
+        NetworkClientDelegate.UnsentRequest firstRequest = manager.poll(time.milliseconds()).unsentRequests.get(0);
+        if (partitionError) {
+            OffsetFetchResponseData.OffsetFetchResponseGroup group = new OffsetFetchResponseData.OffsetFetchResponseGroup()
+                    .setGroupId(DEFAULT_GROUP_ID)
+                    .setTopics(List.of(new OffsetFetchResponseData.OffsetFetchResponseTopics()
+                            .setName(partition.topic())
+                            .setPartitions(List.of(new OffsetFetchResponseData.OffsetFetchResponsePartitions()
+                                    .setPartitionIndex(partition.partition())
+                                    .setErrorCode(Errors.UNKNOWN_TOPIC_OR_PARTITION.code())))));
+            firstRequest.handler().onComplete(buildOffsetFetchClientResponse(firstRequest, group, false));
+        } else {
+            firstRequest.handler().onComplete(buildOffsetFetchClientResponse(
+                    firstRequest, partitions, Errors.COORDINATOR_LOAD_IN_PROGRESS));
+        }
+        assertFalse(first.isDone());
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> sameScope = manager.fetchOffsets(
+                partitions, deadlineMs, Collections.unmodifiableMap(new HashMap<>(scope)));
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> newScope = manager.fetchOffsets(
+                partitions, deadlineMs, Map.of(partition, new Object()));
+        assertEquals(2, manager.pendingRequests.unsentOffsetFetches.size());
+
+        NetworkClientDelegate.PollResult newPoll = manager.poll(time.milliseconds());
+        assertEquals(1, newPoll.unsentRequests.size(), "Only the new scope is ready during the old scope's backoff");
+        completeScopedOffsetFetch(newPoll.unsentRequests.get(0), partition, 20L);
+        assertTrue(newScope.isDone());
+        assertEquals(20L, newScope.join().offsets().get(partition).offset());
+        assertFalse(first.isDone());
+        assertFalse(sameScope.isDone());
+        time.sleep(retryBackoffMs);
+        NetworkClientDelegate.PollResult retry = manager.poll(time.milliseconds());
+        assertEquals(1, retry.unsentRequests.size());
+        completeScopedOffsetFetch(retry.unsentRequests.get(0), partition, 10L);
+        assertTrue(first.isDone());
+        assertEquals(10L, first.join().offsets().get(partition).offset());
+        assertTrue(sameScope.isDone());
+        assertEquals(10L, sameScope.join().offsets().get(partition).offset());
+        assertEmptyPendingRequests(manager);
+    }
+
+    private void completeScopedOffsetFetch(NetworkClientDelegate.UnsentRequest request,
+                                           TopicPartition partition,
+                                           long offset) {
+        OffsetFetchResponseData.OffsetFetchResponseGroup group = new OffsetFetchResponseData.OffsetFetchResponseGroup()
+                .setGroupId(DEFAULT_GROUP_ID)
+                .setTopics(List.of(new OffsetFetchResponseData.OffsetFetchResponseTopics()
+                        .setName(partition.topic())
+                        .setPartitions(List.of(new OffsetFetchResponseData.OffsetFetchResponsePartitions()
+                                .setPartitionIndex(partition.partition())
+                                .setCommittedOffset(offset)))));
+        request.handler().onComplete(buildOffsetFetchClientResponse(request, group, false));
     }
 
     @Test
@@ -1817,6 +1946,109 @@ public class CommitRequestManagerTest {
         }
 
         return res.unsentRequests.stream().map(NetworkClientDelegate.UnsentRequest::handler).collect(Collectors.toList());
+    }
+
+    @Nested
+    class BackgroundAutoCommitTest {
+        private final ApplicationPollWait waitState = new ApplicationPollWait();
+        private final TopicPartition partition = new TopicPartition("background-commit", 0);
+
+        private CommitRequestManager manager() {
+            subscriptionState = spy(subscriptionState);
+            subscriptionState.assignFromUser(singleton(partition));
+            subscriptionState.seek(partition, 100);
+            CommitRequestManager manager = create(true, 100);
+            manager.setApplicationPollWait(waitState);
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+            return manager;
+        }
+
+        @Test
+        void commitsAtDeadlineWithoutAppPollAndDoesNotDuplicateInflight() {
+            CommitRequestManager manager = manager();
+            waitState.begin(time.milliseconds(), time.milliseconds() + 10000);
+            assertEquals(100, manager.poll(time.milliseconds()).timeUntilNextPollMs);
+            assertEquals(Long.MAX_VALUE, manager.maximumTimeToWait(time.milliseconds()));
+            time.sleep(99);
+            assertEquals(1, manager.poll(time.milliseconds()).timeUntilNextPollMs);
+            time.sleep(1);
+            NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+            assertEquals(1, result.unsentRequests.size());
+            OffsetCommitRequestData data = (OffsetCommitRequestData) result.unsentRequests.get(0).requestBuilder().build().data();
+            assertEquals(100, data.topics().get(0).partitions().get(0).committedOffset());
+            time.sleep(200);
+            assertEquals(Long.MAX_VALUE, manager.poll(time.milliseconds()).timeUntilNextPollMs);
+            assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+            result.unsentRequests.get(0).handler().onComplete(
+                mockOffsetCommitResponse(partition.topic(), partition.partition(), (short) 1, Errors.NONE));
+            assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+        }
+
+        @Test
+        void doesNotReadOffsetsWhileAppIsActiveOrNotifiedOrWaitExpired() {
+            CommitRequestManager manager = manager();
+            time.sleep(100);
+            assertEquals(Long.MAX_VALUE, manager.poll(time.milliseconds()).timeUntilNextPollMs);
+            waitState.begin(time.milliseconds(), time.milliseconds() + 100);
+            waitState.signal(time.milliseconds());
+            assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+            waitState.begin(time.milliseconds(), time.milliseconds() + 100);
+            time.sleep(100);
+            assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+            verify(subscriptionState, never()).allConsumed();
+        }
+
+        @Test
+        void rejectsSnapshotWhenAppStartsAnotherWait() {
+            CommitRequestManager manager = manager();
+            waitState.begin(time.milliseconds(), time.milliseconds() + 10000);
+            time.sleep(100);
+            doAnswer(invocation -> {
+                Object offsets = invocation.callRealMethod();
+                waitState.signal(time.milliseconds());
+                subscriptionState.seek(partition, 200);
+                waitState.begin(time.milliseconds(), time.milliseconds() + 10000);
+                return offsets;
+            }).when(subscriptionState).allConsumed();
+            assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+            verify(manager, never()).resetAutoCommitTimer();
+        }
+
+        @Test
+        void retriesOnlyAfterBackoffAndCoordinatorAvailability() {
+            CommitRequestManager manager = manager();
+            waitState.begin(time.milliseconds(), time.milliseconds() + 10000);
+            time.sleep(100);
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+            assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+            verify(subscriptionState, never()).allConsumed();
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+            NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+            assertEquals(1, result.unsentRequests.size());
+            result.unsentRequests.get(0).handler().onComplete(
+                mockOffsetCommitResponse(partition.topic(), partition.partition(), (short) 1, Errors.COORDINATOR_LOAD_IN_PROGRESS));
+            assertEquals(retryBackoffMs, manager.poll(time.milliseconds()).timeUntilNextPollMs);
+            time.sleep(retryBackoffMs - 1);
+            assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+            time.sleep(1);
+            assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+        }
+
+        @Test
+        void emptyOffsetsRescheduleAndCloseDoesNotAdmitNewCommit() {
+            CommitRequestManager manager = manager();
+            subscriptionState.assignFromUser(Collections.emptySet());
+            waitState.begin(time.milliseconds(), time.milliseconds() + 10000);
+            time.sleep(100);
+            NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+            assertTrue(result.unsentRequests.isEmpty());
+            assertEquals(100, result.timeUntilNextPollMs);
+            subscriptionState.assignFromUser(singleton(partition));
+            subscriptionState.seek(partition, 200);
+            time.sleep(100);
+            manager.signalClose();
+            assertTrue(manager.poll(time.milliseconds()).unsentRequests.isEmpty());
+        }
     }
 
     private CommitRequestManager create(final boolean autoCommitEnabled, final long autoCommitInterval) {

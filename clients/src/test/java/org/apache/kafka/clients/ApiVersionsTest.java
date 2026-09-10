@@ -20,11 +20,29 @@ import org.apache.kafka.common.message.ApiVersionsResponseData;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class ApiVersionsTest {
+
+    @Test
+    public void changeListenerObservesPublishedStateAndAbsentRemoval() {
+        ApiVersions apiVersions = new ApiVersions();
+        List<NodeApiVersions> observations = new ArrayList<>();
+        Runnable listener = () -> observations.add(apiVersions.get("1"));
+        apiVersions.addChangeListener(listener);
+        NodeApiVersions versions = NodeApiVersions.create();
+        apiVersions.update("1", versions);
+        apiVersions.remove("1");
+        apiVersions.remove("1");
+        assertEquals(Arrays.asList(versions, null, null), observations);
+        apiVersions.removeChangeListener(listener);
+        apiVersions.update("1", versions);
+        assertEquals(3, observations.size());
+    }
 
     @Test
     public void testFinalizedFeaturesUpdate() {

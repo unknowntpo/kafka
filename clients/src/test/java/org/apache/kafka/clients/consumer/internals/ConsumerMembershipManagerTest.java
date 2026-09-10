@@ -288,17 +288,22 @@ public class ConsumerMembershipManagerTest {
         when(subscriptionState.assignedPartitions()).thenReturn(ownedPartitions);
         when(subscriptionState.hasAutoAssignedPartitions()).thenReturn(true);
 
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
         membershipManager.transitionToFenced();
 
         // Verify markPendingRevocation is called before enqueueing the callback event
-        InOrder inOrder = inOrder(subscriptionState, backgroundEventHandler);
+        InOrder inOrder = inOrder(subscriptionState, positionChanged, backgroundEventHandler);
         inOrder.verify(subscriptionState).markPendingRevocation(ownedPartitions);
+        inOrder.verify(positionChanged).run();
         inOrder.verify(backgroundEventHandler).add(any(PartitionsRemovedEvent.class));
     }
 
     @Test
     public void testTransitionToFatalMarksPendingRevocationBeforeSignalingPartitionsLost() {
         ConsumerMembershipManager membershipManager = createMemberInStableState();
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
         String topicName = "topic1";
         TopicPartition ownedPartition = new TopicPartition(topicName, 0);
         Set<TopicPartition> ownedPartitions = Collections.singleton(ownedPartition);
@@ -311,14 +316,17 @@ public class ConsumerMembershipManagerTest {
         membershipManager.transitionToFatal();
 
         // Verify markPendingRevocation is called before enqueueing the callback event
-        InOrder inOrder = inOrder(subscriptionState, backgroundEventHandler);
+        InOrder inOrder = inOrder(subscriptionState, positionChanged, backgroundEventHandler);
         inOrder.verify(subscriptionState).markPendingRevocation(ownedPartitions);
+        inOrder.verify(positionChanged).run();
         inOrder.verify(backgroundEventHandler).add(any(PartitionsRemovedEvent.class));
     }
 
     @Test
     public void testTransitionToStaleMarksPendingRevocationBeforeSignalingPartitionsLost() {
         ConsumerMembershipManager membershipManager = createMemberInStableState();
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
         String topicName = "topic1";
         TopicPartition ownedPartition = new TopicPartition(topicName, 0);
         Set<TopicPartition> ownedPartitions = Collections.singleton(ownedPartition);
@@ -336,8 +344,9 @@ public class ConsumerMembershipManagerTest {
         membershipManager.transitionToStale();
 
         // Verify markPendingRevocation is called before enqueueing the callback event
-        InOrder inOrder = inOrder(subscriptionState, backgroundEventHandler);
+        InOrder inOrder = inOrder(subscriptionState, positionChanged, backgroundEventHandler);
         inOrder.verify(subscriptionState).markPendingRevocation(ownedPartitions);
+        inOrder.verify(positionChanged).run();
         inOrder.verify(backgroundEventHandler).add(any(PartitionsRemovedEvent.class));
     }
 
@@ -1069,6 +1078,25 @@ public class ConsumerMembershipManagerTest {
         ConsumerMembershipManager membershipManager = createMemberInStableState();
         testLeaveGroupReleasesAssignmentAndResetsEpochToSendLeaveGroup(membershipManager);
         verify(subscriptionState).assignFromSubscribed(Collections.emptySet());
+    }
+
+    @Test
+    public void testNormalLeaveNotifiesAfterUnsubscribeClearsAutoAssignment() {
+        ConsumerMembershipManager membershipManager = createMemberInStableState();
+        mockLeaveGroup();
+        doAnswer(invocation -> {
+            when(subscriptionState.hasAutoAssignedPartitions()).thenReturn(false);
+            return null;
+        }).when(subscriptionState).unsubscribe();
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
+
+        membershipManager.leaveGroup();
+
+        InOrder order = inOrder(subscriptionState, positionChanged);
+        order.verify(subscriptionState).unsubscribe();
+        order.verify(positionChanged).run();
+        assertEquals(MemberState.LEAVING, membershipManager.state());
     }
 
     @Test
@@ -2143,6 +2171,8 @@ public class ConsumerMembershipManagerTest {
             new CounterConsumerRebalanceListener(), membershipManager);
 
         membershipManager.maybeReconcile(true);
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
 
         performCallback(
             membershipManager,
@@ -2154,7 +2184,9 @@ public class ConsumerMembershipManagerTest {
 
         // Assignment is applied when the callback event is processed
         verify(subscriptionState).assignFromSubscribedAwaitingCallback(assignedPartitions, addedPartitions);
-        verify(subscriptionState).enablePartitionsAwaitingCallback(assignedPartitions);
+        InOrder order = inOrder(subscriptionState, positionChanged);
+        order.verify(subscriptionState).enablePartitionsAwaitingCallback(assignedPartitions);
+        order.verify(positionChanged).run();
     }
 
     @Test
@@ -2175,6 +2207,8 @@ public class ConsumerMembershipManagerTest {
             listener, membershipManager);
 
         membershipManager.maybeReconcile(true);
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
 
         performCallback(
             membershipManager,
@@ -2187,6 +2221,7 @@ public class ConsumerMembershipManagerTest {
         // Assignment is applied when the callback event is processed
         verify(subscriptionState).assignFromSubscribedAwaitingCallback(assignedPartitions, addedPartitions);
         verify(subscriptionState, never()).enablePartitionsAwaitingCallback(any());
+        verify(positionChanged, never()).run();
     }
 
     @Test

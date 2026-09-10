@@ -17,7 +17,10 @@
 package org.apache.kafka.clients;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Maintains node api versions for access outside of NetworkClient (which is where the information is derived).
@@ -28,6 +31,7 @@ import java.util.Map;
 public class ApiVersions {
 
     private final Map<String, NodeApiVersions> nodeApiVersions = new HashMap<>();
+    private final List<Runnable> changeListeners = new CopyOnWriteArrayList<>();
 
     // The maximum finalized feature epoch of all the node api versions.
     private long maxFinalizedFeaturesEpoch = -1;
@@ -48,10 +52,26 @@ public class ApiVersions {
             this.maxFinalizedFeaturesEpoch = nodeApiVersions.finalizedFeaturesEpoch();
             this.finalizedFeatures = nodeApiVersions.finalizedFeatures();
         }
+        changeListeners.forEach(Runnable::run);
     }
 
     public synchronized void remove(String nodeId) {
         this.nodeApiVersions.remove(nodeId);
+        // A failed first handshake has no cached entry, but is still a dependency change.
+        changeListeners.forEach(Runnable::run);
+    }
+
+    /**
+     * Observe cache publication on the updating thread. Listeners must only publish a notification:
+     * NetworkClient may finish updating connection state after this callback returns. They must not
+     * block, throw, or initiate transport work inline. Remove the listener when its owner closes.
+     */
+    public void addChangeListener(Runnable listener) {
+        changeListeners.add(Objects.requireNonNull(listener));
+    }
+
+    public void removeChangeListener(Runnable listener) {
+        changeListeners.remove(listener);
     }
 
     public synchronized NodeApiVersions get(String nodeId) {

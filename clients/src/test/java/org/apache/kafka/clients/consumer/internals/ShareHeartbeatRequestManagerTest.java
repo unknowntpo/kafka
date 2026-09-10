@@ -98,6 +98,10 @@ public class ShareHeartbeatRequestManagerTest
         backgroundEventHandler = mock(BackgroundEventHandler.class);
         membershipManager = mock(ShareMembershipManager.class);
         super.membershipManager = membershipManager;
+        coordinatorInput = new NextPollCondition.Signal();
+        membershipInput = new NextPollCondition.Signal();
+        when(coordinatorRequestManager.stateChanged()).thenAnswer(invocation -> coordinatorInput.await());
+        when(membershipManager.heartbeatStateChanged()).thenAnswer(invocation -> membershipInput.await());
         heartbeatState = mock(ShareHeartbeatRequestManager.HeartbeatState.class);
         metadata = mock(ConsumerMetadata.class);
         metrics = new Metrics(time);

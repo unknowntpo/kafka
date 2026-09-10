@@ -61,6 +61,23 @@ import static java.util.Collections.unmodifiableList;
  */
 public abstract class AbstractMembershipManager<R extends AbstractResponse> implements RequestManager {
 
+    private final NextPollCondition.Signal heartbeatInputChanged = new NextPollCondition.Signal();
+
+    /** Capture on the network thread before reading heartbeat eligibility. */
+    NextPollCondition heartbeatStateChanged() {
+        return heartbeatInputChanged.await();
+    }
+
+    private Runnable positionStateChangeListener = () -> { };
+
+    /**
+     * Install a background-thread notification for subscription mutations. The listener must only
+     * publish readiness; retained position and fetch work is advanced on the next owner turn.
+     */
+    void setPositionStateChangeListener(Runnable listener) {
+        positionStateChangeListener = listener;
+    }
+
     /**
      * TopicPartition comparator based on topic name and partition.
      */
@@ -246,6 +263,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
 
         log.info("Member {} with epoch {} transitioned from {} to {}.", memberId, memberEpoch, state, nextState);
         this.state = nextState;
+        heartbeatInputChanged.publish();
         stateUpdatesListeners.forEach(listener -> listener.onMemberStateChange(nextState));
     }
 
@@ -564,6 +582,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
         }
         currentAssignment = LocalAssignment.NONE;
         clearPendingAssignmentsAndLocalNamesCache();
+        positionStateChangeListener.run();
     }
 
     /**
@@ -598,6 +617,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
      */
     public CompletableFuture<Void> leaveGroupOnClose(CloseOptions.GroupMembershipOperation membershipOperation) {
         this.leaveGroupOperation = membershipOperation;
+        heartbeatInputChanged.publish();
         return leaveGroup(false);
     }
 
@@ -631,6 +651,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
                 transitionTo(MemberState.UNSUBSCRIBED);
             }
             subscriptions.unsubscribe();
+            positionStateChangeListener.run();
             notifyAssignmentChange(Collections.emptySet());
             return CompletableFuture.completedFuture(null);
         }
@@ -1264,6 +1285,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
                 // if the first callback fails but the next one succeeds, polling can still retrieve data. To align with
                 // this behavior, we rely on assignedPartitions to avoid such scenarios.
                 subscriptions.enablePartitionsAwaitingCallback(assignedPartitions.topicPartitions());
+                positionStateChangeListener.run();
             } else {
                 // Keeping newly added partitions as non-fetchable after the callback failure.
                 // They will be retried on the next reconciliation loop, until it succeeds or the
@@ -1326,6 +1348,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
         // fetches or returning data from previous fetches to the user.
         log.debug("Marking partitions pending for revocation: {}", partitionsToRevoke);
         subscriptions.markPendingRevocation(partitionsToRevoke);
+        positionStateChangeListener.run();
     }
 
     /**

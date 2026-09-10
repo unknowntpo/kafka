@@ -28,6 +28,8 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetOutOfRangeException;
+import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
+import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.Cluster;
@@ -97,6 +99,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -150,10 +153,13 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 public class FetchRequestManagerTest {
 
@@ -252,6 +258,202 @@ public class FetchRequestManagerTest {
     private int sendFetches(boolean requestFetch) {
         offsetFetcher.validatePositionsOnMetadataChange();
         return fetcher.sendFetches(requestFetch);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testPositionCallbackHandsOffToRealFetchManager(boolean terminateBeforeFetch) {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        OffsetsRequestManager offsets = mock(OffsetsRequestManager.class);
+        CompletableFuture<Void> positions = new CompletableFuture<>();
+        when(offsets.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(positions);
+        RequestManagers managers = new RequestManagers(new LogContext(), offsets,
+                mock(TopicMetadataRequestManager.class), fetcher, Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        ApplicationEventProcessor processor = new ApplicationEventProcessor(new LogContext(), managers,
+                metadata, subscriptions);
+        RequestManagerScheduler scheduler = new RequestManagerScheduler();
+        scheduler.registerManagers(List.of(fetcher));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        AsyncPollEvent event = new AsyncPollEvent(1000, 0);
+        processor.process(event);
+        // Model the position manager's successful validation against current metadata.
+        offsetFetcher.validatePositionsOnMetadataChange();
+        positions.complete(null);
+        assertFalse(event.isComplete());
+        assertEquals(0, scheduler.remainingMs(0));
+        KafkaException terminal = new KafkaException("operation terminated before fetch");
+        if (terminateBeforeFetch)
+            event.completeExceptionally(terminal);
+        List<NetworkClientDelegate.UnsentRequest> requests = new ArrayList<>();
+        scheduler.pollReady(0, result -> {
+            requests.addAll(result.unsentRequests);
+            return Long.MAX_VALUE;
+        });
+        assertTrue(event.isComplete());
+        assertEquals(terminateBeforeFetch ? 0 : 1, requests.size());
+        if (terminateBeforeFetch)
+            assertEquals(terminal, event.error().orElseThrow());
+        else
+            assertTrue(event.error().isEmpty());
+        assertEquals(Long.MAX_VALUE, scheduler.remainingMs(0));
+        scheduler.close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"unassigned", "paused", "revoking", "seek"})
+    public void testQueuedHandoffUsesCurrentSubscriptionState(String change) {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        OffsetsRequestManager offsets = mock(OffsetsRequestManager.class);
+        CompletableFuture<Void> positions = new CompletableFuture<>();
+        when(offsets.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(positions);
+        RequestManagers managers = new RequestManagers(new LogContext(), offsets,
+                mock(TopicMetadataRequestManager.class), fetcher, Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        ApplicationEventProcessor processor = new ApplicationEventProcessor(new LogContext(), managers,
+                metadata, subscriptions);
+        RequestManagerScheduler scheduler = new RequestManagerScheduler();
+        scheduler.registerManagers(List.of(fetcher));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        AsyncPollEvent event = new AsyncPollEvent(1000, 0);
+        processor.process(event);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        positions.complete(null);
+        assertFalse(event.isComplete());
+        switch (change) {
+            case "unassigned":
+                assignFromUser(Collections.emptySet());
+                break;
+            case "paused":
+                subscriptions.pause(tp0);
+                break;
+            case "revoking":
+                subscriptions.markPendingRevocation(singleton(tp0));
+                break;
+            case "seek":
+                subscriptions.seekValidated(tp0, new SubscriptionState.FetchPosition(
+                        25, Optional.empty(), subscriptions.position(tp0).currentLeader));
+                break;
+            default:
+                throw new AssertionError(change);
+        }
+        List<NetworkClientDelegate.UnsentRequest> requests = new ArrayList<>();
+        scheduler.pollReady(0, result -> {
+            requests.addAll(result.unsentRequests);
+            return Long.MAX_VALUE;
+        });
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isEmpty());
+        assertEquals(change.equals("seek") ? 1 : 0, requests.size());
+        if (change.equals("seek")) {
+            FetchRequest.Builder builder = (FetchRequest.Builder) requests.get(0).requestBuilder();
+            assertEquals(25, builder.fetchData().get(tp0).fetchOffset);
+        }
+        assertEquals(Long.MAX_VALUE, scheduler.remainingMs(0));
+        scheduler.close();
+    }
+
+    @Test
+    public void testContinuationActivatesOnlyFetchAndReturnsToWaiting() {
+        buildFetcher();
+        RequestManagerScheduler scheduler = new RequestManagerScheduler();
+        RequestManager unrelated = mock(RequestManager.class);
+        when(unrelated.poll(anyLong())).thenReturn(new NetworkClientDelegate.PollResult(
+                Long.MAX_VALUE, Collections.emptyList(), new NextPollCondition.Signal().await()));
+        scheduler.registerManagers(List.of(fetcher, unrelated));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        FetchRequestManager.FetchContinuation continuation = mock(FetchRequestManager.FetchContinuation.class);
+        fetcher.enqueueFetchContinuation(continuation);
+        fetcher.enqueueFetchContinuation(mock(FetchRequestManager.FetchContinuation.class));
+        assertEquals(0, scheduler.remainingMs(0));
+        verify(continuation, never()).advance();
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        verify(continuation).advance();
+        verify(unrelated).poll(0);
+        assertEquals(Long.MAX_VALUE, scheduler.remainingMs(0));
+        assertNull(scheduler.poll(fetcher, 0));
+        scheduler.close();
+    }
+
+    @Test
+    public void testEarlierManagerHandoffToAlreadyReadyFetchWaitsForNextBatch() {
+        buildFetcher();
+        RequestManagerScheduler scheduler = new RequestManagerScheduler();
+        FetchRequestManager.FetchContinuation continuation = mock(FetchRequestManager.FetchContinuation.class);
+        RequestManager source = mock(RequestManager.class);
+        when(source.poll(anyLong())).thenAnswer(invocation -> {
+            fetcher.enqueueFetchContinuation(continuation);
+            return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, Collections.emptyList(),
+                    new NextPollCondition.Signal().await());
+        });
+        scheduler.registerManagers(List.of(source, fetcher));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        verify(continuation, never()).advance();
+        assertEquals(0, scheduler.remainingMs(0));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        verify(continuation).advance();
+        assertEquals(Long.MAX_VALUE, scheduler.remainingMs(0));
+        scheduler.close();
+    }
+
+    @Test
+    public void testContinuationPublishedDuringDrainWaitsForNextBatch() {
+        buildFetcher();
+        RequestManagerScheduler scheduler = new RequestManagerScheduler();
+        FetchRequestManager.FetchContinuation first = mock(FetchRequestManager.FetchContinuation.class);
+        FetchRequestManager.FetchContinuation second = mock(FetchRequestManager.FetchContinuation.class);
+        doAnswer(invocation -> {
+            fetcher.enqueueFetchContinuation(second);
+            return null;
+        }).when(first).advance();
+        fetcher.enqueueFetchContinuation(first);
+        scheduler.registerManagers(List.of(fetcher));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        verify(first).advance();
+        verify(second, never()).advance();
+        assertEquals(0, scheduler.remainingMs(0));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        verify(second).advance();
+        assertEquals(Long.MAX_VALUE, scheduler.remainingMs(0));
+        scheduler.close();
+    }
+
+    @Test
+    public void testFetchRequestedFromCompletionSurvivesUntilNextActivation() {
+        buildFetcher();
+        RequestManagerScheduler scheduler = new RequestManagerScheduler();
+        scheduler.registerManagers(List.of(fetcher));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        CompletableFuture<Void> first = fetcher.createFetchRequests();
+        CompletableFuture<Void> second = first.thenCompose(ignored -> fetcher.createFetchRequests());
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        assertTrue(first.isDone());
+        assertFalse(second.isDone());
+        assertEquals(0, scheduler.remainingMs(0));
+        scheduler.pollReady(0, result -> Long.MAX_VALUE);
+        assertTrue(second.isDone());
+        assertFalse(second.isCompletedExceptionally());
+        assertEquals(Long.MAX_VALUE, scheduler.remainingMs(0));
+        scheduler.close();
+    }
+
+    @Test
+    public void testCloseRejectsQueuedAndLateContinuations() {
+        buildFetcher();
+        FetchRequestManager.FetchContinuation queued = mock(FetchRequestManager.FetchContinuation.class);
+        FetchRequestManager.FetchContinuation late = mock(FetchRequestManager.FetchContinuation.class);
+        fetcher.enqueueFetchContinuation(queued);
+        fetcher.closeFetchContinuations();
+        fetcher.enqueueFetchContinuation(late);
+        fetcher.poll(0);
+        verify(queued).onClose();
+        verify(late).onClose();
+        verify(queued, never()).advance();
+        verify(late, never()).advance();
     }
 
     @Test
@@ -430,6 +632,191 @@ public class FetchRequestManagerTest {
         // A new fetch request can now be sent; maximumTimeToWait remains unbounded.
         assertEquals(1, sendFetches());
         assertEquals(Long.MAX_VALUE, fetcher.maximumTimeToWait(time.milliseconds()));
+    }
+
+    @Test
+    public void testReconnectDemandRunsAtTransportDeadlineWithoutAppRedrive() {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 100);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        client.backoff(metadata.fetch().leaderFor(tp0), 500);
+        CompletableFuture<Void> demand = fetcher.createFetchRequestsWithReconnect(time.milliseconds() + 2000, () -> true);
+        List<NetworkClientDelegate.UnsentRequest> requests = new ArrayList<>();
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            scheduler.registerManagers(List.of(fetcher));
+            scheduler.pollReady(time.milliseconds(), result -> {
+                requests.addAll(result.unsentRequests);
+                return Long.MAX_VALUE;
+            });
+            assertFalse(demand.isDone());
+            assertTrue(requests.isEmpty());
+            // Unrelated loop turns must not scan this waiting manager or re-prepare its partitions.
+            for (int i = 0; i < 20; i++)
+                scheduler.pollReady(time.milliseconds(), result -> Long.MAX_VALUE);
+            verify(fetcher, times(1)).poll(anyLong());
+            time.sleep(600);
+            scheduler.pollReady(time.milliseconds(), result -> {
+                requests.addAll(result.unsentRequests);
+                return Long.MAX_VALUE;
+            });
+            assertTrue(demand.isDone());
+            assertFalse(demand.isCompletedExceptionally());
+            assertEquals(1, requests.size());
+            FetchRequest request = (FetchRequest) requests.get(0).requestBuilder().build();
+            assertEquals(100, request.fetchData(topicNames).get(tidp0).fetchOffset);
+            assertEquals(Long.MAX_VALUE, scheduler.remainingMs(time.milliseconds()));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testZeroTimeoutAllowsInitialPreparationButDoesNotRetainReconnect(boolean backoff) {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        if (backoff)
+            client.backoff(metadata.fetch().leaderFor(tp0), 500);
+        CompletableFuture<Void> demand = fetcher.createFetchRequestsWithReconnect(time.milliseconds(), () -> true);
+        assertEquals(backoff ? 0 : 1, fetcher.poll(time.milliseconds()).unsentRequests.size());
+        assertTrue(demand.isDone());
+        time.sleep(600);
+        assertTrue(fetcher.poll(time.milliseconds()).unsentRequests.isEmpty());
+    }
+
+    @Test
+    public void testAsyncPollReconnectSendsWhileApplicationRemainsParked() throws Exception {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 1);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        client.backoff(metadata.fetch().leaderFor(tp0), 500);
+        OffsetsRequestManager offsets = mock(OffsetsRequestManager.class);
+        when(offsets.updateFetchPositionsAndAwaitValidation(anyLong(), any())).thenReturn(CompletableFuture.completedFuture(null));
+        RequestManagers managers = new RequestManagers(new LogContext(), offsets,
+                mock(TopicMetadataRequestManager.class), fetcher, Optional.empty(), Optional.empty(),
+                Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty(), Optional.empty());
+        ApplicationEventProcessor processor = new ApplicationEventProcessor(new LogContext(), managers,
+                metadata, subscriptions);
+        AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 5000, time.milliseconds());
+        Thread app = new Thread(() -> fetcher.fetchBuffer.awaitWakeup(time.timer(60_000)));
+        app.setDaemon(true);
+        app.start();
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            TestUtils.waitForCondition(() -> app.getState() == Thread.State.TIMED_WAITING, "app did not park");
+            scheduler.registerManagers(List.of(fetcher));
+            processor.process(event);
+            scheduler.pollReady(time.milliseconds(), result -> {
+                networkClientDelegate.addAll(result.unsentRequests);
+                return Long.MAX_VALUE;
+            });
+            assertFalse(event.isComplete());
+            assertTrue(app.isAlive());
+            time.sleep(600);
+            scheduler.pollReady(time.milliseconds(), result -> {
+                networkClientDelegate.addAll(result.unsentRequests);
+                return Long.MAX_VALUE;
+            });
+            assertTrue(event.isComplete());
+            assertTrue(event.error().isEmpty());
+            assertTrue(app.isAlive(), "request preparation alone must not wake the app");
+            client.prepareResponse(fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
+            networkClientDelegate.poll(time.timer(0));
+            app.join(5000);
+            assertFalse(app.isAlive());
+            assertTrue(fetcher.hasCompletedFetches());
+        } finally {
+            fetcher.fetchBuffer.wakeup();
+            app.join(5000);
+        }
+    }
+
+    @Test
+    public void testReconnectDemandDeadlinesRemainIndependentOfSingleAttempt() {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        client.backoff(metadata.fetch().leaderFor(tp0), 500);
+        CompletableFuture<Void> singleAttempt = fetcher.createFetchRequests();
+        CompletableFuture<Void> shortDemand = fetcher.createFetchRequestsWithReconnect(time.milliseconds() + 100, () -> true);
+        CompletableFuture<Void> longDemand = fetcher.createFetchRequestsWithReconnect(time.milliseconds() + 2000, () -> true);
+        assertTrue(fetcher.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertTrue(singleAttempt.isDone());
+        assertFalse(shortDemand.isDone());
+        assertFalse(longDemand.isDone());
+        time.sleep(150);
+        assertTrue(fetcher.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertTrue(shortDemand.isCompletedExceptionally());
+        assertFalse(longDemand.isDone());
+        time.sleep(600);
+        assertEquals(1, fetcher.poll(time.milliseconds()).unsentRequests.size());
+        assertTrue(longDemand.isDone());
+        assertFalse(longDemand.isCompletedExceptionally());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 2, 3})
+    public void testReconnectDemandRechecksPermissionAndSubscription(int change) {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        client.backoff(metadata.fetch().leaderFor(tp0), 500);
+        boolean[] active = {true};
+        CompletableFuture<Void> demand = fetcher.createFetchRequestsWithReconnect(time.milliseconds() + 2000, () -> active[0]);
+        assertTrue(fetcher.poll(time.milliseconds()).unsentRequests.isEmpty());
+        if (change == 0)
+            active[0] = false;
+        else if (change == 1)
+            subscriptions.pause(tp0);
+        else if (change == 2)
+            subscriptions.assignFromUser(Collections.emptySet());
+        else
+            fetcher.close();
+        time.sleep(600);
+        assertTrue(fetcher.poll(time.milliseconds()).unsentRequests.isEmpty());
+        assertTrue(demand.isDone());
+        assertEquals(change == 3, demand.isCompletedExceptionally());
+    }
+
+    @Test
+    public void testCancelledReconnectDemandIsReleasedOnSignalBeforeBackoff() {
+        buildFetcher();
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        client.backoff(metadata.fetch().leaderFor(tp0), 500);
+        boolean[] active = {true};
+        CompletableFuture<Void> demand = fetcher.createFetchRequestsWithReconnect(time.milliseconds() + 2000, () -> active[0]);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            assertTrue(scheduler.poll(fetcher, time.milliseconds()).unsentRequests.isEmpty());
+            assertFalse(demand.isDone());
+            active[0] = false;
+            fetcher.onPollDemandChanged();
+            assertFalse(demand.isDone(), "notification does not run preparation inline");
+            assertTrue(scheduler.poll(fetcher, time.milliseconds()).unsentRequests.isEmpty());
+            assertTrue(demand.isDone());
+            assertFalse(demand.isCompletedExceptionally());
+            assertEquals(Long.MAX_VALUE, scheduler.remainingMs(time.milliseconds()));
+        }
+    }
+
+    @Test
+    public void testReconnectDemandRetainsSkippedNodeWhenAnotherNodeCanFetch() {
+        buildFetcher();
+        assignFromUser(Set.of(tp0, tp1), 2);
+        subscriptions.seek(tp0, 0);
+        subscriptions.seek(tp1, 0);
+        offsetFetcher.validatePositionsOnMetadataChange();
+        client.backoff(metadata.fetch().leaderFor(tp0), 500);
+        CompletableFuture<Void> demand = fetcher.createFetchRequestsWithReconnect(time.milliseconds() + 2000, () -> true);
+        assertEquals(1, fetcher.poll(time.milliseconds()).unsentRequests.size());
+        assertFalse(demand.isDone());
+        time.sleep(600);
+        assertEquals(1, fetcher.poll(time.milliseconds()).unsentRequests.size());
+        assertTrue(demand.isDone());
     }
 
     @Test

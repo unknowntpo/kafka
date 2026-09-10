@@ -1,0 +1,249 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.clients.consumer.internals;
+
+import java.util.ArrayList;
+import java.util.BitSet;
+import java.util.Comparator;
+import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
+import java.util.function.ToLongFunction;
+
+/** Experimental strict condition scheduler. No legacy fallback or per-pass manager scan. */
+public final class RequestManagerScheduler implements AutoCloseable {
+    private final Map<RequestManager, Entry> entries = new IdentityHashMap<>();
+    private final List<Entry> ordered = new ArrayList<>();
+    private BitSet ready = new BitSet();
+    private BitSet batch = new BitSet();
+    private final ApplicationProgress applicationProgress = new ApplicationProgress();
+
+    public ApplicationProgress applicationProgress() { return applicationProgress; }
+    private final TreeSet<Waiting> timers = new TreeSet<>(Comparator
+            .comparingLong((Waiting wait) -> wait.deadline).thenComparingInt(wait -> wait.entry.order));
+
+    public void registerManagers(List<RequestManager> managers) {
+        for (RequestManager manager : managers)
+            entry(manager);
+    }
+
+    private Entry entry(RequestManager manager) {
+        Entry result = entries.get(manager);
+        if (result == null) {
+            result = new Entry(manager, entries.size());
+            entries.put(manager, result);
+            ordered.add(result);
+            ready.set(result.order);
+        }
+        return result;
+    }
+
+    /** Drain one ordered snapshot. Events raised during this pass never recursively drain it. */
+    public long pollReady(long nowMs, ToLongFunction<NetworkClientDelegate.PollResult> admit) {
+        expire(nowMs);
+        if (ready.isEmpty())
+            return remainingMs(nowMs);
+        BitSet swap = batch;
+        batch = ready;
+        ready = swap;
+        long delay = Long.MAX_VALUE;
+        boolean progressed = false;
+        boolean completed = false;
+        int consumedPrefix = 0;
+        try {
+            for (int i = batch.nextSetBit(0); i >= 0; i = batch.nextSetBit(i + 1)) {
+                Entry entry = ordered.get(i);
+                ready.set(i);
+                NetworkClientDelegate.PollResult result = poll(entry.manager, nowMs);
+                consumedPrefix = i + 1;
+                progressed = true;
+                delay = Math.min(delay, admit.applyAsLong(result));
+            }
+            completed = true;
+        } finally {
+            // Do not compact BitSet once per manager. On failure, restore only the suffix
+            // whose manager polls have not completed, preserving notifications in ready.
+            if (!completed) {
+                batch.clear(0, consumedPrefix);
+                ready.or(batch);
+            }
+            batch.clear();
+            if (progressed)
+                applicationProgress.publish();
+        }
+        return Math.min(delay, remainingMs(nowMs));
+    }
+
+    /** Targeted polling for tests; production drains pollReady instead of visiting waiting managers. */
+    public NetworkClientDelegate.PollResult poll(RequestManager manager, long nowMs) {
+        expire(nowMs);
+        Entry entry = entry(manager);
+        if (!ready.get(entry.order))
+            return null;
+        ready.clear(entry.order);
+        if (entry.waiting != null)
+            entry.waiting.cancel();
+        final NetworkClientDelegate.PollResult result;
+        try {
+            result = manager.poll(nowMs);
+        } catch (RuntimeException | Error e) {
+            ready.set(entry.order);
+            throw e;
+        }
+        if (result.nextPollCondition == null) {
+            ready.set(entry.order);
+            throw new IllegalStateException("Event-only manager must declare a next poll condition");
+        } else {
+            if (entry.waiting == null)
+                entry.waiting = new Waiting(entry);
+            Waiting wait = entry.waiting;
+            wait.reset();
+            try {
+                result.nextPollCondition.register(wait);
+            } catch (RuntimeException | Error e) {
+                wait.cancel();
+                ready.set(entry.order);
+                throw e;
+            }
+            wait.armed = true;
+            if (wait.signalled || (wait.hasDeadline && wait.deadline <= nowMs))
+                wait.wake();
+            else if (wait.hasDeadline)
+                timers.add(wait);
+        }
+        return result;
+    }
+
+    /** Inspect only the ready queue and earliest timer, never all waiting conditions. */
+    public long remainingMs(long nowMs) {
+        expire(nowMs);
+        if (!ready.isEmpty())
+            return 0;
+        if (timers.isEmpty())
+            return Long.MAX_VALUE;
+        long remaining = timers.first().deadline - nowMs;
+        return remaining < 0 ? Long.MAX_VALUE : remaining;
+    }
+
+    private void expire(long nowMs) {
+        while (!timers.isEmpty() && timers.first().deadline <= nowMs)
+            timers.first().wake();
+    }
+
+    @Override
+    public void close() {
+        for (Entry entry : entries.values()) {
+            if (entry.waiting != null)
+                entry.waiting.cancel();
+        }
+        entries.clear();
+        ready.clear();
+        batch.clear();
+        ordered.clear();
+        timers.clear();
+    }
+
+    private static final class Entry {
+        private final RequestManager manager;
+        private final int order;
+        private Waiting waiting;
+
+        private Entry(RequestManager manager, int order) {
+            this.manager = manager;
+            this.order = order;
+        }
+    }
+
+    private final class Waiting implements NextPollCondition.Registration, Runnable {
+        private final Entry entry;
+        private NextPollCondition.Signal.Subscription firstSubscription;
+        private List<NextPollCondition.Signal.Subscription> additionalSubscriptions;
+        private int signalCount;
+        private long deadline = Long.MAX_VALUE;
+        private boolean hasDeadline;
+        private boolean armed;
+        private boolean signalled;
+        private boolean active;
+
+        private Waiting(Entry entry) {
+            this.entry = entry;
+        }
+
+        private void reset() {
+            deadline = Long.MAX_VALUE;
+            hasDeadline = false;
+            armed = false;
+            signalled = false;
+            signalCount = 0;
+            active = true;
+        }
+
+        @Override
+        public void onSignal(NextPollCondition.Signal signal, long observed) {
+            int index = signalCount++;
+            if (index == 0) {
+                firstSubscription = signal.subscribeReusable(observed, this, firstSubscription);
+            } else {
+                if (additionalSubscriptions == null)
+                    additionalSubscriptions = new ArrayList<>();
+                int extraIndex = index - 1;
+                if (extraIndex == additionalSubscriptions.size())
+                    additionalSubscriptions.add(null);
+                additionalSubscriptions.set(extraIndex,
+                    signal.subscribeReusable(observed, this, additionalSubscriptions.get(extraIndex)));
+            }
+        }
+
+        @Override
+        public void onDeadline(long deadlineMs) {
+            hasDeadline = true;
+            deadline = Math.min(deadline, deadlineMs);
+        }
+
+        @Override
+        public void run() {
+            wake();
+        }
+
+        private void wake() {
+            if (!active)
+                return;
+            if (!armed) {
+                signalled = true;
+                return;
+            }
+            cancel();
+            ready.set(entry.order);
+        }
+
+        private void cancel() {
+            if (!active)
+                return;
+            active = false;
+            if (firstSubscription != null)
+                firstSubscription.run();
+            if (additionalSubscriptions != null) {
+                for (int i = 0; i < signalCount - 1; i++)
+                    additionalSubscriptions.get(i).run();
+            }
+            if (hasDeadline)
+                timers.remove(this);
+            // Retain the waiter and inactive subscription slots for the next arm.
+        }
+    }
+}

@@ -82,6 +82,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -970,6 +971,37 @@ public class StreamsMembershipManagerTest {
     }
 
     @Test
+    public void testAssignedCallbackNotifiesAfterEnablingPartitions() {
+        setupStreamsRebalanceDataWithOneSubtopologyOneSourceTopic(SUBTOPOLOGY_ID_0, TOPIC_0);
+        final Set<StreamsRebalanceData.TaskId> activeTasks =
+            Set.of(new StreamsRebalanceData.TaskId(SUBTOPOLOGY_ID_0, PARTITION_0));
+        joining();
+
+        reconcile(makeHeartbeatResponseWithActiveTasks(SUBTOPOLOGY_ID_0, List.of(PARTITION_0)));
+
+        final StreamsTasksAssignedEvent onTasksAssignedCallbackExecuted =
+            verifyOnTasksAssignedCallbackNeededEventAddedToBackgroundEventHandler(
+                activeTasks,
+                Set.of(),
+                Set.of()
+            );
+        final Set<TopicPartition> expectedFullPartitionsToAssign = Set.of(new TopicPartition(TOPIC_0, PARTITION_0));
+        final Set<TopicPartition> expectedNewPartitionsToAssign = expectedFullPartitionsToAssign;
+        verifyInStateReconcilingBeforeOnTaskAssignedCallbackExecuted(expectedFullPartitionsToAssign, expectedNewPartitionsToAssign);
+
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
+
+        membershipManager.applyAssignment(onTasksAssignedCallbackExecuted.assignedPartitions(), onTasksAssignedCallbackExecuted.addedPartitions());
+        membershipManager.onTasksAssignedCallbackCompleted(new StreamsOnTasksAssignedCallbackCompletedEvent(
+            onTasksAssignedCallbackExecuted.future(), Optional.empty()));
+
+        InOrder order = inOrder(subscriptionState, positionChanged);
+        order.verify(subscriptionState).enablePartitionsAwaitingCallback(expectedFullPartitionsToAssign);
+        order.verify(positionChanged).run();
+    }
+
+    @Test
     public void testReconcilingAndAssignmentCallbackFails() {
         setupStreamsRebalanceDataWithOneSubtopologyOneSourceTopic(SUBTOPOLOGY_ID_0, TOPIC_0);
         final Set<StreamsRebalanceData.TaskId> activeTasks =
@@ -988,12 +1020,16 @@ public class StreamsMembershipManagerTest {
         final Set<TopicPartition> expectedNewPartitionsToAssign = expectedFullPartitionsToAssign;
         verifyInStateReconcilingBeforeOnTaskAssignedCallbackExecuted(expectedFullPartitionsToAssign, expectedNewPartitionsToAssign);
 
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
+
         // Assignment is applied before callback is invoked, then callback fails
         membershipManager.applyAssignment(onTasksAssignedCallbackExecuted.assignedPartitions(), onTasksAssignedCallbackExecuted.addedPartitions());
         onTasksAssignedCallbackExecuted.future().completeExceptionally(new RuntimeException("KABOOM!"));
 
         verifyInStateReconciling(membershipManager);
         verify(subscriptionState, never()).enablePartitionsAwaitingCallback(any());
+        verify(positionChanged, never()).run();
     }
 
     @Test
@@ -2055,6 +2091,8 @@ public class StreamsMembershipManagerTest {
 
     @Test
     public void testTransitionToFatalMarksPendingRevocationBeforeCallback() {
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
         TopicPartition ownedPartition = new TopicPartition(TOPIC_0, PARTITION_0);
         Set<TopicPartition> ownedPartitions = Collections.singleton(ownedPartition);
         when(subscriptionState.assignedPartitions()).thenReturn(ownedPartitions);
@@ -2063,13 +2101,16 @@ public class StreamsMembershipManagerTest {
         membershipManager.transitionToFatal();
 
         // Verify markPendingRevocation is called before the callback event is enqueued
-        InOrder inOrder = inOrder(subscriptionState, backgroundEventHandler);
+        InOrder inOrder = inOrder(subscriptionState, positionChanged, backgroundEventHandler);
         inOrder.verify(subscriptionState).markPendingRevocation(ownedPartitions);
+        inOrder.verify(positionChanged).run();
         inOrder.verify(backgroundEventHandler).add(any(StreamsOnAllTasksLostCallbackNeededEvent.class));
     }
 
     @Test
     public void testTransitionToStaleMarksPendingRevocationBeforeCallback() {
+        Runnable positionChanged = mock(Runnable.class);
+        membershipManager.setPositionStateChangeListener(positionChanged);
         TopicPartition ownedPartition = new TopicPartition(TOPIC_0, PARTITION_0);
         Set<TopicPartition> ownedPartitions = Collections.singleton(ownedPartition);
         when(subscriptionState.assignedPartitions()).thenReturn(ownedPartitions);
@@ -2080,8 +2121,9 @@ public class StreamsMembershipManagerTest {
         membershipManager.onHeartbeatRequestGenerated();
 
         // Verify markPendingRevocation is called before the callback event is enqueued
-        InOrder inOrder = inOrder(subscriptionState, backgroundEventHandler);
+        InOrder inOrder = inOrder(subscriptionState, positionChanged, backgroundEventHandler);
         inOrder.verify(subscriptionState).markPendingRevocation(ownedPartitions);
+        inOrder.verify(positionChanged).run();
         inOrder.verify(backgroundEventHandler).add(any(StreamsOnAllTasksLostCallbackNeededEvent.class));
     }
 

@@ -53,6 +53,31 @@ public class OffsetCommitCallbackInvokerTest {
     }
 
     @Test
+    public void testPublicationPrecedesWakeup() {
+        OffsetCommitCallback callback = mock(OffsetCommitCallback.class);
+        Map<TopicPartition, OffsetAndMetadata> offsets = Collections.emptyMap();
+        offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(consumerInterceptors,
+            () -> offsetCommitCallbackInvoker.executeCallbacks());
+        offsetCommitCallbackInvoker.enqueueUserCallbackInvocation(callback, offsets, null);
+        verify(callback).onComplete(offsets, null);
+    }
+
+    @Test
+    public void testNotificationDoesNotExecuteCallbacksOrWakeForEmptyInterceptors() {
+        Runnable wakeup = mock(Runnable.class);
+        OffsetCommitCallback callback = mock(OffsetCommitCallback.class);
+        offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(consumerInterceptors, wakeup);
+        when(consumerInterceptors.isEmpty()).thenReturn(true);
+        offsetCommitCallbackInvoker.enqueueInterceptorInvocation(Collections.emptyMap());
+        verify(wakeup, never()).run();
+        offsetCommitCallbackInvoker.enqueueUserCallbackInvocation(callback, Collections.emptyMap(), null);
+        verify(wakeup).run();
+        verify(callback, never()).onComplete(any(), any());
+        offsetCommitCallbackInvoker.executeCallbacks();
+        verify(callback).onComplete(Collections.emptyMap(), null);
+    }
+
+    @Test
     public void testMultipleUserCallbacksInvoked() {
         final TopicPartition t0 = new TopicPartition("t0", 2);
         Map<TopicPartition, OffsetAndMetadata> offsets1 =

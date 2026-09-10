@@ -383,6 +383,8 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
      * sending heartbeat until the next poll.
      */
     private final Timer pollTimer;
+    private ApplicationPollWait applicationPollWait;
+    private long appliedWaitActivityMs = Long.MIN_VALUE;
 
     public StreamsGroupHeartbeatRequestManager(final LogContext logContext,
                                                final Time time,
@@ -454,7 +456,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
             maybePropagateCoordinatorFatalErrorEvent();
             return NetworkClientDelegate.PollResult.EMPTY;
         }
-        pollTimer.update(currentTimeMs);
+        updatePollTimer(currentTimeMs);
         if (pollTimer.isExpired() && !membershipManager.isLeavingGroup()) {
             logger.warn("Consumer poll timeout has expired. This means the time between " +
                 "subsequent calls to poll() was longer than the configured max.poll.interval.ms, " +
@@ -529,7 +531,7 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        pollTimer.update(currentTimeMs);
+        updatePollTimer(currentTimeMs);
         if (pollTimer.isExpired() ||
             membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
 
@@ -538,7 +540,35 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
 
+    void setApplicationPollWait(ApplicationPollWait applicationPollWait) {
+        this.applicationPollWait = applicationPollWait;
+    }
+
+    private void updatePollTimer(long nowMs) {
+        pollTimer.update(nowMs);
+        if (applicationPollWait != null) {
+            long currentMs = pollTimer.currentTimeMs();
+            long activityMs = Math.min(currentMs, applicationPollWait.activityMs(currentMs));
+            if (activityMs > appliedWaitActivityMs) {
+                appliedWaitActivityMs = activityMs;
+                long elapsedMs = currentMs - activityMs;
+                pollTimer.reset(elapsedMs >= maxPollIntervalMs ? 0L : maxPollIntervalMs - elapsedMs);
+            }
+        }
+    }
+
     public void resetPollTimer(final long pollMs) {
+        if (applicationPollWait != null) {
+            pollTimer.update(pollMs);
+            boolean wasExpired = pollTimer.isExpired();
+            applicationPollWait.recordActivity(pollMs);
+            // Recompute from the activity timestamp, not from delivery time of a delayed event.
+            appliedWaitActivityMs = Long.MIN_VALUE;
+            updatePollTimer(pollTimer.currentTimeMs());
+            if (wasExpired && pollTimer.notExpired())
+                membershipManager.maybeRejoinStaleMember();
+            return;
+        }
         pollTimer.update(pollMs);
         if (pollTimer.isExpired()) {
             logger.warn("Time between subsequent calls to poll() was longer than the configured " +

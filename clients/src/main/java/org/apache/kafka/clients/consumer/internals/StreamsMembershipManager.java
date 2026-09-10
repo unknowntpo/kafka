@@ -69,6 +69,16 @@ import static java.util.Collections.unmodifiableList;
  */
 public class StreamsMembershipManager implements RequestManager {
 
+    private Runnable positionStateChangeListener = () -> { };
+
+    /**
+     * Install a background-thread notification for subscription mutations. The listener must only
+     * publish readiness; retained position and fetch work is advanced on the next owner turn.
+     */
+    void setPositionStateChangeListener(Runnable listener) {
+        positionStateChangeListener = listener;
+    }
+
     /**
      * A data structure to represent the current task assignment, and target task assignment of a member in a
      * streams group.
@@ -528,6 +538,7 @@ public class StreamsMembershipManager implements RequestManager {
 
         // Mark partitions as pending revocation to stop fetching before callback
         subscriptionState.markPendingRevocation(subscriptionState.assignedPartitions());
+        positionStateChangeListener.run();
 
         final CompletableFuture<Void> onAllTasksLostCallbackExecuted = requestOnAllTasksLostCallbackInvocation();
         staleMemberAssignmentRelease = onAllTasksLostCallbackExecuted.whenComplete((result, error) -> {
@@ -569,6 +580,7 @@ public class StreamsMembershipManager implements RequestManager {
 
         // Mark partitions as pending revocation to stop fetching before callback
         subscriptionState.markPendingRevocation(subscriptionState.assignedPartitions());
+        positionStateChangeListener.run();
 
         CompletableFuture<Void> onAllTasksLostCallbackExecuted = requestOnAllTasksLostCallbackInvocation();
         onAllTasksLostCallbackExecuted.whenComplete((result, error) -> {
@@ -661,6 +673,7 @@ public class StreamsMembershipManager implements RequestManager {
         notifyAssignmentChange(Collections.emptySet());
         currentAssignment = LocalAssignment.NONE;
         targetAssignment = LocalAssignment.NONE;
+        positionStateChangeListener.run();
     }
 
     /**
@@ -884,6 +897,7 @@ public class StreamsMembershipManager implements RequestManager {
 
         // Mark partitions as pending revocation to stop fetching before callback
         subscriptionState.markPendingRevocation(subscriptionState.assignedPartitions());
+        positionStateChangeListener.run();
 
         CompletableFuture<Void> onAllTasksLostCallbackExecuted = requestOnAllTasksLostCallbackInvocation();
         onAllTasksLostCallbackExecuted.whenComplete((result, error) -> {
@@ -1028,6 +1042,7 @@ public class StreamsMembershipManager implements RequestManager {
                 transitionTo(MemberState.UNSUBSCRIBED);
             }
             subscriptionState.unsubscribe();
+            positionStateChangeListener.run();
             notifyAssignmentChange(Collections.emptySet());
             return CompletableFuture.completedFuture(null);
         }
@@ -1075,6 +1090,7 @@ public class StreamsMembershipManager implements RequestManager {
     private void leaving() {
         clearTaskAndPartitionAssignment();
         subscriptionState.unsubscribe();
+        positionStateChangeListener.run();
         transitionToSendingLeaveGroup(false);
     }
 
@@ -1239,6 +1255,7 @@ public class StreamsMembershipManager implements RequestManager {
         final SortedSet<TopicPartition> partitionsToRevoke = topicPartitionsForActiveTasks(activeTasksToRevoke);
         log.debug("Marking partitions pending for revocation: {}", partitionsToRevoke);
         subscriptionState.markPendingRevocation(partitionsToRevoke);
+        positionStateChangeListener.run();
 
         CompletableFuture<Void> tasksRevoked = new CompletableFuture<>();
         CompletableFuture<Void> onTasksRevokedCallbackExecuted = requestOnTasksRevokedCallbackInvocation(activeTasksToRevoke);
@@ -1291,6 +1308,7 @@ public class StreamsMembershipManager implements RequestManager {
         partitionsAssignedAndCallbackExecuted.whenComplete((__, callbackError) -> {
             if (callbackError == null) {
                 subscriptionState.enablePartitionsAwaitingCallback(partitionsToAssign);
+                positionStateChangeListener.run();
             } else {
                 if (!partitionsToAssignNotPreviouslyOwned.isEmpty() && subscriptionState.assignedPartitions().containsAll(partitionsToAssignNotPreviouslyOwned)) {
                     log.warn("Leaving newly assigned partitions {} marked as non-fetchable and not " +
@@ -1312,6 +1330,7 @@ public class StreamsMembershipManager implements RequestManager {
         final SortedSet<TopicPartition> partitionsToRelease = topicPartitionsForActiveTasks(activeTasksToRelease);
         log.debug("Marking lost partitions pending for revocation: {}", partitionsToRelease);
         subscriptionState.markPendingRevocation(partitionsToRelease);
+        positionStateChangeListener.run();
 
         return requestOnAllTasksLostCallbackInvocation();
     }

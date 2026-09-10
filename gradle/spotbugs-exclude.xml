@@ -733,4 +733,29 @@ For a detailed description of spotbugs bug categories, see https://spotbugs.read
         <Bug pattern="AT_NONATOMIC_64BIT_PRIMITIVE"/>
     </Match>
 
+    <!-- A4 managers and condition subscriptions are confined to ConsumerNetworkThread.
+         Input from other threads must use the application event queue and network wakeup. -->
+    <Match>
+        <Class name="org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread"/>
+        <Field name="managersRegistered"/>
+        <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE"/>
+    </Match>
+    <Match>
+        <Class name="org.apache.kafka.clients.consumer.internals.OffsetsRequestManager"/>
+        <Field name="positionResetsClosed"/>
+        <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE"/>
+    </Match>
+    <Match>
+        <Class name="org.apache.kafka.clients.consumer.internals.RequestManagerScheduler$Waiting"/>
+        <Field name="active"/>
+        <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE"/>
+    </Match>
+
+    <Match>
+        <!-- Attempt-local reconnect eligibility is produced and consumed only by the offsets owner. -->
+        <Class name="org.apache.kafka.clients.consumer.internals.OffsetsRequestManager"/>
+        <Field name="validationConnectRetryTimeMs"/>
+        <Bug pattern="AT_NONATOMIC_64BIT_PRIMITIVE"/>
+    </Match>
+
 </FindBugsFilter>

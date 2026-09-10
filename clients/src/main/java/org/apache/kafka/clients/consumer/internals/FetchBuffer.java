@@ -19,6 +19,7 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.internals.IdempotentCloser;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
 
@@ -50,6 +51,9 @@ import java.util.function.Predicate;
 public class FetchBuffer implements AutoCloseable {
 
     private final Logger log;
+    private final Time time;
+    private final ApplicationPollWait applicationPollWait = new ApplicationPollWait();
+    private volatile Runnable onWaitRegistered = () -> { };
     private final ConcurrentLinkedQueue<CompletedFetch> completedFetches;
     private final Lock lock;
     private final Condition blockingCondition;
@@ -60,10 +64,27 @@ public class FetchBuffer implements AutoCloseable {
     private CompletedFetch nextInLineFetch;
 
     public FetchBuffer(final LogContext logContext) {
+        this(logContext, Time.SYSTEM);
+    }
+
+    FetchBuffer(final LogContext logContext, final Time time) {
+        this.time = time;
         this.log = logContext.logger(FetchBuffer.class);
         this.completedFetches = new ConcurrentLinkedQueue<>();
         this.lock = new ReentrantLock();
         this.blockingCondition = lock.newCondition();
+    }
+
+    void setWaitRegistrationListener(Runnable listener) {
+        onWaitRegistered = listener;
+    }
+
+    void recordPollActivity(long nowMs) {
+        applicationPollWait.recordActivity(nowMs);
+    }
+
+    ApplicationPollWait applicationPollWait() {
+        return applicationPollWait;
     }
 
     /**
@@ -106,6 +127,7 @@ public class FetchBuffer implements AutoCloseable {
         try {
             lock.lock();
             this.completedFetches.addAll(completedFetches);
+            applicationPollWait.signal(time.milliseconds());
             wokenup.set(true);
             blockingCondition.signalAll();
         } finally {
@@ -163,14 +185,14 @@ public class FetchBuffer implements AutoCloseable {
      * @param timer Timer that provides time to wait
      */
     void awaitWakeup(Timer timer) {
+        long waitEpoch = 0;
+        lock.lock();
         try {
-            lock.lock();
-
             while (!wokenup.compareAndSet(true, false)) {
                 // Update the timer before we head into the loop in case it took a while to get the lock.
                 timer.update();
 
-                if (timer.isExpired()) {
+                if (timer.isExpired() || idempotentCloser.isClosed()) {
                     // If the thread was interrupted before we start waiting, it still counts as
                     // interrupted from the point of view of the KafkaConsumer.poll(Duration) contract.
                     // We only need to check this when we are not going to wait because waiting
@@ -181,6 +203,15 @@ public class FetchBuffer implements AutoCloseable {
                     break;
                 }
 
+                if (waitEpoch == 0) {
+                    long nowMs = timer.currentTimeMs();
+                    long deadlineMs = nowMs > Long.MAX_VALUE - timer.remainingMs()
+                            ? Long.MAX_VALUE : nowMs + timer.remainingMs();
+                    // Publish the bounded wait before its listener wakes the network owner. The listener
+                    // is not a NextPollCondition signal and must not mutate scheduler state on this thread.
+                    waitEpoch = applicationPollWait.begin(nowMs, deadlineMs);
+                    onWaitRegistered.run();
+                }
                 if (!blockingCondition.await(timer.remainingMs(), TimeUnit.MILLISECONDS)) {
                     break;
                 }
@@ -188,14 +219,28 @@ public class FetchBuffer implements AutoCloseable {
         } catch (InterruptedException e) {
             throw new InterruptException("Interrupted waiting for results from fetching records", e);
         } finally {
-            lock.unlock();
-            timer.update();
+            try {
+                try {
+                    timer.update();
+                } finally {
+                    // A failed clock read leaves the timer's last valid timestamp available.
+                    // Revoke the wait even if cleanup cannot refresh that timestamp.
+                    if (waitEpoch != 0)
+                        applicationPollWait.end(waitEpoch, timer.currentTimeMs());
+                    else
+                        applicationPollWait.recordActivity(timer.currentTimeMs());
+                }
+            } finally {
+                lock.unlock();
+            }
         }
     }
 
+    /** Wake the application waiter after revoking its registration; this does not wake network I/O. */
     void wakeup() {
         try {
             lock.lock();
+            applicationPollWait.signal(time.milliseconds());
             wokenup.set(true);
             blockingCondition.signalAll();
         } finally {
@@ -264,7 +309,10 @@ public class FetchBuffer implements AutoCloseable {
             lock.lock();
 
             idempotentCloser.close(
-                    () -> retainAll(Collections.emptySet()),
+                    () -> {
+                        retainAll(Collections.emptySet());
+                        wakeup();
+                    },
                     () -> log.warn("The fetch buffer was already closed")
             );
         } finally {

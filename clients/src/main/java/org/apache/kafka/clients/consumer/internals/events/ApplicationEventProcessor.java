@@ -25,6 +25,7 @@ import org.apache.kafka.clients.consumer.internals.CommitRequestManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerMembershipManager;
 import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
+import org.apache.kafka.clients.consumer.internals.FetchRequestManager.FetchContinuation;
 import org.apache.kafka.clients.consumer.internals.OffsetAndTimestampInternal;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
 import org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManager;
@@ -63,6 +64,64 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
     private final SubscriptionState subscriptions;
     private final RequestManagers requestManagers;
     private int metadataVersionSnapshot;
+    // Lifecycle ownership only: never scanned by the network loop.
+    private final Set<AsyncPollEvent> pendingPositionEvents = new HashSet<>();
+    private boolean asyncPollContinuationsClosed;
+
+    /** Only network-thread completions may enqueue; a snapshot bounds each scheduling turn. */
+    private final class PendingFetch implements FetchContinuation {
+        private final AsyncPollEvent event;
+        private final Throwable positionError;
+
+        private PendingFetch(AsyncPollEvent event, Throwable positionError) {
+            this.event = event;
+            this.positionError = positionError;
+        }
+
+        @Override
+        public void advance() {
+            if (!event.isActive())
+                return;
+            Throwable error = positionError;
+            while (error instanceof CompletionException && error.getCause() != null)
+                error = error.getCause();
+            if (!event.isComplete() && (error instanceof org.apache.kafka.common.errors.TimeoutException
+                    || error instanceof java.util.concurrent.TimeoutException)) {
+                event.completeSuccessfully();
+                return;
+            }
+            if (maybeCompleteAsyncPollEventExceptionally(event, error))
+                return;
+            try {
+                requestManagers.fetchRequestManager.createFetchRequestsWithReconnect(event.deadlineMs(), event::isActive).whenComplete((ignored, fetchError) -> {
+                    if (!maybeCompleteAsyncPollEventExceptionally(event, fetchError))
+                        event.completeSuccessfully();
+                });
+            } catch (RuntimeException e) {
+                event.completeExceptionally(ConsumerUtils.maybeWrapAsKafkaException(e));
+            }
+        }
+
+        @Override
+        public void onClose() {
+            if (!event.isComplete())
+                event.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
+        }
+    }
+
+    public void closeFetchContinuations() {
+        asyncPollContinuationsClosed = true;
+        Set<AsyncPollEvent> pending = new HashSet<>(pendingPositionEvents);
+        pendingPositionEvents.clear();
+        if (requestManagers.fetchRequestManager != null)
+            requestManagers.fetchRequestManager.closeFetchContinuations();
+        for (AsyncPollEvent event : pending) {
+            if (!event.isComplete())
+                event.completeExceptionally(new KafkaException("Consumer closed while awaiting positions"));
+        }
+        if (requestManagers.offsetsRequestManager != null)
+            requestManagers.offsetsRequestManager.closePendingPositionResets();
+    }
 
     public ApplicationEventProcessor(final LogContext logContext,
                                      final RequestManagers requestManagers,
@@ -145,6 +204,10 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
 
             case CONSUMER_REBALANCE_LISTENER_CALLBACK_COMPLETED:
                 process((ConsumerRebalanceListenerCallbackCompletedEvent) event);
+                return;
+
+            case CANCEL_ASYNC_POLL:
+                process((CancelAsyncPollEvent) event);
                 return;
 
             case COMMIT_ON_CLOSE:
@@ -315,6 +378,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
             if (subscriptions.assignFromUser(new HashSet<>(event.partitions())))
                 metadata.requestUpdateForNewTopics();
 
+            requestManagers.offsetsRequestManager.onPositionStateChanged();
             event.future().complete(null);
         } catch (Exception e) {
             event.future().completeExceptionally(e);
@@ -434,6 +498,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
         } else {
             // If the consumer is not using the group management capabilities, we still need to clear all assignments it may have.
             subscriptions.unsubscribe();
+            requestManagers.offsetsRequestManager.onPositionStateChanged();
             event.future().complete(null);
         }
     }
@@ -443,6 +508,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
             Collection<TopicPartition> parts = event.topicPartitions().isEmpty() ?
                     subscriptions.assignedPartitions() : event.topicPartitions();
             subscriptions.requestOffsetReset(parts, event.offsetResetStrategy());
+            requestManagers.offsetsRequestManager.onPositionStateChanged();
             event.future().complete(null);
         } catch (Exception e) {
             event.future().completeExceptionally(e);
@@ -624,6 +690,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
                 metadata.currentLeader(event.partition())
             );
             subscriptions.seekUnvalidated(event.partition(), newPosition);
+            requestManagers.offsetsRequestManager.onPositionStateChanged();
             event.future().complete(null);
         } catch (Exception e) {
             event.future().completeExceptionally(e);
@@ -719,13 +786,29 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
                     new IllegalStateException("No membership manager available when processing ApplyAssignmentEvent"));
                 return;
             }
+            requestManagers.offsetsRequestManager.onPositionStateChanged();
             event.future().complete(null);
         } catch (Exception e) {
             event.future().completeExceptionally(e);
         }
     }
 
+    private void process(final CancelAsyncPollEvent event) {
+        AsyncPollEvent target = event.target();
+        target.requestCancellation();
+        pendingPositionEvents.remove(target);
+        target.completeSuccessfully();
+        requestManagers.offsetsRequestManager.onPositionStateChanged();
+        requestManagers.fetchRequestManager.onPollDemandChanged();
+    }
+
     private void process(final AsyncPollEvent event) {
+        if (!event.isActive())
+            return;
+        if (asyncPollContinuationsClosed) {
+            event.completeExceptionally(new KafkaException("Consumer closed before position preparation"));
+            return;
+        }
         // Trigger a reconciliation that can safely commit offsets if needed to rebalance,
         // as we're processing before any new fetching starts
         requestManagers.consumerMembershipManager.ifPresent(consumerMembershipManager ->
@@ -753,27 +836,31 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
             });
         }
 
-        CompletableFuture<Void> updatePositionsFuture = requestManagers.offsetsRequestManager.updateFetchPositions(event.deadlineMs());
-        event.markValidatePositionsComplete();
+        pendingPositionEvents.add(event);
+        try {
+            CompletableFuture<Void> updatePositionsFuture = requestManagers.offsetsRequestManager.updateFetchPositionsAndAwaitValidation(event.deadlineMs(), event::isActive);
+            event.markValidatePositionsComplete();
 
-        updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
-            if (maybeCompleteAsyncPollEventExceptionally(event, updatePositionsError))
-                return;
-
-            requestManagers.fetchRequestManager.createFetchRequests().whenComplete((___, fetchError) -> {
-                if (maybeCompleteAsyncPollEventExceptionally(event, fetchError))
+            updatePositionsFuture.whenComplete((__, updatePositionsError) -> {
+                pendingPositionEvents.remove(event);
+                if (!event.isActive())
                     return;
-
-                event.completeSuccessfully();
+                requestManagers.fetchRequestManager.enqueueFetchContinuation(new PendingFetch(event, updatePositionsError));
             });
-        });
+        } catch (RuntimeException e) {
+            pendingPositionEvents.remove(event);
+            if (event.isActive())
+                event.completeExceptionally(ConsumerUtils.maybeWrapAsKafkaException(e));
+        }
     }
 
     /**
-     * If there's an error to report to the user, the current event will be completed and this method will
-     * return {@code true}. Otherwise, it will return {@code false}.
+     * Stop a continuation if its event has already completed, or complete it with an error to report.
+     * A late owner result must neither start another stage nor replace the event's terminal error.
      */
     private boolean maybeCompleteAsyncPollEventExceptionally(AsyncPollEvent event, Throwable t) {
+        if (!event.isActive())
+            return true;
         if (t == null)
             return false;
 

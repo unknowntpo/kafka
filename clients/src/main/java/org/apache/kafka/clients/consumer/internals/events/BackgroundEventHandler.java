@@ -18,12 +18,16 @@ package org.apache.kafka.clients.consumer.internals.events;
 
 import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
+import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.utils.Time;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * An event handler that receives {@link BackgroundEvent background events} from the
@@ -36,10 +40,23 @@ public class BackgroundEventHandler {
     private final BlockingQueue<BackgroundEvent> backgroundEventQueue;
     private final Time time;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
+    private final Runnable wakeupApplication;
+    // The network owner adds/closes callbacks. Completion bookkeeping is safe even if a future
+    // observer removes an entry from another thread; it never runs domain work or scheduler signals.
+    private final Set<CompletableBackgroundEvent<?>> pendingCallbacks = ConcurrentHashMap.newKeySet();
+    private boolean callbacksClosed;
 
     public BackgroundEventHandler(final BlockingQueue<BackgroundEvent> backgroundEventQueue,
                                   final Time time,
                                   final AsyncConsumerMetrics asyncConsumerMetrics) {
+        this(backgroundEventQueue, time, asyncConsumerMetrics, () -> { });
+    }
+
+    public BackgroundEventHandler(final BlockingQueue<BackgroundEvent> backgroundEventQueue,
+                                  final Time time,
+                                  final AsyncConsumerMetrics asyncConsumerMetrics,
+                                  final Runnable wakeupApplication) {
+        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
         this.backgroundEventQueue = backgroundEventQueue;
         this.time = time;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
@@ -52,9 +69,44 @@ public class BackgroundEventHandler {
      */
     public void add(BackgroundEvent event) {
         Objects.requireNonNull(event, "BackgroundEvent provided to add must be non-null");
+        if (event instanceof CompletableBackgroundEvent) {
+            CompletableBackgroundEvent<?> callback = (CompletableBackgroundEvent<?>) event;
+            if (callback.deadlineMs() != Long.MAX_VALUE) {
+                IllegalArgumentException error = new IllegalArgumentException(
+                        "Background callback deadlines require network-owner timeout handling");
+                callback.future().completeExceptionally(error);
+                throw error;
+            }
+            if (callbacksClosed) {
+                callback.future().completeExceptionally(new KafkaException("Consumer closed before callback publication"));
+                return;
+            }
+            pendingCallbacks.add(callback);
+            callback.future().whenComplete((ignored, error) -> pendingCallbacks.remove(callback));
+        }
         event.setEnqueuedMs(time.milliseconds());
         asyncConsumerMetrics.recordBackgroundEventQueueSize(backgroundEventQueue.size() + 1);
         backgroundEventQueue.add(event);
+        // Publish the event before waking its observer; the notifier must retain a wake before parking.
+        wakeupApplication.run();
+    }
+
+    /**
+     * Terminate callbacks on their network owner, including events already drained by the app.
+     * Close before completing the snapshot: completion may attempt to publish another callback.
+     */
+    public void closePendingCallbacks() {
+        callbacksClosed = true;
+        List<CompletableBackgroundEvent<?>> closing = new ArrayList<>(pendingCallbacks);
+        pendingCallbacks.clear();
+        for (CompletableBackgroundEvent<?> callback : closing)
+            callback.future().completeExceptionally(new TimeoutException(String.format(
+                    "%s could not be completed before the consumer closed", callback.getClass().getSimpleName())));
+    }
+
+    // Visible for lifecycle tests; this is bookkeeping, not an application-thread completion API.
+    public int pendingCallbackCount() {
+        return pendingCallbacks.size();
     }
 
     /**

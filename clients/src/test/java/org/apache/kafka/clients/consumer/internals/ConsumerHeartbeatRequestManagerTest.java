@@ -84,6 +84,7 @@ import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -118,6 +119,10 @@ public class ConsumerHeartbeatRequestManagerTest
         this.subscriptions = mock(SubscriptionState.class);
         this.membershipManager = mock(ConsumerMembershipManager.class);
         super.membershipManager = this.membershipManager;
+        coordinatorInput = new NextPollCondition.Signal();
+        membershipInput = new NextPollCondition.Signal();
+        when(coordinatorRequestManager.stateChanged()).thenAnswer(invocation -> coordinatorInput.await());
+        when(membershipManager.heartbeatStateChanged()).thenAnswer(invocation -> membershipInput.await());
         Metrics metrics = new Metrics(time);
         ConsumerConfig config = mock(ConsumerConfig.class);
 
@@ -645,6 +650,82 @@ public class ConsumerHeartbeatRequestManagerTest
             new ConsumerGroupHeartbeatResponseData.Assignment();
         assignmentTopic1.setTopicPartitions(Collections.singletonList(tpTopic1));
         when(metadata.topicNames()).thenReturn(Collections.singletonMap(topicId, "topic1"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testNetworkActivityRequiresIndependentApplicationProgress(boolean publishApplicationProgress) {
+        heartbeatRequestManager = createHeartbeatRequestManager(coordinatorRequestManager,
+                membershipManager, heartbeatState, heartbeatRequestState, backgroundEventHandler);
+        when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
+        when(membershipManager.isLeavingGroup()).thenReturn(false);
+        heartbeatRequestManager.resetPollTimer(time.milliseconds());
+        // The network loop keeps running throughout a long application wait. Computing a wait
+        // bound is not proof that the app actually ran; only resetPollTimer renews its activity.
+        for (int i = 1; i <= 10; i++) {
+            time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS / 10);
+            if (publishApplicationProgress && i % 4 == 0)
+                heartbeatRequestManager.resetPollTimer(time.milliseconds());
+            heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+            heartbeatRequestManager.poll(time.milliseconds());
+        }
+        verify(membershipManager, times(publishApplicationProgress ? 0 : 1))
+                .transitionToSendingLeaveGroup(true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testRegisteredInternalWaitKeepsHeartbeatActiveUntilNotification(boolean appReturns) {
+        heartbeatRequestManager = createHeartbeatRequestManager(coordinatorRequestManager,
+                membershipManager, heartbeatState, heartbeatRequestState, backgroundEventHandler);
+        when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
+        ApplicationPollWait wait = new ApplicationPollWait();
+        heartbeatRequestManager.setApplicationPollWait(wait);
+        heartbeatRequestManager.resetPollTimer(time.milliseconds());
+        long epoch = wait.begin(time.milliseconds(), time.milliseconds() + 10 * DEFAULT_MAX_POLL_INTERVAL_MS);
+        time.sleep(2 * DEFAULT_MAX_POLL_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        verify(membershipManager, never()).transitionToSendingLeaveGroup(true);
+        wait.signal(time.milliseconds());
+        if (appReturns)
+            wait.end(epoch, time.milliseconds()); // The app may now be stuck in a user callback.
+        time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS - 1);
+        wait.signal(time.milliseconds()); // Repeated notification must not renew the app.
+        heartbeatRequestManager.poll(time.milliseconds());
+        verify(membershipManager, never()).transitionToSendingLeaveGroup(true);
+        time.sleep(1);
+        heartbeatRequestManager.poll(time.milliseconds());
+        verify(membershipManager).transitionToSendingLeaveGroup(true);
+    }
+
+    @Test
+    public void testDelayedPollEventCannotExtendOldActivity() {
+        heartbeatRequestManager = createHeartbeatRequestManager(coordinatorRequestManager,
+                membershipManager, heartbeatState, heartbeatRequestState, backgroundEventHandler);
+        when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
+        heartbeatRequestManager.setApplicationPollWait(new ApplicationPollWait());
+        long originalPollMs = time.milliseconds();
+        heartbeatRequestManager.resetPollTimer(originalPollMs);
+        time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS - 1);
+        heartbeatRequestManager.poll(time.milliseconds());
+        heartbeatRequestManager.resetPollTimer(originalPollMs);
+        time.sleep(1);
+        heartbeatRequestManager.poll(time.milliseconds());
+        verify(membershipManager).transitionToSendingLeaveGroup(true);
+    }
+
+    @Test
+    public void testExpiredInternalWaitCannotKeepMembershipAlive() {
+        heartbeatRequestManager = createHeartbeatRequestManager(coordinatorRequestManager,
+                membershipManager, heartbeatState, heartbeatRequestState, backgroundEventHandler);
+        when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
+        ApplicationPollWait wait = new ApplicationPollWait();
+        heartbeatRequestManager.setApplicationPollWait(wait);
+        heartbeatRequestManager.resetPollTimer(time.milliseconds());
+        wait.begin(time.milliseconds(), time.milliseconds() + 2 * DEFAULT_MAX_POLL_INTERVAL_MS);
+        time.sleep(3 * DEFAULT_MAX_POLL_INTERVAL_MS);
+        heartbeatRequestManager.poll(time.milliseconds());
+        verify(membershipManager).transitionToSendingLeaveGroup(true);
     }
 
     @Test

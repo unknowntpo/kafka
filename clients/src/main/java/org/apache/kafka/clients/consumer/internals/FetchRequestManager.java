@@ -23,16 +23,22 @@ import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.PollResult;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate.UnsentRequest;
 import org.apache.kafka.clients.consumer.internals.events.CreateFetchRequestsEvent;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
@@ -46,6 +52,81 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     private final NetworkClientDelegate networkClientDelegate;
     private final long retryBackoffMs;
     private CompletableFuture<Void> pendingFetchRequestFuture;
+    // Network-owner handoffs, drained only up to the boundary captured by onPollBatchStart().
+    private final ArrayDeque<FetchContinuation> continuations = new ArrayDeque<>();
+    // Local demand/continuation changes activate this manager; network wakeup alone does not.
+    private final NextPollCondition.Signal inputChanged = new NextPollCondition.Signal();
+    private int continuationBatchSize = -1;
+    private boolean continuationsClosed;
+    private final List<PendingFetchDemand> reconnectDemands = new ArrayList<>();
+    private long reconnectDeadlineMs = Long.MAX_VALUE;
+
+    private static final class PendingFetchDemand {
+        private final long deadlineMs;
+        private final BooleanSupplier canFetch;
+        private boolean attempted;
+        private final CompletableFuture<Void> future = new CompletableFuture<>();
+
+        private PendingFetchDemand(long deadlineMs, BooleanSupplier canFetch) {
+            this.deadlineMs = deadlineMs;
+            this.canFetch = canFetch;
+        }
+    }
+
+    /**
+     * Prepare requests, retaining work skipped by transport reconnect backoff until its actual
+     * deadline. Completion still describes preparation, not receipt of records. The no-argument
+     * createFetchRequests method remains a single attempt, including prefetch and close callers.
+     * The first attempt is preserved even for poll(Duration.ZERO); the deadline bounds retries.
+     * This does not yet retain work blocked on metadata, positions or buffer capacity.
+     */
+    public CompletableFuture<Void> createFetchRequestsWithReconnect(long deadlineMs, BooleanSupplier canFetch) {
+        PendingFetchDemand demand = new PendingFetchDemand(deadlineMs, canFetch);
+        if (continuationsClosed) {
+            demand.future.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
+        } else {
+            reconnectDemands.add(demand);
+            inputChanged.publish();
+        }
+        return demand.future;
+    }
+
+
+    /** Network-thread-confined operation handoff; the owner rechecks permission in advance. */
+    public interface FetchContinuation {
+        void advance();
+        void onClose();
+    }
+
+    public void enqueueFetchContinuation(FetchContinuation continuation) {
+        if (continuationsClosed) {
+            continuation.onClose();
+            return;
+        }
+        continuations.addLast(continuation);
+        inputChanged.publish();
+    }
+
+    /** Recheck retained work after an application poll loses permission, on the network owner. */
+    public void onPollDemandChanged() {
+        if (!continuationsClosed && (!continuations.isEmpty() || !reconnectDemands.isEmpty()))
+            inputChanged.publish();
+    }
+
+    @Override
+    public void onPollBatchStart() {
+        continuationBatchSize = continuations.size();
+    }
+
+    public void closeFetchContinuations() {
+        continuationsClosed = true;
+        List<PendingFetchDemand> closingDemands = new ArrayList<>(reconnectDemands);
+        reconnectDemands.clear();
+        closingDemands.forEach(demand -> demand.future.completeExceptionally(
+                new KafkaException("Consumer closed before fetch preparation")));
+        while (!continuations.isEmpty())
+            continuations.removeFirst().onClose();
+    }
 
     FetchRequestManager(final LogContext logContext,
                         final Time time,
@@ -64,7 +145,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
 
     @Override
     protected boolean isUnavailable(Node node) {
-        return networkClientDelegate.isUnavailable(node);
+        boolean unavailable = networkClientDelegate.isUnavailable(node);
+        if (unavailable) {
+            long nowMs = time.milliseconds();
+            long delayMs = networkClientDelegate.connectionDelay(node, nowMs);
+            long deadlineMs = nowMs > Long.MAX_VALUE - delayMs ? Long.MAX_VALUE : nowMs + delayMs;
+            reconnectDeadlineMs = Math.min(reconnectDeadlineMs, deadlineMs);
+        }
+        return unavailable;
     }
 
     @Override
@@ -108,6 +196,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
             pendingFetchRequestFuture = future;
         }
 
+        inputChanged.publish();
         return future;
     }
 
@@ -116,11 +205,28 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public PollResult poll(long currentTimeMs) {
-        return pollInternal(
+        int batch = continuationBatchSize < 0 ? continuations.size() : continuationBatchSize;
+        continuationBatchSize = -1;
+        for (int i = 0; i < batch && !continuations.isEmpty(); i++)
+            continuations.removeFirst().advance();
+        NextPollCondition input = inputChanged.await();
+        reconnectDeadlineMs = Long.MAX_VALUE;
+        PollResult result = pollInternal(
             this::prepareFetchRequests,
             this::handleFetchSuccess,
             this::handleFetchFailure
         );
+        // Publications while executing this batch must survive condition registration.
+        if (!continuations.isEmpty())
+            inputChanged.publish();
+        if (!reconnectDemands.isEmpty()) {
+            long nowMs = time.milliseconds();
+            long nextDelayMs = Math.max(0, reconnectDeadlineMs - nowMs);
+            for (PendingFetchDemand demand : reconnectDemands)
+                nextDelayMs = Math.min(nextDelayMs, Math.max(0, demand.deadlineMs - nowMs));
+            input = NextPollCondition.anyOf(input, NextPollCondition.after(nowMs, nextDelayMs));
+        }
+        return new PollResult(result.timeUntilNextPollMs, result.unsentRequests, input);
     }
 
     /**
@@ -128,6 +234,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public PollResult pollOnClose(long currentTimeMs) {
+        closeFetchContinuations();
         // There needs to be a pending fetch request for pollInternal to create the requests.
         createFetchRequests();
 
@@ -152,7 +259,10 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     private PollResult pollInternal(FetchRequestPreparer fetchRequestPreparer,
                                     ResponseHandler<ClientResponse> successHandler,
                                     ResponseHandler<Throwable> errorHandler) {
-        if (pendingFetchRequestFuture == null) {
+        CompletableFuture<Void> currentFetchRequestFuture = pendingFetchRequestFuture;
+        pendingFetchRequestFuture = null;
+        List<PendingFetchDemand> currentDemands = takeActiveDemands();
+        if (currentFetchRequestFuture == null && currentDemands.isEmpty()) {
             // If no explicit request for creating fetch requests was issued, just short-circuit.
             return PollResult.EMPTY;
         }
@@ -168,7 +278,9 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                     // the data in the fetch buffer is consumed.
                     fetchBuffer.wakeup();
                 }
-                pendingFetchRequestFuture.complete(null);
+                if (currentFetchRequestFuture != null)
+                    currentFetchRequestFuture.complete(null);
+                finishFetchDemands(currentDemands);
                 return PollResult.EMPTY;
             }
 
@@ -186,16 +298,58 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
             }).collect(Collectors.toList());
 
-            pendingFetchRequestFuture.complete(null);
+            if (currentFetchRequestFuture != null)
+                currentFetchRequestFuture.complete(null);
+            finishFetchDemands(currentDemands);
             return new PollResult(requests);
         } catch (Throwable t) {
             // A "dummy" poll result is returned here rather than rethrowing the error because any error
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
-            pendingFetchRequestFuture.completeExceptionally(t);
+            if (currentFetchRequestFuture != null)
+                currentFetchRequestFuture.completeExceptionally(t);
+            currentDemands.forEach(demand -> demand.future.completeExceptionally(t));
             return PollResult.EMPTY;
-        } finally {
-            pendingFetchRequestFuture = null;
+        }
+    }
+
+    private List<PendingFetchDemand> takeActiveDemands() {
+        List<PendingFetchDemand> currentDemands = reconnectDemands.isEmpty()
+                ? List.of() : new ArrayList<>(reconnectDemands);
+        reconnectDemands.clear();
+        if (!currentDemands.isEmpty())
+            currentDemands.removeIf(demand -> {
+                if (continuationsClosed)
+                    demand.future.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
+                else if (!demand.canFetch.getAsBoolean())
+                    demand.future.complete(null);
+                if (demand.attempted && time.milliseconds() >= demand.deadlineMs)
+                    demand.future.completeExceptionally(new TimeoutException("Fetch preparation deadline expired"));
+                demand.attempted = true;
+                return demand.future.isDone();
+            });
+        return currentDemands;
+    }
+
+    @Override
+    protected void closeInternal(Timer timer) {
+        closeFetchContinuations();
+        super.closeInternal(timer);
+    }
+
+    private void finishFetchDemands(List<PendingFetchDemand> demands) {
+        for (PendingFetchDemand demand : demands) {
+            if (demand.future.isDone())
+                continue;
+            if (continuationsClosed)
+                demand.future.completeExceptionally(new KafkaException("Consumer closed before fetch preparation"));
+            else if (reconnectDeadlineMs != Long.MAX_VALUE) {
+                if (time.milliseconds() >= demand.deadlineMs)
+                    demand.future.completeExceptionally(new TimeoutException("Fetch preparation deadline expired"));
+                else
+                    reconnectDemands.add(demand);
+            } else
+                demand.future.complete(null);
         }
     }
 

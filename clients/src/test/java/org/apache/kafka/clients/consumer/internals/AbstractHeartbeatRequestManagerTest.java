@@ -19,6 +19,8 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.common.utils.LogCaptureAppender;
@@ -39,6 +41,8 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -63,6 +67,8 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
     protected static final long DEFAULT_RETRY_BACKOFF_MAX_MS = 1000;
     protected static final double DEFAULT_HEARTBEAT_JITTER_MS = 0.0;
 
+    protected NextPollCondition.Signal coordinatorInput;
+    protected NextPollCondition.Signal membershipInput;
     protected Time time;
     protected Timer pollTimer;
     protected CoordinatorRequestManager coordinatorRequestManager;
@@ -83,6 +89,127 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
 
     protected abstract ClientResponse createHeartbeatResponse(
         NetworkClientDelegate.UnsentRequest request, Errors error, int heartbeatIntervalMs);
+
+    @Test
+    public void testConditionWaitsForCoordinatorAndOnlyRunsNextBatch() {
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            assertTrue(scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.isEmpty());
+            for (int i = 0; i < 100; i++) {
+                time.sleep(1);
+                assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            }
+            verify(membershipManager, never()).onHeartbeatRequestGenerated();
+            when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(new Node(1, "localhost", 9092)));
+            coordinatorInput.publish();
+            verify(membershipManager, never()).onHeartbeatRequestGenerated();
+            assertEquals(1, scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.size());
+            assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+        }
+    }
+
+    @Test
+    public void testConditionIgnoresExpiredIntervalWhileInFlightAndWakesOnResponse() {
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            NetworkClientDelegate.UnsentRequest request = scheduler.poll(heartbeatRequestManager, time.milliseconds())
+                .unsentRequests.get(0);
+            time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+            for (int i = 0; i < 100; i++) {
+                time.sleep(1);
+                assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            }
+            assertTrue(scheduler.remainingMs(time.milliseconds()) > 0);
+            request.handler().onComplete(createHeartbeatResponse(request, Errors.NONE));
+            assertEquals(0, scheduler.remainingMs(time.milliseconds()));
+            assertNotNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+        }
+    }
+
+    @Test
+    public void testConditionFailurePreservesBackoffAcrossCoordinatorNotification() {
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            NetworkClientDelegate.UnsentRequest request = scheduler.poll(heartbeatRequestManager, time.milliseconds())
+                .unsentRequests.get(0);
+            request.handler().onFailure(time.milliseconds(), new TimeoutException("retry"));
+            NetworkClientDelegate.PollResult retry = scheduler.poll(heartbeatRequestManager, time.milliseconds());
+            assertTrue(retry.unsentRequests.isEmpty());
+            long delay = retry.timeUntilNextPollMs;
+            assertTrue(delay > 1);
+            time.sleep(1);
+            coordinatorInput.publish();
+            NetworkClientDelegate.PollResult notified = scheduler.poll(heartbeatRequestManager, time.milliseconds());
+            assertTrue(notified.unsentRequests.isEmpty());
+            assertEquals(delay - 1, notified.timeUntilNextPollMs);
+            time.sleep(delay - 2);
+            assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            time.sleep(1);
+            assertEquals(1, scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.size());
+        }
+    }
+
+    @Test
+    public void testConditionMembershipUnblocksSkippedHeartbeat() {
+        when(membershipManager.shouldSkipHeartbeat()).thenReturn(true);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            assertTrue(scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.isEmpty());
+            time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+            assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
+            when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
+            membershipInput.publish();
+            assertEquals(1, scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.size());
+        }
+    }
+
+    @Test
+    public void testConditionPollTimerExpiryStillSendsLeaveWhileInFlight() {
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            assertEquals(1, scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.size());
+            time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS - DEFAULT_HEARTBEAT_INTERVAL_MS - 1);
+            assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            time.sleep(1);
+            assertEquals(1, scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.size());
+            verify(membershipManager).transitionToSendingLeaveGroup(true);
+        }
+    }
+
+    @Test
+    public void testConditionDoesNotRearmExpiredPollTimerWhileAlreadyLeaving() {
+        when(membershipManager.isLeavingGroup()).thenReturn(true);
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            assertEquals(1, scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.size());
+            time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
+            assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            membershipInput.publish();
+            NetworkClientDelegate.PollResult result = scheduler.poll(heartbeatRequestManager, time.milliseconds());
+            assertTrue(result.unsentRequests.isEmpty());
+            assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+            assertEquals(Long.MAX_VALUE, scheduler.remainingMs(time.milliseconds()));
+            assertNull(scheduler.poll(heartbeatRequestManager, time.milliseconds()));
+            verify(membershipManager, never()).transitionToSendingLeaveGroup(true);
+        }
+    }
+
+    @Test
+    public void testConditionResetAndCloseNotifyButDoNotRunInline() {
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            scheduler.poll(heartbeatRequestManager, time.milliseconds());
+            heartbeatRequestManager.resetPollTimer(time.milliseconds());
+            assertEquals(0, scheduler.remainingMs(time.milliseconds()));
+            assertTrue(scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.isEmpty());
+            heartbeatRequestManager.signalClose();
+            assertEquals(0, scheduler.remainingMs(time.milliseconds()));
+            assertTrue(scheduler.poll(heartbeatRequestManager, time.milliseconds()).unsentRequests.isEmpty());
+            verify(membershipManager, never()).onHeartbeatRequestGenerated();
+        }
+    }
 
     @Test
     public void testTimerNotDue() {

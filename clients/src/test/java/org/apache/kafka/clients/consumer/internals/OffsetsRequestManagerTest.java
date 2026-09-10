@@ -44,10 +44,12 @@ import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -70,12 +72,17 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.anySet;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -584,6 +591,118 @@ public class OffsetsRequestManagerTest {
     }
 
     @Test
+    public void testResetWaitsForMetadataWithoutSchedulerRedrive() {
+        prepareMissingResetMetadata(Set.of(TEST_PARTITION_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+            assertTrue(scheduler.poll(requestManager, 0).unsentRequests.isEmpty());
+            for (int i = 1; i <= 100; i++) {
+                assertNull(scheduler.poll(requestManager, i));
+                requestManager.onUpdate(new ClusterResource("unchanged"));
+                assertFalse(result.isDone());
+                assertNull(scheduler.poll(requestManager, i));
+            }
+            assertEquals(Long.MAX_VALUE, scheduler.remainingMs(100));
+            mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+            requestManager.onUpdate(new ClusterResource("leader available"));
+            NetworkClientDelegate.PollResult poll = scheduler.poll(requestManager, 100);
+            assertEquals(1, poll.unsentRequests.size());
+            assertFalse(result.isDone());
+            completeResetRequest(poll.unsentRequests.get(0), TEST_PARTITION_1);
+            assertTrue(result.isDone());
+            assertFalse(result.isCompletedExceptionally());
+            verify(subscriptionState).maybeSeekUnvalidated(eq(TEST_PARTITION_1), any(), any());
+            assertNull(scheduler.poll(requestManager, 101));
+        }
+    }
+
+    @Test
+    public void testRepeatedResetReusesPendingMetadataWork() {
+        prepareMissingResetMetadata(Set.of(TEST_PARTITION_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        assertSame(result, requestManager.resetPositionsIfNeeded());
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        requestManager.onUpdate(new ClusterResource("leader available"));
+        NetworkClientDelegate.PollResult poll = requestManager.poll(0);
+        assertEquals(1, poll.unsentRequests.size());
+        completeResetRequest(poll.unsentRequests.get(0), TEST_PARTITION_1);
+        assertTrue(result.isDone());
+    }
+
+    @Test
+    public void testPartialResetWaitsForMissingPartitionWithoutResendingKnownPartition() {
+        prepareMissingResetMetadata(Set.of(TEST_PARTITION_1, TEST_PARTITION_2));
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        NetworkClientDelegate.PollResult first = requestManager.poll(0);
+        assertEquals(1, first.unsentRequests.size());
+        completeResetRequest(first.unsentRequests.get(0), TEST_PARTITION_1);
+        assertFalse(result.isDone());
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1, TEST_PARTITION_2, LEADER_1));
+        requestManager.onUpdate(new ClusterResource("second leader"));
+        NetworkClientDelegate.PollResult second = requestManager.poll(0);
+        assertEquals(1, second.unsentRequests.size());
+        ListOffsetsRequest request = (ListOffsetsRequest) second.unsentRequests.get(0).requestBuilder().build();
+        assertEquals(1, request.data().topics().get(0).partitions().size());
+        assertEquals(TEST_PARTITION_2.partition(), request.data().topics().get(0).partitions().get(0).partitionIndex());
+        completeResetRequest(second.unsentRequests.get(0), TEST_PARTITION_2);
+        assertTrue(result.isDone());
+        assertFalse(result.isCompletedExceptionally());
+    }
+
+    @Test
+    public void testFatalResetErrorDoesNotWaitForUnrelatedMetadata() {
+        prepareMissingResetMetadata(Set.of(TEST_PARTITION_1, TEST_PARTITION_2));
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        NetworkClientDelegate.UnsentRequest request = requestManager.poll(0).unsentRequests.get(0);
+        buildClientResponseWithErrors(request, Map.of(TEST_PARTITION_1, Errors.TOPIC_AUTHORIZATION_FAILED)).onComplete();
+        assertTrue(result.isDone());
+        assertFutureThrows(TopicAuthorizationException.class, requestManager.resetPositionsIfNeeded());
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_2, LEADER_1));
+        requestManager.onUpdate(new ClusterResource("late metadata"));
+        assertEquals(0, requestManager.requestsToSend());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testMetadataDoesNotRestartObsoleteReset(boolean revoked) {
+        prepareMissingResetMetadata(Set.of(TEST_PARTITION_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        if (revoked)
+            when(subscriptionState.isAssigned(TEST_PARTITION_1)).thenReturn(false);
+        else
+            when(subscriptionState.resetStrategy(TEST_PARTITION_1)).thenReturn(AutoOffsetResetStrategy.LATEST);
+        requestManager.onUpdate(new ClusterResource("changed assignment or reset"));
+        assertTrue(result.isDone());
+        assertEquals(0, requestManager.requestsToSend());
+    }
+
+    @Test
+    public void testCloseFailsMetadataWaitAndIgnoresLateMetadata() {
+        prepareMissingResetMetadata(Set.of(TEST_PARTITION_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        requestManager.closePendingPositionResets();
+        assertTrue(result.isCompletedExceptionally());
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        requestManager.onUpdate(new ClusterResource("late metadata"));
+        assertEquals(0, requestManager.requestsToSend());
+        assertTrue(requestManager.resetPositionsIfNeeded().isCompletedExceptionally());
+    }
+
+    private void prepareMissingResetMetadata(Set<TopicPartition> partitions) {
+        mockFailedRequest_MissingLeader();
+        when(subscriptionState.partitionsNeedingReset(time.milliseconds())).thenReturn(partitions);
+        when(subscriptionState.resetStrategy(any())).thenReturn(AutoOffsetResetStrategy.EARLIEST);
+        partitions.forEach(tp -> when(subscriptionState.isOffsetResetNeeded(tp)).thenReturn(true));
+    }
+
+    private void completeResetRequest(NetworkClientDelegate.UnsentRequest request, TopicPartition partition) {
+        buildClientResponse(request, Map.of(partition, new OffsetAndTimestampInternal(5L, 1L, Optional.empty()))).onComplete();
+    }
+
+    @Test
     public void testResetPositionsSuccess_NoLeaderEpochInResponse() {
         testResetPositionsSuccessWithLeaderEpoch(Metadata.LeaderAndEpoch.noLeaderOrEpoch());
         verify(metadata, never()).updateLastSeenEpochIfNewer(any(), anyInt());
@@ -626,6 +745,609 @@ public class OffsetsRequestManagerTest {
         assertEquals(0, requestManager.requestsToSend());
         assertTrue(nextReset.isCompletedExceptionally());
         assertFutureThrows(TopicAuthorizationException.class, nextReset);
+    }
+
+    @Nested
+    class ValidationCompletionTest {
+        private NetworkClientDelegate validationNetwork;
+
+        private void realValidationState() {
+            LogContext context = new LogContext();
+            subscriptionState = new SubscriptionState(context, AutoOffsetResetStrategy.EARLIEST);
+            subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+            Metadata.LeaderAndEpoch leader = new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3));
+            when(metadata.currentLeader(TEST_PARTITION_1)).thenReturn(leader);
+            apiVersions = new ApiVersions();
+            apiVersions.update(LEADER_1.idString(), NodeApiVersions.create());
+            validationNetwork = mock(NetworkClientDelegate.class);
+            subscriptionState.seekUnvalidated(TEST_PARTITION_1,
+                    new SubscriptionState.FetchPosition(5, Optional.of(2), leader));
+            requestManager = new OffsetsRequestManager(subscriptionState, metadata, DEFAULT_ISOLATION_LEVEL,
+                    time, RETRY_BACKOFF_MS, REQUEST_TIMEOUT_MS, DEFAULT_API_TIMEOUT_MS, apiVersions,
+                    validationNetwork, null,
+                    new PositionsValidator(context, time, subscriptionState, metadata), context);
+        }
+
+        @Test
+        void obsoleteMetadataResetDoesNotSendAfterSameStrategyReset() {
+            realValidationState();
+            when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of()));
+            subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+            CompletableFuture<Void> first = requestManager.resetPositionsIfNeeded();
+            subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+            CompletableFuture<Void> second = requestManager.resetPositionsIfNeeded();
+            assertFalse(first == second, "same strategy with a new position operation cannot coalesce");
+            when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of(TEST_PARTITION_1, LEADER_1)));
+            requestManager.onUpdate(new ClusterResource("new-reset"));
+            NetworkClientDelegate.PollResult poll = requestManager.poll(0);
+            assertEquals(1, poll.unsentRequests.size());
+            buildClientResponse(poll.unsentRequests.get(0), Map.of(TEST_PARTITION_1,
+                    new OffsetAndTimestampInternal(20, -1, Optional.empty()))).onComplete();
+            assertEquals(20, subscriptionState.position(TEST_PARTITION_1).offset);
+            assertTrue(first.isDone());
+            assertTrue(second.isDone());
+        }
+
+        @Test
+        void partialObsoleteCommittedErrorRefetchesCurrentPartitionBeforeReset() {
+            realCommittedPositionState();
+            TopicPartition kept = new TopicPartition("kept", 0);
+            subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1, kept));
+            when(metadata.currentLeader(kept)).thenReturn(
+                    new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3)));
+            CompletableFuture<CommitRequestManager.OffsetFetchResult> old = new CompletableFuture<>();
+            CompletableFuture<CommitRequestManager.OffsetFetchResult> current = new CompletableFuture<>();
+            when(commitRequestManager.fetchOffsets(anySet(), anyLong(), any())).thenReturn(old, current);
+            CompletableFuture<Void> result = requestManager.updateFetchPositions(5000);
+            subscriptionState.seek(TEST_PARTITION_1, 200);
+            old.completeExceptionally(new TopicAuthorizationException(Set.of(TEST_PARTITION_1.topic())));
+            verify(commitRequestManager).fetchOffsets(eq(Set.of(kept)), anyLong(), any());
+            assertNull(subscriptionState.position(kept));
+            assertFalse(subscriptionState.isOffsetResetNeeded(kept));
+            assertFalse(result.isDone());
+            current.complete(new CommitRequestManager.OffsetFetchResult(Map.of(kept, new OffsetAndMetadata(20)), Map.of()));
+            assertEquals(20, subscriptionState.position(kept).offset);
+            assertEquals(200, subscriptionState.position(TEST_PARTITION_1).offset);
+            assertTrue(result.isDone());
+            assertFalse(result.isCompletedExceptionally());
+        }
+
+        @Test
+        void repeatedResetRejectsOldResponseEvenWithSameStrategy() {
+            realValidationState();
+            when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of(TEST_PARTITION_1, LEADER_1)));
+            subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+            CompletableFuture<Void> first = requestManager.resetPositionsIfNeeded();
+            NetworkClientDelegate.UnsentRequest old = requestManager.poll(0).unsentRequests.get(0);
+            subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+            CompletableFuture<Void> second = requestManager.resetPositionsIfNeeded();
+            NetworkClientDelegate.UnsentRequest current = requestManager.poll(0).unsentRequests.get(0);
+            buildClientResponse(old, Map.of(TEST_PARTITION_1,
+                    new OffsetAndTimestampInternal(10, -1, Optional.empty()))).onComplete();
+            assertTrue(subscriptionState.isOffsetResetNeeded(TEST_PARTITION_1));
+            assertFalse(second.isDone());
+            buildClientResponse(current, Map.of(TEST_PARTITION_1,
+                    new OffsetAndTimestampInternal(20, -1, Optional.empty()))).onComplete();
+            assertEquals(20, subscriptionState.position(TEST_PARTITION_1).offset);
+            assertTrue(first.isDone());
+            assertTrue(second.isDone());
+        }
+
+        @Test
+        void seekReleasesResetWaitingForMetadata() {
+            realValidationState();
+            when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of()));
+            subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+            CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                assertTrue(scheduler.poll(requestManager, 0).unsentRequests.isEmpty());
+                assertFalse(result.isDone());
+                subscriptionState.seek(TEST_PARTITION_1, 200);
+                requestManager.onPositionStateChanged();
+                assertFalse(result.isDone());
+                assertNotNull(scheduler.poll(requestManager, 1));
+                assertTrue(result.isDone());
+                assertEquals(200, subscriptionState.position(TEST_PARTITION_1).offset);
+            }
+        }
+
+        @Test
+        void reassignedPartitionDoesNotReuseOrApplyOldCommittedOffsets() {
+            realCommittedPositionState();
+            CompletableFuture<CommitRequestManager.OffsetFetchResult> old = new CompletableFuture<>();
+            CompletableFuture<CommitRequestManager.OffsetFetchResult> current = new CompletableFuture<>();
+            when(commitRequestManager.fetchOffsets(anySet(), anyLong(), any())).thenReturn(old, current);
+            CompletableFuture<Void> first = requestManager.updateFetchPositions(5000);
+            subscriptionState.assignFromUser(Set.of());
+            subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+            CompletableFuture<Void> second = requestManager.updateFetchPositions(5000);
+            verify(commitRequestManager, times(2)).fetchOffsets(anySet(), anyLong(), any());
+            old.complete(new CommitRequestManager.OffsetFetchResult(
+                    Map.of(TEST_PARTITION_1, new OffsetAndMetadata(10)), Map.of()));
+            assertNull(subscriptionState.position(TEST_PARTITION_1));
+            CompletableFuture<Void> reused = requestManager.updateFetchPositions(5000);
+            verify(commitRequestManager, times(2)).fetchOffsets(anySet(), anyLong(), any());
+            current.complete(new CommitRequestManager.OffsetFetchResult(
+                    Map.of(TEST_PARTITION_1, new OffsetAndMetadata(20)), Map.of()));
+            assertEquals(20, subscriptionState.position(TEST_PARTITION_1).offset);
+            assertTrue(first.isDone());
+            assertTrue(second.isDone());
+            assertTrue(reused.isDone());
+            assertFalse(second.isCompletedExceptionally());
+        }
+
+        @Test
+        void closeFencesLateCommittedOffsetResponse() {
+            realCommittedPositionState();
+            CompletableFuture<CommitRequestManager.OffsetFetchResult> response = new CompletableFuture<>();
+            when(commitRequestManager.fetchOffsets(anySet(), anyLong(), any())).thenReturn(response);
+            CompletableFuture<Void> result = requestManager.updateFetchPositions(5000);
+            requestManager.closePendingPositionResets();
+            assertTrue(result.isCompletedExceptionally());
+            response.complete(new CommitRequestManager.OffsetFetchResult(
+                    Map.of(TEST_PARTITION_1, new OffsetAndMetadata(10)), Map.of()));
+            assertNull(subscriptionState.position(TEST_PARTITION_1));
+        }
+
+        private void realCommittedPositionState() {
+            realValidationState();
+            subscriptionState.assignFromUser(Set.of());
+            subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+            LogContext context = new LogContext();
+            requestManager.closePendingPositionResets();
+            requestManager = new OffsetsRequestManager(subscriptionState, metadata, DEFAULT_ISOLATION_LEVEL,
+                    time, RETRY_BACKOFF_MS, REQUEST_TIMEOUT_MS, DEFAULT_API_TIMEOUT_MS, apiVersions,
+                    validationNetwork, commitRequestManager,
+                    new PositionsValidator(context, time, subscriptionState, metadata), context);
+        }
+
+        @Test
+        void stalePartitionAuthorizationErrorDoesNotPoisonUnchangedPartition() {
+            realValidationState();
+            TopicPartition kept = new TopicPartition("kept", 0);
+            subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1, kept));
+            Metadata.LeaderAndEpoch leader = new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3));
+            when(metadata.currentLeader(kept)).thenReturn(leader);
+            subscriptionState.seekUnvalidated(kept, new SubscriptionState.FetchPosition(5, Optional.of(2), leader));
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                NetworkClientDelegate.UnsentRequest old = scheduler.poll(requestManager, 0).unsentRequests.get(0);
+                subscriptionState.seek(TEST_PARTITION_1, 200);
+                requestManager.onPositionStateChanged();
+                scheduler.poll(requestManager, 1);
+                ClientResponse response = buildOffsetsForLeaderEpochResponse(old, List.of(TEST_PARTITION_1, kept), 100);
+                ((OffsetsForLeaderEpochResponse) response.responseBody()).data().topics().find(TEST_PARTITION_1.topic())
+                        .partitions().get(0).setErrorCode(Errors.TOPIC_AUTHORIZATION_FAILED.code());
+                response.onComplete();
+                scheduler.poll(requestManager, 1);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+                assertFalse(subscriptionState.awaitingValidation(kept));
+                assertEquals(200, subscriptionState.position(TEST_PARTITION_1).offset);
+            }
+        }
+
+        @Test
+        void validSeekDetachesFromObsoleteValidationRpc() {
+            realValidationState();
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                NetworkClientDelegate.UnsentRequest old = scheduler.poll(requestManager, 0).unsentRequests.get(0);
+                subscriptionState.seek(TEST_PARTITION_1, 200);
+                requestManager.onPositionStateChanged();
+                assertFalse(result.isDone());
+                scheduler.poll(requestManager, 1);
+                assertTrue(result.isDone(), "valid seek must not await an obsolete RPC");
+                buildOffsetsForLeaderEpochResponse(old, List.of(TEST_PARTITION_1), 1).onComplete();
+                assertEquals(200, subscriptionState.position(TEST_PARTITION_1).offset);
+                assertTrue(requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true).isDone());
+            }
+        }
+
+        @Test
+        void samePositionSeekDoesNotAcceptOldValidationResponse() {
+            realValidationState();
+            SubscriptionState.FetchPosition samePosition = subscriptionState.position(TEST_PARTITION_1);
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                NetworkClientDelegate.UnsentRequest old = scheduler.poll(requestManager, 0).unsentRequests.get(0);
+                subscriptionState.seekUnvalidated(TEST_PARTITION_1, samePosition);
+                requestManager.onPositionStateChanged();
+                NetworkClientDelegate.PollResult next = scheduler.poll(requestManager, 1);
+                assertEquals(1, next.unsentRequests.size(), "new seek owns its own validation");
+                buildOffsetsForLeaderEpochResponse(old, List.of(TEST_PARTITION_1), 1).onComplete();
+                assertTrue(subscriptionState.awaitingValidation(TEST_PARTITION_1));
+                assertEquals(5, subscriptionState.position(TEST_PARTITION_1).offset);
+                assertFalse(result.isDone());
+                buildOffsetsForLeaderEpochResponse(next.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+                scheduler.poll(requestManager, 1);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+            }
+        }
+
+        @Test
+        void reassignedSamePartitionRejectsOldValidationFailure() {
+            realValidationState();
+            SubscriptionState.FetchPosition samePosition = subscriptionState.position(TEST_PARTITION_1);
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                NetworkClientDelegate.UnsentRequest old = scheduler.poll(requestManager, 0).unsentRequests.get(0);
+                subscriptionState.assignFromUser(Set.of());
+                subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+                subscriptionState.seekUnvalidated(TEST_PARTITION_1, samePosition);
+                requestManager.onPositionStateChanged();
+                NetworkClientDelegate.PollResult next = scheduler.poll(requestManager, 1);
+                assertEquals(1, next.unsentRequests.size());
+                buildOffsetsForLeaderEpochResponseWithErrors(old,
+                        Map.of(TEST_PARTITION_1, Errors.TOPIC_AUTHORIZATION_FAILED)).onComplete();
+                assertFalse(result.isDone());
+                buildOffsetsForLeaderEpochResponse(next.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+                scheduler.poll(requestManager, 1);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally(), "old generation error must not poison new demand");
+            }
+        }
+
+        @Test
+        void validSeekActivatesParkedValidationWithoutNetworkPublication() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                assertTrue(scheduler.poll(requestManager, 0).unsentRequests.isEmpty());
+                assertNull(scheduler.poll(requestManager, 100));
+                subscriptionState.seek(TEST_PARTITION_1, 200);
+                requestManager.onPositionStateChanged();
+                assertFalse(result.isDone(), "notification must not run the owner inline");
+                assertNotNull(scheduler.poll(requestManager, 100));
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+                assertEquals(200, subscriptionState.position(TEST_PARTITION_1).offset);
+                assertNull(scheduler.poll(requestManager, 101), "consumed notification must not spin");
+            }
+        }
+
+        @Test
+        void sameTopicAssignmentActivatesParkedValidationWithoutMetadataUpdate() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                scheduler.poll(requestManager, 0);
+                assertNull(scheduler.poll(requestManager, 100));
+                TopicPartition replacement = new TopicPartition(TEST_PARTITION_1.topic(), 99);
+                assertFalse(subscriptionState.assignFromUser(Set.of(replacement)),
+                        "same-topic assignment does not request new topic metadata");
+                subscriptionState.seek(replacement, 300);
+                requestManager.onPositionStateChanged();
+                assertFalse(result.isDone());
+                assertNotNull(scheduler.poll(requestManager, 100));
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+                assertEquals(Set.of(replacement), subscriptionState.assignedPartitions());
+            }
+        }
+
+        @Test
+        void seekStillNeedingValidationRechecksOnceThenParks() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                scheduler.poll(requestManager, 0);
+                assertNull(scheduler.poll(requestManager, 100));
+                subscriptionState.seekUnvalidated(TEST_PARTITION_1,
+                        new SubscriptionState.FetchPosition(200, Optional.of(2),
+                                new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3))));
+                requestManager.onPositionStateChanged();
+                NetworkClientDelegate.PollResult recheck = scheduler.poll(requestManager, 100);
+                assertNotNull(recheck);
+                assertTrue(recheck.unsentRequests.isEmpty());
+                assertFalse(result.isDone(), "seek notification is not proof of validation");
+                assertNull(scheduler.poll(requestManager, 101));
+                apiVersions.update(LEADER_1.idString(), NodeApiVersions.create());
+                NetworkClientDelegate.PollResult validation = scheduler.poll(requestManager, 101);
+                assertEquals(1, validation.unsentRequests.size());
+                buildOffsetsForLeaderEpochResponse(validation.unsentRequests.get(0),
+                        List.of(TEST_PARTITION_1), 300).onComplete();
+                scheduler.poll(requestManager, 101);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+                assertEquals(200, subscriptionState.position(TEST_PARTITION_1).offset);
+            }
+        }
+
+        @Test
+        void delayedResetPastValidationRetryDeadlineActivatesRetainedDemand() {
+            realValidationState();
+            subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1, TEST_PARTITION_2));
+            when(metadata.currentLeader(TEST_PARTITION_2)).thenReturn(
+                    new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3)));
+            when(metadata.fetch()).thenReturn(testClusterMetadata(
+                    Map.of(TEST_PARTITION_1, LEADER_1, TEST_PARTITION_2, LEADER_1)));
+            subscriptionState.setNextAllowedRetry(Set.of(TEST_PARTITION_1), 100);
+
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                NetworkClientDelegate.PollResult initial = scheduler.poll(requestManager, 0);
+                assertEquals(1, initial.unsentRequests.size());
+                NetworkClientDelegate.UnsentRequest reset = initial.unsentRequests.get(0);
+                assertInstanceOf(ListOffsetsRequest.Builder.class, reset.requestBuilder());
+                assertFalse(result.isDone());
+                assertNull(scheduler.poll(requestManager, 100),
+                        "pending reset preparation must not be polled on validation retry expiry");
+
+                when(time.milliseconds()).thenReturn(150L);
+                buildClientResponse(reset, Map.of(TEST_PARTITION_2,
+                        new OffsetAndTimestampInternal(10L, -1, Optional.empty()))).onComplete();
+                assertFalse(result.isDone(), "reset completion does not complete the other partition's validation");
+                assertEquals(10, subscriptionState.position(TEST_PARTITION_2).offset);
+
+                NetworkClientDelegate.PollResult validation = scheduler.poll(requestManager, 150);
+                assertNotNull(validation, "preparation completion must activate the retained owner");
+                assertEquals(1, validation.unsentRequests.size(),
+                        "elapsed validation retry must resume without another application poll");
+                buildOffsetsForLeaderEpochResponse(validation.unsentRequests.get(0),
+                        List.of(TEST_PARTITION_1), 100).onComplete();
+                scheduler.poll(requestManager, 150);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+            }
+        }
+
+        @Test
+        void missingLeaderWaitsForMetadataInsteadOfAnotherApplicationPoll() {
+            realValidationState();
+            Metadata.LeaderAndEpoch unknown = new Metadata.LeaderAndEpoch(Optional.of(Node.noNode()), Optional.of(3));
+            when(metadata.currentLeader(TEST_PARTITION_1)).thenReturn(unknown);
+            subscriptionState.seekUnvalidated(TEST_PARTITION_1,
+                    new SubscriptionState.FetchPosition(5, Optional.of(2), unknown));
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            assertFalse(result.isDone(), "missing leader must retain the operation");
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                assertTrue(scheduler.poll(requestManager, 0).unsentRequests.isEmpty());
+                assertNull(scheduler.poll(requestManager, 100), "no periodic readiness probe");
+                when(metadata.currentLeader(TEST_PARTITION_1)).thenReturn(
+                        new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(4)));
+                when(metadata.updateVersion()).thenReturn(1);
+                requestManager.onUpdate(new ClusterResource("validation"));
+                assertFalse(result.isDone(), "metadata is not validation completion");
+                NetworkClientDelegate.PollResult poll = scheduler.poll(requestManager, 100);
+                assertEquals(1, poll.unsentRequests.size());
+                buildOffsetsForLeaderEpochResponse(poll.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+                scheduler.poll(requestManager, 100);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+            }
+        }
+
+        @Test
+        void retriableValidationResponseWaitsForActualBackoff() {
+            realValidationState();
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                NetworkClientDelegate.UnsentRequest first = scheduler.poll(requestManager, 0).unsentRequests.get(0);
+                buildOffsetsForLeaderEpochResponseWithErrors(first,
+                        Map.of(TEST_PARTITION_1, Errors.NOT_LEADER_OR_FOLLOWER)).onComplete();
+                NetworkClientDelegate.PollResult waiting = scheduler.poll(requestManager, 0);
+                assertFalse(result.isDone(), "retry response is not successful validation");
+                assertTrue(waiting.unsentRequests.isEmpty());
+                assertEquals(RETRY_BACKOFF_MS, waiting.nextPollCondition.remainingMs(0));
+                when(time.milliseconds()).thenReturn((long) RETRY_BACKOFF_MS - 1);
+                assertNull(scheduler.poll(requestManager, RETRY_BACKOFF_MS - 1));
+                when(time.milliseconds()).thenReturn((long) RETRY_BACKOFF_MS);
+                NetworkClientDelegate.PollResult retry = scheduler.poll(requestManager, RETRY_BACKOFF_MS);
+                assertEquals(1, retry.unsentRequests.size());
+                buildOffsetsForLeaderEpochResponse(retry.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+                scheduler.poll(requestManager, RETRY_BACKOFF_MS);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+            }
+        }
+
+        @Test
+        void apiVersionsPublicationActivatesOwnerWithoutInlineRequest() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            assertFalse(result.isDone());
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                assertTrue(scheduler.poll(requestManager, 0).unsentRequests.isEmpty());
+                assertNull(scheduler.poll(requestManager, 100));
+                apiVersions.update(LEADER_1.idString(), NodeApiVersions.create());
+                assertEquals(0, requestManager.requestsToSend(), "transport must not run in the listener");
+                NetworkClientDelegate.PollResult poll = scheduler.poll(requestManager, 100);
+                assertEquals(1, poll.unsentRequests.size());
+                apiVersions.update(LEADER_1.idString(), NodeApiVersions.create());
+                assertTrue(scheduler.poll(requestManager, 100).unsentRequests.isEmpty(), "no duplicate in-flight validation");
+                buildOffsetsForLeaderEpochResponse(poll.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+                scheduler.poll(requestManager, 100);
+                assertTrue(result.isDone());
+                assertFalse(result.isCompletedExceptionally());
+            }
+        }
+
+        @Test
+        void failedFirstHandshakeActivatesReconnectAtTransportBackoff() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                scheduler.poll(requestManager, 0);
+                when(validationNetwork.isUnavailable(LEADER_1)).thenReturn(true);
+                when(validationNetwork.connectionDelay(LEADER_1, 0)).thenReturn(200L);
+                apiVersions.remove(LEADER_1.idString()); // No cached entry existed for this failed handshake.
+                NetworkClientDelegate.PollResult wait = scheduler.poll(requestManager, 0);
+                assertTrue(wait.unsentRequests.isEmpty());
+                assertEquals(200, wait.nextPollCondition.remainingMs(0));
+                when(time.milliseconds()).thenReturn(199L);
+                assertNull(scheduler.poll(requestManager, 199));
+                when(time.milliseconds()).thenReturn(200L);
+                when(validationNetwork.isUnavailable(LEADER_1)).thenReturn(false);
+                assertTrue(scheduler.poll(requestManager, 200).unsentRequests.isEmpty());
+                verify(validationNetwork, times(3)).tryConnect(LEADER_1);
+                assertNull(scheduler.poll(requestManager, 300), "connecting waits for publication, not a periodic probe");
+                apiVersions.update(LEADER_1.idString(), NodeApiVersions.create());
+                NetworkClientDelegate.PollResult request = scheduler.poll(requestManager, 300);
+                assertEquals(1, request.unsentRequests.size());
+                buildOffsetsForLeaderEpochResponse(request.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+                scheduler.poll(requestManager, 300);
+                assertTrue(result.isDone());
+            }
+        }
+
+        @Test
+        void reconnectBackoffExpiringDuringCheckDoesNotStrandDemand() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            when(validationNetwork.isUnavailable(LEADER_1)).thenReturn(true, false);
+            when(validationNetwork.connectionDelay(LEADER_1, 0)).thenReturn(0L);
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                assertTrue(scheduler.poll(requestManager, 0).unsentRequests.isEmpty());
+                verify(validationNetwork, times(2)).tryConnect(LEADER_1);
+                assertFalse(result.isDone());
+                assertNull(scheduler.poll(requestManager, 100));
+                apiVersions.update(LEADER_1.idString(), NodeApiVersions.create());
+                assertEquals(1, scheduler.poll(requestManager, 100).unsentRequests.size());
+            }
+        }
+
+        @Test
+        void authenticationFailureAfterMissingVersionsReachesRetainedOperation() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                scheduler.poll(requestManager, 0);
+                apiVersions.remove(LEADER_1.idString());
+                // NetworkClient publishes the final authentication state after removing versions.
+                org.mockito.Mockito.doThrow(new org.apache.kafka.common.errors.AuthenticationException("denied"))
+                        .when(validationNetwork).maybeThrowAuthFailure(LEADER_1);
+                assertFalse(result.isDone());
+                assertTrue(scheduler.poll(requestManager, 0).unsentRequests.isEmpty());
+                assertFutureThrows(org.apache.kafka.common.errors.AuthenticationException.class, result);
+            }
+        }
+
+        @Test
+        void missingVersionsDeadlineAndLatePublicationDoNotRestartDemand() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(100, () -> true);
+            try (RequestManagerScheduler scheduler = new RequestManagerScheduler()) {
+                scheduler.poll(requestManager, 0);
+                when(time.milliseconds()).thenReturn(100L);
+                assertTrue(scheduler.poll(requestManager, 100).unsentRequests.isEmpty());
+                assertFutureThrows(org.apache.kafka.common.errors.TimeoutException.class, result);
+                apiVersions.update(LEADER_1.idString(), NodeApiVersions.create());
+                assertNull(scheduler.poll(requestManager, 100));
+            }
+        }
+
+        @Test
+        void terminalGuardPreventsInitialConnectionAttempt() {
+            realValidationState();
+            apiVersions.remove(LEADER_1.idString());
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(5000, () -> false);
+            assertTrue(result.isDone());
+            verify(validationNetwork, never()).tryConnect(any());
+        }
+
+        @Test
+        void responsePublishesPositionsBeforeOwnerCompletesFuture() {
+            realValidationState();
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> true);
+            assertFalse(result.isDone());
+            assertFalse(subscriptionState.hasAllFetchPositions());
+            NetworkClientDelegate.UnsentRequest request = requestManager.poll(0).unsentRequests.get(0);
+            buildOffsetsForLeaderEpochResponse(request, List.of(TEST_PARTITION_1), 100).onComplete();
+            assertTrue(subscriptionState.hasAllFetchPositions());
+            assertFalse(result.isDone(), "response must activate the owner, not inline the next phase");
+            requestManager.poll(0);
+            assertTrue(result.isDone());
+            assertFalse(result.isCompletedExceptionally());
+        }
+
+        @Test
+        void cachedValidationErrorReachesWaitingOperation() {
+            realValidationState();
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> true);
+            NetworkClientDelegate.UnsentRequest request = requestManager.poll(0).unsentRequests.get(0);
+            buildOffsetsForLeaderEpochResponseWithErrors(request,
+                    Map.of(TEST_PARTITION_1, Errors.TOPIC_AUTHORIZATION_FAILED)).onComplete();
+            assertFalse(result.isDone());
+            requestManager.poll(0);
+            assertFutureThrows(TopicAuthorizationException.class, result);
+        }
+
+        @Test
+        void apiDeadlineExpiresWithoutResponseAndLateResponseCannotRestartWork() {
+            realValidationState();
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(100, () -> true);
+            NetworkClientDelegate.PollResult poll = requestManager.poll(0);
+            assertEquals(100, poll.nextPollCondition.remainingMs(0));
+            when(time.milliseconds()).thenReturn(100L);
+            // The network-loop timestamp may precede work done by other managers.
+            requestManager.poll(0);
+            assertFutureThrows(org.apache.kafka.common.errors.TimeoutException.class, result);
+            buildOffsetsForLeaderEpochResponse(poll.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+            assertTrue(requestManager.poll(100).unsentRequests.isEmpty());
+        }
+
+        @Test
+        void waitsForExistingValidationWithoutDuplicateRpc() {
+            realValidationState();
+            CompletableFuture<Void> first = requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> true);
+            CompletableFuture<Void> second = requestManager.updateFetchPositionsAndAwaitValidation(2000, () -> true);
+            NetworkClientDelegate.PollResult poll = requestManager.poll(0);
+            assertEquals(1, poll.unsentRequests.size());
+            assertFalse(first.isDone());
+            assertFalse(second.isDone());
+            buildOffsetsForLeaderEpochResponse(poll.unsentRequests.get(0), List.of(TEST_PARTITION_1), 100).onComplete();
+            assertTrue(requestManager.poll(0).unsentRequests.isEmpty());
+            assertTrue(first.isDone());
+            assertTrue(second.isDone());
+        }
+
+        @Test
+        void closeFailsPendingWaitAndLateResponseCannotReopenIt() {
+            realValidationState();
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> true);
+            NetworkClientDelegate.UnsentRequest request = requestManager.poll(0).unsentRequests.get(0);
+            requestManager.closePendingPositionResets();
+            assertFutureThrows(org.apache.kafka.common.KafkaException.class, result);
+            buildOffsetsForLeaderEpochResponse(request, List.of(TEST_PARTITION_1), 100).onComplete();
+            assertTrue(requestManager.poll(0).unsentRequests.isEmpty());
+        }
+
+        @Test
+        void validSeekDoesNotWaitForStaleValidationRpc() {
+            realValidationState();
+            requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> true);
+            NetworkClientDelegate.UnsentRequest oldRequest = requestManager.poll(0).unsentRequests.get(0);
+            subscriptionState.seek(TEST_PARTITION_1, 200);
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> true);
+            assertTrue(result.isDone());
+            buildOffsetsForLeaderEpochResponse(oldRequest, List.of(TEST_PARTITION_1), 100).onComplete();
+            assertEquals(200, subscriptionState.position(TEST_PARTITION_1).offset);
+        }
+
+        @Test
+        void closedOrTerminatedWaitCannotStartAnotherStage() {
+            realValidationState();
+            boolean[] active = {true};
+            CompletableFuture<Void> result = requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> active[0]);
+            NetworkClientDelegate.UnsentRequest request = requestManager.poll(0).unsentRequests.get(0);
+            active[0] = false;
+            requestManager.poll(0);
+            assertTrue(result.isDone());
+            buildOffsetsForLeaderEpochResponse(request, List.of(TEST_PARTITION_1), 100).onComplete();
+            assertTrue(requestManager.poll(0).unsentRequests.isEmpty());
+            requestManager.closePendingPositionResets();
+            assertTrue(requestManager.updateFetchPositionsAndAwaitValidation(1000, () -> true).isCompletedExceptionally());
+        }
     }
 
     @Test
@@ -736,10 +1458,10 @@ public class OffsetsRequestManagerTest {
 
         // Call to updateFetchPositions. Should send an OffsetFetch request and use the response to set positions
         CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult = new CompletableFuture<>();
-        when(commitRequestManager.fetchOffsets(initPartitions1, internalFetchCommittedTimeout)).thenReturn(fetchResult);
+        when(commitRequestManager.fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any())).thenReturn(fetchResult);
         CompletableFuture<Void> updatePositions1 = requestManager.updateFetchPositions(time.milliseconds());
         assertFalse(updatePositions1.isDone(), "Update positions should wait for the OffsetFetch request");
-        verify(commitRequestManager).fetchOffsets(initPartitions1, internalFetchCommittedTimeout);
+        verify(commitRequestManager).fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any());
 
         // Receive response with committed offsets. Should complete the updatePositions operation (the set
         // of initializing partitions hasn't changed)
@@ -766,15 +1488,15 @@ public class OffsetsRequestManagerTest {
 
         // call to updateFetchPositions. Should send an OffsetFetch request
         CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult = new CompletableFuture<>();
-        when(commitRequestManager.fetchOffsets(initPartitions1, internalFetchCommittedTimeout)).thenReturn(fetchResult);
+        when(commitRequestManager.fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any())).thenReturn(fetchResult);
         CompletableFuture<Void> updatePositions1 = requestManager.updateFetchPositions(time.milliseconds());
         assertFalse(updatePositions1.isDone(), "Update positions should wait for the OffsetFetch request");
-        verify(commitRequestManager).fetchOffsets(initPartitions1, internalFetchCommittedTimeout);
+        verify(commitRequestManager).fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any());
         clearInvocations(commitRequestManager);
 
         // Call to updateFetchPositions again with the same set of initializing partitions should reuse request
         CompletableFuture<Void> updatePositions2 = requestManager.updateFetchPositions(time.milliseconds());
-        verify(commitRequestManager, never()).fetchOffsets(initPartitions1, internalFetchCommittedTimeout);
+        verify(commitRequestManager, never()).fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any());
 
         // Receive response with committed offsets, should complete both calls
         OffsetAndMetadata offsetAndMetadata = new OffsetAndMetadata(10, Optional.of(1), "");
@@ -800,10 +1522,10 @@ public class OffsetsRequestManagerTest {
 
         // call to updateFetchPositions will trigger an OffsetFetch request for tp1 (won't complete just yet)
         CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult = new CompletableFuture<>();
-        when(commitRequestManager.fetchOffsets(initPartitions1, internalFetchCommittedTimeout)).thenReturn(fetchResult);
+        when(commitRequestManager.fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any())).thenReturn(fetchResult);
         CompletableFuture<Void> updatePositions1 = requestManager.updateFetchPositions(time.milliseconds());
         assertFalse(updatePositions1.isDone());
-        verify(commitRequestManager).fetchOffsets(initPartitions1, internalFetchCommittedTimeout);
+        verify(commitRequestManager).fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any());
         clearInvocations(commitRequestManager);
 
         // tp1 does not require a position anymore (ex. removed from the assignment, or got a position manually via
@@ -829,10 +1551,10 @@ public class OffsetsRequestManagerTest {
 
         // call to updateFetchPositions will trigger an OffsetFetch request for tp1 (won't complete just yet)
         CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult = new CompletableFuture<>();
-        when(commitRequestManager.fetchOffsets(initPartitions1, internalFetchCommittedTimeout)).thenReturn(fetchResult);
+        when(commitRequestManager.fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any())).thenReturn(fetchResult);
         CompletableFuture<Void> updatePositions1 = requestManager.updateFetchPositions(time.milliseconds());
         assertFalse(updatePositions1.isDone());
-        verify(commitRequestManager).fetchOffsets(initPartitions1, internalFetchCommittedTimeout);
+        verify(commitRequestManager).fetchOffsets(eq(initPartitions1), eq(internalFetchCommittedTimeout), any());
         clearInvocations(commitRequestManager);
 
         // tp2 added to the assignment when the Offset Fetch request is already sent including tp1 only

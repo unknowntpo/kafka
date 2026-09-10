@@ -29,8 +29,10 @@ import org.apache.kafka.clients.consumer.internals.OffsetFetcherUtils.ListOffset
 import org.apache.kafka.common.ClusterResource;
 import org.apache.kafka.common.ClusterResourceListener;
 import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.message.ListOffsetsRequestData;
 import org.apache.kafka.common.requests.AbstractRequest;
@@ -44,6 +46,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -56,6 +59,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
@@ -108,6 +112,74 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      * kept to be used on the next attempt to update fetch positions (if partitions remain the same)
      */
     private PendingFetchCommittedRequest pendingOffsetFetchEvent;
+    private final Set<PendingFetchCommittedRequest> committedPositionRequests = new HashSet<>();
+    private final Set<PendingMetadataReset> positionResets = new HashSet<>();
+    private final NextPollCondition.Signal requestsAvailable = new NextPollCondition.Signal();
+    // Network-thread owned: metadata callbacks retry only these unresolved partitions.
+    private final List<PendingMetadataReset> pendingMetadataResets = new ArrayList<>();
+    private boolean positionResetsClosed;
+
+    // Futures are published only after the response has updated SubscriptionState/error caches.
+    private final Map<CompletableFuture<Void>, Map<TopicPartition, Object>> validationCompletions = new HashMap<>();
+    private final List<PositionValidationWait> validationWaits = new ArrayList<>();
+    private final Runnable apiVersionsChanged = this::onValidationDependencyChanged;
+    private long validationConnectRetryTimeMs = Long.MAX_VALUE;
+
+    private static final class PositionValidationWait {
+        private final long deadlineMs;
+        private final BooleanSupplier canProceed;
+        private final CompletableFuture<Void> result = new CompletableFuture<>();
+        private boolean ready;
+        private boolean awaitingCompletion;
+        private long retryAtMs = Long.MAX_VALUE;
+        private Throwable error;
+        private int attempt;
+        private Map<TopicPartition, Object> positionStates;
+
+        private PositionValidationWait(long deadlineMs, BooleanSupplier canProceed) {
+            this.deadlineMs = deadlineMs;
+            this.canProceed = canProceed;
+        }
+    }
+
+    private static final class PendingMetadataReset {
+        private final Map<TopicPartition, AutoOffsetResetStrategy> strategies;
+        private final CompletableFuture<Void> result = new CompletableFuture<>();
+        private final Map<TopicPartition, Object> positionStates;
+        private int outstandingRequests;
+
+        private PendingMetadataReset(Map<TopicPartition, AutoOffsetResetStrategy> strategies,
+                                     Map<TopicPartition, Object> positionStates) {
+            this.strategies = new HashMap<>(strategies);
+            this.positionStates = positionStates;
+        }
+    }
+
+    public void closePendingPositionResets() {
+        positionResetsClosed = true;
+        apiVersions.removeChangeListener(apiVersionsChanged);
+        for (PendingFetchCommittedRequest request : new ArrayList<>(committedPositionRequests))
+            request.result.completeExceptionally(new KafkaException("Consumer closed while fetching committed positions"));
+        pendingOffsetFetchEvent = null;
+        for (PendingMetadataReset reset : new ArrayList<>(positionResets))
+            reset.result.completeExceptionally(new KafkaException("Consumer closed while resetting positions"));
+        for (PositionValidationWait wait : new ArrayList<>(validationWaits))
+            wait.result.completeExceptionally(new KafkaException("Consumer closed during position validation"));
+        for (CompletableFuture<Void> completion : new ArrayList<>(validationCompletions.keySet()))
+            completion.completeExceptionally(new KafkaException("Consumer closed during position validation"));
+        validationCompletions.clear();
+        List<PendingMetadataReset> pending = new ArrayList<>(pendingMetadataResets);
+        pendingMetadataResets.clear();
+        for (PendingMetadataReset reset : pending)
+            reset.result.completeExceptionally(new KafkaException("Consumer closed while awaiting offset metadata"));
+    }
+
+    private void enqueueRequests(List<NetworkClientDelegate.UnsentRequest> requests) {
+        if (!requests.isEmpty()) {
+            requestsToSend.addAll(requests);
+            requestsAvailable.publish();
+        }
+    }
 
     public OffsetsRequestManager(final SubscriptionState subscriptionState,
                                  final ConsumerMetadata metadata,
@@ -147,16 +219,19 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
         // initialized and the network thread started.
         this.metadata.addClusterUpdateListener(this);
         this.commitRequestManager = commitRequestManager;
+        this.apiVersions.addChangeListener(apiVersionsChanged);
     }
 
     private static class PendingFetchCommittedRequest {
         final Set<TopicPartition> requestedPartitions;
         final CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result;
+        final Map<TopicPartition, Object> positionStates;
 
         private PendingFetchCommittedRequest(final Set<TopicPartition> requestedPartitions,
-                                             final CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result) {
+                                             final Map<TopicPartition, Object> positionStates) {
             this.requestedPartitions = Objects.requireNonNull(requestedPartitions);
-            this.result = Objects.requireNonNull(result);
+            this.positionStates = positionStates;
+            this.result = new CompletableFuture<>();
         }
     }
 
@@ -167,10 +242,20 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
+        NextPollCondition input = requestsAvailable.await();
+        retireObsoletePositionPreparations();
+        completePositionValidationWaits();
+        for (PositionValidationWait wait : validationWaits) {
+            input = NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs,
+                    Math.max(0, wait.deadlineMs - currentTimeMs)));
+            if (!wait.awaitingCompletion && wait.retryAtMs != Long.MAX_VALUE)
+                input = NextPollCondition.anyOf(input, NextPollCondition.after(currentTimeMs,
+                        Math.max(0, wait.retryAtMs - currentTimeMs)));
+        }
         // Copy the outgoing request list and clear it.
         List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>(requestsToSend);
         requestsToSend.clear();
-        return new NetworkClientDelegate.PollResult(unsentRequests);
+        return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, unsentRequests, input);
     }
 
     /**
@@ -317,6 +402,153 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
         return result;
     }
 
+    /**
+     * Like updateFetchPositions, but retains validation demand across dependency waits and RPCs.
+     * A response first updates positions/errors, then activates this owner to recheck before
+     * handing work to Fetch. Metadata/API-version publication activates the owner without an app
+     * recheck; only actual retry eligibility and the operation's API deadline register timers.
+     */
+    public CompletableFuture<Void> updateFetchPositionsAndAwaitValidation(long deadlineMs, BooleanSupplier canProceed) {
+        if (positionResetsClosed)
+            return CompletableFuture.failedFuture(new KafkaException("Consumer closed during position validation"));
+        if (!canProceed.getAsBoolean())
+            return CompletableFuture.completedFuture(null);
+        CompletableFuture<Void> preparation = updateFetchPositions(deadlineMs);
+        // Preserve the initial nonblocking poll(0) attempt, but never retain an expired wait.
+        if (preparation.isCompletedExceptionally() || !subscriptionState.hasPendingValidation()
+                || subscriptionState.hasAllFetchPositions() || time.milliseconds() >= deadlineMs)
+            return preparation;
+        PositionValidationWait wait = new PositionValidationWait(deadlineMs, canProceed);
+        validationWaits.add(wait);
+        wait.result.whenComplete((ignored, error) -> validationWaits.remove(wait));
+        awaitValidationBatch(wait, preparation);
+        requestsAvailable.publish();
+        return wait.result;
+    }
+
+    private void awaitValidationBatch(PositionValidationWait wait, CompletableFuture<Void> preparation) {
+        wait.awaitingCompletion = true;
+        int attempt = ++wait.attempt;
+        wait.positionStates = positionStateSnapshot(subscriptionState.assignedPartitions());
+        if (validationCompletions.isEmpty()) {
+            boolean preparationPending = !preparation.isDone();
+            long connectRetryTimeMs = validationConnectRetryTimeMs;
+            preparation.whenComplete((ignored, error) -> {
+                if (wait.result.isDone() || wait.attempt != attempt)
+                    return;
+                wait.awaitingCompletion = false;
+                if (!samePositionStates(wait.positionStates)) {
+                    wait.error = error;
+                    wait.ready = true;
+                    requestsAvailable.publish();
+                    return;
+                }
+                if (!wait.canProceed.getAsBoolean())
+                    wait.result.complete(null);
+                else if (time.milliseconds() >= wait.deadlineMs)
+                    wait.result.completeExceptionally(new TimeoutException("Position validation deadline expired"));
+                else if (error != null)
+                    wait.result.completeExceptionally(error);
+                else if (subscriptionState.hasPendingValidation()) {
+                    long nowMs = time.milliseconds();
+                    wait.retryAtMs = Math.min(subscriptionState.nextValidationRetryTimeMs(nowMs), connectRetryTimeMs);
+                    if (preparationPending) {
+                        // Another partition's preparation may outlast this partition's backoff.
+                        // Recheck once on completion, even if that eligibility time is now past.
+                        wait.ready = true;
+                        requestsAvailable.publish();
+                    }
+                } else
+                    wait.result.complete(null);
+            });
+            return;
+        }
+        List<CompletableFuture<Void>> batch = new ArrayList<>(validationCompletions.keySet());
+        batch.add(preparation);
+        CompletableFuture.allOf(batch.toArray(new CompletableFuture<?>[0])).whenComplete((ignored, error) -> {
+            if (wait.result.isDone() || wait.attempt != attempt)
+                return;
+            wait.awaitingCompletion = false;
+            wait.error = error;
+            wait.ready = true;
+            requestsAvailable.publish();
+        });
+    }
+
+    private void completePositionValidationWaits() {
+        if (validationWaits.isEmpty())
+            return;
+        retireObsoleteValidationRequests();
+        for (PositionValidationWait wait : new ArrayList<>(validationWaits)) {
+            if (wait.ready && !samePositionStates(wait.positionStates)) {
+                // The old batch may still finish, but it no longer owns this retained demand.
+                wait.attempt++;
+                wait.awaitingCompletion = false;
+            }
+            if (!wait.canProceed.getAsBoolean())
+                wait.result.complete(null);
+            else if (time.milliseconds() >= wait.deadlineMs)
+                wait.result.completeExceptionally(new TimeoutException("Position validation deadline expired"));
+            else if (!wait.awaitingCompletion && (wait.ready || time.milliseconds() >= wait.retryAtMs)) {
+                wait.ready = false;
+                wait.retryAtMs = Long.MAX_VALUE;
+                if (wait.error != null)
+                    wait.result.completeExceptionally(wait.error);
+                else
+                    awaitValidationBatch(wait, updateFetchPositions(wait.deadlineMs));
+            }
+        }
+    }
+
+    private Map<TopicPartition, Object> positionStateSnapshot(Set<TopicPartition> partitions) {
+        Map<TopicPartition, Object> result = new HashMap<>();
+        for (TopicPartition partition : partitions)
+            result.put(partition, subscriptionState.positionStateToken(partition));
+        return result;
+    }
+
+    private boolean isCurrentPositionState(TopicPartition partition, Map<TopicPartition, Object> snapshot) {
+        return snapshot.containsKey(partition)
+                && snapshot.get(partition) == subscriptionState.positionStateToken(partition);
+    }
+
+    private Set<TopicPartition> currentPositionStates(Map<TopicPartition, Object> snapshot) {
+        return snapshot.keySet().stream().filter(partition -> isCurrentPositionState(partition, snapshot))
+                .collect(Collectors.toSet());
+    }
+
+    private boolean samePositionStates(Map<TopicPartition, Object> snapshot) {
+        return snapshot.keySet().equals(subscriptionState.assignedPartitions())
+                && snapshot.keySet().stream().allMatch(partition -> isCurrentPositionState(partition, snapshot));
+    }
+
+    private void retireObsoletePositionPreparations() {
+        for (PendingMetadataReset reset : new ArrayList<>(positionResets)) {
+            reset.strategies.keySet().removeIf(partition -> !isCurrentPositionState(partition, reset.positionStates));
+            if (currentPositionStates(reset.positionStates).isEmpty()) {
+                pendingMetadataResets.remove(reset);
+                reset.result.complete(null);
+            }
+        }
+        for (PendingFetchCommittedRequest request : new ArrayList<>(committedPositionRequests)) {
+            if (currentPositionStates(request.positionStates).isEmpty()) {
+                if (pendingOffsetFetchEvent == request)
+                    pendingOffsetFetchEvent = null;
+                request.result.complete(Collections.emptyMap());
+            }
+        }
+    }
+
+    private void retireObsoleteValidationRequests() {
+        for (Map.Entry<CompletableFuture<Void>, Map<TopicPartition, Object>> entry :
+                new ArrayList<>(validationCompletions.entrySet())) {
+            if (entry.getValue().keySet().stream().noneMatch(partition -> isCurrentPositionState(partition, entry.getValue()))) {
+                validationCompletions.remove(entry.getKey());
+                entry.getKey().complete(null);
+            }
+        }
+    }
+
     private boolean maybeCompleteWithPreviousException(CompletableFuture<Void> result) {
         Throwable cachedException = cachedUpdatePositionsException.getAndSet(null);
         if (cachedException != null) {
@@ -338,11 +570,13 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
 
         CompletableFuture<Void> updatePositions;
         final Set<TopicPartition> initializingPartitions = subscriptionState.initializingPartitions();
+        final Map<TopicPartition, Object> initialStates = positionStateSnapshot(initializingPartitions);
         if (commitRequestManager != null) {
             CompletableFuture<Void> refreshWithCommittedOffsets = initWithCommittedOffsetsIfNeeded(initializingPartitions, deadlineMs);
 
             // Reset positions for all partitions that may still require it (or that are awaiting reset)
-            updatePositions = refreshWithCommittedOffsets.thenCompose(__ -> initWithPartitionOffsetsIfNeeded(initializingPartitions));
+            updatePositions = refreshWithCommittedOffsets.thenCompose(__ -> initWithPartitionOffsetsIfNeeded(
+                    currentPositionStates(initialStates)));
 
         } else {
             updatePositions = initWithPartitionOffsetsIfNeeded(initializingPartitions);
@@ -417,42 +651,64 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      */
     private CompletableFuture<Void> initWithCommittedOffsetsIfNeeded(Set<TopicPartition> initializingPartitions,
                                                                      long deadlineMs) {
-        if (initializingPartitions.isEmpty()) {
+        if (initializingPartitions.isEmpty())
             return CompletableFuture.completedFuture(null);
+        if (canReusePendingOffsetFetchEvent(initializingPartitions))
+            return pendingOffsetFetchEvent.result.thenApply(ignored -> null);
+
+        PendingFetchCommittedRequest request = new PendingFetchCommittedRequest(initializingPartitions,
+                positionStateSnapshot(initializingPartitions));
+        pendingOffsetFetchEvent = request;
+        committedPositionRequests.add(request);
+        request.result.whenComplete((ignored, error) -> committedPositionRequests.remove(request));
+        long fetchCommittedDeadlineMs = Math.max(deadlineMs, time.milliseconds() + defaultApiTimeoutMs);
+        try {
+            commitRequestManager.fetchOffsets(initializingPartitions, fetchCommittedDeadlineMs,
+                    Collections.unmodifiableMap(request.positionStates)).whenComplete((fetched, error) ->
+                            completeCommittedPositionRequest(request, fetched, error, deadlineMs));
+        } catch (Throwable error) {
+            completeCommittedPositionRequest(request, null, error, deadlineMs);
         }
+        return request.result.thenApply(ignored -> null);
+    }
 
-        log.debug("Refreshing committed offsets for partitions {}", initializingPartitions);
-        CompletableFuture<Void> result = new CompletableFuture<>();
-
-        // The shorter the timeout provided to poll(), the more likely the offsets fetch will time out. To handle
-        // this case, on the first attempt to fetch the committed offsets, a FetchCommittedOffsetsEvent is created
-        // (with potentially a longer timeout) and stored. The event is used for the first attempt, but in the
-        // case it times out, subsequent attempts will also use the event in order to wait for the results.
-        if (!canReusePendingOffsetFetchEvent(initializingPartitions)) {
-            // Generate a new OffsetFetch request and update positions when a response is received
-            final long fetchCommittedDeadlineMs = Math.max(deadlineMs, time.milliseconds() + defaultApiTimeoutMs);
-            CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchOffsets =
-                    commitRequestManager.fetchOffsets(initializingPartitions, fetchCommittedDeadlineMs);
-            CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> fetchOffsetsAndRefresh =
-                    fetchOffsets.thenApply(CommitRequestManager.OffsetFetchResult::toOffsetMapWithNulls)
-                    .whenComplete((offsets, error) -> {
-                        pendingOffsetFetchEvent = null;
-                        // Update positions with the retrieved offsets
-                        refreshOffsets(offsets, error, result);
-                    });
-            pendingOffsetFetchEvent = new PendingFetchCommittedRequest(initializingPartitions, fetchOffsetsAndRefresh);
-        } else {
-            // Reuse pending OffsetFetch request that will complete when positions are refreshed with the committed offsets retrieved
-            pendingOffsetFetchEvent.result.whenComplete((__, error) -> {
-                if (error == null) {
-                    result.complete(null);
-                } else {
-                    result.completeExceptionally(error);
-                }
+    private void completeCommittedPositionRequest(PendingFetchCommittedRequest request,
+                                                  CommitRequestManager.OffsetFetchResult fetched,
+                                                  Throwable error,
+                                                  long deadlineMs) {
+        if (request.result.isDone())
+            return;
+        if (pendingOffsetFetchEvent == request)
+            pendingOffsetFetchEvent = null;
+        Set<TopicPartition> current = currentPositionStates(request.positionStates);
+        if (error != null && !current.isEmpty() && !current.equals(request.requestedPartitions)) {
+            // OffsetFetch may aggregate a removed partition's authorization error. Obtain a
+            // result for the still-current subset before initializing or resetting any of it.
+            initWithCommittedOffsetsIfNeeded(current, deadlineMs).whenComplete((ignored, failure) -> {
+                if (failure == null)
+                    request.result.complete(Collections.emptyMap());
+                else
+                    request.result.completeExceptionally(failure);
             });
+            return;
         }
-
-        return result;
+        Map<TopicPartition, OffsetAndMetadata> offsets = new HashMap<>();
+        if (error == null) {
+            offsets.putAll(fetched.toOffsetMapWithNulls());
+            offsets.keySet().retainAll(current);
+        }
+        CompletableFuture<Void> refreshed = new CompletableFuture<>();
+        try {
+            refreshOffsets(offsets, current.isEmpty() ? null : error, refreshed);
+        } catch (Throwable failure) {
+            refreshed.completeExceptionally(failure);
+        }
+        refreshed.whenComplete((ignored, failure) -> {
+            if (failure == null)
+                request.result.complete(offsets);
+            else
+                request.result.completeExceptionally(failure);
+        });
     }
 
     /**
@@ -514,7 +770,8 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
             return false;
         }
 
-        return pendingOffsetFetchEvent.requestedPartitions.equals(partitions);
+        return pendingOffsetFetchEvent.requestedPartitions.equals(partitions)
+                && currentPositionStates(pendingOffsetFetchEvent.positionStates).equals(partitions);
     }
 
     /**
@@ -557,6 +814,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      * next call to this function.
      */
     void validatePositionsIfNeeded() {
+        validationConnectRetryTimeMs = Long.MAX_VALUE;
         Map<TopicPartition, SubscriptionState.FetchPosition> partitionsToValidate = offsetFetcherUtils.refreshAndGetPartitionsToValidate();
         if (partitionsToValidate.isEmpty()) {
             return;
@@ -575,7 +833,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
         try {
             List<NetworkClientDelegate.UnsentRequest> unsentRequests = buildListOffsetsRequests(
                     timestampsToSearch, requireTimestamps, listOffsetsRequestState);
-            requestsToSend.addAll(unsentRequests);
+            enqueueRequests(unsentRequests);
         } catch (StaleMetadataException e) {
             if (listOffsetsRequestState.oneShot)
                 listOffsetsRequestState.completeWithResultSoFar();
@@ -586,6 +844,24 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
 
     @Override
     public void onUpdate(ClusterResource clusterResource) {
+        onValidationDependencyChanged();
+        // Only metadata publication revisits these blocked resets; ordinary loop turns do not.
+        List<PendingMetadataReset> resets = new ArrayList<>(pendingMetadataResets);
+        pendingMetadataResets.clear();
+        for (PendingMetadataReset reset : resets) {
+            if (reset.result.isDone())
+                continue;
+            reset.strategies.entrySet().removeIf(entry ->
+                    !isCurrentPositionState(entry.getKey(), reset.positionStates)
+                    || !subscriptionState.isAssigned(entry.getKey())
+                    || !subscriptionState.isOffsetResetNeeded(entry.getKey())
+                    || !entry.getValue().equals(subscriptionState.resetStrategy(entry.getKey())));
+            try {
+                sendPositionResetRequests(reset);
+            } catch (RuntimeException e) {
+                reset.result.completeExceptionally(e);
+            }
+        }
         // Retry requests that were awaiting a metadata update. Process a copy of the list to
         // avoid errors, given that the list of requestsToRetry may be modified from the
         // fetchOffsetsByTimes call if any of the requests being retried fails
@@ -597,6 +873,25 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
             requestState.remainingToSearch.clear();
             prepareFetchOffsetsRequests(timestampsToSearch, requestState.requireTimestamps, requestState);
         });
+    }
+
+    /**
+     * Called after an application event changes positions or assignment on the network thread.
+     * The event mutation must be visible before notifying retained validation demand.
+     */
+    public void onPositionStateChanged() {
+        onValidationDependencyChanged();
+        if (!positionResetsClosed && (!positionResets.isEmpty() || !committedPositionRequests.isEmpty()))
+            requestsAvailable.publish();
+    }
+
+    /** Network-thread notification only; validation/transport work runs in a later owner poll. */
+    private void onValidationDependencyChanged() {
+        if (positionResetsClosed || validationWaits.isEmpty())
+            return;
+        for (PositionValidationWait wait : validationWaits)
+            wait.ready = true;
+        requestsAvailable.publish();
     }
 
     /**
@@ -670,6 +965,15 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
             Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition> targetTimes,
             boolean requireTimestamps,
             List<NetworkClientDelegate.UnsentRequest> unsentRequests) {
+        return buildListOffsetRequestToNode(node, targetTimes, requireTimestamps, unsentRequests, null);
+    }
+
+    private CompletableFuture<ListOffsetResult> buildListOffsetRequestToNode(
+            Node node,
+            Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition> targetTimes,
+            boolean requireTimestamps,
+            List<NetworkClientDelegate.UnsentRequest> unsentRequests,
+            Map<TopicPartition, Object> positionStates) {
         ListOffsetsRequest.Builder builder = ListOffsetsRequest.Builder
                 .forConsumer(requireTimestamps, isolationLevel)
                 .setTargetTimes(ListOffsetsRequest.toListOffsetsTopics(targetTimes))
@@ -694,6 +998,12 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
                 ListOffsetsResponse lor = (ListOffsetsResponse) response.responseBody();
                 log.trace("Received ListOffsetResponse {} from broker {}", lor, node);
                 try {
+                    if (positionStates != null) {
+                        var currentData = lor.data().duplicate();
+                        currentData.topics().forEach(topic -> topic.partitions().removeIf(partition ->
+                                !isCurrentPositionState(new TopicPartition(topic.name(), partition.partitionIndex()), positionStates)));
+                        lor = new ListOffsetsResponse(currentData);
+                    }
                     ListOffsetResult listOffsetResult = offsetFetcherUtils.handleListOffsetResponse(lor);
                     result.complete(listOffsetResult);
                 } catch (RuntimeException e) {
@@ -715,13 +1025,35 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      */
     private CompletableFuture<Void> sendListOffsetsRequestsAndResetPositions(
             final Map<TopicPartition, AutoOffsetResetStrategy> partitionAutoOffsetResetStrategyMap) {
+        if (positionResetsClosed)
+            return CompletableFuture.failedFuture(new KafkaException("Consumer closed while resetting positions"));
+        for (PendingMetadataReset pending : pendingMetadataResets) {
+            if (!pending.result.isDone() && pending.strategies.equals(partitionAutoOffsetResetStrategyMap)
+                    && currentPositionStates(pending.positionStates).containsAll(partitionAutoOffsetResetStrategyMap.keySet()))
+                return pending.result;
+        }
+        PendingMetadataReset reset = new PendingMetadataReset(partitionAutoOffsetResetStrategyMap,
+                positionStateSnapshot(partitionAutoOffsetResetStrategyMap.keySet()));
+        positionResets.add(reset);
+        reset.result.whenComplete((ignored, error) -> {
+            positionResets.remove(reset);
+            pendingMetadataResets.remove(reset);
+        });
+        sendPositionResetRequests(reset);
+        return reset.result;
+    }
+
+    private void sendPositionResetRequests(PendingMetadataReset reset) {
+        Map<TopicPartition, AutoOffsetResetStrategy> partitionAutoOffsetResetStrategyMap = new HashMap<>(reset.strategies);
         Map<TopicPartition, Long> timestampsToSearch = partitionAutoOffsetResetStrategyMap.entrySet().stream()
                 .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().timestamp().get()));
         Map<Node, Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition>> timestampsToSearchByNode =
                 groupListOffsetRequests(timestampsToSearch, Optional.empty());
 
-        final AtomicInteger expectedResponses = new AtomicInteger(0);
-        final CompletableFuture<Void> globalResult = new CompletableFuture<>();
+        timestampsToSearchByNode.values().forEach(partitions -> partitions.keySet().forEach(reset.strategies::remove));
+        if (!reset.strategies.isEmpty())
+            pendingMetadataResets.add(reset);
+        reset.outstandingRequests += timestampsToSearchByNode.size();
         final List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>();
 
         timestampsToSearchByNode.forEach((node, resetTimestamps) -> {
@@ -732,36 +1064,57 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
                     node,
                     resetTimestamps,
                     false,
-                    unsentRequests);
+                    unsentRequests,
+                    reset.positionStates);
 
-            partialResult.whenComplete((result, error) -> {
-                if (error == null) {
-                    offsetFetcherUtils.onSuccessfulResponseForResettingPositions(result,
-                            partitionAutoOffsetResetStrategyMap);
-                } else {
-                    RuntimeException e;
-                    if (error instanceof RuntimeException) {
-                        e = (RuntimeException) error;
-                    } else {
-                        e = new RuntimeException("Unexpected failure in ListOffsets request for " +
-                                "resetting positions", error);
-                    }
-                    offsetFetcherUtils.onFailedResponseForResettingPositions(resetTimestamps, e);
-                }
-                if (expectedResponses.decrementAndGet() == 0) {
-                    globalResult.complete(null);
-                }
-            });
+            partialResult.whenComplete((result, error) -> completePositionResetRequest(reset,
+                    resetTimestamps, partitionAutoOffsetResetStrategyMap, result, error));
         });
 
-        if (unsentRequests.isEmpty()) {
-            globalResult.complete(null);
-        } else {
-            expectedResponses.set(unsentRequests.size());
-            requestsToSend.addAll(unsentRequests);
-        }
+        enqueueRequests(unsentRequests);
+        completePositionResetIfFinished(reset);
+    }
 
-        return globalResult;
+    private void completePositionResetRequest(PendingMetadataReset reset,
+                                              Map<TopicPartition, ListOffsetsRequestData.ListOffsetsPartition> resetTimestamps,
+                                              Map<TopicPartition, AutoOffsetResetStrategy> strategies,
+                                              ListOffsetResult result,
+                                              Throwable error) {
+        if (reset.result.isDone())
+            return;
+        Set<TopicPartition> current = currentPositionStates(reset.positionStates);
+        current.retainAll(resetTimestamps.keySet());
+        try {
+            if (!current.isEmpty()) {
+                if (error == null) {
+                    var fetched = new HashMap<>(result.fetchedOffsets);
+                    fetched.keySet().retainAll(current);
+                    Set<TopicPartition> retries = new HashSet<>(result.partitionsToRetry);
+                    retries.retainAll(current);
+                    offsetFetcherUtils.onSuccessfulResponseForResettingPositions(
+                            new ListOffsetResult(fetched, retries), strategies);
+                } else {
+                    RuntimeException failure = error instanceof RuntimeException ? (RuntimeException) error
+                            : new RuntimeException("Unexpected failure in ListOffsets request for resetting positions", error);
+                    var currentRequests = new HashMap<>(resetTimestamps);
+                    currentRequests.keySet().retainAll(current);
+                    offsetFetcherUtils.onFailedResponseForResettingPositions(currentRequests, failure);
+                    if (!(failure instanceof RetriableException)) {
+                        pendingMetadataResets.remove(reset);
+                        reset.strategies.clear();
+                    }
+                }
+            }
+            reset.outstandingRequests--;
+            completePositionResetIfFinished(reset);
+        } catch (Throwable failure) {
+            reset.result.completeExceptionally(failure);
+        }
+    }
+
+    private void completePositionResetIfFinished(PendingMetadataReset reset) {
+        if (reset.strategies.isEmpty() && reset.outstandingRequests == 0)
+            reset.result.complete(null);
     }
 
     /**
@@ -791,7 +1144,14 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
 
             NodeApiVersions nodeApiVersions = apiVersions.get(node.idString());
             if (nodeApiVersions == null) {
+                networkClientDelegate.maybeThrowAuthFailure(node);
                 networkClientDelegate.tryConnect(node);
+                if (networkClientDelegate.isUnavailable(node)) {
+                    long nowMs = time.milliseconds();
+                    long delayMs = networkClientDelegate.connectionDelay(node, nowMs);
+                    long retryAtMs = nowMs > Long.MAX_VALUE - delayMs ? Long.MAX_VALUE : nowMs + delayMs;
+                    validationConnectRetryTimeMs = Math.min(validationConnectRetryTimeMs, retryAtMs);
+                }
                 return;
             }
 
@@ -810,24 +1170,50 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
             CompletableFuture<OffsetsForLeaderEpochUtils.OffsetForEpochResult> partialResult =
                     buildOffsetsForLeaderEpochRequestToNode(node, fetchPositions, unsentRequests);
 
-            partialResult.whenComplete((offsetsResult, error) -> {
-                if (error == null) {
-                    offsetFetcherUtils.onSuccessfulResponseForValidatingPositions(fetchPositions,
-                            offsetsResult);
-                } else {
-                    RuntimeException e;
-                    if (error instanceof RuntimeException) {
-                        e = (RuntimeException) error;
-                    } else {
-                        e = new RuntimeException("Unexpected failure in OffsetsForLeaderEpoch " +
-                                "request for validating positions", error);
-                    }
-                    offsetFetcherUtils.onFailedResponseForValidatingPositions(fetchPositions, e);
-                }
-            });
+            CompletableFuture<Void> completion = new CompletableFuture<>();
+            Map<TopicPartition, Object> requestStates = positionStateSnapshot(fetchPositions.keySet());
+            validationCompletions.put(completion, requestStates);
+            partialResult.whenComplete((offsetsResult, error) ->
+                    completeValidationRequest(completion, requestStates, fetchPositions, offsetsResult, error));
         });
 
-        requestsToSend.addAll(unsentRequests);
+        enqueueRequests(unsentRequests);
+    }
+
+    private void completeValidationRequest(CompletableFuture<Void> completion,
+                                           Map<TopicPartition, Object> requestStates,
+                                           Map<TopicPartition, SubscriptionState.FetchPosition> fetchPositions,
+                                           OffsetsForLeaderEpochUtils.OffsetForEpochResult offsetsResult,
+                                           Throwable error) {
+        if (completion.isDone())
+            return;
+        Map<TopicPartition, SubscriptionState.FetchPosition> currentPositions = new HashMap<>();
+        fetchPositions.forEach((partition, position) -> {
+            if (isCurrentPositionState(partition, requestStates))
+                currentPositions.put(partition, position);
+        });
+        try {
+            if (!currentPositions.isEmpty()) {
+                if (error == null) {
+                    var endOffsets = new HashMap<>(offsetsResult.endOffsets());
+                    endOffsets.keySet().retainAll(currentPositions.keySet());
+                    Set<TopicPartition> retries = new HashSet<>(offsetsResult.partitionsToRetry());
+                    retries.retainAll(currentPositions.keySet());
+                    offsetFetcherUtils.onSuccessfulResponseForValidatingPositions(currentPositions,
+                            new OffsetsForLeaderEpochUtils.OffsetForEpochResult(endOffsets, retries));
+                } else {
+                    RuntimeException failure = error instanceof RuntimeException ? (RuntimeException) error
+                            : new RuntimeException("Unexpected failure in OffsetsForLeaderEpoch request for validating positions", error);
+                    offsetFetcherUtils.onFailedResponseForValidatingPositions(currentPositions, failure);
+                }
+            }
+            // Obsolete responses must not mutate retry state or cache errors for a new seek.
+            validationCompletions.remove(completion);
+            completion.complete(null);
+        } catch (Throwable failure) {
+            validationCompletions.remove(completion);
+            completion.completeExceptionally(failure);
+        }
     }
 
     /**
@@ -838,6 +1224,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
             final Node node,
             final Map<TopicPartition, SubscriptionState.FetchPosition> fetchPositions,
             List<NetworkClientDelegate.UnsentRequest> unsentRequests) {
+        Map<TopicPartition, Object> requestStates = positionStateSnapshot(fetchPositions.keySet());
         AbstractRequest.Builder<OffsetsForLeaderEpochRequest> builder =
                 OffsetsForLeaderEpochUtils.prepareRequest(fetchPositions);
 
@@ -859,8 +1246,10 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
                 OffsetsForLeaderEpochResponse offsetsForLeaderEpochResponse = (OffsetsForLeaderEpochResponse) response.responseBody();
                 log.trace("Received OffsetsForLeaderEpoch response {} from broker {}", offsetsForLeaderEpochResponse, node);
                 try {
+                    Map<TopicPartition, SubscriptionState.FetchPosition> currentPositions = new HashMap<>(fetchPositions);
+                    currentPositions.keySet().removeIf(partition -> !isCurrentPositionState(partition, requestStates));
                     OffsetsForLeaderEpochUtils.OffsetForEpochResult listOffsetResult =
-                            OffsetsForLeaderEpochUtils.handleResponse(fetchPositions, offsetsForLeaderEpochResponse);
+                            OffsetsForLeaderEpochUtils.handleResponse(currentPositions, offsetsForLeaderEpochResponse);
                     result.complete(listOffsetResult);
                 } catch (RuntimeException e) {
                     result.completeExceptionally(e);
