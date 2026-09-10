@@ -233,7 +233,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             } else {
                 // A request that could not be sent while the coordinator was unknown must not be sent once
                 // the coordinator is found if the application already gave up on it (its deadline passed).
-                pendingRequests.failAndRemoveExpiredRequests();
+                pendingRequests.failAndRemoveExpiredRequests(true);
             }
 
             return EMPTY;
@@ -1541,7 +1541,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 .filter(request -> !request.canSendRequest(currentTimeMs))
                 .collect(Collectors.toList());
 
-            failAndRemoveExpiredRequests();
+            failAndRemoveExpiredRequests(false);
 
             // Add all unsent offset commit requests to the unsentRequests list
             List<NetworkClientDelegate.UnsentRequest> unsentRequests = unsentOffsetCommits.stream()
@@ -1576,13 +1576,25 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * if they were never attempted; a fetch that was already sent keeps the existing retry handling,
          * which observes the deadline when the response arrives (see handleGroupLevelError).
          */
-        private void failAndRemoveExpiredRequests() {
+        /**
+         * Complete and remove buffered requests whose deadline has passed.
+         *
+         * @param includeNeverAttempted when true, also expire requests that were never sent. This is
+         *                              only correct where sending was impossible anyway (the coordinator
+         *                              is unknown): an operation the application already gave up on must
+         *                              not start later. On the sending path a request that can be sent now
+         *                              still gets its one attempt, as it does today and in the classic
+         *                              consumer.
+         */
+        private void failAndRemoveExpiredRequests(final boolean includeNeverAttempted) {
             // Called on every poll while the coordinator is unknown: allocate nothing when idle.
             if (!unsentOffsetCommits.isEmpty()) {
-                Queue<OffsetCommitRequestState> commitsToPurge = new LinkedList<>(unsentOffsetCommits);
+                List<OffsetCommitRequestState> commitsToPurge = unsentOffsetCommits.stream()
+                    .filter(request -> includeNeverAttempted || request.numAttempts > 0)
+                    .collect(Collectors.toList());
                 commitsToPurge.forEach(RetriableRequestState::maybeExpire);
             }
-            if (!unsentOffsetFetches.isEmpty()) {
+            if (includeNeverAttempted && !unsentOffsetFetches.isEmpty()) {
                 List<OffsetFetchRequestState> neverAttemptedFetches = unsentOffsetFetches.stream()
                     .filter(request -> request.numAttempts == 0)
                     .collect(Collectors.toList());

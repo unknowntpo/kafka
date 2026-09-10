@@ -3,7 +3,7 @@
 > 2. Reviewer 可以讀完 §2 Summary 或 §4 Contracts 就停；量測與替代方案在 §8–§9，證據文件在 §10。
 > 3. 已實作（分支 `fable/kip-1371-event-loop`，base trunk `74fbd50061`）：C1、C2、C3；C4、C5 只有文件與測試，沒改 production code。
 > 4. §8 已填入 loop-level JMH（trunk vs branch）實測；end-to-end 真 broker 與系統測試（ducktape）尚未跑。
-> 5. 待決事項：metric 可拿掉；C2 的 `commitSync(Duration.ZERO)` 行為變更需要 reviewer 決定；KAFKA-21031 與 PR #23357 要協調。
+> 5. 待決事項：metric 可拿掉；KAFKA-21031 與 PR #23357 要協調。
 
 # KIP-1371: Wait, scope, publication, termination and thread-ownership contracts for the async consumer background loop
 
@@ -97,7 +97,7 @@ Each contract uses the same format: definition, where trunk violates it, minimal
 - `OffsetsRequestManager.ListOffsetsRequestState` has no deadline: partitions with an unknown leader stay in `requestsToRetry` and are rebuilt on every metadata update, and their transient topics stay registered.
 
 **Minimal change (implemented, commit "KIP-1371 C2").**
-1. `CommitRequestManager`: `maybeExpire` drops the `numAttempts > 0` condition; `PendingRequests.failAndRemoveExpiredRequests` covers unsent commits (attempted or not) and never-attempted unsent offset fetches; it runs in `drain()` and in the coordinator-unknown branch of `poll()` when not closing. Closing with an unknown coordinator still fails with `CommitFailedException` (KAFKA-19357 wins). Auto-commit and `commitAsync` use `Long.MAX_VALUE` deadlines and are unaffected. An offset fetch that was attempted keeps its existing retry semantics.
+1. `CommitRequestManager`: `maybeExpire` drops the `numAttempts > 0` condition; `PendingRequests.failAndRemoveExpiredRequests(includeNeverAttempted)` runs in two places: in `drain()` with `false`, where it expires only requests that were already attempted (so a request that can be sent now still gets its one attempt, as today); and in the coordinator-unknown branch of `poll()` with `true`, where sending is impossible anyway, so never-attempted commits and offset fetches expire too. Closing with an unknown coordinator still fails with `CommitFailedException` (KAFKA-19357 wins). Auto-commit and `commitAsync` use `Long.MAX_VALUE` deadlines and are unaffected. An offset fetch that was attempted keeps its existing retry semantics.
 2. `OffsetsRequestManager.fetchOffsets(timestamps, requireTimestamps, deadlineMs)` carries `ListOffsetsEvent.deadlineMs()` into `ListOffsetsRequestState.deadlineMs`; `poll()` and `onUpdate()` first run `failExpiredRequestsToRetry`, which removes expired states from `requestsToRetry` and completes them with `TimeoutException` (the existing completion handler releases transient topics). `currentLag` passes `Long.MAX_VALUE` (it never retried).
 3. Tests only: late responses for positions (OffsetFetch), reset (ListOffsets) and validation (OffsetsForLeaderEpoch) after seek, unsubscribe and observer timeout, using a real `SubscriptionState`.
 
@@ -173,7 +173,7 @@ The metric is a detector for C1 violations. If reviewers prefer, it can be dropp
 | `commitSync(timeout)` times out while the coordinator is unknown | The caller gets `TimeoutException`; the commit is still sent when the coordinator appears, so the broker records an offset the caller was told did not commit. | The commit expires on the network thread with `TimeoutException` and is never sent. Same for `maybeAutoCommitSyncBeforeRebalance` and the close-path `commitSync` with a finite deadline. |
 | `committed()` / `updateFetchPositions` OffsetFetch never sent while the coordinator is unknown and the deadline passes | Sent later; result cached for a later call. | Fails with `TimeoutException`; `AsyncKafkaConsumer.updateFetchPositions` swallows it (returns false), so `poll()` throws nothing new. |
 | `offsetsForTimes` / `beginningOffsets` / `endOffsets` with an unknown leader | Retried on every metadata update forever; transient topics stay in metadata. | Fails at the API timeout and releases the transient topics. The caller already saw `TimeoutException` from the reaper at the same time; the difference is no leftover request. |
-| `commitSync(Duration.ZERO)` | Sent once; the caller gets `TimeoutException` immediately. | The request state is created with a deadline equal to now and expires in `drain()` before it is sent. The caller still gets `TimeoutException`, but nothing is sent. This differs from the classic consumer, which sends the request. Reviewer decision needed: keep, or require at least one attempt when the coordinator is known. |
+| `commitSync(Duration.ZERO)` with the coordinator known | Sent once; the caller gets `TimeoutException` immediately. | Unchanged. A request that can be sent now still gets its one attempt: the sending path only expires requests that were already attempted. Expiry of never-attempted requests happens only where sending was impossible anyway (coordinator unknown). |
 | RPC already sent when the application times out | Not cancelled. | Unchanged. |
 | Late OffsetFetch response for positions | Applied while the partition is still initializing. | Unchanged (scope is the partition set, not the deadline). |
 
