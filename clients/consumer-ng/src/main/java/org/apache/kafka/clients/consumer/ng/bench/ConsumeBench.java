@@ -106,8 +106,9 @@ public final class ConsumeBench {
                 consumed++;
                 bytes += r.serializedValueSize() + Math.max(0, r.serializedKeySize());
             }
-            if (consumed >= nextLoopAt && loop < loops && group == null) {
-                consumer.seekToBeginning(assigned); // --loops: consume the topic again for long steady windows
+            if (consumed >= nextLoopAt && loop < loops) {
+                // --loops: consume the topic again for long steady windows (in group mode, whatever is assigned now)
+                consumer.seekToBeginning(group == null ? assigned : consumer.assignment());
                 loop++;
                 nextLoopAt += records;
             }

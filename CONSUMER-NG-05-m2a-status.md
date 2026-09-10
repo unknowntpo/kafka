@@ -27,6 +27,17 @@ clients 模組的小改動（都是可見性或一個小掛鉤，對既有實作
 | **group（subscribe + heartbeat + auto-commit），T2** | **1,525** | **1.16** | 加上 group 協定沒有代價 |
 | assign，T1（1 核） | 1,203 | 0.84 | M1 1,236 · 0.81；librdkafka 1,218 · 0.88 |
 
+### M2b 之後重量（2026-09-10，同機同法，homelab 閒置 load 0.0）
+
+| | MB/s | CPU s/GB | M2a |
+|---|---:|---:|---|
+| assign，T2 | 1,458 | 1.185 | 1,498 · 1.13 |
+| group，T2 | 1,467 | 1.156 | 1,525 · 1.16 |
+| assign，T1 | 1,164 | 0.853 | 1,203 · 0.84 |
+| group，T1 | 1,142 | 0.856 | — |
+
+吞吐 −3–4%、CPU/GB +2–5%，兩個等級、兩條路徑一致。profile（async-profiler itimer，6p 1 KB assign）：`Sensor.record` 佔全部樣本 3.0%（lag/lead 每次交付 1.0%、per-fetch bytes/records 0.3%、其餘是 sensor 內部的 `SampledStat` / `Meter`）；新加的每 pass 檢查（請求優先判斷、buffer 回收、coordinator 連線）合計 < 0.2%。所以退的就是 fetch metrics 本身，與 02 量到 trunk 付的 5–8% 同一類；仍領先 librdkafka（1,295 · 1.32 / 1,218 · 0.88）。要再省只能改 `Sensor` 的記錄成本（每次 `record` 取一次時間並上鎖），那是 clients 共用的東西，不在這條線動。
+
 ## 3. 還沒做的（M2b / M2c）
 
 - `Consumer` 方法：KIP-714 telemetry 的 `registerMetricForSubscription` / `unregisterMetricFromSubscription` / `clientInstanceId` 仍丟 `UnsupportedOperationException`（其餘見 §5）。

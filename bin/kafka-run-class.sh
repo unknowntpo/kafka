@@ -93,6 +93,14 @@ do
   fi
 done
 
+# Next-generation consumer module (dev layout only; the release tarball puts its jar in libs/).
+for file in "$clients_lib_dir"/../../consumer-ng/build/libs/kafka-consumer-ng*.jar;
+do
+  if should_include_file "$file"; then
+    CLASSPATH="$CLASSPATH":"$file"
+  fi
+done
+
 for file in "$streams_lib_dir"/kafka-streams*.jar;
 do
   if should_include_file "$file"; then
