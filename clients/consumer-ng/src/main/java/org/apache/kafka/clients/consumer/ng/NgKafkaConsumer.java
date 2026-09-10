@@ -486,8 +486,10 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         Timer timer = time.timer(timeout);
         long deadline = timer.currentTimeMs() + timeout.toMillis();
         try {
+            // As before, commitSync does not run rebalance callbacks while it waits (unsubscribe and close do): a revoke
+            // delivered inside commitSync would be announced before the commit it is waiting for.
             if (!copy.isEmpty())
-                awaitProcessingEvents(engine.submit(e -> e.commitManager.get().commitSync(copy, deadline)), timer, true, "commitSync");
+                awaitProcessingEvents(engine.submit(e -> e.commitManager.get().commitSync(copy, deadline)), timer, true, false, "commitSync");
             timer.update();
             interceptors.onCommit(copy);
         } finally {
@@ -825,12 +827,17 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
      * the previous implementation did for commitSync, unsubscribe and close: the operation may need a callback to run here.
      */
     private <T> T awaitProcessingEvents(CompletableFuture<T> future, Timer timer, boolean allowWakeup, String what) {
+        return awaitProcessingEvents(future, timer, allowWakeup, true, what);
+    }
+
+    private <T> T awaitProcessingEvents(CompletableFuture<T> future, Timer timer, boolean allowWakeup, boolean processEvents, String what) {
         applicationThread = Thread.currentThread();
         future.whenComplete((v, t) -> signalApplication());
         while (true) {
             if (allowWakeup)
                 maybeThrowWakeup();
-            processBackgroundEvents();
+            if (processEvents)
+                processBackgroundEvents();
             if (future.isDone())
                 return await(future, 0, what);
             timer.update();
