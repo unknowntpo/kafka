@@ -417,6 +417,10 @@ public final class NgKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 PartitionsRemovedEvent e = (PartitionsRemovedEvent) event;
                 for (TopicPartition tp : e.partitions())
                     reader.reset(tp);
+                // Commit callbacks for offsets of these partitions run before their revocation is announced (the classic
+                // consumer waits for in-flight async commits in onJoinPrepare; the previous implementation got it from timing).
+                awaitPendingAsyncCommit(time.timer(requestTimeoutMs));
+                commitCallbackInvoker.executeCallbacks();
                 invokeCallbackAndNotify(e.methodName(), e.partitions(), e.future());
                 break;
             }
