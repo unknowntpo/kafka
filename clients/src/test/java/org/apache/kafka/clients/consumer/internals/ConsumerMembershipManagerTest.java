@@ -2086,10 +2086,14 @@ public class ConsumerMembershipManagerTest {
         clearInvocations(membershipManager);
         for (int i = 0; i < 3; i++) {
             membershipManager.poll(time.milliseconds());
-            membershipManager.maybeReconcile(true);
         }
         assertFalse(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
         verify(membershipManager, never()).markReconciliationInProgress();
+
+        membershipManager.maybeReconcile(true);
+        assertTrue(membershipManager.reconciliationInProgress());
+        verify(membershipManager).markReconciliationInProgress();
+        backgroundEventQueue.clear();
     }
 
     @Test
@@ -2163,10 +2167,14 @@ public class ConsumerMembershipManagerTest {
         clearInvocations(membershipManager);
         for (int i = 0; i < 3; i++) {
             membershipManager.poll(time.milliseconds());
-            membershipManager.maybeReconcile(true);
         }
         assertFalse(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
         verify(membershipManager, never()).markReconciliationInProgress();
+
+        membershipManager.maybeReconcile(true);
+        assertTrue(membershipManager.reconciliationInProgress());
+        verify(membershipManager).markReconciliationInProgress();
+        backgroundEventQueue.clear();
     }
 
     @Test

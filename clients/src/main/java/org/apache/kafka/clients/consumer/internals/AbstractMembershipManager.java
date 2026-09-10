@@ -874,7 +874,13 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
      *                  {@code false} and either condition applies, the reconciliation will be skipped.
      */
     public void maybeReconcile(boolean canCommit) {
-        if (state != MemberState.RECONCILING || currentTargetAssignment.equals(failedReconciliationTarget)) {
+        if (state != MemberState.RECONCILING) {
+            return;
+        }
+        // A failed callback must be retried from the next application poll, which is the
+        // existing public contract. Keep the network thread from retrying the same target
+        // by itself, or it would enqueue callback events without an application boundary.
+        if (!canCommit && currentTargetAssignment.equals(failedReconciliationTarget)) {
             return;
         }
 

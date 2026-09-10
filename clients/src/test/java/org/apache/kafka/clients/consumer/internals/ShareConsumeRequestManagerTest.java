@@ -3869,7 +3869,7 @@ public class ShareConsumeRequestManagerTest {
         Set<Long> renewedRecords;
 
         public TestableShareAcknowledgementEventHandler(List<Map<TopicIdPartition, Acknowledgements>> completedAcknowledgements, Set<Long> renewedRecords) {
-            super(new LinkedBlockingQueue<>(), () -> { });
+            super(new LinkedBlockingQueue<>());
             this.completedAcknowledgements = completedAcknowledgements;
             this.renewedRecords = renewedRecords;
         }

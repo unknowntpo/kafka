@@ -154,17 +154,18 @@ application-side conditions and terminal continuation behavior in the complete c
 
 ## A failed reconciliation has an owner and a scope
 
-**Problem:** the local Streams probe extended the existing assignment-callback-failure test by three network turns. It observed two assignment callback events where only the original event was expected. Completing the failed attempt had cleared the in-progress flag without recording that the same target had failed, allowing `poll` to recreate it without a new assignment or membership session.
+**Problem:** after an assignment callback fails, the network thread must not recreate the same callback event on every turn. The application contract nevertheless retries that reconciliation from the next application `poll`. Treating the failed assignment as permanently ineligible prevents the consumer from ever fetching its assignment after a transient listener failure.
 
-**Forces:** preserve callback error delivery and the broker-driven membership state; allow a genuinely new target to proceed; do not let a late callback from an old session disable a new session; avoid a generic continuation runtime.
+**Forces:** preserve callback error delivery and the broker-driven membership state; retain the next-application-poll retry contract; prevent retries generated solely by network turns; allow a genuinely new target to proceed; do not let a late callback from an old session disable a new session; avoid a generic continuation runtime.
 
-**Solution:** the membership owner retains the failed target assignment. That target is no longer eligible for reconciliation in the same session. A different target remains eligible after the previous attempt completes. Existing session-reset paths clear the failed target, and the existing rejoined-during-reconciliation guard prevents an old callback from recording a failure against the new session. The callback records the target captured when the operation began, not whatever target happens to be current when the callback finishes.
+**Solution:** the membership owner retains the failed target assignment. A network-thread reconciliation pass treats that same target as idle, while the next application-poll reconciliation may retry it. A different target remains eligible after the previous attempt completes. A successful retry and existing session-reset paths clear the failed target, and the existing rejoined-during-reconciliation guard prevents an old callback from recording a failure against the new session. The callback records the target captured when the operation began, not whatever target happens to be current when the callback finishes.
 
-**Alternatives:** an unscoped failed boolean would block a new target; recording the current target at callback completion could blame a newer target for an older failure; clearing in-progress without a terminal outcome recreates the failed work. A new generation counter is unnecessary where the existing rejoin guard already distinguishes the relevant lifecycle boundary.
+**Alternatives:** an unscoped failed boolean would block a new target; suppressing both network and application attempts breaks the public retry behavior; recording the current target at callback completion could blame a newer target for an older failure. A new generation counter is unnecessary where the existing rejoin guard already distinguishes the relevant lifecycle boundary.
 
-The corrected tests cover an unchanged failed target, a new target arriving before the old failure, and the same
-assignment after rejoin. Regular/share reconciliation tests additionally resolve partial metadata and associate a
-failure with the full captured target rather than its resolved projection. Final-source Streams verification includes
+The corrected tests prove that repeated network turns do not enqueue the same failed callback, the next application
+poll starts one retry, a new target can proceed, and the same assignment works after rejoin. Regular/share
+reconciliation tests additionally resolve partial metadata and associate a failure with the full captured target
+rather than its resolved projection. Final-source Streams verification includes
 383 consumer-boundary unit tests and 18 broker integration tests: topology push/dedup/permanent failure/expiration,
 plugin absence, group deletion, classic-to-Streams migration, close options and static-member leave behavior. All pass
 with zero failures, errors or skips.
@@ -244,23 +245,17 @@ The initialization regression additionally exercises issuing a new lookup for th
 
 Tests exercise real regular and share buffers, both an event published before waiting and an event published after observing the waiting thread parked. They assert the event is visible when notification runs, the wait returns without any fetch data, and the original event remains available for delivery. The broad regression passed 2,576 tests with zero failures, errors or skips, including the four wakeup scenarios; Checkstyle, Spotless and SpotBugsMain also passed. Completion-only notifications and acknowledgement delivery are covered by the following contracts.
 
-## Completion queues preserve delivery and wake eligibility
+## Completion queues preserve their observation boundary
 
-**Problem:** share acknowledgement events and regular-consumer commit callbacks have their own queues, separate from BackgroundEventHandler. Publishing there did not wake a consumer waiting for fetch data, so the background-event correction alone left these application obligations delayed.
+**Problem:** regular-consumer commit callbacks and share acknowledgement events have queues separate from BackgroundEventHandler, but they do not share one observation contract. Regular commit completion is application work that should interrupt a fetch wait. Share acknowledgement callbacks are observed at the established share-poll boundaries; interrupting the current poll changes whether that poll may return newly fetched records and when a callback-triggered `wakeup()` is raised.
 
-**Forces:** preserve callback payloads, errors and FIFO ordering; keep user callbacks on the application thread; notify only when work was actually enqueued; support input before and after parking; avoid a new event bus or synchronous execution on the producer thread.
+**Forces:** preserve callback payloads, errors and FIFO ordering; keep user callbacks on the application thread; retain existing share acknowledgement, renewal and callback-wakeup behavior; notify only when the relevant contract requires observation during the current wait; avoid a new event bus or synchronous execution on the producer thread.
 
-**Solution:** both queue owners require the existing application-buffer wakeup action. Successful publication precedes notification. Commit interceptors notify only if a non-empty interceptor set caused a task to be queued. Notification does not drain the queue; the application retains its existing callback execution path. All regular/share consumer constructors supply the action explicitly.
+**Solution:** the regular commit callback owner receives the existing application-buffer wakeup action. Successful publication precedes notification, and commit interceptors notify only if a non-empty interceptor set caused a task to be queued. Notification does not drain the queue; the application retains its existing callback execution path. Share acknowledgement completion remains retained in its queue and is drained at the existing application-poll boundaries without waking the active fetch wait.
 
-**Alternatives:** notifying for empty interceptor sets manufactures application work. Executing callbacks while notifying changes their thread and exception contract. Waking on every successful fetch-preparation completion is also invalid: an empty preparation can cause the application to submit another empty preparation, producing a self-sustaining loop. Terminal poll errors use the distinct notification path below.
+**Alternatives:** notifying for empty interceptor sets manufactures application work. Executing callbacks while notifying changes their thread and exception contract. Waking for share acknowledgement completion can make the same poll continue into new fetches after sending acknowledgements and can surface a callback-triggered wakeup one poll too early. Waking on every successful fetch-preparation completion is also invalid: an empty preparation can cause the application to submit another empty preparation, producing a self-sustaining loop. Terminal poll errors use the distinct notification path below.
 
-Tests retain existing callback ordering checks, verify that empty interceptors do not notify, and exercise commit/acknowledgement publication before and after a real buffer wait. The commit test verifies both the error payload and execution on the waiting application thread. Broad verification is recorded separately.
-
-The public share-consumer poll path requires one more step: after an empty fetch wait returns, service completed acknowledgements before parking again. Queue notification alone was insufficient because the old loop only delivered them at poll entry or return. A public-poll probe confirmed zero callback invocations before the second wait. The corrected loop retains background/metadata error checks first, then handles acknowledgements. This includes renewal processing, which must not depend on receiving new fetch data. The probe proves the callback-delivery gap; renewal-specific interaction remains part of broader acceptance.
-
-The public-poll test uses the injectable consumer constructor. That constructor had an immutable completed-acknowledgement list unlike production; it is now mutable. The pre-fix probe was rerun after this fixture correction and still failed before the second wait, isolating the delivery omission rather than relying on the invalid fixture.
-
-Completion-delivery verification passed: 2,581 consumer-internals tests across 74 suites, zero failures/errors/skips, with Checkstyle, Spotless and SpotBugsMain. The corrected public-poll test observes exactly one acknowledgement callback before the next wait. The final 62-test ShareConsumer broker suite covers explicit/implicit acknowledgement, renewal, leader restart and close behavior.
+Tests retain existing callback ordering checks, verify that empty interceptors do not notify, and exercise regular commit publication before and after a real buffer wait. The commit test verifies both the error payload and execution on the waiting application thread. Share integration tests verify callback-triggered wakeup ordering and the renewal poll that sends acknowledgements without returning the next batch early. Broad verification is recorded separately.
 
 ## Terminal poll errors wake their observer
 

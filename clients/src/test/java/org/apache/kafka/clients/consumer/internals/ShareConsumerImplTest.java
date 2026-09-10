@@ -832,41 +832,6 @@ public class ShareConsumerImplTest {
     }
 
     @Test
-    public void testAcknowledgementArrivingDuringEmptyPollIsHandledBeforeWaitingAgain() {
-        ShareFetchBuffer fetchBuffer = mock(ShareFetchBuffer.class);
-        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
-        consumer = newConsumer(fetchBuffer, subscriptions, "group-id", "client-id", "implicit");
-        TopicPartition tp = new TopicPartition("topic", 0);
-        TopicIdPartition tip = new TopicIdPartition(Uuid.randomUuid(), tp);
-        subscriptions.assignFromUser(Set.of(tp));
-        subscriptions.seek(tp, 0);
-        AcknowledgementCommitCallback callback = mock(AcknowledgementCommitCallback.class);
-        consumer.setAcknowledgementCommitCallback(callback);
-        Acknowledgements acknowledgements = Acknowledgements.empty();
-        acknowledgements.add(10, AcknowledgeType.ACCEPT);
-        acknowledgements.complete(null);
-        ShareAcknowledgementEvent event = new ShareAcknowledgementEvent(Map.of(tip, acknowledgements), false, Optional.empty());
-        doAnswer(invocation -> NextPollCondition.after(time.milliseconds(), 100L))
-            .when(applicationEventHandler).applicationPollCondition();
-        doReturn(ShareFetch.empty()).when(fetchCollector).collect(any(ShareFetchBuffer.class));
-        int[] waits = {0};
-        doAnswer(invocation -> {
-            if (waits[0]++ == 0) {
-                acknowledgementEventQueue.add(event);
-            } else {
-                verify(callback).onComplete(Map.of(tip, Set.of(10L)), null);
-            }
-            Timer pollTimer = invocation.getArgument(0, Timer.class);
-            time.sleep(pollTimer.remainingMs());
-            return null;
-        }).when(fetchBuffer).awaitNotEmpty(any(Timer.class));
-
-        assertTrue(consumer.poll(Duration.ofMillis(450)).isEmpty());
-        assertTrue(waits[0] >= 2);
-        verify(callback).onComplete(Map.of(tip, Set.of(10L)), null);
-    }
-
-    @Test
     public void testPollDoesNotAddNewSharePollEventWhenOneIsAlreadyInFlight() {
         ShareFetchBuffer fetchBuffer = mock(ShareFetchBuffer.class);
         SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
