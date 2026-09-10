@@ -225,7 +225,19 @@ Benchmarks added on the branch (`jmh-benchmarks/README-consumer-loop.md`):
 - `ConsumerNetworkThreadPassBenchmark`: one `runOnce()` pass over `MockClient` and `MockTime` with real `RequestManagers`; scenarios `IDLE`, `BLOCKED` (FindCoordinator never answered), `BLOCKED_HEARTBEAT_INFLIGHT` (first heartbeat never answered), `CONSUME`, `RECOVERY`. Counters include `zeroWaitEmptyResults`, `zeroNetworkTimeoutPasses` and `zeroMaximumTimeToWaitPasses` per pass.
 - `AsyncConsumerBrokerBenchmark`: real `KafkaConsumer` against a running broker; modes `consume`, `idle`, `unavailable`; counters `records`, `processCpuMillis`, `networkThreadCpuMillis`.
 
-Trunk vs branch, interleaved A/B, same host. **[to be filled from jmh-ab/results/summary.md]**
+Trunk vs branch, interleaved A/B, same host. **Loop-level JMH, `ConsumerNetworkThreadPassBenchmark`, trunk `74fbd50061` vs this branch, M1 Pro laptop, JDK 21, `-f 2 -wi 5 -i 5 -w 1s -r 2s -prof gc`, run order T,B,B,T per scenario (raw data: `jmh-ab/results/`, `jmh-ab/results2/`):
+
+| scenario | trunk ns/pass | branch ns/pass | trunk B/pass | branch B/pass | zero-wait passes trunk → branch |
+|---|---|---|---|---|---|
+| IDLE | 316.6 ± 5.0 | 309.3 ± 10.8 | 240.3 | 240.3 | 0 → 0 |
+| BLOCKED (coordinator unknown) | 316.8 ± 43.7 | 296.6 ± 20.5 | 223.7 | 223.7 | 0 → 0 |
+| BLOCKED_HEARTBEAT_INFLIGHT | 332.6 ± 20.4 | 338.4 ± 9.1 | 320.2 | 320.2 | **0.968 → 0** per pass |
+| CONSUME (fetch every 2nd pass, 50 records) | 9192.4 ± 171.9 | 9001.4 ± 33.9 | 44563.5 | 44487.5 | 0 → 0 |
+| RECOVERY (coordinator unknown → known) | 277.0 ± 3.6 | 273.5 ± 6.0 | 256.1 | 240.1 | 0 → 0 |
+
+Reading: only the busy-loop scenario changes behaviour (trunk asks for a zero wait on 97% of passes while the first heartbeat is in flight; the branch never does). All other scenarios are within noise in time and identical in allocation. A first branch build had +29% ns/pass and doubled allocation in BLOCKED/RECOVERY because the C2 expiry sweep copied empty queues on every poll; that was fixed (`isEmpty()` guards) and the BLOCKED/RECOVERY/IDLE rows above are from the re-run with the fixed build (`jmh-ab/results2/`).
+
+End-to-end (`AsyncConsumerBrokerBenchmark`, real broker) has not been run on this branch yet; the earlier real-broker measurements that motivate C1 are in the NextPollCondition review (trunk 1.6 CPU cores while the coordinator is unreachable).**
 
 | Scenario | Metric | trunk | branch | Expected |
 |---|---|---|---|---|

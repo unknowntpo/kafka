@@ -1,0 +1,28 @@
+--- /Users/unknowntpo/repo/unknowntpo/kafka/kip-1371-fable/jmh-benchmarks/src/main/java/org/apache/kafka/jmh/consumer/ConsumerNetworkThreadPassBenchmark.java	2026-09-10 12:42:32
++++ jmh-benchmarks/src/main/java/org/apache/kafka/jmh/consumer/ConsumerNetworkThreadPassBenchmark.java	2026-09-10 13:17:30
+@@ -103,7 +103,6 @@
+ import java.util.concurrent.BlockingQueue;
+ import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.TimeUnit;
+-import java.util.concurrent.atomic.AtomicBoolean;
+ import java.util.function.BooleanSupplier;
+ import java.util.function.Supplier;
+ 
+@@ -342,8 +341,7 @@
+             null,
+             NO_OP_MEMBER_STATE_LISTENER,
+             Optional.empty(),
+-            positionsValidator,
+-            new AtomicBoolean()
++            positionsValidator
+         );
+         networkClientDelegate = networkClientDelegateSupplier.get();
+         requestManagers = requestManagersSupplier.get();
+@@ -484,7 +482,6 @@
+         Optional<Exception> metadataError = networkClientDelegate.getAndClearMetadataError();
+         if (metadataError.isPresent()) {
+             filteredEvents.forEach(e -> e.onMetadataError(metadataError.get()));
+-            networkClientDelegate.wakeupApplication();
+         }
+     }
+ 
