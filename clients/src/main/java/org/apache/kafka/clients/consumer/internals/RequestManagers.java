@@ -36,6 +36,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
@@ -174,7 +175,8 @@ public class RequestManagers implements Closeable {
                                                      final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker,
                                                      final MemberStateListener applicationThreadMemberStateListener,
                                                      final Optional<StreamsRebalanceData> streamsRebalanceData,
-                                                     final PositionsValidator positionsValidator
+                                                     final PositionsValidator positionsValidator,
+                                                     final AtomicBoolean autoCommitSnapshotRequested
     ) {
         return new CachedSupplier<>() {
             @Override
@@ -225,7 +227,8 @@ public class RequestManagers implements Closeable {
                         groupRebalanceConfig.groupId,
                         groupRebalanceConfig.groupInstanceId,
                         metrics,
-                        metadata);
+                        metadata,
+                        autoCommitSnapshotRequested);
                     if (streamsRebalanceData.isPresent()) {
                         streamsMembershipManager = new StreamsMembershipManager(
                             groupRebalanceConfig.groupId,

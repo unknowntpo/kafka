@@ -134,6 +134,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -401,6 +402,9 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     private final int requestTimeoutMs;
     private final Duration defaultApiTimeoutMs;
     private final boolean autoCommitEnabled;
+    // Set by the network thread when an interval auto-commit is due; read here on entry to poll() so the
+    // AsyncPollEvent can carry a snapshot of positions taken before this poll collects any record (KAFKA-18641).
+    private final AtomicBoolean autoCommitSnapshotRequested = new AtomicBoolean();
     private volatile boolean closed = false;
     // Init value is needed to avoid NPE in case of exception raised in the constructor
     private Optional<ClientTelemetryReporter> clientTelemetryReporter = Optional.empty();
@@ -509,14 +513,14 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
             ApiVersions apiVersions = new ApiVersions();
             final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
+            // This FetchBuffer is shared between the application and network threads.
+            this.fetchBuffer = new FetchBuffer(logContext);
             this.backgroundEventHandler = new BackgroundEventHandler(
                 backgroundEventQueue,
                 time,
-                asyncConsumerMetrics
+                asyncConsumerMetrics,
+                fetchBuffer::wakeup
             );
-
-            // This FetchBuffer is shared between the application and network threads.
-            this.fetchBuffer = new FetchBuffer(logContext);
             this.positionsValidator = new PositionsValidator(logContext, time, subscriptions, metadata);
             final Supplier<NetworkClientDelegate> networkClientDelegateSupplier = NetworkClientDelegate.supplier(time,
                     logContext,
@@ -548,7 +552,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     offsetCommitCallbackInvoker,
                     memberStateListener,
                     streamsRebalanceData,
-                    positionsValidator
+                    positionsValidator,
+                    autoCommitSnapshotRequested
             );
             final Supplier<ApplicationEventProcessor> applicationEventProcessorSupplier = ApplicationEventProcessor.supplier(logContext,
                     metadata,
@@ -659,7 +664,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.backgroundEventHandler = new BackgroundEventHandler(
             backgroundEventQueue,
             time,
-            asyncConsumerMetrics
+            asyncConsumerMetrics,
+            fetchBuffer::wakeup
         );
         this.positionsValidator = positionsValidator;
     }
@@ -712,7 +718,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.backgroundEventHandler = new BackgroundEventHandler(
             backgroundEventQueue,
             time,
-            asyncConsumerMetrics
+            asyncConsumerMetrics,
+            fetchBuffer::wakeup
         );
         this.rebalanceCallbackMetricsManager = new RebalanceCallbackMetricsManager(metrics);
         this.rebalanceListenerInvoker = new ConsumerRebalanceListenerInvoker(
@@ -751,7 +758,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             offsetCommitCallbackInvoker,
             memberStateListener,
             Optional.empty(),
-            positionsValidator
+            positionsValidator,
+            autoCommitSnapshotRequested
         );
         Supplier<ApplicationEventProcessor> applicationEventProcessorSupplier = ApplicationEventProcessor.supplier(
                 logContext,
@@ -1002,7 +1010,10 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         boolean newlySubmittedEvent = false;
 
         if (inflightPoll == null) {
-            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds());
+            Map<TopicPartition, OffsetAndMetadata> committableOffsets =
+                autoCommitEnabled && autoCommitSnapshotRequested.get() ? subscriptions.allConsumed() : null;
+            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds(), committableOffsets,
+                fetchBuffer::wakeup);
             newlySubmittedEvent = true;
             log.trace("Inflight event {} submitted", inflightPoll);
             applicationEventHandler.add(inflightPoll);
@@ -1989,25 +2000,27 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
         // Bound the wait when background progress may make fetching possible soon.
         // Use the current application-thread state to avoid relying on stale state from the network thread.
-        if (pollTimeout > retryBackoffMs) {
+        // The bound is a re-check interval, never zero: retry.backoff.ms may be configured to 0 (KAFKA-21049).
+        long recheckMs = Math.max(1L, retryBackoffMs);
+        if (pollTimeout > recheckMs) {
             if (subscriptions.numAssignedPartitions() == 0) {
                 // If there are no assigned partitions, reduce the fetch buffer wait time. This may happen when
                 // group membership has not been established yet, assignments have been revoked but not reassigned,
                 // bootstrap DNS resolution is still in progress, or manual assignment has not happened yet.
-                pollTimeout = retryBackoffMs;
+                pollTimeout = recheckMs;
             } else if (!subscriptions.hasAllFetchPositions()) {
                 // If some partitions do not have valid positions, the background thread may still be resolving them,
                 // for example by fetching committed offsets, looking up offsets by timestamp, or backing off after a
                 // failure. Reduce the wait time so the application thread can consume data promptly once positions are
                 // resolved.
-                pollTimeout = retryBackoffMs;
+                pollTimeout = recheckMs;
             } else {
                 Set<TopicPartition> buffered = fetchBuffer.bufferedPartitions();
                 if (subscriptions.hasFetchablePartitions(tp -> !buffered.contains(tp))) {
                     // If any fetchable partition has no buffered data, it may have been skipped due to reconnect
                     // backoff, an in-flight request, or a missing leader. Bound the wait so the application thread
                     // can retry once the condition clears.
-                    pollTimeout = retryBackoffMs;
+                    pollTimeout = recheckMs;
                 }
             }
         }

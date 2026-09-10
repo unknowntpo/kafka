@@ -70,11 +70,14 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -299,11 +302,32 @@ public class ApplicationEventProcessorTest {
         when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
         processor.process(event);
         assertTrue(event.isComplete());
-        verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs());
+        // The poll path must use the snapshot-based overload (KAFKA-18641); a poll without a snapshot passes null.
+        assertNull(event.committableOffsets());
+        verify(commitRequestManager).updateTimerAndMaybeCommit(event.pollTimeMs(), null);
+        verify(commitRequestManager, never()).updateTimerAndMaybeCommit(anyLong());
         verify(membershipManager).onConsumerPoll();
         verify(heartbeatRequestManager).resetPollTimer(event.pollTimeMs());
         verify(offsetsRequestManager).updateFetchPositions(event.deadlineMs());
         verify(fetchRequestManager).createFetchRequests();
+    }
+
+    @Test
+    public void testAsyncPollEventPassesCommittableOffsetsSnapshotToCommitManager() {
+        Map<TopicPartition, OffsetAndMetadata> snapshot =
+            Map.of(new TopicPartition("topic", 0), new OffsetAndMetadata(42));
+        AsyncPollEvent event = new AsyncPollEvent(12346, 12345, snapshot);
+        assertSame(snapshot, event.committableOffsets());
+
+        setupProcessor(true);
+        when(heartbeatRequestManager.membershipManager()).thenReturn(membershipManager);
+        when(offsetsRequestManager.updateFetchPositions(event.deadlineMs())).thenReturn(CompletableFuture.completedFuture(null));
+        when(fetchRequestManager.createFetchRequests()).thenReturn(CompletableFuture.completedFuture(null));
+        processor.process(event);
+        assertTrue(event.isComplete());
+        // The very same map instance the application thread captured reaches the commit manager.
+        verify(commitRequestManager).updateTimerAndMaybeCommit(eq(event.pollTimeMs()), same(snapshot));
+        verify(commitRequestManager, never()).updateTimerAndMaybeCommit(anyLong());
     }
 
     @Test

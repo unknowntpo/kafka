@@ -66,6 +66,7 @@ import java.util.OptionalDouble;
 import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
@@ -80,6 +81,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     private final LogContext logContext;
     private final Logger log;
     private final Optional<AutoCommitState> autoCommitState;
+    // Shared with the application thread; see updateTimerAndMaybeCommit(long, Map).
+    private final AtomicBoolean autoCommitSnapshotRequested;
     private final CoordinatorRequestManager coordinatorRequestManager;
     private final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker;
     private final OffsetCommitMetricsManager metricsManager;
@@ -117,6 +120,22 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         final Optional<String> groupInstanceId,
         final Metrics metrics,
         final ConsumerMetadata metadata) {
+        this(time, logContext, subscriptions, config, coordinatorRequestManager, offsetCommitCallbackInvoker,
+            groupId, groupInstanceId, metrics, metadata, new AtomicBoolean());
+    }
+
+    public CommitRequestManager(
+        final Time time,
+        final LogContext logContext,
+        final SubscriptionState subscriptions,
+        final ConsumerConfig config,
+        final CoordinatorRequestManager coordinatorRequestManager,
+        final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker,
+        final String groupId,
+        final Optional<String> groupInstanceId,
+        final Metrics metrics,
+        final ConsumerMetadata metadata,
+        final AtomicBoolean autoCommitSnapshotRequested) {
         this(time,
             logContext,
             subscriptions,
@@ -129,7 +148,8 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             config.getLong(ConsumerConfig.RETRY_BACKOFF_MAX_MS_CONFIG),
             OptionalDouble.empty(),
             metrics,
-            metadata);
+            metadata,
+            autoCommitSnapshotRequested);
     }
 
     // Visible for testing
@@ -147,7 +167,29 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         final OptionalDouble jitter,
         final Metrics metrics,
         final ConsumerMetadata metadata) {
+        this(time, logContext, subscriptions, config, coordinatorRequestManager, offsetCommitCallbackInvoker, groupId,
+            groupInstanceId, retryBackoffMs, retryBackoffMaxMs, jitter, metrics, metadata, new AtomicBoolean());
+    }
+
+    // Visible for testing
+    @SuppressWarnings("ParameterNumber")
+    CommitRequestManager(
+        final Time time,
+        final LogContext logContext,
+        final SubscriptionState subscriptions,
+        final ConsumerConfig config,
+        final CoordinatorRequestManager coordinatorRequestManager,
+        final OffsetCommitCallbackInvoker offsetCommitCallbackInvoker,
+        final String groupId,
+        final Optional<String> groupInstanceId,
+        final long retryBackoffMs,
+        final long retryBackoffMaxMs,
+        final OptionalDouble jitter,
+        final Metrics metrics,
+        final ConsumerMetadata metadata,
+        final AtomicBoolean autoCommitSnapshotRequested) {
         Objects.requireNonNull(coordinatorRequestManager, "Coordinator is needed upon committing offsets");
+        this.autoCommitSnapshotRequested = Objects.requireNonNull(autoCommitSnapshotRequested);
         this.time = time;
         this.logContext = logContext;
         this.log = logContext.logger(getClass());
@@ -289,8 +331,14 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      */
     private void maybeAutoCommitAsync() {
         if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit()) {
+            maybeAutoCommitAsync(subscriptions.allConsumed());
+        }
+    }
+
+    private void maybeAutoCommitAsync(final Map<TopicPartition, OffsetAndMetadata> offsets) {
+        if (autoCommitEnabled() && autoCommitState.get().shouldAutoCommit()) {
             OffsetCommitRequestState requestState = createOffsetCommitRequest(
-                subscriptions.allConsumed(),
+                offsets,
                 Long.MAX_VALUE);
             CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> result = requestAutoCommit(requestState);
             // Reset timer to the interval (even if no request was generated), but ensure that if
@@ -760,6 +808,37 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
     public void updateTimerAndMaybeCommit(final long currentTimeMs) {
         updateAutoCommitTimer(currentTimeMs);
         maybeAutoCommitAsync();
+    }
+
+    /**
+     * Interval auto-commit driven by an application {@code poll()}. Unlike {@link #updateTimerAndMaybeCommit(long)},
+     * the application thread is not blocked while this runs: it may be collecting records and advancing positions
+     * concurrently, so {@link SubscriptionState#allConsumed()} is not a safe source of offsets here (KAFKA-18641).
+     * The commit uses the snapshot the application thread captured on entry to {@code poll()}; when the poll
+     * carried no snapshot but a commit is due, the next poll is asked to capture one.
+     *
+     * @param committableOffsets Snapshot captured by the application thread, or {@code null}
+     */
+    public void updateTimerAndMaybeCommit(final long currentTimeMs,
+                                          final Map<TopicPartition, OffsetAndMetadata> committableOffsets) {
+        updateAutoCommitTimer(currentTimeMs);
+        if (!autoCommitEnabled() || !autoCommitState.get().shouldAutoCommit()) {
+            return;
+        }
+        if (committableOffsets == null) {
+            autoCommitSnapshotRequested.set(true);
+            return;
+        }
+        autoCommitSnapshotRequested.set(false);
+        maybeAutoCommitAsync(committableOffsets);
+    }
+
+    /**
+     * Set by the network thread when an interval auto-commit is due; read by the application thread on entry to
+     * {@code poll()} to decide whether to capture a positions snapshot for the {@code AsyncPollEvent}.
+     */
+    public AtomicBoolean autoCommitSnapshotRequested() {
+        return autoCommitSnapshotRequested;
     }
 
     class OffsetCommitRequestState extends RetriableRequestState {

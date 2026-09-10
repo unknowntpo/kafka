@@ -56,6 +56,8 @@ public class FetchBuffer implements AutoCloseable {
     private final IdempotentCloser idempotentCloser = new IdempotentCloser();
 
     private final AtomicBoolean wokenup = new AtomicBoolean(false);
+    // Written by the application thread under the lock; read by the network thread without it.
+    private volatile boolean waiting;
 
     private CompletedFetch nextInLineFetch;
 
@@ -165,6 +167,7 @@ public class FetchBuffer implements AutoCloseable {
     void awaitWakeup(Timer timer) {
         try {
             lock.lock();
+            waiting = true;
 
             while (!wokenup.compareAndSet(true, false)) {
                 // Update the timer before we head into the loop in case it took a while to get the lock.
@@ -188,15 +191,24 @@ public class FetchBuffer implements AutoCloseable {
         } catch (InterruptedException e) {
             throw new InterruptException("Interrupted waiting for results from fetching records", e);
         } finally {
+            waiting = false;
             lock.unlock();
             timer.update();
         }
     }
 
+    /**
+     * Wake an application thread parked in {@link #awaitWakeup(Timer)}. The sticky {@code wokenup} flag is
+     * always set so that a wakeup published before the next wait is not lost; the condition is only signalled
+     * (under the lock) when a thread is actually waiting, because the network thread calls this on every fetch
+     * completion and every background event.
+     */
     void wakeup() {
+        wokenup.set(true);
+        if (!waiting)
+            return;
         try {
             lock.lock();
-            wokenup.set(true);
             blockingCondition.signalAll();
         } finally {
             lock.unlock();

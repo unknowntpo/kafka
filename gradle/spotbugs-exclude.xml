@@ -732,4 +732,13 @@ For a detailed description of spotbugs bug categories, see https://spotbugs.read
         <Bug pattern="AT_NONATOMIC_64BIT_PRIMITIVE"/>
     </Match>
 
+    <!-- CommitRequestManager runs on the consumer network thread; "closing" is written and read only there.
+         The AtomicBoolean it shares with the application thread (auto-commit snapshot request) makes SpotBugs
+         treat the class as multi-threaded. -->
+    <Match>
+        <Class name="org.apache.kafka.clients.consumer.internals.CommitRequestManager"/>
+        <Field name="closing"/>
+        <Bug pattern="AT_STALE_THREAD_WRITE_OF_PRIMITIVE"/>
+    </Match>
+
 </FindBugsFilter>

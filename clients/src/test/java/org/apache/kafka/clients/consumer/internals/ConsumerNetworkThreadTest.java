@@ -19,6 +19,8 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEvent;
 import org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor;
 import org.apache.kafka.clients.consumer.internals.events.AsyncPollEvent;
+import org.apache.kafka.clients.consumer.internals.events.CheckAndUpdatePositionsEvent;
+import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.PausePartitionsEvent;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
@@ -41,8 +43,10 @@ import java.time.Duration;
 import java.util.Collections;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
@@ -56,6 +60,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -317,6 +322,55 @@ public class ConsumerNetworkThreadTest {
             throw new KafkaException("Injecting RequestManagers initialization failure");
         };
         testInitializeResourcesError(networkClientDelegateSupplier, requestManagersSupplier);
+    }
+
+    @Test
+    public void testMetadataErrorFailsUncompletedEvent() {
+        CheckAndUpdatePositionsEvent event = new CheckAndUpdatePositionsEvent(time.milliseconds() + 1000);
+        List<CompletableEvent<?>> uncompletedEvents = List.of(event);
+        when(applicationEventReaper.uncompletedEvents()).thenReturn(uncompletedEvents);
+        KafkaException metadataError = new KafkaException("metadata error");
+        when(networkClientDelegate.getAndClearMetadataError()).thenReturn(Optional.of(metadataError));
+
+        consumerNetworkThread.runOnce();
+
+        assertTrue(event.future().isCompletedExceptionally(), "Event should be failed with the metadata error");
+    }
+
+    @Test
+    public void testNoMetadataErrorLeavesUncompletedEventPending() {
+        CheckAndUpdatePositionsEvent event = new CheckAndUpdatePositionsEvent(time.milliseconds() + 1000);
+        List<CompletableEvent<?>> uncompletedEvents = List.of(event);
+        when(applicationEventReaper.uncompletedEvents()).thenReturn(uncompletedEvents);
+        when(networkClientDelegate.getAndClearMetadataError()).thenReturn(Optional.empty());
+
+        consumerNetworkThread.runOnce();
+
+        assertFalse(event.future().isDone());
+        verify(networkClientDelegate).getAndClearMetadataError();
+    }
+
+    /**
+     * KAFKA-20397: the in-flight {@link AsyncPollEvent} is checked for metadata errors before it is processed.
+     * If one is present the event is failed (not processed) and, because the error is published on the event,
+     * the event's error hook runs so a parked application thread is woken to surface it.
+     */
+    @Test
+    public void testMetadataErrorOnAsyncPollEventRunsErrorHookAndSkipsProcessing() {
+        AtomicInteger wakeups = new AtomicInteger();
+        AsyncPollEvent event = new AsyncPollEvent(time.milliseconds() + 1000, time.milliseconds(), null,
+            wakeups::incrementAndGet);
+        event.setEnqueuedMs(time.milliseconds());
+        applicationEventQueue.add(event);
+        KafkaException metadataError = new KafkaException("metadata error");
+        when(networkClientDelegate.getAndClearMetadataError()).thenReturn(Optional.of(metadataError));
+
+        consumerNetworkThread.runOnce();
+
+        assertTrue(event.isComplete());
+        assertTrue(event.error().isPresent(), "Metadata error should be published on the poll event");
+        verify(applicationEventProcessor, never()).process(event);
+        assertEquals(1, wakeups.get(), "Publishing the error must wake the application thread exactly once");
     }
 
     @Test
