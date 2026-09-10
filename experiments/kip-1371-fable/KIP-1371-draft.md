@@ -1,9 +1,9 @@
 > 閱讀指南（給 owner，不貼到 Confluence）：
-> 1. 本文是 KIP-1371 新版草稿，結構依 `DESIGN.md` §9；只講五條契約與它們修的 issue，機制放在各契約的「Minimal change」。
-> 2. Reviewer 可以讀完 §2 Summary 或 §4 Contracts 就停；量測與替代方案在 §8–§9，證據文件在 §10。
-> 3. 已實作（分支 `fable/kip-1371-event-loop`，base trunk `74fbd50061`）：C1、C2、C3；C4、C5 只有文件與測試，沒改 production code。
-> 4. §8 已填入 loop-level JMH（trunk vs branch）實測；end-to-end 真 broker 與系統測試（ducktape）尚未跑。
-> 5. 待決事項：metric 可拿掉；KAFKA-21031 與 PR #23357 要協調。
+> 1. 結構依 `DESIGN.md` §9：只講五條契約與它們修的 issue，機制放在每條契約的「Minimal change」。
+> 2. Reviewer 讀完 §2 或 §4 就可以停；量測在 §8、替代方案在 §9、證據文件在 §10。
+> 3. 已實作於分支 `fable/kip-1371-event-loop`（base trunk `74fbd50061`）：C1、C2、C3 改程式；C4、C5 只有文件與測試。
+> 4. §8 的 loop-level 與 end-to-end JMH 都已實測；ducktape 系統測試尚未跑。
+> 5. 待決事項：新 metric 可拿掉；KAFKA-21031 與 PR #23357 需與作者協調。
 
 # KIP-1371: Wait, scope, publication, termination and thread-ownership contracts for the async consumer background loop
 
@@ -15,141 +15,157 @@
 | JIRA | [KAFKA-20995](https://issues.apache.org/jira/browse/KAFKA-20995) (umbrella) |
 | Discussion thread | TBD |
 | Author | [placeholder] |
-| Related tickets | KAFKA-20253, KAFKA-20426, KAFKA-20970, KAFKA-21010, KAFKA-21031, KAFKA-21049, KAFKA-20540, KAFKA-19804, KAFKA-20854, KAFKA-17066, KAFKA-17674, KAFKA-15529 (PR #21476), KAFKA-18641, KAFKA-20397, KAFKA-18160, KAFKA-18569, KAFKA-19357 |
 | Baseline | trunk `74fbd50061` (2026-09-10) |
+| Related tickets | KAFKA-20253, 20426, 20970, 21010, 21031, 21049, 20540, 19804, 20854, 17066, 17674, 15529 (PR #21476), 18641, 20397, 18160, 18569, 19357 |
 
 ## 2. Summary
 
-`AsyncKafkaConsumer` (`group.protocol=consumer`), `ShareConsumerImpl` and the Streams group protocol share one background loop (`ConsumerNetworkThread`) and one set of `RequestManager`s. The rules that keep this loop correct are not written down. The same bugs keep coming back in different managers. This KIP writes the rules down as five contracts, fixes the places where trunk breaks them with the smallest possible change, and pins each rule with a test.
+`AsyncKafkaConsumer` (`group.protocol=consumer`), `ShareConsumerImpl` and the Streams group protocol share one background loop (`ConsumerNetworkThread`) and one set of `RequestManager`s. The rules that keep this loop correct are not written down anywhere, so the same bug keeps coming back in a different manager. This KIP writes the rules down as five contracts, fixes the places where trunk breaks them with the smallest change that works, and pins every rule with a test.
 
 | Contract | One sentence | Closes |
 |---|---|---|
-| C1 Wait reason | A manager that did not send a request must never ask for a zero wait, on either the network channel (`timeUntilNextPollMs`) or the application channel (`maximumTimeToWait`). | Busy loops: KAFKA-21031, KAFKA-21049; makes the 20253/20426/20970/21010 pattern a rule |
-| C2 Scope and late response | An operation captures its scope when it is admitted, checks it before applying a response, and never starts after its observer's deadline has passed. | Never-expiring commits, ListOffsets retried forever, late responses after seek/unsubscribe |
-| C3 Publish then notify | The background thread changes state, then publishes, then wakes the application thread; anything the application must handle wakes it; interval auto-commit only snapshots positions already delivered. | KAFKA-20397, KAFKA-18641 residual |
-| C4 Termination | Close is one written sequence, and every kind of pending work has exactly one terminator and one result. | KAFKA-18569, KAFKA-19357 family (documented and pinned, no code change) |
-| C5 Thread ownership | Manager state lives on the network thread, user callbacks run on the application thread, and every shared field has one named writer. | KAFKA-18160 family (documented and pinned, no code change) |
+| C1 Wait reason | A manager that did not send a request must never ask for a zero wait, on the network channel (`timeUntilNextPollMs`) or the application channel (`maximumTimeToWait`). | KAFKA-21031, 21049; turns the 20253/20426/20970/21010 pattern into a rule |
+| C2 Scope and late response | An operation captures its scope when admitted, checks it before applying a response, and does not start after its observer's deadline when it could never be sent. | Commits that never expire, ListOffsets retried forever, late responses after seek or unsubscribe |
+| C3 Publish then notify | Change state, publish, then wake the application thread; anything the application must handle wakes it; an interval auto-commit only snapshots positions already delivered. | KAFKA-20397, KAFKA-18641 residual |
+| C4 Termination | Close is one written sequence and every kind of pending work has exactly one terminator and one result. | KAFKA-18569, 19357 family (documented and pinned, no code change) |
+| C5 Thread ownership | Manager state lives on the network thread, user callbacks run on the application thread, every shared field has one named writer. | KAFKA-18160 family (documented and pinned, no code change) |
 
-Public interface change: one new metric (`network-thread-invalid-poll-result-total`) and one behaviour change (C2: a never-attempted commit or offset fetch expires at its deadline instead of being sent later). No scheduler. No new thread model. No `Consumer` or `ShareConsumer` API change.
+Public interface: one new metric and one behaviour change (C2). No scheduler, no new thread model, no `Consumer` or `ShareConsumer` API change, no configuration change.
 
 ## 3. Motivation
 
 ### 3.1 Six failure shapes
 
-The 14 tickets under the umbrella fall into six shapes. Status is at trunk `74fbd50061`.
+The tickets under the umbrella fall into six shapes. Status is at trunk `74fbd50061`.
 
-| Shape | Tickets | Status at trunk | One sentence |
+| Shape | Tickets | Status | One sentence |
 |---|---|---|---|
-| A. Blocked work reports zero wait | KAFKA-20253, 20426, 20970, 21010 | fixed | Wait time is computed from a timer that is only reset when a request is sent, so it becomes 0 while in flight, while the coordinator is unknown, or before the first heartbeat. |
-| | KAFKA-21031, KAFKA-21049, KAFKA-20540 | **open** | Same shape, not yet fixed. |
-| B. Scope leaks across stages | KAFKA-17066, 17674 | fixed | A later stage of an async chain reads the current assignment instead of the set captured at admission. |
-| C. Publication order | KAFKA-15529 / PR #21476 | fixed | No written order between position advance, record delivery, `isConsumed` and the auto-commit snapshot. |
-| | KAFKA-18641 | **partly regressed** | KAFKA-18376 removed the application-thread wait that gave the ordering; interval auto-commit can again read positions of records not yet returned. No trunk test covers it. |
-| D. Error delivery and no-progress wakeup | KAFKA-20854 | fixed | An empty fetch preparation result woke the application for no reason. |
-| | KAFKA-20397 | **open** | The background thread marks the in-flight poll with a metadata error but does not wake the parked application thread. |
-| E. Callback acknowledgement | KAFKA-18160 | fixed | A `WakeupException` inside a rebalance callback skipped the `CallbackCompletedEvent`. |
-| F. Close and termination | KAFKA-18569, 19357 | fixed | Each manager decided its own close behaviour; two fixes conflicted. |
+| A. Blocked work reports zero wait | 20253, 20426, 20970, 21010 | fixed | Wait time comes from a timer that is only reset when a request is sent, so it reads 0 while a request is in flight, while the coordinator is unknown, or before the first heartbeat. |
+| | 21031, 21049, 20540 | **open** | Same shape, not yet fixed. |
+| B. Scope leaks across stages | 17066, 17674 | fixed | A later stage of an async chain reads the current assignment instead of the set captured at admission. |
+| C. Publication order | 15529 / PR #21476 | fixed | No written order between position advance, record delivery, `isConsumed` and the auto-commit snapshot. |
+| | 18641 | **partly regressed** | KAFKA-18376 removed the application-thread wait that provided the ordering, so an interval auto-commit can again read positions of records not yet returned. No trunk test covers it. |
+| D. Error delivery and no-progress wakeup | 20854 | fixed | An empty fetch preparation woke the application for no reason. |
+| | 20397 | **open** | The background thread marks the in-flight poll with a metadata error and does not wake the parked application thread. |
+| E. Callback acknowledgement | 18160 | fixed | A `WakeupException` inside a rebalance callback skipped the `CallbackCompletedEvent`. |
+| F. Close and termination | 18569, 19357 | fixed | Each manager decided its own close behaviour; two fixes then conflicted. |
 
 ### 3.2 The same method was patched four times
 
-`AbstractHeartbeatRequestManager.maximumTimeToWait()` was changed by KAFKA-20253 (guard on coordinator unavailable), KAFKA-20970 (coordinator unknown returns backoff), KAFKA-21010 (return `retry.backoff.ms` instead of the heartbeat interval, which is 0 before the first response), and is changed again by KAFKA-21031 (in-flight heartbeat still returns 0). Each fix rebuilt the condition "will `poll()` send anything?" by hand. The 20253 guard `!requestInFlight()` only protected the "heartbeat now" branch and let the in-flight case fall through to the same zero. This is what happens when the rule is not written down.
+`AbstractHeartbeatRequestManager.maximumTimeToWait()` was changed by KAFKA-20253 (guard when the coordinator is unavailable), KAFKA-20970 (coordinator unknown returns a backoff), KAFKA-21010 (return `retry.backoff.ms` rather than the heartbeat interval, which is 0 before the first response), and is changed again by KAFKA-21031 (an in-flight heartbeat still returns 0). Each fix rebuilt the question "will `poll()` send anything?" by hand. The 20253 guard `!requestInFlight()` protected only the "heartbeat now" branch and let the in-flight case fall through to the same zero. That is what happens when the rule is not written down.
 
 ### 3.3 Measured cost
 
-- Busy-loop family: with the coordinator unreachable, trunk burns about 1.6 CPU cores (1607–1725 process CPU ms/s) in the `unavailable` scenario of the real-broker A/B harness. The no-spin change alone removes about 93% of that (the design notes quote < 0.05 core). The scheduler prototype did not change it at all.
-- Scheduler alternative (S1): consume CPU per record +31.3%, process CPU +24.0%, idle allocation on the network thread +110%, throughput within noise. See §9.
-- Manager polls are not the cost: async-profiler shows 82–88% of network-thread time in `Selector.select` / socket read; the seven manager `poll()` calls together are under 1%.
+- Busy-loop family: with an unreachable coordinator, trunk burns about 1.6 CPU cores (1607–1725 process CPU ms/s) in the real-broker harness of the NextPollCondition review; the no-spin change alone removes about 93% of it.
+- The scheduler alternative did not help there at all, and cost 31.3% more CPU per record while consuming (§9, S1).
+- Manager polls are not the cost: async-profiler shows 82–88% of network-thread time in `Selector.select` and socket read; the seven manager `poll()` calls together are under 1%.
 
 ## 4. Proposed changes
 
-Each contract uses the same format: definition, where trunk violates it, minimal change, tests, tickets. C1, C2 and C3 are implemented on the branch. C4 and C5 are documentation plus tests only.
+Each contract has the same format: definition, where trunk violates it, minimal change, tests, tickets. C1, C2 and C3 change code. C4 and C5 are documentation plus tests.
 
 ### C1. Wait-reason contract
 
 **Definition.** `RequestManager.poll()` returns one of three results:
-- `progress(requests)`: requests were staged; only this case may ask for an immediate re-poll (`timeUntilNextPollMs == 0`);
-- `retryAfter(delayMs)`: waiting for time, `delayMs > 0`;
-- `awaitInput()`: waiting for an in-flight response or another owner's state; `Long.MAX_VALUE`, re-evaluated on the next network poll or application event.
 
-`maximumTimeToWait()` bounds the application thread only by deadlines of actions the application thread itself must start and that are possible now: poll-timer refresh, auto-commit when the coordinator is known, Streams topology push. Waiting for an in-flight request, the coordinator, or DNS is not such an action, so it returns `Long.MAX_VALUE` (or the poll-timer bound).
+- `progress(requests)` — requests were staged; only this may ask for an immediate re-poll (`timeUntilNextPollMs == 0`);
+- `retryAfter(delayMs)` — waiting for time to pass, `delayMs > 0`;
+- `awaitInput()` — waiting for an in-flight response or for another owner's state; `Long.MAX_VALUE`, re-evaluated on the next network poll or application event.
+
+`maximumTimeToWait()` bounds the application thread only by deadlines of actions the application thread itself must start and that are possible now: refreshing the poll timer, an auto-commit when the coordinator is known, a Streams topology push. Waiting for an in-flight request, for the coordinator, or for DNS is not such an action, so it returns `Long.MAX_VALUE` or the poll-timer bound.
 
 **Where trunk violates it.**
-- `HeartbeatRequestState.timeToNextHeartbeatMs`: with the timer expired and a request in flight, returns `remainingBackoffMs()`, which is 0 before the first response (KAFKA-21031). `AbstractHeartbeatRequestManager.poll()` and `maximumTimeToWait()` both forward it, so both threads spin until the response or `request.timeout.ms`.
+
+- `HeartbeatRequestState.timeToNextHeartbeatMs`: with the timer expired and a request in flight it returns `remainingBackoffMs()`, which is 0 before the first response (KAFKA-21031). `AbstractHeartbeatRequestManager.poll()` and `maximumTimeToWait()` both forward it, so both threads spin until the response or `request.timeout.ms`.
 - `AbstractHeartbeatRequestManager.maximumTimeToWait`: `pollTimer.remainingMs() / 2` rounds the last millisecond to 0.
-- `FetchRequestManager.maximumTimeToWait` and `AsyncKafkaConsumer.pollForFetches`: return `retry.backoff.ms`, which may be 0 (KAFKA-21049).
+- `FetchRequestManager.maximumTimeToWait` and `AsyncKafkaConsumer.pollForFetches`: return `retry.backoff.ms`, which may be configured to 0 (KAFKA-21049).
 
-**Minimal change (implemented, commit "KIP-1371 C1").**
+**Minimal change.**
+
 1. `NetworkClientDelegate.PollResult.progress / retryAfter / awaitInput` named factories; `retryAfter` rejects non-positive delays. No new fields.
-2. `NetworkClientDelegate.addAll(PollResult)`: a zero delay with no requests is counted in `network-thread-invalid-poll-result-total` and replaced by `max(1, retry.backoff.ms)`. This is a safety net and a detector, not a scheduler.
-3. `HeartbeatRequestState.timeToNextHeartbeatMs`: returns `max(1, retryBackoffMs)` while a request is in flight. `AbstractHeartbeatRequestManager` and `StreamsGroupHeartbeatRequestManager.maximumTimeToWait`: while in flight, bound only by `max(1, pollTimer.remainingMs() / 2)`.
-4. `FetchRequestManager.maximumTimeToWait`: `max(1, retryBackoffMs)`. The same floor in `pollForFetches` (`recheckMs`) landed with the C3 commit.
+2. `NetworkClientDelegate.addAll(PollResult)`: a zero delay with no requests is counted in `network-thread-invalid-poll-result-total` and replaced by `max(1, retry.backoff.ms)`. A safety net and a detector, not a scheduler.
+3. `HeartbeatRequestState.timeToNextHeartbeatMs` returns `max(1, retryBackoffMs)` while a request is in flight; `AbstractHeartbeatRequestManager` and `StreamsGroupHeartbeatRequestManager.maximumTimeToWait` bound the application only by `max(1, pollTimer.remainingMs() / 2)` in that case.
+4. `FetchRequestManager.maximumTimeToWait` and the three re-check branches of `pollForFetches` use `max(1, retry.backoff.ms)`.
 
-**Tests that pin it.** `ConsumerHeartbeatRequestManagerTest.testInFlightHeartbeatWithExpiredIntervalDoesNotSpin` (interval 0 and 5000), `testMaximumTimeToWaitWithOneMsLeftOnPollTimerDoesNotRoundToZero`; `StreamsGroupHeartbeatRequestManagerTest.testInFlightFirstHeartbeatWithExpiredIntervalDoesNotSpin`; `FetchRequestManagerTest.testMaximumTimeToWaitBoundedToAtLeastOneMsWhenRetryBackoffIsZero`; `NetworkClientDelegateTest.testAddAll{ClampsZeroDelayWithoutRequestsToRetryBackoff, ClampsZeroDelayWithoutRequestsToAtLeastOneMs, ProgressResultStagesRequestAndReturnsZero, AwaitInputResultWaitsForever, RetryAfterResultReturnsDelay}`, `testRetryAfterRejectsNegativeDelay`; `AsyncConsumerMetricsTest` for the metric. Existing `...DoesNotSpin` tests from 20253/20426/20970/21010 stay unchanged.
+**Tests.** `ConsumerHeartbeatRequestManagerTest.testInFlightHeartbeatWithExpiredIntervalDoesNotSpin` (heartbeat interval 0 and 5000), `testMaximumTimeToWaitWithOneMsLeftOnPollTimerDoesNotRoundToZero`; `StreamsGroupHeartbeatRequestManagerTest.testInFlightFirstHeartbeatWithExpiredIntervalDoesNotSpin`; `FetchRequestManagerTest.testMaximumTimeToWaitBoundedToAtLeastOneMsWhenRetryBackoffIsZero`; `NetworkClientDelegateTest` (clamp, metric, three factories, negative delay); `AsyncConsumerMetricsTest`. The existing `...DoesNotSpin` tests from 20253/20426/20970/21010 are unchanged.
 
-**Tickets.** KAFKA-21031, KAFKA-21049; pattern of KAFKA-20253, 20426, 20970, 21010, 20540.
+**Tickets.** KAFKA-21031, 21049; pattern of 20253, 20426, 20970, 21010, 20540.
 
 ### C2. Scope and late-response contract
 
-**Definition.** An operation that spans several polls captures its scope (partition set, assignment) at admission and checks it before applying a response. A stale result is dropped but still clears the in-flight state. The application's timeout, wakeup or cancel ends the observer, not the RPC: a request already sent completes or fails on its own. A request that was **never attempted** must not start after the observer's deadline has passed.
+**Definition.** An operation that spans several polls captures its scope (partition set, assignment) when admitted and checks it before applying a response. A stale result is dropped but still clears the in-flight state. The application's timeout, wakeup or cancel ends the observer, not the RPC: a request already sent completes or fails on its own. A request that could never be sent, and whose observer's deadline has passed, must not start later.
 
 **Where trunk violates it.**
-- `CommitRequestManager.RetriableRequestState.maybeExpire` requires `numAttempts > 0`, so a `commitSync` that waited out its timeout while the coordinator was unknown is still sent when the coordinator appears. `poll()` returns `EMPTY` in the coordinator-unknown branch without expiring anything.
-- `OffsetsRequestManager.ListOffsetsRequestState` has no deadline: partitions with an unknown leader stay in `requestsToRetry` and are rebuilt on every metadata update, and their transient topics stay registered.
 
-**Minimal change (implemented, commit "KIP-1371 C2").**
-1. `CommitRequestManager`: `maybeExpire` drops the `numAttempts > 0` condition; `PendingRequests.failAndRemoveExpiredRequests(includeNeverAttempted)` runs in two places: in `drain()` with `false`, where it expires only requests that were already attempted (so a request that can be sent now still gets its one attempt, as today); and in the coordinator-unknown branch of `poll()` with `true`, where sending is impossible anyway, so never-attempted commits and offset fetches expire too. Closing with an unknown coordinator still fails with `CommitFailedException` (KAFKA-19357 wins). Auto-commit and `commitAsync` use `Long.MAX_VALUE` deadlines and are unaffected. An offset fetch that was attempted keeps its existing retry semantics.
-2. `OffsetsRequestManager.fetchOffsets(timestamps, requireTimestamps, deadlineMs)` carries `ListOffsetsEvent.deadlineMs()` into `ListOffsetsRequestState.deadlineMs`; `poll()` and `onUpdate()` first run `failExpiredRequestsToRetry`, which removes expired states from `requestsToRetry` and completes them with `TimeoutException` (the existing completion handler releases transient topics). `currentLag` passes `Long.MAX_VALUE` (it never retried).
-3. Tests only: late responses for positions (OffsetFetch), reset (ListOffsets) and validation (OffsetsForLeaderEpoch) after seek, unsubscribe and observer timeout, using a real `SubscriptionState`.
+- `CommitRequestManager.RetriableRequestState.maybeExpire` requires `numAttempts > 0`, and the coordinator-unknown branch of `poll()` returns `EMPTY` without expiring anything. A `commitSync` that timed out while the coordinator was unknown is still sent once the coordinator appears, so the broker records an offset the caller was told did not commit.
+- `OffsetsRequestManager.ListOffsetsRequestState` has no deadline: partitions with an unknown leader stay in `requestsToRetry`, are rebuilt on every metadata update forever, and keep their transient topics registered.
 
-`ShareConsumeRequestManager.AcknowledgeRequestState.maybeExpire` keeps `numAttempts > 0`: it is a reusable per-node container with different semantics and is out of scope.
+**Minimal change.**
 
-**Tests that pin it.** `CommitRequestManagerTest.testCommitSyncExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered`, `testFetchOffsetsExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered` (both fail on trunk), `testPollWithClosingAndExpiredPendingCommitFailsWithCommitFailedException`; `OffsetsRequestManagerTest.testListOffsetsWaitingForMetadataUpdate_Timeout` (rewritten, fails on trunk), `..._ExpiredOnMetadataUpdate` (fails on trunk), `testUpdatePositionsAppliesCommittedOffsetsReceivedAfterEventDeadline`, `testUpdatePositionsErrorReceivedAfterEventDeadlineIsThrownOnNextCall`, `testResetPositionsLateResponseNotAppliedAfter{Seek,Unsubscribe}`, `testValidatePositionsLateResponseNotAppliedAfter{Seek,Unsubscribe}`.
+1. `CommitRequestManager.PendingRequests.failAndRemoveExpiredRequests(includeNeverAttempted)` runs in two places. In `drain()` with `false`: only requests that were already attempted expire, so a request that can be sent now still gets its one attempt, exactly as trunk and the classic consumer do. In the coordinator-unknown branch of `poll()` with `true`: sending is impossible anyway, so never-attempted commits and offset fetches expire with `TimeoutException`. Closing with an unknown coordinator still fails with `CommitFailedException` first (KAFKA-19357). Auto-commit and `commitAsync` use `Long.MAX_VALUE` deadlines and never expire here.
+2. `OffsetsRequestManager.fetchOffsets(...)` carries `ListOffsetsEvent.deadlineMs()` into `ListOffsetsRequestState`; `poll()` and `onUpdate()` first run `failExpiredRequestsToRetry`, which removes expired states and completes them with `TimeoutException`, releasing the transient topics. `currentLag` passes `Long.MAX_VALUE`, as it never retried.
+3. Both sweeps allocate nothing when their queues are empty, which matters because the first runs on every poll while the coordinator is unknown (§8.1).
 
-**Tickets.** KAFKA-17066, KAFKA-17674 (pattern); new behaviour, see §5.
+`ShareConsumeRequestManager.AcknowledgeRequestState.maybeExpire` keeps `numAttempts > 0`: it is a reusable per-node container with different semantics, and is out of scope.
+
+**Tests.** `CommitRequestManagerTest.testCommitSyncExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered`, `testFetchOffsetsExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered` (both fail on trunk), `testExpiredCommitIsStillAttemptedOnceWhenCoordinatorIsKnown`, `testPollWithClosingAndExpiredPendingCommitFailsWithCommitFailedException`; `OffsetsRequestManagerTest.testListOffsetsWaitingForMetadataUpdate_Timeout` and `..._ExpiredOnMetadataUpdate` (both fail on trunk), plus late-response tests for positions, reset and validation after seek and unsubscribe.
+
+**Tickets.** KAFKA-17066, 17674 (pattern); new behaviour, see §5.2.
 
 ### C3. Publication and notification contract
 
 **Definition.**
+
 - Order of background-visible effects: change state, publish (volatile or queue), then signal.
-- After the background thread puts anything the application must handle into a queue or onto the `AsyncPollEvent` (records, a `BackgroundEvent`, a metadata or fatal error), it wakes a parked application thread.
+- After the background thread puts anything the application must handle into a queue or onto the `AsyncPollEvent` — records, a `BackgroundEvent`, a metadata or fatal error — it wakes a parked application thread.
 - An interval auto-commit may only snapshot positions of records already returned by a completed `poll()`.
 
 **Where trunk violates it.**
-- `BackgroundEventHandler.add` enqueues but does not wake the application thread.
-- `ConsumerNetworkThread.maybeFailOnMetadataError` → `AsyncPollEvent.onMetadataError` marks the error and nobody wakes `FetchBuffer.awaitWakeup` (KAFKA-20397). The open PR #21991 adds a check before blocking, which still leaves a window.
+
+- `BackgroundEventHandler.add` enqueues without waking the application thread.
+- `ConsumerNetworkThread.maybeFailOnMetadataError` marks the in-flight poll with the error and nobody wakes `FetchBuffer.awaitWakeup` (KAFKA-20397). The open PR #21991 adds a check before blocking, which still leaves a window.
 - `ApplicationEventProcessor` calls `CommitRequestManager.updateTimerAndMaybeCommit(now)` while the application thread may be advancing positions in `FetchCollector` (KAFKA-18641 residual after KAFKA-18376).
 
-**Minimal change (implemented, commit "KIP-1371 C3").**
+**Minimal change.**
+
 1. `BackgroundEventHandler` takes an `applicationWakeup` hook and runs it after enqueueing; `AsyncKafkaConsumer` and `ShareConsumerImpl` pass their fetch buffer's `wakeup`. `NetworkClientDelegate.wakeupApplication()` exposes the same hook.
-2. `AsyncPollEvent` takes an `onError` hook; `completeExceptionally` writes the volatile error first, then runs the hook (`fetchBuffer::wakeup`).
-3. `FetchBuffer.wakeup()` sets the sticky flag first and takes the lock only when a thread is waiting.
-4. `CommitRequestManager.updateTimerAndMaybeCommit(now, committableOffsets)`: the interval auto-commit driven by an `AsyncPollEvent` uses only the snapshot carried by the event. The application thread captures `allConsumed()` in `checkInflightPoll`, before `collectFetch`, and only when the network thread asked for it through the shared `autoCommitSnapshotRequested` flag. Commit due but no snapshot: set the flag, do not commit, the next poll carries one. The blocking overload (`AssignmentChangeEvent`, close) still reads live `allConsumed()`.
+2. `AsyncPollEvent` takes an `onError` hook; `completeExceptionally` writes the volatile error first, then runs the hook.
+3. `FetchBuffer.wakeup()` sets the sticky flag first and takes the lock only when a thread is actually waiting.
+4. `CommitRequestManager.updateTimerAndMaybeCommit(now, committableOffsets)`: an interval auto-commit driven by an `AsyncPollEvent` uses only the snapshot the event carries. The application thread captures `allConsumed()` in `checkInflightPoll`, before `collectFetch`, and only when the network thread asked for it through the shared `autoCommitSnapshotRequested` flag. If a commit is due and no snapshot was carried, the flag is set, nothing is committed, and the next poll carries one. The blocking overload used by `AssignmentChangeEvent` and by close still reads live `allConsumed()`.
 
-**Tests that pin it.** `EventLoopContractRegressionTest.testMetadataErrorWakesParkedApplicationThread` and `testIntervalAutoCommitDoesNotIncludeUndeliveredPositions` (both fail on trunk); `BackgroundEventHandlerTest.testAddPublishesEventBeforeRunningApplicationWakeup`; `FetchBufferTest.testWakeupBeforeAwaitIsSticky`, `testWakeupRacingWithAwaitIsNeverLost`, `testWakeupReleasesParkedThreadPromptly`; `CommitRequestManagerTest.testPollDrivenAutoCommit{CommitsExactlyTheSnapshot, DoesNothingBeforeIntervalElapses, DoesNothingWhileCommitInFlight, WithoutSnapshotRequestsSnapshotAndDoesNotCommit}`; `AsyncKafkaConsumerTest.testPollEventCarriesNoCommittableOffsetsWhenSnapshotNotRequested`; `ApplicationEventProcessorTest.testAsyncPollEventPassesCommittableOffsetsSnapshotToCommitManager`; `ConsumerNetworkThreadTest.testMetadataErrorOnAsyncPollEventRunsErrorHookAndSkipsProcessing`.
+**Tests.** `EventLoopContractRegressionTest.testMetadataErrorWakesParkedApplicationThread` and `testIntervalAutoCommitDoesNotIncludeUndeliveredPositions` (both fail on trunk); `BackgroundEventHandlerTest.testAddPublishesEventBeforeRunningApplicationWakeup`; `FetchBufferTest.testWakeupBeforeAwaitIsSticky`, `testWakeupRacingWithAwaitIsNeverLost`, `testWakeupReleasesParkedThreadPromptly`; four `CommitRequestManagerTest.testPollDrivenAutoCommit*` cases; `AsyncKafkaConsumerTest.testPollEventCarriesNoCommittableOffsetsWhenSnapshotNotRequested`; `ApplicationEventProcessorTest.testAsyncPollEventPassesCommittableOffsetsSnapshotToCommitManager`; `ConsumerNetworkThreadTest.testMetadataErrorOnAsyncPollEventRunsErrorHookAndSkipsProcessing`.
 
-**Tickets.** KAFKA-20397, KAFKA-18641, KAFKA-15529 / PR #21476 (pattern).
+**Tickets.** KAFKA-20397, 18641; 15529 / PR #21476 (pattern).
 
 ### C4. Termination contract
 
-**Definition.** `close()` is one written sequence (ten steps: disable wakeups, one shared `closeTimer`, auto-commit on close, stop FindCoordinator, run rebalance callbacks on the application thread, leave group, await async commits, stop the network thread and run `cleanup()`, reap the background queue, close resources). Every kind of pending work has one terminator and one result: sent, `CommitFailedException`, `TimeoutException`, or dropped. The table lives in `termination-table.md` (18 kinds of pending work) instead of in each manager's `closing` flag.
+**Definition.** `close()` is one written sequence of ten steps: disable wakeups, take one shared close timer, auto-commit, stop FindCoordinator, run rebalance callbacks on the application thread, leave the group, await async commits, stop the network thread and run `cleanup()`, reap the background queue, close resources. Every kind of pending work has one terminator and one result: sent, `CommitFailedException`, `TimeoutException`, or dropped. The table lives in `termination-table.md` (18 kinds of pending work) rather than in each manager's `closing` flag.
 
-**Where trunk violates it.** Not a code violation. The table found one manager-level future without a terminator (unsent OffsetFetch for positions at close: `clearAll()` clears it without completing it) and a few ambiguous rows (validation has no observable result; `AsyncPollEvent` is the only application event without a reaper; Streams topology push has no close hook). None can hang a caller because the application-side events are all reaped, so no production change is made in this KIP.
+**Where trunk violates it.** Not a code violation. The table found one manager-level future with no terminator (an unsent OffsetFetch for positions at close: `clearAll()` clears it without completing it) and a few ambiguous rows: validation has no observable result, `AsyncPollEvent` is the only application event outside the reaper, and a Streams topology push has no close hook. None can hang a caller, because every application-side event is reaped, so this KIP changes no code here.
 
-**Minimal change.** Documentation and tests only (commit "KIP-1371 C4/C5"). If a test shows a pending work item with no terminator that can hang a caller, the smallest fix goes in a follow-up.
+**Minimal change.** Documentation and tests only. If a test later shows a pending item with no terminator that can hang a caller, the smallest fix goes in a follow-up.
 
-**Tests that pin it.** `TerminationContractTest.testUnsentCommitSyncWithCoordinatorUnknownFailsWithCommitFailedExceptionAtClose`, `testUnsentCommitWithCoordinatorKnownIsDrainedOnFirstPollAfterSignalClose`, `testUnsentOffsetFetchIsDroppedWithoutCompletingItsFutureAtClose` (characterization), `testLateListOffsetsResponseAfterAssignmentReleasedDoesNotThrowOrWritePosition`, `testLateListOffsetsResponseWithManualAssignmentStillWritesPosition`, `testLateOffsetFetchResponseAfterAssignmentReleasedDoesNotThrowOrWritePosition`, `testRebalanceCallbackEventsLeftInBackgroundQueueAreFailedAtClose`, `testApplyAssignmentEventInApplicationQueueIsFailedByNetworkThreadCleanup`.
+**Tests.** Eight `TerminationContractTest` cases: close with an unsent commit (coordinator known and unknown), the unsent OffsetFetch characterization, late ListOffsets and OffsetFetch responses after the assignment is released, rebalance callback events left in the background queue, and an `ApplyAssignmentEvent` failed by `cleanup()`.
 
-**Tickets.** KAFKA-18569, KAFKA-19357.
+**Tickets.** KAFKA-18569, 19357.
 
 ### C5. Thread-ownership contract
 
-**Definition.** (1) `RequestManager` state is read and written only on the network thread; the application thread reaches it only through `ApplicationEvent`s and their futures. (2) User callbacks (`ConsumerRebalanceListener`, `StreamsRebalanceListener`, `OffsetCommitCallback`, interceptors, `AcknowledgementCommitCallback`) run only on the application thread. (3) The application completes a background future only through a `*CallbackCompletedEvent`. (4) Positions are advanced by the application thread (`FetchCollector`), except seek/reset which run on the network thread while the application is blocked inside the API. (5) A field with one writer thread and a different reader thread is at least `volatile`/`Atomic*`; two writer threads means one lock or one queue. The writer/reader table for `SubscriptionState`, `FetchBuffer`, `AsyncPollEvent` and the other shared objects lives in `thread-ownership.md`.
+**Definition.**
 
-**Where trunk violates it.** Rule 5: `SubscriptionState.seekUnvalidated(tp, position)` and `TopicPartitionState.seekUnvalidated` are not synchronized while every other `SubscriptionState` entry point is. Not changed in this KIP; recorded for a follow-up.
+1. `RequestManager` state is read and written only on the network thread; the application thread reaches it through `ApplicationEvent`s and their futures.
+2. User callbacks (`ConsumerRebalanceListener`, `StreamsRebalanceListener`, `OffsetCommitCallback`, interceptors, `AcknowledgementCommitCallback`) run only on the application thread.
+3. The application completes a background future only through a `*CallbackCompletedEvent`.
+4. Positions are advanced by the application thread in `FetchCollector`, except seek and reset, which run on the network thread while the application is blocked inside the API call.
+5. A field with one writer thread and a different reader thread is at least `volatile` or `Atomic*`; two writer threads means one lock or one queue.
+
+The writer and reader table for `SubscriptionState`, `FetchBuffer`, `AsyncPollEvent` and the other shared objects lives in `thread-ownership.md`.
+
+**Where trunk violates it.** Rule 5: `SubscriptionState.seekUnvalidated` and `TopicPartitionState.seekUnvalidated` are not synchronized while every other entry point of that class is. Recorded for a follow-up, not changed here.
 
 **Minimal change.** Documentation and tests only.
 
-**Tests that pin it.** `TerminationContractTest.testCallbackWakeupOrInterruptStillProducesCallbackCompletedEvent`, `testCallbackWakeupOrInterruptDuringProcessBackgroundEventsReportsThenPropagates`, `testCommitCallbackWakeupOrInterruptPropagatesFromPollWithoutBlockingNetworkThread`, `testApplicationThreadReleasedFromApplyAssignmentReportsErrorAndDoesNotHang`; existing `ConsumerMembershipManagerTest.testListenerCallbacksThrowsErrorOnPartitions{Revoked,Assigned}`, `testOnPartitionsLost`.
+**Tests.** `TerminationContractTest` covers `WakeupException` and `InterruptException` thrown from each rebalance callback and from an `OffsetCommitCallback`, through both the direct path and `processBackgroundEvents`, plus the application thread being released from `ApplyAssignmentEvent` with an error rather than hanging. Existing `ConsumerMembershipManagerTest` callback-error tests are unchanged.
 
 **Tickets.** KAFKA-18160.
 
@@ -162,138 +178,129 @@ Each contract uses the same format: definition, where trunk violates it, minimal
 | Name | `network-thread-invalid-poll-result-total` |
 | Group | `consumer-metrics` (consumer, Streams); `consumer-share-metrics` (share) |
 | Type | `CumulativeSum` |
-| Description | The total number of request manager poll results that asked for an immediate re-poll without staging any request. Such results are clamped to `retry.backoff.ms` to avoid a busy loop. |
+| Description | Number of request manager poll results that asked for an immediate re-poll without staging any request. Such results are clamped to `retry.backoff.ms` to avoid a busy loop. |
 
-The metric is a detector for C1 violations. If reviewers prefer, it can be dropped and the clamp kept with a debug log; the KIP then has no public interface change.
+The metric is a detector for C1 violations. If reviewers prefer, it can be dropped and the clamp kept with a debug log, leaving this KIP with no public interface change.
 
 ### 5.2 Behaviour changes (C2)
 
 | Case | Before (trunk) | After |
 |---|---|---|
-| `commitSync(timeout)` times out while the coordinator is unknown | The caller gets `TimeoutException`; the commit is still sent when the coordinator appears, so the broker records an offset the caller was told did not commit. | The commit expires on the network thread with `TimeoutException` and is never sent. Same for `maybeAutoCommitSyncBeforeRebalance` and the close-path `commitSync` with a finite deadline. |
-| `committed()` / `updateFetchPositions` OffsetFetch never sent while the coordinator is unknown and the deadline passes | Sent later; result cached for a later call. | Fails with `TimeoutException`; `AsyncKafkaConsumer.updateFetchPositions` swallows it (returns false), so `poll()` throws nothing new. |
-| `offsetsForTimes` / `beginningOffsets` / `endOffsets` with an unknown leader | Retried on every metadata update forever; transient topics stay in metadata. | Fails at the API timeout and releases the transient topics. The caller already saw `TimeoutException` from the reaper at the same time; the difference is no leftover request. |
-| `commitSync(Duration.ZERO)` with the coordinator known | Sent once; the caller gets `TimeoutException` immediately. | Unchanged. A request that can be sent now still gets its one attempt: the sending path only expires requests that were already attempted. Expiry of never-attempted requests happens only where sending was impossible anyway (coordinator unknown). |
-| RPC already sent when the application times out | Not cancelled. | Unchanged. |
-| Late OffsetFetch response for positions | Applied while the partition is still initializing. | Unchanged (scope is the partition set, not the deadline). |
+| `commitSync(timeout)` times out while the coordinator is unknown | The caller gets `TimeoutException`, and the commit is still sent when the coordinator appears, so the broker records an offset the caller was told did not commit. | The commit expires on the network thread with `TimeoutException` and is never sent. Same for `maybeAutoCommitSyncBeforeRebalance` and the close-path `commitSync`. |
+| An OffsetFetch for positions never sent while the coordinator is unknown, deadline passes | Sent later; the result is cached for a later call. | Fails with `TimeoutException`. `AsyncKafkaConsumer.updateFetchPositions` swallows it and returns false, so `poll()` throws nothing new. |
+| `offsetsForTimes`, `beginningOffsets`, `endOffsets` with an unknown leader | Retried on every metadata update forever; transient topics stay registered. | Fails at the API timeout and releases the transient topics. The caller already saw `TimeoutException` from the reaper at the same moment; what changes is that no request is left behind. |
+| A request that can be sent now with its deadline already passed, such as `commitSync(Duration.ZERO)` with a known coordinator | Sent once. | Unchanged: the sending path expires only requests that were attempted before. |
+| An RPC already sent when the application times out | Not cancelled. | Unchanged. |
+| A late OffsetFetch response for positions | Applied while the partition is still initializing. | Unchanged: the scope is the partition set, not the deadline. |
 
 ## 6. Compatibility, deprecation and migration
 
-- No `Consumer`, `ShareConsumer`, callback or configuration change. No thread rename. Existing metrics unchanged.
+- No `Consumer`, `ShareConsumer`, callback or configuration change; no thread rename; existing metrics unchanged.
 - Classic consumer (`group.protocol=classic`): untouched.
-- Consumer (`group.protocol=consumer`) and Streams: all five contracts. C2 applies only here (`CommitRequestManager`, `OffsetsRequestManager`).
-- Share consumer: C1 through `HeartbeatRequestState` and the `addAll` clamp; C3 through the `BackgroundEventHandler` wakeup hook passed by `ShareConsumerImpl`. `ShareConsumeRequestManager` acknowledgement expiry is out of scope.
-- KAFKA-21031: the C1 change to `HeartbeatRequestState.timeToNextHeartbeatMs` overlaps PR #23357. Whichever lands first, the other is reduced to its test; this must be coordinated with the PR author.
+- Consumer and Streams: all five contracts. C2 applies only here (`CommitRequestManager`, `OffsetsRequestManager`).
+- Share consumer: C1 through `HeartbeatRequestState` and the `addAll` clamp; C3 through the wakeup hook passed by `ShareConsumerImpl`. Acknowledgement expiry is out of scope.
+- KAFKA-21031: the C1 change to `HeartbeatRequestState.timeToNextHeartbeatMs` overlaps PR #23357. Whichever lands first, the other is reduced to its test; this needs coordinating with the PR author.
 - Migration: none.
 
 ## 7. Test plan
 
-### 7.1 Contract tests on the branch
+### 7.1 Contract tests
 
-| Contract | Coordinator | Heartbeat (consumer / share / streams) | Commit | Offsets | Fetch | Loop / delegate |
+| Contract | Coordinator | Heartbeat (consumer / share / streams) | Commit | Offsets | Fetch | Loop and delegate |
 |---|---|---|---|---|---|---|
-| C1 | existing `testNoBusyPollWhileFindCoordinatorRequestInFlight` | `ConsumerHeartbeatRequestManagerTest`, `StreamsGroupHeartbeatRequestManagerTest` (new, above); existing `...DoesNotSpin` | existing `testMaximumTimeToWaitWhenCoordinatorUnknownDoesNotSpin`, `...DuringRealBootstrapDnsResolution` | — | `FetchRequestManagerTest` (retry.backoff.ms=0) | `NetworkClientDelegateTest` (clamp, factories), `AsyncConsumerMetricsTest` |
-| C2 | — | — | `CommitRequestManagerTest` (expiry, closing) | `OffsetsRequestManagerTest` (deadline, late responses) | — | — |
-| C3 | — | — | `CommitRequestManagerTest` (poll-driven auto-commit) | — | `FetchBufferTest` | `BackgroundEventHandlerTest`, `ConsumerNetworkThreadTest`, `ApplicationEventProcessorTest`, `AsyncKafkaConsumerTest`, `EventLoopContractRegressionTest` |
-| C4 | `TerminationContractTest` (close sequence, late responses after close) | | | | | |
-| C5 | `TerminationContractTest` (wakeup/interrupt in rebalance and commit callbacks) | | | | | |
+| C1 | existing `testNoBusyPollWhileFindCoordinatorRequestInFlight` | new in-flight cases plus the existing `...DoesNotSpin` set | existing coordinator-unknown and DNS cases | — | `retry.backoff.ms=0` floor | `NetworkClientDelegateTest`, `AsyncConsumerMetricsTest` |
+| C2 | — | — | expiry and closing cases | deadline and late responses | — | — |
+| C3 | — | — | poll-driven auto-commit, four cases | — | `FetchBufferTest` | `BackgroundEventHandlerTest`, `ConsumerNetworkThreadTest`, `ApplicationEventProcessorTest`, `AsyncKafkaConsumerTest`, `EventLoopContractRegressionTest` |
+| C4 and C5 | `TerminationContractTest`: close sequence, late responses after close, wakeup and interrupt inside rebalance and commit callbacks | | | | | |
 
 Gap: the design asked for one table-driven test that polls every manager twice in the same state and asserts no zero wait without a request. The branch has per-manager tests instead; the table-driven form is a follow-up.
 
-### 7.2 Regression tests that fail on trunk
+### 7.2 Tests that fail on trunk and pass on the branch
 
-- `EventLoopContractRegressionTest.testMetadataErrorWakesParkedApplicationThread` (KAFKA-20397).
-- `EventLoopContractRegressionTest.testIntervalAutoCommitDoesNotIncludeUndeliveredPositions` (KAFKA-18641 residual).
-- `CommitRequestManagerTest.testCommitSyncExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered`, `testFetchOffsetsExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered` (C2).
-- `OffsetsRequestManagerTest.testListOffsetsWaitingForMetadataUpdate_Timeout`, `..._ExpiredOnMetadataUpdate` (C2).
-- `ConsumerHeartbeatRequestManagerTest.testInFlightHeartbeatWithExpiredIntervalDoesNotSpin` (KAFKA-21031).
+`EventLoopContractRegressionTest.testMetadataErrorWakesParkedApplicationThread` (KAFKA-20397); `...testIntervalAutoCommitDoesNotIncludeUndeliveredPositions` (KAFKA-18641 residual); `CommitRequestManagerTest.testCommitSyncExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered` and `testFetchOffsetsExpired...` (C2); `OffsetsRequestManagerTest.testListOffsetsWaitingForMetadataUpdate_Timeout` and `..._ExpiredOnMetadataUpdate` (C2); `ConsumerHeartbeatRequestManagerTest.testInFlightHeartbeatWithExpiredIntervalDoesNotSpin` (KAFKA-21031).
 
 ### 7.3 Loop-driving tests that must stay green
 
-- Unit, real thread or real client: `KafkaConsumerTest` (about 90 dual-protocol methods over `MockClient`), `ConsumerNetworkThreadTest`, `ApplicationEventHandlerTest`, `KafkaShareConsumerTest`, `NetworkClientDelegateTest`, `FetchRequestManagerTest`, `ShareConsumeRequestManagerTest`, `CommitRequestManagerTest` and `ConsumerHeartbeatRequestManagerTest` (real DNS resolution cases).
-- Integration (embedded KRaft): `PlaintextConsumer{,Poll,Fetch,Assign,Subscription,Commit,Callback,Close}Test`, `ConsumerBounceTest`, `ConsumerIntegrationTest`, `ClientRebootstrapTest`, SASL variants; share `ShareConsumer*Test`; Scala `BaseConsumerTest`, `AuthorizerIntegrationTest`; Streams `EosIntegrationTest`, `RestoreIntegrationTest`, `KafkaStreamsCloseOptionsIntegrationTest`, `KafkaStreamsStaticMemberIntegrationTest`, `RebalanceProtocolMigrationIntegrationTest`. The timing-sensitive ones are `PlaintextConsumerPollTest.test*PollEventuallyReturnsRecordsWithZeroTimeout`, `test*MaxPollIntervalMsShorterThanPollTimeout`, `test*RecoveryOnPollAfterDelayedRebalance`, `PlaintextConsumerCloseTest.test*CloseWithDefaultTakesAtLeastFetchMaxWaitMs` and `PlaintextConsumerCommitTest.testCommitAsyncFailsWhenCoordinatorUnavailableDuringClose`.
+- Real thread or real client at unit level: `KafkaConsumerTest` (about 90 dual-protocol methods over `MockClient`), `ConsumerNetworkThreadTest`, `ApplicationEventHandlerTest`, `KafkaShareConsumerTest`, `NetworkClientDelegateTest`, `FetchRequestManagerTest`, `ShareConsumeRequestManagerTest`, and the real-DNS cases in `CommitRequestManagerTest` and `ConsumerHeartbeatRequestManagerTest`.
+- Integration on embedded KRaft: the `PlaintextConsumer*Test` family, `ConsumerBounceTest`, `ConsumerIntegrationTest`, `ClientRebootstrapTest`, the SASL variants, the `ShareConsumer*Test` family, Scala `BaseConsumerTest` and `AuthorizerIntegrationTest`, and the Streams classes with a protocol axis (`EosIntegrationTest`, `RestoreIntegrationTest`, `KafkaStreamsCloseOptionsIntegrationTest`, `KafkaStreamsStaticMemberIntegrationTest`, `RebalanceProtocolMigrationIntegrationTest`). The timing-sensitive ones are the zero-timeout poll, `max.poll.interval.ms`, delayed-rebalance recovery, close-takes-at-least-`fetch.max.wait.ms`, and commit-fails-when-coordinator-unavailable-during-close cases.
 
-### 7.4 System tests
+### 7.4 Results so far
 
-`tests/kafkatest/tests/client/consumer_test.py` (9 `group_protocol`-parameterized cases), `consumer_protocol_migration_test.py`, `share_consumer_test.py`, `streams_broker_bounce_test.py` on Jenkins. **Not yet run.**
+| Suite | Result |
+|---|---|
+| `:clients:test`, consumer packages | 3209 pass, 0 fail (trunk baseline 3174) |
+| `:clients:clients-integration-tests`, consumer packages | 410 of 413 pass; the 3 failures pass on rerun and one also fails on trunk |
+| checkstyle, spotless, spotbugs, RAT | clean |
+| Fork CI (GitHub Actions, JDK 17 and 25) | compile and validate pass; JUnit matrix running |
+
+### 7.5 System tests
+
+`consumer_test.py` (9 `group_protocol`-parameterized cases), `consumer_protocol_migration_test.py`, `share_consumer_test.py`, `streams_broker_bounce_test.py` on Jenkins. **Not yet run.**
 
 ## 8. Performance
 
-What is claimed: the C1 fixes remove the busy loop in the blocked scenarios, and the C1–C3 changes do not change the cost of the consume and idle paths beyond noise. What is not claimed: any throughput or latency improvement.
+Claimed: the C1 fix removes the busy loop in the blocked scenario, and C1 to C3 do not change the cost of the consume and idle paths beyond noise. Not claimed: any throughput or latency improvement.
 
-Benchmarks added on the branch (`jmh-benchmarks/src/main/java/org/apache/kafka/jmh/consumer/README.md`):
-- `ConsumerNetworkThreadPassBenchmark`: one `runOnce()` pass over `MockClient` and `MockTime` with real `RequestManagers`; scenarios `IDLE`, `BLOCKED` (FindCoordinator never answered), `BLOCKED_HEARTBEAT_INFLIGHT` (first heartbeat never answered), `CONSUME`, `RECOVERY`. Counters include `zeroWaitEmptyResults`, `zeroNetworkTimeoutPasses` and `zeroMaximumTimeToWaitPasses` per pass.
-- `AsyncConsumerBrokerBenchmark`: real `KafkaConsumer` against a running broker; modes `consume`, `idle`, `unavailable`; counters `records`, `processCpuMillis`, `networkThreadCpuMillis`.
+Two benchmarks were added (`jmh-benchmarks/src/main/java/org/apache/kafka/jmh/consumer/README.md`). `ConsumerNetworkThreadPassBenchmark` runs one loop pass over `MockClient` and `MockTime` with real request managers, and counts zero-wait passes. `AsyncConsumerBrokerBenchmark` drives a real `KafkaConsumer` against a running broker.
 
-Trunk vs branch, interleaved A/B, same host. **Loop-level JMH, `ConsumerNetworkThreadPassBenchmark`, trunk `74fbd50061` vs this branch, M1 Pro laptop, JDK 21, `-f 2 -wi 5 -i 5 -w 1s -r 2s -prof gc`, run order T,B,B,T per scenario (raw data: `jmh-ab/results/`, `jmh-ab/results2/`):
+### 8.1 Loop level
 
-| scenario | trunk ns/pass | branch ns/pass | trunk B/pass | branch B/pass | zero-wait passes trunk → branch |
+Trunk `74fbd50061` vs branch, M1 Pro laptop, JDK 21, `-f 2 -wi 5 -i 5 -w 1s -r 2s -prof gc`, run order T,B,B,T per scenario. Raw data in `jmh-ab/`.
+
+| Scenario | trunk ns/pass | branch ns/pass | trunk B/pass | branch B/pass | zero-wait passes, trunk to branch |
 |---|---|---|---|---|---|
-| IDLE | 316.6 ± 5.0 | 309.3 ± 10.8 | 240.3 | 240.3 | 0 → 0 |
-| BLOCKED (coordinator unknown) | 316.8 ± 43.7 | 296.6 ± 20.5 | 223.7 | 223.7 | 0 → 0 |
-| BLOCKED_HEARTBEAT_INFLIGHT | 332.6 ± 20.4 | 338.4 ± 9.1 | 320.2 | 320.2 | **0.968 → 0** per pass |
-| CONSUME (fetch every 2nd pass, 50 records) | 9192.4 ± 171.9 | 9001.4 ± 33.9 | 44563.5 | 44487.5 | 0 → 0 |
-| RECOVERY (coordinator unknown → known) | 277.0 ± 3.6 | 273.5 ± 6.0 | 256.1 | 240.1 | 0 → 0 |
+| IDLE | 316.6 ± 5.0 | 309.3 ± 10.8 | 240.3 | 240.3 | 0 to 0 |
+| BLOCKED (coordinator unknown) | 316.8 ± 43.7 | 296.6 ± 20.5 | 223.7 | 223.7 | 0 to 0 |
+| BLOCKED_HEARTBEAT_INFLIGHT | 332.6 ± 20.4 | 338.4 ± 9.1 | 320.2 | 320.2 | **0.968 to 0 per pass** |
+| CONSUME (one fetch every second pass, 50 records) | 9192.4 ± 171.9 | 9001.4 ± 33.9 | 44563.5 | 44487.5 | 0 to 0 |
+| RECOVERY (coordinator unknown, then known) | 277.0 ± 3.6 | 273.5 ± 6.0 | 256.1 | 240.1 | 0 to 0 |
 
-Reading: only the busy-loop scenario changes behaviour (trunk asks for a zero wait on 97% of passes while the first heartbeat is in flight; the branch never does). All other scenarios are within noise in time and identical in allocation. A first branch build had +29% ns/pass and doubled allocation in BLOCKED/RECOVERY because the C2 expiry sweep copied empty queues on every poll; that was fixed (`isEmpty()` guards) and the BLOCKED/RECOVERY/IDLE rows above are from the re-run with the fixed build (`jmh-ab/results2/`).
+Only the busy-loop scenario changes behaviour: trunk asks for a zero wait on 97% of passes while the first heartbeat is in flight, the branch never does. Everything else is within noise in time and identical in allocation.
 
-End-to-end, `AsyncConsumerBrokerBenchmark` against a single-node broker on the same laptop (2,000,000 x 128 B, one partition; JMH `-f 1 -wi 5 -w 2s -i 5 -r 5s`, interleaved T,B,B,T; raw data in `e2e-ab/`):
+The benchmark also caught a regression in an earlier build of this branch: BLOCKED and RECOVERY were 29% slower with twice the allocation per pass, because the C2 expiry sweep copied empty queues on every poll while the coordinator was unknown. Guarding both sweeps with `isEmpty()` removed it, and the rows above come from the re-run.
 
-| mode | metric | trunk | branch | change |
+### 8.2 End to end
+
+Real broker on the same laptop, 2,000,000 records of 128 B, one partition, `-f 1 -wi 5 -w 2s -i 5 -r 5s`, interleaved T,B,B,T. Raw data in `e2e-ab/`.
+
+| Mode | Metric | trunk | branch | Change |
 |---|---|---:|---:|---:|
 | consume | records/s | 2,671,455 | 2,750,425 | +3.0% |
 | consume | process CPU ms/s | 465.22 | 474.92 | +2.1% |
 | consume | network-thread CPU ms/s | 186.93 | 180.68 | -3.3% |
 | idle | process CPU ms/s | 18.29 | 17.43 | -4.7% |
 | idle | network-thread CPU ms/s | 7.38 | 6.52 | -11.6% |
-| unavailable (closed port) | process CPU ms/s | 19.94 | 19.66 | -1.4% |
 
-Consume and idle are within noise, as expected: within one variant, consume throughput moved from 1.22M to 4.21M records/s across runs as the page cache warmed, far more than the 3% between variants. The idle rows have n=2 and absolute values under 1% of a core.
+Consume and idle are within noise, which is what this KIP claims. Inside a single variant, consume throughput moved from 1.22M to 4.21M records/s across runs as the page cache warmed, far more than the 3% between variants; the idle rows have n=2 and absolute values under 1% of a core.
 
-The `unavailable` mode of this harness does **not** exercise the busy loop this KIP fixes, and its numbers must not be quoted as evidence either way. It points the bootstrap at a closed port, so every connection is refused immediately and the client sits in reconnect backoff, which trunk already handles. The busy loop needs a peer that accepts the connection and never answers the heartbeat, which is what the loop-level `BLOCKED_HEARTBEAT_INFLIGHT` scenario builds and where the effect is measured. Making the end-to-end harness show it needs a listener that accepts but never replies; that is a follow-up.
-
-The earlier real-broker measurement that motivates C1 (trunk about 1.6 CPU cores with an unreachable coordinator) comes from the NextPollCondition review harness, which used a different unavailable setup.**
-
-| Scenario | Metric | trunk | branch | Expected |
-|---|---|---|---|---|
-| pass `IDLE` | ns/pass, zero-wait passes | | | within noise; zero-wait passes 0 |
-| pass `BLOCKED` | ns/pass, zero-wait passes | | | zero-wait passes drop to 0 |
-| pass `BLOCKED_HEARTBEAT_INFLIGHT` | ns/pass, zero-wait passes | | | zero-wait passes drop to 0 |
-| pass `CONSUME` | ns/pass | | | within noise |
-| pass `RECOVERY` | ns/pass | | | within noise |
-| broker `consume` | records/s, CPU ms per M records | | | within noise |
-| broker `idle` | process CPU ms/s | | | within noise |
-| broker `unavailable` | process CPU ms/s | ~1.6 core (prior harness) | | large drop |
-
-Only the blocked scenarios are expected to change. Run an A/A pair first to measure noise; laptop runs with a co-located broker have shown 30% drift inside one session.
+The `unavailable` mode of this harness is **not** evidence in either direction and its numbers are not quoted here. It points the bootstrap at a closed port, so every connection is refused at once and the client sits in reconnect backoff, which trunk already handles correctly. The busy loop needs a peer that accepts the connection and never answers the heartbeat; that is what the loop-level `BLOCKED_HEARTBEAT_INFLIGHT` scenario builds and where the effect is measured. Teaching the end-to-end harness to do the same is a follow-up.
 
 ## 9. Rejected alternatives
 
-**S1. `NextPollCondition` / Signal scheduler.** Each manager returns a typed condition (`progress`, `retryAfter`, `awaitInput`) and the loop skips managers that are not ready. Measured on a real broker with an interleaved A/B harness: consume CPU per record +31.3%, process CPU +24.0%, network-thread allocation while idle +110%, throughput within noise, and no improvement in the coordinator-unavailable scenario (the improvement there came from a separate no-spin patch). Two liveness regressions were found in review: a member whose poll timer expired stayed `STALE` and never rejoined, and one partition in `AWAIT_VALIDATION` stopped fetches for all partitions. Skipping a manager moves the burden of proving liveness onto every owner. Evidence: `next-poll-condition/fable-review/REPORT.md` §1, §3.
+**S1. `NextPollCondition` / Signal scheduler.** Each manager returns a typed condition and the loop skips managers that are not ready. Measured on a real broker with an interleaved A/B harness: consume CPU per record +31.3%, process CPU +24.0%, network-thread allocation while idle +110%, throughput within noise, and no improvement at all in the coordinator-unavailable scenario, where the gain had come from a separate no-spin patch. Review also found two liveness regressions: a member whose poll timer expired stayed `STALE` and never rejoined, and one partition in `AWAIT_VALIDATION` stopped fetches for every partition. Skipping a manager moves the burden of proving liveness onto every owner.
 
-**S2. Per-pass immutable snapshot with versioned waits.** The background thread publishes one snapshot per pass and the application waits on a version. Strong for C3, but it rewrites several wait paths, and positions advanced by the application thread are not in the snapshot. Not validated on trunk. Evidence: `codex-model-summary.md` §4.2 (deadline tree, ready set), `consumer-ng` R3 notes.
+**S2. Per-pass immutable snapshot with versioned waits.** The background thread publishes one snapshot per pass and the application waits on a version. Strong for C3, but it rewrites several wait paths, and positions advanced by the application thread are not in the snapshot. Never validated on trunk.
 
-**S3. Operation / continuation framework.** Make each operation an object with scope, blocker and continuation. Makes C2 and C5 explicit, but adds a framework the reviewers have rejected before (PR #20521 review history) and its cost is the handoffs, not the data structures. Evidence: `reviewer-preferences.md` §4, `codex-model-summary.md` §4.2.
+**S3. Operation or continuation framework.** Make each operation an object carrying scope, blocker and continuation. This makes C2 and C5 explicit, but it adds a framework reviewers have turned down before, and the cost in this loop is the handoffs, not the data structures.
 
-**S4. Extra post-I/O decision pass.** Poll the managers a second time after network I/O so responses are acted on in the same pass. Measured: local throughput −1.95% / CPU +6.71%; Jenkins runs 930/931 throughput −4.36% / CPU +5.67%; the ablation (removing the pass) moved the numbers the other way, so the effect is not attributable. Evidence: `codex-model-summary.md` §4.2.
+**S4. Extra post-I/O decision pass.** Poll the managers a second time after network I/O so responses are acted on in the same pass. Measured: local throughput -1.95% with CPU +6.71%; Jenkins runs 930 and 931 throughput -4.36% with CPU +5.67%; removing the pass again moved the numbers the other way, so nothing is attributable. An A/A run of identical code on the same infrastructure showed a spread larger than every A/B delta.
 
-**Skipping unready managers in general.** The seven manager `poll()` calls are under 1% of network-thread CPU (82–88% is `select` / socket read). There is nothing to save, and every skip needs a liveness proof (F1). Evidence: `next-poll-condition/fable-review/REPORT.md` §3.
+**Skipping unready managers in general.** The seven manager `poll()` calls are under 1% of network-thread CPU, while 82–88% is `select` and socket read. There is nothing to save, and every skip needs its own liveness proof.
 
 ## 10. Appendix
-
-Evidence documents (in `experiments/kip-1371-fable/` unless noted):
 
 | File | Content |
 |---|---|
 | `DESIGN.md` | Context, forces, contracts, alternatives, hypotheses |
-| `core-inventory.md` | Trunk background loop, every manager's `poll` / `maximumTimeToWait`, cross-manager dependencies, zero-wait branch table, close sequence |
-| `issues-traceability.md` | Every ticket: root cause from code, fix commit, trunk regression test, mismatches with the old KIP text |
-| `termination-table.md` | C4: close sequence, 18 kinds of pending work × terminator × result × time bound |
-| `thread-ownership.md` | C5: writer/reader table for `SubscriptionState`, `FetchBuffer`, `AsyncPollEvent` and other shared objects |
-| `test-inventory.md` | Use case × consumer type matrix, loop-driving tests, gaps |
-| `reviewer-preferences.md` | Reviewer evidence from 15 PRs; implications in §4 |
+| `core-inventory.md` | Trunk loop, every manager's `poll` and `maximumTimeToWait`, cross-manager dependencies, zero-wait branches, close sequence |
+| `issues-traceability.md` | Every ticket: root cause read from code, fix commit, trunk regression test, mismatches with the old KIP text |
+| `traceability-matrix.md` | Issue to contract to implementation to test; use case by consumer type; contract to files to evidence |
+| `termination-table.md` | C4: close sequence and 18 kinds of pending work |
+| `thread-ownership.md` | C5: writer and reader for every shared field |
+| `test-inventory.md` | Use case by consumer type, loop-driving tests, coverage gaps |
+| `reviewer-preferences.md` | Evidence from 15 reviewed PRs and what it implies for this proposal |
 | `codex-model-summary.md` | What the earlier prototypes proved and disproved |
-| `../next-poll-condition/fable-review/REPORT.md` | S1 review: regressions, real-broker A/B numbers, profiles |
-| `jmh-benchmarks/src/main/java/org/apache/kafka/jmh/consumer/README.md` | Benchmark method |
+| `jmh-ab/`, `e2e-ab/` | Benchmark raw data and summaries |
+| `../next-poll-condition/fable-review/REPORT.md` | The S1 review: regressions, real-broker A/B, profiles |
 
-Out of scope (each goes in its own MINOR PR with its own JMH numbers): `Selector.wakeup` only when the network thread is parked; per-pass `LinkedList` / `ArrayList` / `Optional` allocations in `runOnce`; a new `PollResult` per heartbeat pass in `STABLE`; removing the application-side 100 ms re-check in `pollForFetches` (a consequence of C3, to be done after the notification path has soaked); `ShareConsumeRequestManager` acknowledgement expiry; `SubscriptionState.seekUnvalidated` synchronization; `AsyncPollEvent` termination in `cleanup()`; Streams topology push close hook.
+Out of scope, each with its own MINOR PR and its own numbers: `Selector.wakeup` only when the network thread is parked; per-pass `LinkedList`, `ArrayList` and `Optional` allocations in `runOnce`; a new `PollResult` per heartbeat pass while `STABLE`; removing the application-side 100 ms re-check in `pollForFetches`, which becomes possible once C3 has soaked; `ShareConsumeRequestManager` acknowledgement expiry; `SubscriptionState.seekUnvalidated` synchronization; `AsyncPollEvent` termination in `cleanup()`; the Streams topology push close hook.
