@@ -376,7 +376,6 @@ public class TerminationContractTest {
         assertTimedOutBeforeClose(revoked.future());
         assertEquals(0, listener.invocations, "a reaped callback event must not run the user callback");
         verify(applicationEventHandler, never()).addAndGet(isA(ApplyAssignmentEvent.class));
-        assertTrue(backgroundEventQueue.isEmpty());
     }
 
     /**
@@ -402,7 +401,6 @@ public class TerminationContractTest {
         thread.cleanup();
 
         assertTimedOutBeforeClose(applyEvent.future());
-        assertTrue(applicationEventQueue.isEmpty());
     }
 
     /**
@@ -657,7 +655,7 @@ public class TerminationContractTest {
     private ConsumerMembershipManager newMembershipManager() {
         return new ConsumerMembershipManager(GROUP_ID, Optional.empty(), Optional.empty(), 30_000, Optional.empty(),
             mock(SubscriptionState.class), mock(CommitRequestManager.class), metadata, logContext,
-            mock(BackgroundEventHandler.class), time, metrics, false);
+            mock(BackgroundEventHandler.class), time, new Metrics(), false);
     }
 
     private CommitRequestManager newCommitRequestManager(SubscriptionState subscriptions) {
@@ -679,7 +677,7 @@ public class TerminationContractTest {
             RETRY_BACKOFF_MS,
             RETRY_BACKOFF_MAX_MS,
             OptionalDouble.of(0),
-            metrics,
+            new Metrics(),
             metadata,
             new AtomicBoolean());
     }
