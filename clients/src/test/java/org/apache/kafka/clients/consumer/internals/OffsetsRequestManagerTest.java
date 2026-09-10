@@ -131,7 +131,7 @@ public class OffsetsRequestManagerTest {
         mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> result = requestManager.fetchOffsets(
                 timestampsToSearch,
-                false);
+                false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -145,20 +145,57 @@ public class OffsetsRequestManagerTest {
     public void testListOffsetsWaitingForMetadataUpdate_Timeout() {
         Map<TopicPartition, Long> timestampsToSearch = Collections.singletonMap(TEST_PARTITION_1,
                 ListOffsetsRequest.EARLIEST_TIMESTAMP);
+        long deadlineMs = time.milliseconds() + DEFAULT_API_TIMEOUT_MS;
 
         // Building list offsets request fails with unknown leader
         mockFailedRequest_MissingLeader();
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture =
-            requestManager.fetchOffsets(timestampsToSearch, false);
+            requestManager.fetchOffsets(timestampsToSearch, false, deadlineMs);
 
         assertEquals(0, requestManager.requestsToSend());
         assertEquals(1, requestManager.requestsToRetry());
         verify(metadata).requestUpdate(true);
+        verify(metadata).addTransientTopics(Collections.singleton(TEST_TOPIC));
         NetworkClientDelegate.PollResult res = requestManager.poll(time.milliseconds());
         assertEquals(0, res.unsentRequests.size());
-        // Metadata update not happening within the time boundaries of the request future, so
-        // future should time out.
-        assertThrows(TimeoutException.class, () -> fetchOffsetsFuture.get(5L, TimeUnit.MILLISECONDS));
+        assertFalse(fetchOffsetsFuture.isDone());
+        assertEquals(1, requestManager.requestsToRetry());
+
+        // Metadata update not happening before the deadline. The request must be dropped from the
+        // retry set, its transient topics released, and the future failed with a TimeoutException.
+        when(time.milliseconds()).thenReturn(deadlineMs);
+        res = requestManager.poll(time.milliseconds());
+        assertEquals(0, res.unsentRequests.size());
+        assertEquals(0, requestManager.requestsToRetry());
+        assertFutureThrows(org.apache.kafka.common.errors.TimeoutException.class, fetchOffsetsFuture);
+        verify(metadata).clearTransientTopics();
+
+        // A metadata update after the deadline must not re-issue the request.
+        mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
+        requestManager.onUpdate(new ClusterResource(""));
+        assertEquals(0, requestManager.requestsToSend());
+    }
+
+    @Test
+    public void testListOffsetsWaitingForMetadataUpdate_ExpiredOnMetadataUpdate() {
+        Map<TopicPartition, Long> timestampsToSearch = Collections.singletonMap(TEST_PARTITION_1,
+                ListOffsetsRequest.EARLIEST_TIMESTAMP);
+        long deadlineMs = time.milliseconds() + DEFAULT_API_TIMEOUT_MS;
+
+        mockFailedRequest_MissingLeader();
+        CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture =
+            requestManager.fetchOffsets(timestampsToSearch, false, deadlineMs);
+        assertEquals(1, requestManager.requestsToRetry());
+
+        // The leader becomes known only after the deadline passed. The retry must be dropped even if no
+        // poll ran in between, so the application (already told it timed out) does not trigger a late request.
+        when(time.milliseconds()).thenReturn(deadlineMs);
+        mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
+        requestManager.onUpdate(new ClusterResource(""));
+        assertEquals(0, requestManager.requestsToSend());
+        assertEquals(0, requestManager.requestsToRetry());
+        assertFutureThrows(org.apache.kafka.common.errors.TimeoutException.class, fetchOffsetsFuture);
+        verify(metadata).clearTransientTopics();
     }
 
     @Test
@@ -175,7 +212,7 @@ public class OffsetsRequestManagerTest {
         mockSuccessfulRequest(partitionLeaders);
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> result = requestManager.fetchOffsets(
                         timestampsToSearch,
-                        false);
+                        false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -189,7 +226,7 @@ public class OffsetsRequestManagerTest {
     public void testListOffsetsRequestEmpty() throws ExecutionException, InterruptedException {
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> result = requestManager.fetchOffsets(
                         Collections.emptyMap(),
-                        false);
+                        false, Long.MAX_VALUE);
         assertEquals(0, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -213,7 +250,7 @@ public class OffsetsRequestManagerTest {
         mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> result = requestManager.fetchOffsets(
                 timestampsToSearch,
-                false);
+                false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -238,7 +275,7 @@ public class OffsetsRequestManagerTest {
         // Building list offsets request fails with unknown leader
         mockFailedRequest_MissingLeader();
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture =
-            requestManager.fetchOffsets(timestampsToSearch, false);
+            requestManager.fetchOffsets(timestampsToSearch, false, Long.MAX_VALUE);
         assertEquals(0, requestManager.requestsToSend());
         assertEquals(1, requestManager.requestsToRetry());
         verify(metadata).requestUpdate(true);
@@ -285,7 +322,7 @@ public class OffsetsRequestManagerTest {
 
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture =
                 assertDoesNotThrow(
-                        () -> requestManager.fetchOffsets(timestampsToSearch, false),
+                        () -> requestManager.fetchOffsets(timestampsToSearch, false, Long.MAX_VALUE),
                         "Should not throw NPE; only PARTITION_1 has a leader in regroup, so one request for LEADER_1");
         assertEquals(1, requestManager.requestsToSend());
         // requestsToRetry is populated when the in-flight request completes and remainingToSearch is non-empty, not yet
@@ -328,7 +365,7 @@ public class OffsetsRequestManagerTest {
         mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture = requestManager.fetchOffsets(
                 timestampsToSearch,
-                false);
+                false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -379,7 +416,7 @@ public class OffsetsRequestManagerTest {
         mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture = requestManager.fetchOffsets(
                 timestampsToSearch,
-                false);
+                false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -419,7 +456,7 @@ public class OffsetsRequestManagerTest {
         mockSuccessfulRequest(partitionLeaders);
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture = requestManager.fetchOffsets(
                 timestampsToSearch,
-                false);
+                false, Long.MAX_VALUE);
         assertEquals(2, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -479,7 +516,7 @@ public class OffsetsRequestManagerTest {
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture =
                 requestManager.fetchOffsets(
                         timestampsToSearch,
-                        false);
+                        false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -508,7 +545,7 @@ public class OffsetsRequestManagerTest {
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture =
                 requestManager.fetchOffsets(
                         timestampsToSearch,
-                        false);
+                        false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
 
@@ -540,7 +577,7 @@ public class OffsetsRequestManagerTest {
         CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsetsFuture =
             requestManager.fetchOffsets(
                     timestampsToSearch,
-                    false);
+                    false, Long.MAX_VALUE);
 
         assertEquals(1, requestManager.requestsToSend());
         assertEquals(0, requestManager.requestsToRetry());
@@ -564,6 +601,81 @@ public class OffsetsRequestManagerTest {
 
         assertEquals(0, requestManager.requestsToRetry());
         assertEquals(0, requestManager.requestsToSend());
+    }
+
+    @Test
+    public void testResetPositionsLateResponseNotAppliedAfterSeek() {
+        useRealSubscriptionState();
+        TopicPartition tp = TEST_PARTITION_1;
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.requestOffsetReset(tp, AutoOffsetResetStrategy.EARLIEST);
+        NetworkClientDelegate.UnsentRequest unsentRequest = sendResetPositionsRequest(tp);
+
+        // The application seeks before the response arrives: the reset is no longer in scope.
+        subscriptionState.seek(tp, 42L);
+        buildClientResponse(unsentRequest, Collections.singletonMap(tp,
+                new OffsetAndTimestampInternal(5L, 1L, Optional.empty()))).onComplete();
+
+        assertTrue(unsentRequest.future().isDone());
+        assertEquals(42L, subscriptionState.position(tp).offset, "Late reset response must not override the seek");
+        assertTrue(subscriptionState.hasValidPosition(tp));
+        assertEquals(0, requestManager.requestsToSend());
+        assertTrue(subscriptionState.partitionsNeedingReset(time.milliseconds()).isEmpty());
+    }
+
+    @Test
+    public void testResetPositionsLateResponseNotAppliedAfterUnsubscribe() {
+        useRealSubscriptionState();
+        TopicPartition tp = TEST_PARTITION_1;
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.requestOffsetReset(tp, AutoOffsetResetStrategy.EARLIEST);
+        NetworkClientDelegate.UnsentRequest unsentRequest = sendResetPositionsRequest(tp);
+
+        // The consumer unsubscribes (ex. on close) before the response arrives.
+        subscriptionState.unsubscribe();
+        assertDoesNotThrow(() -> buildClientResponse(unsentRequest, Collections.singletonMap(tp,
+                new OffsetAndTimestampInternal(5L, 1L, Optional.empty()))).onComplete());
+
+        assertTrue(unsentRequest.future().isDone());
+        assertTrue(subscriptionState.assignedPartitions().isEmpty());
+        assertEquals(0, requestManager.requestsToSend());
+        // No error left behind for the next reset attempt
+        assertDoesNotThrow(() -> requestManager.resetPositionsIfNeeded());
+    }
+
+    @Test
+    public void testValidatePositionsLateResponseNotAppliedAfterSeek() {
+        useRealSubscriptionState();
+        TopicPartition tp = TEST_PARTITION_1;
+        NetworkClientDelegate.UnsentRequest unsentRequest = sendValidatePositionsRequest(tp, 5L);
+
+        // The application seeks before the response arrives: the validation is no longer in scope.
+        subscriptionState.seek(tp, 42L);
+        // End offset 2 is lower than the validated position 5, so a stale apply would reset the position to 2.
+        buildOffsetsForLeaderEpochResponse(unsentRequest, Collections.singletonList(tp), 2).onComplete();
+
+        assertTrue(unsentRequest.future().isDone());
+        assertEquals(42L, subscriptionState.position(tp).offset, "Late validation response must not override the seek");
+        assertFalse(subscriptionState.awaitingValidation(tp));
+        assertEquals(0, requestManager.requestsToSend());
+        assertDoesNotThrow(() -> requestManager.validatePositionsIfNeeded());
+        assertEquals(0, requestManager.requestsToSend());
+    }
+
+    @Test
+    public void testValidatePositionsLateResponseNotAppliedAfterUnsubscribe() {
+        useRealSubscriptionState();
+        TopicPartition tp = TEST_PARTITION_1;
+        NetworkClientDelegate.UnsentRequest unsentRequest = sendValidatePositionsRequest(tp, 5L);
+
+        // The consumer unsubscribes (ex. on close) before the response arrives.
+        subscriptionState.unsubscribe();
+        assertDoesNotThrow(() -> buildOffsetsForLeaderEpochResponse(unsentRequest, Collections.singletonList(tp), 2).onComplete());
+
+        assertTrue(unsentRequest.future().isDone());
+        assertTrue(subscriptionState.assignedPartitions().isEmpty());
+        assertEquals(0, requestManager.requestsToSend());
+        assertDoesNotThrow(() -> requestManager.validatePositionsIfNeeded());
     }
 
     @Test
@@ -815,6 +927,65 @@ public class OffsetsRequestManagerTest {
         verify(subscriptionState, never()).seekUnvalidated(any(), any());
     }
 
+    @Test
+    public void testUpdatePositionsAppliesCommittedOffsetsReceivedAfterEventDeadline() {
+        long deadlineMs = time.milliseconds() + 100;
+        long internalFetchCommittedTimeout = time.milliseconds() + DEFAULT_API_TIMEOUT_MS;
+        TopicPartition tp1 = new TopicPartition("topic1", 1);
+        Set<TopicPartition> initPartitions1 = Collections.singleton(tp1);
+        Metadata.LeaderAndEpoch leaderAndEpoch = testLeaderEpoch(LEADER_1, Optional.of(1));
+        mockAssignedPartitionsMissingPositions(initPartitions1, initPartitions1, leaderAndEpoch);
+
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(initPartitions1, internalFetchCommittedTimeout)).thenReturn(fetchResult);
+        CompletableFuture<Void> updatePositions1 = requestManager.updateFetchPositions(deadlineMs);
+        assertFalse(updatePositions1.isDone());
+
+        // The observer (poll) deadline passes, but the OffsetFetch was already sent and tp1 still needs a
+        // position: the scope is still valid, so the late response is applied and the in-flight request cleared.
+        when(time.milliseconds()).thenReturn(deadlineMs);
+        OffsetAndMetadata offsetAndMetadata = new OffsetAndMetadata(10, Optional.of(1), "");
+        fetchResult.complete(new CommitRequestManager.OffsetFetchResult(
+            Collections.singletonMap(tp1, offsetAndMetadata), Collections.emptyMap()));
+
+        assertTrue(updatePositions1.isDone());
+        assertFalse(updatePositions1.isCompletedExceptionally());
+        verify(subscriptionState).seekUnvalidated(tp1, new SubscriptionState.FetchPosition(
+                offsetAndMetadata.offset(), offsetAndMetadata.leaderEpoch(), leaderAndEpoch));
+
+        // The next update must not reuse the completed request: a new OffsetFetch is issued.
+        clearInvocations(commitRequestManager);
+        when(commitRequestManager.fetchOffsets(any(), anyLong())).thenReturn(new CompletableFuture<>());
+        requestManager.updateFetchPositions(deadlineMs + 100);
+        verify(commitRequestManager).fetchOffsets(any(), anyLong());
+    }
+
+    @Test
+    public void testUpdatePositionsErrorReceivedAfterEventDeadlineIsThrownOnNextCall() {
+        long deadlineMs = time.milliseconds() + 100;
+        long internalFetchCommittedTimeout = time.milliseconds() + DEFAULT_API_TIMEOUT_MS;
+        TopicPartition tp1 = new TopicPartition("topic1", 1);
+        Set<TopicPartition> initPartitions1 = Collections.singleton(tp1);
+        Metadata.LeaderAndEpoch leaderAndEpoch = testLeaderEpoch(LEADER_1, Optional.of(1));
+        mockAssignedPartitionsMissingPositions(initPartitions1, initPartitions1, leaderAndEpoch);
+
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(initPartitions1, internalFetchCommittedTimeout)).thenReturn(fetchResult);
+        CompletableFuture<Void> updatePositions1 = requestManager.updateFetchPositions(deadlineMs);
+        assertFalse(updatePositions1.isDone());
+
+        // The error arrives after the observer deadline: it is kept for the next call instead of being lost.
+        when(time.milliseconds()).thenReturn(deadlineMs);
+        fetchResult.completeExceptionally(new TopicAuthorizationException(Collections.singleton("topic1")));
+        assertFutureThrows(TopicAuthorizationException.class, updatePositions1);
+        verify(subscriptionState, never()).seekUnvalidated(any(), any());
+
+        clearInvocations(commitRequestManager);
+        CompletableFuture<Void> updatePositions2 = requestManager.updateFetchPositions(deadlineMs + 100);
+        assertFutureThrows(TopicAuthorizationException.class, updatePositions2);
+        verify(commitRequestManager, never()).fetchOffsets(any(), anyLong());
+    }
+
     // This test ensures that we don't reset positions to the partition offsets for a partition assigned while the
     // updateFetchPositions is running (after the OffsetFetch request has been sent).
     @Test
@@ -879,7 +1050,7 @@ public class OffsetsRequestManagerTest {
         Map<TopicPartition, Long> timestampsToSearch = Collections.singletonMap(TEST_PARTITION_1,
                 ListOffsetsRequest.EARLIEST_TIMESTAMP);
         mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
-        requestManager.fetchOffsets(timestampsToSearch, false);
+        requestManager.fetchOffsets(timestampsToSearch, false, Long.MAX_VALUE);
         assertEquals(1, requestManager.requestsToSend());
         NetworkClientDelegate.PollResult retriedPoll = requestManager.poll(time.milliseconds());
         NetworkClientDelegate.UnsentRequest unsentRequest = retriedPoll.unsentRequests.get(0);
@@ -887,6 +1058,51 @@ public class OffsetsRequestManagerTest {
         assertInstanceOf(ListOffsetsRequest.class, abstractRequest);
         ListOffsetsRequest offsetFetchRequest = (ListOffsetsRequest) abstractRequest;
         assertEquals(requestTimeoutMs, offsetFetchRequest.timeoutMs());
+    }
+
+    /**
+     * Replace the mocked subscription state with a real one, so that tests can observe whether a late
+     * response was applied to positions.
+     */
+    private void useRealSubscriptionState() {
+        subscriptionState = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.EARLIEST);
+        requestManager = new OffsetsRequestManager(
+                subscriptionState,
+                metadata,
+                DEFAULT_ISOLATION_LEVEL,
+                time,
+                RETRY_BACKOFF_MS,
+                REQUEST_TIMEOUT_MS,
+                DEFAULT_API_TIMEOUT_MS,
+                apiVersions,
+                mock(NetworkClientDelegate.class),
+                commitRequestManager,
+                new PositionsValidator(new LogContext(), time, subscriptionState, metadata),
+                new LogContext());
+    }
+
+    private NetworkClientDelegate.UnsentRequest sendResetPositionsRequest(TopicPartition tp) {
+        when(metadata.currentLeader(tp)).thenReturn(testLeaderEpoch(LEADER_1, Optional.empty()));
+        when(metadata.fetch()).thenReturn(testClusterMetadata(Collections.singletonMap(tp, LEADER_1)));
+        requestManager.resetPositionsIfNeeded();
+        assertEquals(1, requestManager.requestsToSend());
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+        assertEquals(1, pollResult.unsentRequests.size());
+        return pollResult.unsentRequests.get(0);
+    }
+
+    private NetworkClientDelegate.UnsentRequest sendValidatePositionsRequest(TopicPartition tp, long offset) {
+        Metadata.LeaderAndEpoch leaderAndEpoch = testLeaderEpoch(LEADER_1, Optional.of(3));
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.seekUnvalidated(tp, new SubscriptionState.FetchPosition(offset, Optional.of(10), leaderAndEpoch));
+        assertTrue(subscriptionState.awaitingValidation(tp));
+        when(metadata.currentLeader(tp)).thenReturn(leaderAndEpoch);
+        when(apiVersions.get(LEADER_1.idString())).thenReturn(NodeApiVersions.create());
+        requestManager.validatePositionsIfNeeded();
+        assertEquals(1, requestManager.requestsToSend());
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+        assertEquals(1, pollResult.unsentRequests.size());
+        return pollResult.unsentRequests.get(0);
     }
 
     private void mockAssignedPartitionsMissingPositions(Set<TopicPartition> assignedPartitions,

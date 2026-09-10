@@ -46,6 +46,7 @@ import org.slf4j.Logger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -167,6 +168,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      */
     @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
+        failExpiredRequestsToRetry(currentTimeMs);
         // Copy the outgoing request list and clear it.
         List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>(requestsToSend);
         requestsToSend.clear();
@@ -181,20 +183,26 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      * @param timestampsToSearch Partitions and target timestamps to get offsets for
      * @param requireTimestamps  True if this should fail with an UnsupportedVersionException if the
      *                           broker does not support fetching precise timestamps for offsets
+     * @param deadlineMs         Deadline of the application event that triggered this operation. Partitions
+     *                           whose leader is still unknown when the deadline passes are not retried on later
+     *                           metadata updates; the future fails with a {@link TimeoutException} instead.
+     *                           Pass {@link Long#MAX_VALUE} to retry until the leader is known.
      * @return Future containing the map of {@link TopicPartition} and {@link OffsetAndTimestamp}
      * found .The future will complete when the requests responses are received and
      * processed, following a call to {@link #poll(long)}
      */
     public CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsets(
             Map<TopicPartition, Long> timestampsToSearch,
-            boolean requireTimestamps) {
-        return fetchOffsets(timestampsToSearch, requireTimestamps, false);
+            boolean requireTimestamps,
+            long deadlineMs) {
+        return fetchOffsets(timestampsToSearch, requireTimestamps, false, deadlineMs);
     }
 
     private CompletableFuture<Map<TopicPartition, OffsetAndTimestampInternal>> fetchOffsets(
             Map<TopicPartition, Long> timestampsToSearch,
             boolean requireTimestamps,
-            boolean oneShot) {
+            boolean oneShot,
+            long deadlineMs) {
         if (timestampsToSearch.isEmpty()) {
             return CompletableFuture.completedFuture(Map.of());
         }
@@ -204,7 +212,8 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
                 requireTimestamps,
                 offsetFetcherUtils,
                 isolationLevel,
-                oneShot);
+                oneShot,
+                deadlineMs);
         listOffsetsRequestState.globalResult.whenComplete((result, error) -> {
             metadata.clearTransientTopics();
             if (error != null) {
@@ -259,7 +268,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
                 // reachable on every outcome, so a failed LIST_OFFSETS doesn't block all future lag lookups.
                 // A successful response clears the flag as a side effect of updating the subscription state,
                 // so the call below is a no-op in that case.
-                fetchOffsets(timestampToSearch, false, true).whenComplete((__, error) ->
+                fetchOffsets(timestampToSearch, false, true, Long.MAX_VALUE).whenComplete((__, error) ->
                     offsetFetcherUtils.clearPartitionEndOffsetRequests(Set.of(topicPartition)));
             }
 
@@ -586,6 +595,7 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
 
     @Override
     public void onUpdate(ClusterResource clusterResource) {
+        failExpiredRequestsToRetry(time.milliseconds());
         // Retry requests that were awaiting a metadata update. Process a copy of the list to
         // avoid errors, given that the list of requestsToRetry may be modified from the
         // fetchOffsetsByTimes call if any of the requests being retried fails
@@ -597,6 +607,25 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
             requestState.remainingToSearch.clear();
             prepareFetchOffsetsRequests(timestampsToSearch, requestState.requireTimestamps, requestState);
         });
+    }
+
+    /**
+     * Fail the requests awaiting a metadata update whose deadline has passed, and stop retrying them.
+     * Completing the result also releases the transient topics registered for the request.
+     */
+    private void failExpiredRequestsToRetry(final long currentTimeMs) {
+        Iterator<ListOffsetsRequestState> iterator = requestsToRetry.iterator();
+        while (iterator.hasNext()) {
+            ListOffsetsRequestState requestState = iterator.next();
+            if (requestState.isExpired(currentTimeMs)) {
+                iterator.remove();
+                log.debug("ListOffsets request for partitions {} expired before their leader was known",
+                        requestState.remainingToSearch.keySet());
+                requestState.globalResult.completeExceptionally(new TimeoutException(
+                        "ListOffsets request for partitions " + requestState.remainingToSearch.keySet() +
+                                " timed out before the partition leader was known"));
+            }
+        }
     }
 
     /**
@@ -889,11 +918,19 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
          */
         final boolean oneShot;
 
+        /**
+         * Deadline of the application event that triggered this request. Once it passes, partitions still
+         * waiting for a known leader are not retried on the next metadata update (see
+         * {@link OffsetsRequestManager#failExpiredRequestsToRetry(long)}).
+         */
+        final long deadlineMs;
+
         private ListOffsetsRequestState(Map<TopicPartition, Long> timestampsToSearch,
                                         boolean requireTimestamps,
                                         OffsetFetcherUtils offsetFetcherUtils,
                                         IsolationLevel isolationLevel,
-                                        boolean oneShot) {
+                                        boolean oneShot,
+                                        long deadlineMs) {
             remainingToSearch = new HashMap<>();
             fetchedOffsets = new HashMap<>();
             globalResult = new CompletableFuture<>();
@@ -903,6 +940,11 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
             this.offsetFetcherUtils = offsetFetcherUtils;
             this.isolationLevel = isolationLevel;
             this.oneShot = oneShot;
+            this.deadlineMs = deadlineMs;
+        }
+
+        private boolean isExpired(long currentTimeMs) {
+            return currentTimeMs >= deadlineMs;
         }
 
         private void addPartitionsToRetry(Set<TopicPartition> partitionsToRetry) {

@@ -212,7 +212,47 @@ public class CommitRequestManagerTest {
         offsets.put(new TopicPartition("t1", 0), new OffsetAndMetadata(0));
         commitRequestManager.commitAsync(offsets);
         assertPoll(false, 0, commitRequestManager);
+        // commitAsync has no deadline, so it is still sent no matter how long the coordinator was unknown
+        time.sleep(defaultApiTimeoutMs * 2L);
+        assertPoll(false, 0, commitRequestManager);
         assertPoll(true, 1, commitRequestManager);
+    }
+
+    @Test
+    public void testCommitSyncExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered() {
+        CommitRequestManager commitRequestManager = create(false, 0);
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("t1", 0), new OffsetAndMetadata(0));
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitResult = commitRequestManager.commitSync(offsets, deadlineMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFalse(commitResult.isDone());
+
+        // The application deadline passes while the coordinator is still unknown. The commit was never
+        // attempted, so it must fail and leave the outbound buffer instead of waiting for the coordinator.
+        time.sleep(defaultApiTimeoutMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFutureThrows(TimeoutException.class, commitResult);
+        assertTrue(commitRequestManager.pendingRequests.unsentOffsetCommits.isEmpty());
+
+        // Once the coordinator is discovered, the expired commit must not reach the broker.
+        assertPoll(true, 0, commitRequestManager);
+    }
+
+    @Test
+    public void testFetchOffsetsExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered() {
+        CommitRequestManager commitRequestManager = create(false, 0);
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult =
+            commitRequestManager.fetchOffsets(Set.of(new TopicPartition("t1", 0)), deadlineMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFalse(fetchResult.isDone());
+
+        time.sleep(defaultApiTimeoutMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFutureThrows(TimeoutException.class, fetchResult);
+        assertEmptyPendingRequests(commitRequestManager);
+
+        assertPoll(true, 0, commitRequestManager);
     }
 
     @Test
@@ -1938,6 +1978,24 @@ public class CommitRequestManagerTest {
 
         TestUtils.assertFutureThrows(CommitFailedException.class, commitFuture,
                 "Failed to commit offsets: Coordinator unknown and consumer is closing");
+    }
+
+    @Test
+    public void testPollWithClosingAndExpiredPendingCommitFailsWithCommitFailedException() {
+        CommitRequestManager commitRequestManager = create(true, 100);
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("topic", 1), new OffsetAndMetadata(0));
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitFuture = commitRequestManager.commitSync(offsets, deadlineMs);
+
+        // Closing with an unknown coordinator takes precedence over the expired deadline (KAFKA-19357)
+        time.sleep(defaultApiTimeoutMs);
+        commitRequestManager.signalClose();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+
+        TestUtils.assertFutureThrows(CommitFailedException.class, commitFuture,
+                "Failed to commit offsets: Coordinator unknown and consumer is closing");
+        assertEmptyPendingRequests(commitRequestManager);
     }
 
     // Supplies (error, isRetriable)

@@ -127,9 +127,15 @@
 
 **現況違反。** 未送出過的 commit 永不過期（`CommitRequestManager.maybeExpire` 需 `numAttempts > 0`）；ListOffsets 無 manager 端 deadline；validation 錯誤時間位移。
 
-**機制。** (1) `RetriableRequestState.maybeExpire` 對「有 deadline 且從未嘗試」的請求同樣過期（行為變更：commitSync 逾時後不再事後送出；需 reviewer 確認）；(2) `ListOffsetsRequestState` 帶 observer deadline，過期時退出 `requestsToRetry` 並移除 transient topic；(3) 只加測試：OffsetFetch／ListOffsets／validation 在 seek／assign 後的晚到回應不得套用。
+**機制。** (1) `CommitRequestManager`：`RetriableRequestState.maybeExpire` 去掉 `numAttempts > 0` 條件，deadline 過了就過期（`TimeoutException`，與 reaper 同型別）；`PendingRequests.failAndRemoveExpiredRequests` 取代 `failAndRemoveExpiredCommitRequests`，同時涵蓋 unsent commit（不論是否嘗試過）與**從未嘗試**的 unsent OffsetFetch；`poll` 在 coordinator unknown 且非 closing 時也呼叫它（HEAD 在該分支直接回 EMPTY，從不過期）。closing + coordinator unknown 仍先以 `CommitFailedException` 失敗（KAFKA-19357 優先）；deadline 為 `Long.MAX_VALUE` 的 auto-commit／commitAsync 不受影響。已嘗試過的 OffsetFetch 維持原本「回應到達時才看 deadline」的重試語意，不在此變更。(2) `OffsetsRequestManager`：`fetchOffsets(timestamps, requireTimestamps, deadlineMs)` 帶 `ListOffsetsEvent.deadlineMs()` 進 `ListOffsetsRequestState.deadlineMs`；`poll` 與 `onUpdate` 先跑 `failExpiredRequestsToRetry`，過期的 state 退出 `requestsToRetry` 並以 `TimeoutException` 完成 `globalResult`（既有 completion handler 順便 `clearTransientTopics`）；`currentLag` 的 one-shot 請求傳 `Long.MAX_VALUE`（本來就不重試）。(3) 只加測試：OffsetFetch（positions）在 observer 逾時後的成功／失敗回應、ListOffsets reset 與 OffsetsForLeaderEpoch validation 在 seek／unsubscribe 後的晚到回應，用真的 `SubscriptionState` 驗證沒有套用。`ShareConsumeRequestManager.AcknowledgeRequestState.maybeExpire` 保留 `numAttempts > 0`：它是 per-node 可重用容器，timer 每次 build 後重設，且過期處理只涵蓋 `incompleteAcknowledgements`（失敗過才會有），從未嘗試的 acks 在 `acknowledgementsToSend`，語意不同，另案處理。
 
-**測試。** 每種操作三個案例：observer 逾時後回應到達、scope 變更後回應到達、close 後回應到達。
+**行為變更（使用者可見）。**
+- `commitSync` 在 coordinator unknown 期間逾時：HEAD 會在 coordinator 出現後照送（broker 端被 commit，但 app 已收到 timeout）；改後不送，manager 端以 `TimeoutException` 結束。`maybeAutoCommitSyncBeforeRebalance` 與 close 路徑的 commitSync 同樣適用（finite deadline）。
+- `committed()`／`updateFetchPositions` 觸發的 OffsetFetch 若在 coordinator unknown 期間從未送出且 deadline 已過：改後直接 `TimeoutException`，不再事後送出；`updateFetchPositions` 的 `TimeoutException` 由 `AsyncKafkaConsumer.updateFetchPositions` 吞掉（回 false），poll() 不會多拋例外。
+- `offsetsForTimes`／`beginningOffsets`／`endOffsets` 遇到 leader 未知：HEAD 每次 metadata 更新都重試、永不結束，transient topic 一直留在 metadata；改後在 API timeout 到期時失敗並釋放 transient topic。app 端看到的例外不變（reaper 本來就在同一時刻回 `TimeoutException`），差別在背景不再有殘留請求。
+- 未變：已送出的 RPC 不因 app timeout 取消；positions 更新的晚到回應只要 partition 仍在 initializing 就套用（scope 是 partition 集合，不是 deadline）。
+
+**測試。** `CommitRequestManagerTest`：`testCommitSyncExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered`、`testFetchOffsetsExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered`（改前失敗）、`testPollWithClosingAndExpiredPendingCommitFailsWithCommitFailedException`、commitAsync 長時間 coordinator unknown 仍送出。`OffsetsRequestManagerTest`：`testListOffsetsWaitingForMetadataUpdate_Timeout`（改寫，改前失敗）、`_ExpiredOnMetadataUpdate`（改前失敗）、`testUpdatePositions*AfterEventDeadline*`、`testResetPositionsLateResponse*`、`testValidatePositionsLateResponse*`。
 
 ### C3 發佈與通知契約（F4，C／D 類）
 

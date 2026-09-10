@@ -230,6 +230,10 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                         "Failed to commit offsets: Coordinator unknown and consumer is closing");
                 pendingRequests.drainPendingCommits()
                         .forEach(request -> request.future().completeExceptionally(exception));
+            } else {
+                // A request that could not be sent while the coordinator was unknown must not be sent once
+                // the coordinator is found if the application already gave up on it (its deadline passed).
+                pendingRequests.failAndRemoveExpiredRequests();
             }
 
             return EMPTY;
@@ -1084,11 +1088,14 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         abstract CompletableFuture<?> future();
 
         /**
-         * Complete the request future with a TimeoutException if the request has been sent out
-         * at least once and the timeout has been reached.
+         * Complete the request future with a TimeoutException and remove it from the outbound buffer
+         * if its deadline has passed. This applies whether or not the request was ever attempted: an
+         * operation the application already gave up on (ex. commitSync that timed out while the
+         * coordinator was unknown) must not start after its deadline. Requests without a deadline
+         * (auto-commit and commitAsync use Long.MAX_VALUE) never expire here.
          */
         void maybeExpire() {
-            if (numAttempts > 0 && isExpired()) {
+            if (isExpired()) {
                 removeRequest();
                 future().completeExceptionally(new TimeoutException(requestDescription() +
                     " could not complete before timeout expired."));
@@ -1534,7 +1541,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
                 .filter(request -> !request.canSendRequest(currentTimeMs))
                 .collect(Collectors.toList());
 
-            failAndRemoveExpiredCommitRequests();
+            failAndRemoveExpiredRequests();
 
             // Add all unsent offset commit requests to the unsentRequests list
             List<NetworkClientDelegate.UnsentRequest> unsentRequests = unsentOffsetCommits.stream()
@@ -1564,12 +1571,18 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         }
 
         /**
-         * Find the unsent commit requests that have expired, remove them and complete their
-         * futures with a TimeoutException.
+         * Find the unsent requests that have expired, remove them and complete their futures with a
+         * TimeoutException. Commits expire whether or not they were attempted. Fetches expire here only
+         * if they were never attempted; a fetch that was already sent keeps the existing retry handling,
+         * which observes the deadline when the response arrives (see handleGroupLevelError).
          */
-        private void failAndRemoveExpiredCommitRequests() {
-            Queue<OffsetCommitRequestState> requestsToPurge = new LinkedList<>(unsentOffsetCommits);
-            requestsToPurge.forEach(RetriableRequestState::maybeExpire);
+        private void failAndRemoveExpiredRequests() {
+            Queue<OffsetCommitRequestState> commitsToPurge = new LinkedList<>(unsentOffsetCommits);
+            commitsToPurge.forEach(RetriableRequestState::maybeExpire);
+            List<OffsetFetchRequestState> neverAttemptedFetches = unsentOffsetFetches.stream()
+                .filter(request -> request.numAttempts == 0)
+                .collect(Collectors.toList());
+            neverAttemptedFetches.forEach(RetriableRequestState::maybeExpire);
         }
 
         private void clearAll() {
