@@ -42,6 +42,8 @@ clients 模組的小改動（都是可見性或一個小掛鉤，對既有實作
 
 `tests/docker/ducker-ak up -n 14 -j docker.io/library/eclipse-temurin:21-jdk-jammy` 後跑 `consumer_test.py` 48 個 case：第一次 43/48。5 個失敗都是 `group_protocol=consumer`、同一個斷言：ducktape 收到某個 partition 的 `offsets_committed` 事件時，那個 partition 已經 `partitions_revoked`。事件流（`VerifiableConsumer` 每個 poll 後 `commitAsync`）：records_consumed → **partitions_revoked** → offsets_committed。兩個原因：(1) `VerifiableConsumer` 預設用 `commitSync`，而 M2b 讓 `commitSync` 在等待時也處理 background event（為了 unsubscribe / close 的 callback），於是 revoke callback 在 commitSync **裡面**先跑了，commit 結果在 commitSync 回傳後才印；舊實作的 `commitSync` 不處理 background event（只有 unsubscribe / close 會）——改回一樣。(2) `commitAsync` 的情況：引擎把 revoke 事件立刻叫醒 app thread，而那筆 commit 還在飛；舊實作的 app thread 只在 fetch 資料到時醒來，commit 回應「碰巧」總是先到；classic consumer 則在 `onJoinPrepare` 明確等 in-flight async commit（`invokePendingAsyncCommits`）。修法：revoke / lost callback 之前先等最後一個 async commit（上限 `request.timeout.ms`）並跑 commit callback。兩者合起來的語意是「某個 partition 的 commit 結果要在它被撤銷之前交付」（06 的 R3 / R8 一類）。
 
+修完重跑：5 個 case 全過；整份 48 個再跑一次時筆電 load 200+（別的容器），5 個 `test_consumer_failure` / `test_consumer_bounce` 因 producer 逾時（「Timeout awaiting messages to be produced and acked」，其中 4 個是 classic protocol）失敗，load 降到 30 時重跑 4/5 過，剩 1 個是 classic + load 230。**`group_protocol=consumer` 的 24 個 case 在各輪裡全部通過**；JUnit 的 Callback / Commit / Subscription / Bounce 四個類別在兩個修正後仍全綠。要拿乾淨的 48/48 得在沒有別的負載的機器上跑（Jenkins 或閒置的筆電）。
+
 ## 3. 還沒做的（M2b / M2c）
 
 - `Consumer` 方法：KIP-714 telemetry 的 `registerMetricForSubscription` / `unregisterMetricFromSubscription` / `clientInstanceId` 仍丟 `UnsupportedOperationException`（其餘見 §5）。
