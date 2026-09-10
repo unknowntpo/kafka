@@ -113,11 +113,11 @@
 
 `maximumTimeToWait()` 的定義改為：**application thread 必須主動呼叫 poll() 才能推進、且現在可執行的動作**的最早期限。可執行的動作只有：poll timer 刷新（HB）、auto-commit 觸發（需 coordinator 已知且無 in-flight commit）、Streams topology push。等 in-flight、等 coordinator、等 DNS 都不是 app 可執行的動作 → `Long.MAX_VALUE`。這條把 20253→20970→21010→21031 四次修同一方法的 pattern 變成規則。
 
-**機制。**
-1. `PollResult` 加三個 static factory（`progress(requests)`、`retryAfter(ms)`、`awaitInput()`），只是命名，不加欄位。
-2. `ConsumerNetworkThread.runOnce`：manager 回 `timeUntilNextPollMs == 0` 且 `unsentRequests` 為空 → 記 metric `network-thread-zero-wait-without-progress-total`，並把該值視為 `retry.backoff.ms`（下限 1 ms）。這是安全網加偵測器，不是排程器。
-3. `HeartbeatRequestState.timeToNextHeartbeatMs()` in-flight 分支（= KAFKA-21031，#23357 的修法）；`maximumTimeToWait` 各 manager 依定義修正（多數已由 20253/20970/21010 完成）。
-4. app 端 `pollForFetches` 的 `retry.backoff.ms` 縮短分支加 1 ms 下限（KAFKA-21049）。
+**機制（已實作，commit `KIP-1371 C1`）。**
+1. `PollResult.progress(requests)` / `retryAfter(delay > 0)` / `awaitInput()`：只是命名工廠，不加欄位。
+2. `NetworkClientDelegate.addAll(PollResult)`：`timeUntilNextPollMs == 0` 且無請求 → metric `network-thread-invalid-poll-result-total` +1，並以 `max(1, retry.backoff.ms)` 取代。這是安全網加偵測器，不是排程器。
+3. `HeartbeatRequestState.timeToNextHeartbeatMs`：in-flight 時回 `max(1, retryBackoffMs)`（KAFKA-21031）；`AbstractHeartbeatRequestManager` / `StreamsGroupHeartbeatRequestManager.maximumTimeToWait`：in-flight 時只以 `max(1, pollTimer.remainingMs()/2)` 限制 app，不再用 `timeToNextHeartbeatMs`；最後 1 ms 不再四捨五入成 0。
+4. `AsyncKafkaConsumer.pollForFetches` 的三個縮短分支與 `FetchRequestManager.maximumTimeToWait` 以 `max(1, retry.backoff.ms)` 為下限（KAFKA-21049）。
 
 **測試。** 每個 manager 在「同一狀態、時間不前進」下連續 poll 兩次不得回 0 而無請求（表格驅動）；in-flight／coordinator unknown／JOINING 三種阻塞狀態的兩條通道；`ConsumerNetworkThreadTest` 對違反契約的 mock manager 驗證 clamp 與 metric。
 
@@ -144,7 +144,11 @@
 - 背景把任何「app 必須處理的東西」放進 queue 或標記到 `AsyncPollEvent` 後，必須喚醒 parked 的 app：records（已有）、`BackgroundEvent`（**現況不喚醒**）、metadata／fatal error 標記（**20397 open：不喚醒**）。
 - auto-commit 只能快照「上一次完成的 poll() 已交付」的 position。
 
-**機制。** (1) `BackgroundEventHandler.add` 與 `maybeFailOnMetadataError` 之後呼叫一個 `applicationWakeup` hook（實作為 `fetchBuffer.wakeup()`，Share 為 `shareFetchBuffer.wakeup()`）；(2) `FetchBuffer.wakeup()` 在沒有 waiter 時不取 lock（配合 (1) 的頻率）；(3) interval auto-commit 的 offsets 快照改由 app thread 在 poll() 進入時、`collectFetch` 之前捕捉並隨 `AsyncPollEvent` 帶入，只在背景發佈的 `autoCommitDueMs` 已到時才捕捉（避免每次 poll 複製 map）。這修復 18641 殘留而不恢復 18376 拿掉的阻塞。
+**機制（已實作，commit `KIP-1371 C3`）。**
+1. `BackgroundEventHandler` 在入列後執行 `applicationWakeup`（consumer／share 傳入各自 fetch buffer 的 `wakeup`）；`NetworkClientDelegate.wakeupApplication()` 暴露同一個 hook。
+2. `AsyncPollEvent` 帶 `onError` hook：任何人（network thread 的 metadata error 投遞、event 處理失敗）在 event 上發佈錯誤後，hook 喚醒 parked 的 app（KAFKA-20397）。錯誤先以 volatile 寫入，再喚醒。
+3. `FetchBuffer.wakeup()`：先設 sticky 旗標，只在有 waiter 時取 lock 與 signal。
+4. interval auto-commit：`CommitRequestManager.updateTimerAndMaybeCommit(now, snapshot)` 只用 `AsyncPollEvent` 帶來的快照；快照由 app thread 在 `checkInflightPoll` 建立 event 時、`collectFetch` 之前以 `allConsumed()` 捕捉，且只在 network thread 透過共享的 `autoCommitSnapshotRequested` 旗標要求時才複製。commit 到期但沒有快照 → 設旗標、不 commit、下一次 poll 帶來快照。`AssignmentChangeEvent` 路徑（app 阻塞在 API 內）維持讀即時 `allConsumed()`。這恢復 KAFKA-18641 的保證而不恢復 18376 拿掉的阻塞。
 
 **測試。** 20397：metadata error 在 app parked 後標記，poll 必須在短時間內拋出；`BackgroundEvent` 入列後 parked app 必須醒來；interval auto-commit 不包含本次 poll 才推進的 position（`EventLoopContractRegressionTest`，改前失敗）。
 
