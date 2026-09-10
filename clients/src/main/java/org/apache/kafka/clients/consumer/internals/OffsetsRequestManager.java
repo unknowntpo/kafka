@@ -614,6 +614,8 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      * Completing the result also releases the transient topics registered for the request.
      */
     private void failExpiredRequestsToRetry(final long currentTimeMs) {
+        if (requestsToRetry.isEmpty())
+            return;
         Iterator<ListOffsetsRequestState> iterator = requestsToRetry.iterator();
         while (iterator.hasNext()) {
             ListOffsetsRequestState requestState = iterator.next();

@@ -1577,12 +1577,17 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
          * which observes the deadline when the response arrives (see handleGroupLevelError).
          */
         private void failAndRemoveExpiredRequests() {
-            Queue<OffsetCommitRequestState> commitsToPurge = new LinkedList<>(unsentOffsetCommits);
-            commitsToPurge.forEach(RetriableRequestState::maybeExpire);
-            List<OffsetFetchRequestState> neverAttemptedFetches = unsentOffsetFetches.stream()
-                .filter(request -> request.numAttempts == 0)
-                .collect(Collectors.toList());
-            neverAttemptedFetches.forEach(RetriableRequestState::maybeExpire);
+            // Called on every poll while the coordinator is unknown: allocate nothing when idle.
+            if (!unsentOffsetCommits.isEmpty()) {
+                Queue<OffsetCommitRequestState> commitsToPurge = new LinkedList<>(unsentOffsetCommits);
+                commitsToPurge.forEach(RetriableRequestState::maybeExpire);
+            }
+            if (!unsentOffsetFetches.isEmpty()) {
+                List<OffsetFetchRequestState> neverAttemptedFetches = unsentOffsetFetches.stream()
+                    .filter(request -> request.numAttempts == 0)
+                    .collect(Collectors.toList());
+                neverAttemptedFetches.forEach(RetriableRequestState::maybeExpire);
+            }
         }
 
         private void clearAll() {
