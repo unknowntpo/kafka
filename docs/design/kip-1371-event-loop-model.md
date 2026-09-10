@@ -512,15 +512,17 @@ at the operation boundary.
 
 ## Final acceptance
 
-The final source revision passes 2,606 consumer-internals tests across 75 suites and 13,662 complete clients-module
-tests across 446 suites, with zero failures or errors and four existing skips. Checkstyle, Spotless and SpotBugsMain
-pass. Local broker evidence contains 194 regular-consumer, 62 ShareConsumer and 18 Streams tests, supplemented by 383
-Streams consumer-boundary tests. The final source also passes RAT and JMH compilation. Baseline/candidate JMH results
+The corrected source revision passes 13,659 complete clients-module tests across 445 suites, with zero failures or
+errors and two existing skips. Its three affected broker-integration classes pass 27 tests, including assignment
+listener recovery in both KRaft layouts, share callback-triggered wakeup ordering and share renewal polling.
+Checkstyle and SpotBugsMain pass. Earlier broad local evidence contains 194 regular-consumer, 62 ShareConsumer and 18
+Streams broker tests, supplemented by 383 Streams consumer-boundary tests and a 2,606-test consumer-internals run.
+The source also passes RAT and JMH compilation. Baseline/candidate JMH results
 use two forks, five 500 ms warmups, eight 500 ms measurements and the GC profiler; the measured condition-composition
 allocation chain was removed and all correctness suites were rerun afterward.
 
 The issue-to-contract table and use-case map are normative acceptance inputs for this local design. They cover public
 consumer surfaces, all application-event families, every request-manager composition, callback and buffer publication,
 close, late results and the three required end-to-end cases. Transport fixes already present in the baseline remain
-compatibility requirements rather than new claims. No remote CI result, upstream publication or community approval is
-implied.
+compatibility requirements rather than new claims. Remote CI and e2e results are recorded separately from this design;
+upstream publication or community approval is not implied.
