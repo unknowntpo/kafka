@@ -38,6 +38,10 @@ clients 模組的小改動（都是可見性或一個小掛鉤，對既有實作
 
 吞吐 −3–4%、CPU/GB +2–5%，兩個等級、兩條路徑一致。profile（async-profiler itimer，6p 1 KB assign）：`Sensor.record` 佔全部樣本 3.0%（lag/lead 每次交付 1.0%、per-fetch bytes/records 0.3%、其餘是 sensor 內部的 `SampledStat` / `Meter`）；新加的每 pass 檢查（請求優先判斷、buffer 回收、coordinator 連線）合計 < 0.2%。所以退的就是 fetch metrics 本身，與 02 量到 trunk 付的 5–8% 同一類；仍領先 librdkafka（1,295 · 1.32 / 1,218 · 0.88）。要再省只能改 `Sensor` 的記錄成本（每次 `record` 取一次時間並上鎖），那是 clients 共用的東西，不在這條線動。
 
+### M2c：ducktape `consumer_test.py`（2026-09-10，本機 docker，JDK 21 ducker 映像）
+
+`tests/docker/ducker-ak up -n 14 -j docker.io/library/eclipse-temurin:21-jdk-jammy` 後跑 `consumer_test.py` 48 個 case：第一次 43/48。5 個失敗都是 `group_protocol=consumer`、同一個斷言：ducktape 收到某個 partition 的 `offsets_committed` 事件時，那個 partition 已經 `partitions_revoked`。事件流（`VerifiableConsumer` 每個 poll 後 `commitAsync`）：records_consumed → **partitions_revoked** → offsets_committed。原因是引擎把 revoke 的 callback 事件立刻叫醒 app thread，而那筆 commit 還在飛；舊實作的 app thread 只在 fetch 資料到時醒來，所以 commit 回應「碰巧」總是先到。classic consumer 在 `onJoinPrepare` 明確等 in-flight async commit（`invokePendingAsyncCommits`）。修法：revoke / lost callback 之前先等最後一個 async commit（上限 `request.timeout.ms`）並跑 commit callback——語意是「某個 partition 的 commit 結果要在它被撤銷之前交付」。
+
 ## 3. 還沒做的（M2b / M2c）
 
 - `Consumer` 方法：KIP-714 telemetry 的 `registerMetricForSubscription` / `unregisterMetricFromSubscription` / `clientInstanceId` 仍丟 `UnsupportedOperationException`（其餘見 §5）。
