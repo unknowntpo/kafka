@@ -16,7 +16,7 @@
 
 - 背景執行緒 82–88% 的 CPU 在 `Selector.select`／socket read；七個 manager 的 poll 在 profile 中 < 1%。
 - 減少 manager poll 次數的原型（NextPollCondition）consume CPU/record +31%，來源是每次 poll 的物件配置與 app↔network 交接次數。
-- 唯一量到的大成本是「阻塞卻回零等待」（coordinator unavailable：trunk 1.6 core，no-spin 後 < 0.05 core）。
+- 唯一量到的大成本是「阻塞卻回零等待」（coordinator unavailable：trunk 1.6 core，no-spin 後 −93%，約 0.1 core）。
 - app thread 實際上是 100 ms 的 ticker：`FetchRequestManager.maximumTimeToWait` 無 in-flight 時回 `retry.backoff.ms`，`pollForFetches` 另有三個分支縮短到 `retry.backoff.ms`（§4.2）。
 
 ## 2. Intent
