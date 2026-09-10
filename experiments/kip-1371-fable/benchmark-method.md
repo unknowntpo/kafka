@@ -72,14 +72,15 @@ harness 把 bootstrap 指向一個**關閉**的 port，連線立刻被拒絕，c
 
 ## 4. 這份分支上待補的事
 
-| 項目 | 為什麼 | 成本 |
-|---|---|---|
-| e2e 依 3.2 重跑（預熱、A/A、5 對、逐對比值） | 目前的 e2e 只能排除大回歸，說不出偵測下限 | 約 30–40 分鐘機器時間 |
-| `unavailable` 模式改成「接受連線但不回應」的 listener | 現在測不到本分支修的 busy loop（見 2.4） | 小，改 harness 加一個 TCP listener |
-| ducktape `consumer_test.py` 等系統測試 | 尚未跑 | 需要 Jenkins 或本機 docker |
+| 項目 | 為什麼 | 成本 | 狀態 |
+|---|---|---|---|
+| e2e 依 3.2 重跑（預熱、A/A、5 對、逐對比值） | 目前的 e2e 只能排除大回歸，說不出偵測下限 | 約 30–40 分鐘機器時間 | 2026-09-10 完成。A/A 包絡 ±16%（吞吐）／±0.1%（配置量），consume 逐對 median 0.897 在包絡內。 |
+| `unavailable` 模式改成「接受連線但不回應」的 listener | 現在測不到本分支修的 busy loop（見 2.4） | 小，改 harness 加一個 TCP listener | 2026-09-10 完成，但**光是「接受連線但不回應」還不夠**：silent peer 卡在 `CHECKING_API_VERSIONS`，走不到 heartbeat。真正走到的是新的 `heartbeat-blackhole` 模式——在 broker listener 前面擺一個吞掉 `ConsumerGroupHeartbeat` 的 byte-level proxy。trunk 1.7 核心 / 154 MB per poll，branch 24 cpuMs/s / 17 kB per poll。 |
+| ducktape `consumer_test.py` 等系統測試 | 尚未跑 | 需要 Jenkins 或本機 docker | 未做 |
 
 ## 5. 本輪的原始資料
 
+- 2026-09-10 依本文件 §3 重跑的 e2e：`e2e-ab2/results/summary.md`（含 A/A 包絡、逐對比值、偵測下限）
 - loop-level：`jmh-ab/results/`（第一版）與 `jmh-ab/results2/`（修掉 2.3 的回歸後重跑），`jmh-ab/results/summary.md`
 - end-to-end：`e2e-ab/`
 - 前一條線（NextPollCondition 審查）的真 broker harness 與數字：`../next-poll-condition/fable-review/bench/`
