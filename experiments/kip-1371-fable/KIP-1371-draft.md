@@ -2,7 +2,7 @@
 > 1. 本文是 KIP-1371 新版草稿，結構依 `DESIGN.md` §9；只講五條契約與它們修的 issue，機制放在各契約的「Minimal change」。
 > 2. Reviewer 可以讀完 §2 Summary 或 §4 Contracts 就停；量測與替代方案在 §8–§9，證據文件在 §10。
 > 3. 已實作（分支 `fable/kip-1371-event-loop`，base trunk `74fbd50061`）：C1、C2、C3；C4、C5 只有文件與測試，沒改 production code。
-> 4. §8 的 trunk vs branch JMH 數字是佔位表，等 `jmh-ab/results/summary.md` 產出後填入；系統測試尚未跑。
+> 4. §8 已填入 loop-level JMH（trunk vs branch）實測；end-to-end 真 broker 與系統測試（ducktape）尚未跑。
 > 5. 待決事項：metric 可拿掉；C2 的 `commitSync(Duration.ZERO)` 行為變更需要 reviewer 決定；KAFKA-21031 與 PR #23357 要協調。
 
 # KIP-1371: Wait, scope, publication, termination and thread-ownership contracts for the async consumer background loop
