@@ -68,6 +68,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -199,6 +200,24 @@ public class CommitRequestManagerTest {
         offsets.put(new TopicPartition("t1", 0), new OffsetAndMetadata(0));
         commitRequestManager.commitAsync(offsets);
         assertPoll(false, 0, commitRequestManager);
+    }
+
+    @Test
+    public void testConditionStopsAfterPendingWorkFailsWithCoordinatorError() {
+        CommitRequestManager manager = create(false, 0);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        CompletableFuture<?> result = manager.commitAsync(Map.of(new TopicPartition("topic", 0), new OffsetAndMetadata(1)));
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        when(coordinatorRequestManager.fatalError()).thenReturn(Optional.of(new GroupAuthorizationException("denied")));
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertFalse(result.isDone());
+        manager.poll(time.milliseconds());
+
+        assertTrue(result.isCompletedExceptionally());
+        // Commit processing does not consume the coordinator's error; no pending work means no reason to run.
+        assertTrue(coordinatorRequestManager.fatalError().isPresent());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
     }
 
     @Test
@@ -751,10 +770,10 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
         time.sleep(100);
-        long result = commitRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = commitRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
         assertTrue(result > 0,
-            "maximumTimeToWait must be > 0 when the coordinator is unknown to avoid a busy-spin; got " + result);
+            "applicationPollCondition must be > 0 when the coordinator is unknown to avoid a busy-spin; got " + result);
         assertEquals(retryBackoffMs, result);
     }
 
@@ -808,8 +827,8 @@ public class CommitRequestManagerTest {
                 // the coordinator never becomes known since there is no real broker to respond.
                 networkClientDelegate.poll(50, time.milliseconds());
 
-                long waitMs = realCommitRequestManager.maximumTimeToWait(time.milliseconds());
-                assertTrue(waitMs > 0, "maximumTimeToWait must be > 0 while real bootstrap DNS resolution is pending; got " + waitMs);
+                long waitMs = realCommitRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+                assertTrue(waitMs > 0, "applicationPollCondition must be > 0 while real bootstrap DNS resolution is pending; got " + waitMs);
 
                 Optional<Exception> metadataError = networkClientDelegate.getAndClearMetadataError();
                 if (metadataError.isPresent()) {
@@ -1278,7 +1297,7 @@ public class CommitRequestManagerTest {
     private void assertPollDoesNotReturn(CommitRequestManager commitRequestManager, long assertNextPollMs) {
         NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
         assertEquals(0, res.unsentRequests.size());
-        assertEquals(assertNextPollMs, res.timeUntilNextPollMs);
+        assertEquals(assertNextPollMs, commitRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
     }
 
     private void assertRetryBackOff(CommitRequestManager commitRequestManager, long retryBackoffMs) {
@@ -1810,6 +1829,38 @@ public class CommitRequestManagerTest {
 
         TestUtils.assertFutureThrows(CommitFailedException.class, commitFuture,
                 "Failed to commit offsets: Coordinator unknown and consumer is closing");
+    }
+
+    @Test
+    public void testNetworkThreadCloseTerminatesPendingCommitWhenCoordinatorUnknown() {
+        CommitRequestManager commitRequestManager = create(true, 100);
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("topic", 1),
+                new OffsetAndMetadata(0));
+        CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitFuture =
+                commitRequestManager.commitAsync(offsets);
+
+        ConsumerNetworkThread.runAtClose(List.of(commitRequestManager),
+                mock(NetworkClientDelegate.class), time.milliseconds());
+
+        assertTrue(commitFuture.isCompletedExceptionally());
+        TestUtils.assertFutureThrows(CommitFailedException.class, commitFuture,
+                "Failed to commit offsets: Coordinator unknown and consumer is closing");
+    }
+
+    @Test
+    public void testNetworkThreadCloseStagesPendingCommitWhenCoordinatorKnown() {
+        CommitRequestManager commitRequestManager = create(true, 100);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        commitRequestManager.commitAsync(Map.of(new TopicPartition("topic", 1), new OffsetAndMetadata(0)));
+        NetworkClientDelegate networkClientDelegate = mock(NetworkClientDelegate.class);
+
+        ConsumerNetworkThread.runAtClose(List.of(commitRequestManager),
+                networkClientDelegate, time.milliseconds());
+
+        ArgumentCaptor<NetworkClientDelegate.PollResult> result =
+                ArgumentCaptor.forClass(NetworkClientDelegate.PollResult.class);
+        verify(networkClientDelegate).addAll(result.capture());
+        assertEquals(1, result.getValue().unsentRequests.size());
     }
 
     // Supplies (error, isRetriable)

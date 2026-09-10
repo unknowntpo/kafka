@@ -61,6 +61,23 @@ public class HeartbeatRequestStateTest {
     }
 
     @Test
+    public void testTimeToNextHeartbeatAdvancesWithoutSendCheck() {
+        final HeartbeatRequestState heartbeatRequestState = new HeartbeatRequestState(
+            LOG_CONTEXT,
+            time,
+            HEARTBEAT_INTERVAL_MS,
+            RETRY_BACKOFF_MS,
+            RETRY_BACKOFF_MAX_MS,
+            JITTER
+        );
+
+        time.sleep(HEARTBEAT_INTERVAL_MS - 1);
+        assertEquals(1, heartbeatRequestState.timeToNextHeartbeatMs(time.milliseconds()));
+        time.sleep(1);
+        assertEquals(0, heartbeatRequestState.timeToNextHeartbeatMs(time.milliseconds()));
+    }
+
+    @Test
     public void testResetTimer() {
         final HeartbeatRequestState heartbeatRequestState = new HeartbeatRequestState(
             LOG_CONTEXT,

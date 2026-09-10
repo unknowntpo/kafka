@@ -136,6 +136,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
      * It is equal to LocalAssignment.NONE whenever we are not in a group.
      */
     private LocalAssignment currentTargetAssignment;
+    private LocalAssignment failedReconciliationTarget;
 
     /**
      * If there is a reconciliation running (triggering commit, callbacks) for the
@@ -876,6 +877,12 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
         if (state != MemberState.RECONCILING) {
             return;
         }
+        // A failed callback must be retried from the next application poll, which is the
+        // existing public contract. Keep the network thread from retrying the same target
+        // by itself, or it would enqueue callback events without an application boundary.
+        if (!canCommit && currentTargetAssignment.equals(failedReconciliationTarget)) {
+            return;
+        }
 
         if (targetAssignmentReconciled()) {
             log.trace("Ignoring reconciliation attempt. Target assignment is equal to the " +
@@ -888,6 +895,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
             return;
         }
 
+        final LocalAssignment reconciliationTarget = currentTargetAssignment;
         // Find the subset of the target assignment that can be resolved to topic names, and trigger a metadata update
         // if some topic IDs are not resolvable.
         TopicIdPartitionSet assignedTopicIdPartitions = findResolvableAssignmentAndTriggerMetadataUpdate();
@@ -965,7 +973,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
             }
 
             if (!maybeAbortReconciliation()) {
-                revokeAndAssign(resolvedAssignment, assignedTopicIdPartitions, revokedPartitions, addedPartitions);
+                revokeAndAssign(reconciliationTarget, resolvedAssignment, assignedTopicIdPartitions, revokedPartitions, addedPartitions);
             }
 
         }).exceptionally(error -> {
@@ -990,7 +998,8 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
      * then complete the reconciliation by updating the assignment and making the appropriate state
      * transition. Note that if any of the 2 callbacks fails, the reconciliation should fail.
      */
-    private void revokeAndAssign(LocalAssignment resolvedAssignment,
+    private void revokeAndAssign(LocalAssignment reconciliationTarget,
+                                 LocalAssignment resolvedAssignment,
                                  TopicIdPartitionSet assignedTopicIdPartitions,
                                  SortedSet<TopicPartition> revokedPartitions,
                                  SortedSet<TopicPartition> addedPartitions) {
@@ -1019,10 +1028,13 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
                 // member out of the group after the reconciliation commit timeout expires, leading to a
                 // RECONCILING -> FENCED transition.
                 log.error("Reconciliation failed.", error);
+                if (state == MemberState.RECONCILING && !rejoinedWhileReconciliationInProgress)
+                    failedReconciliationTarget = reconciliationTarget;
                 markReconciliationCompleted();
             } else {
                 if (reconciliationInProgress && !maybeAbortReconciliation()) {
                     currentAssignment = resolvedAssignment;
+                    failedReconciliationTarget = null;
 
                     signalReconciliationCompleting();
 
@@ -1334,6 +1346,7 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
      */
     private void clearPendingAssignmentsAndLocalNamesCache() {
         currentTargetAssignment = LocalAssignment.NONE;
+        failedReconciliationTarget = null;
         assignedTopicNamesCache.clear();
     }
 
@@ -1463,6 +1476,42 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
      * @param currentTimeMs The current system time at which the method was called; useful for determining if
      *                      time-sensitive operations should be performed
      */
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (state != MemberState.RECONCILING || reconciliationInProgress || targetAssignmentReconciled() ||
+            currentTargetAssignment.equals(failedReconciliationTarget))
+            return NextPollCondition.idle();
+
+        // Inspect the same projection that reconciliation uses, without updating the local names cache
+        // or requesting metadata. Those effects belong to poll, not to an eligibility query.
+        Map<Uuid, SortedSet<Integer>> resolved = new HashMap<>();
+        Set<TopicPartition> resolvedPartitions = new HashSet<>();
+        Map<Uuid, String> topicNames = metadata.topicNames();
+        boolean unresolved = false;
+        for (Map.Entry<Uuid, SortedSet<Integer>> entry : currentTargetAssignment.partitions.entrySet()) {
+            String name = topicNames.get(entry.getKey());
+            if (name == null)
+                name = assignedTopicNamesCache.get(entry.getKey());
+            if (name == null) {
+                unresolved = true;
+            } else {
+                resolved.put(entry.getKey(), entry.getValue());
+                for (int partition : entry.getValue())
+                    resolvedPartitions.add(new TopicPartition(name, partition));
+            }
+        }
+        if (unresolved && !metadata.updateRequested())
+            return NextPollCondition.ready();
+        if (!currentAssignment.isNone() && resolved.equals(currentAssignment.partitions)) {
+            return currentAssignment.localEpoch == currentTargetAssignment.localEpoch
+                ? NextPollCondition.idle() : NextPollCondition.ready();
+        }
+        // Revocation and auto-commit require the application poll's reconciliation opportunity.
+        if (autoCommitEnabled || !resolvedPartitions.containsAll(subscriptions.assignedPartitions()))
+            return NextPollCondition.idle();
+        return NextPollCondition.ready();
+    }
+
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         maybeReconcile(false);
         return NetworkClientDelegate.PollResult.EMPTY;

@@ -457,7 +457,9 @@ public class SubscriptionState {
     }
 
     public synchronized void seekValidated(TopicPartition tp, FetchPosition position) {
-        assignedState(tp).seekValidated(position);
+        TopicPartitionState state = assignedState(tp);
+        state.beginPositionIntent();
+        state.seekValidated(position);
     }
 
     public void seek(TopicPartition tp, long offset) {
@@ -465,7 +467,9 @@ public class SubscriptionState {
     }
 
     public void seekUnvalidated(TopicPartition tp, FetchPosition position) {
-        assignedState(tp).seekUnvalidated(position);
+        TopicPartitionState state = assignedState(tp);
+        state.beginPositionIntent();
+        state.seekUnvalidated(position);
     }
 
     synchronized void maybeSeekUnvalidated(TopicPartition tp, FetchPosition position, AutoOffsetResetStrategy requestedResetStrategy) {
@@ -617,7 +621,7 @@ public class SubscriptionState {
                 if (hasDefaultOffsetResetPolicy()) {
                     log.info("Truncation detected for partition {} at offset {}, resetting offset",
                              tp, currentPosition);
-                    requestOffsetReset(tp);
+                    state.reset(defaultResetStrategy);
                 } else {
                     log.warn("Truncation detected for partition {} at offset {}, but no reset policy is set",
                              tp, currentPosition);
@@ -652,6 +656,22 @@ public class SubscriptionState {
 
     public synchronized void completeValidation(TopicPartition tp) {
         assignedState(tp).completeValidation();
+    }
+
+    synchronized void maybeCompleteValidationWithoutResponse(TopicPartition tp,
+                                                             FetchPosition requestPosition,
+                                                             Predicate<TopicPartition> scope) {
+        TopicPartitionState state = assignedStateOrNull(tp);
+        if (matchesPosition(tp, requestPosition, scope) && state.awaitingValidation()) {
+            state.completeValidation();
+        }
+    }
+
+    synchronized boolean matchesPosition(TopicPartition tp,
+                                         FetchPosition expectedPosition,
+                                         Predicate<TopicPartition> scope) {
+        TopicPartitionState state = assignedStateOrNull(tp);
+        return state != null && scope.test(tp) && Objects.equals(state.position, expectedPosition);
     }
 
     public synchronized FetchPosition validPosition(TopicPartition tp) {
@@ -802,6 +822,15 @@ public class SubscriptionState {
     }
 
     /**
+     * Return the currently recorded preferred replica without expiring or otherwise changing it.
+     * Scheduling queries use this read-only view and leave lease processing to fetch preparation.
+     */
+    synchronized Optional<Integer> preferredReadReplicaId(TopicPartition tp) {
+        TopicPartitionState state = assignedStateOrNull(tp);
+        return state == null ? Optional.empty() : Optional.ofNullable(state.preferredReadReplica);
+    }
+
+    /**
      * Unset the preferred read replica. This causes the fetcher to go back to the leader for fetches.
      *
      * @param tp The topic partition
@@ -827,13 +856,17 @@ public class SubscriptionState {
     }
 
     public synchronized void requestOffsetReset(TopicPartition partition, AutoOffsetResetStrategy offsetResetStrategy) {
-        assignedState(partition).reset(offsetResetStrategy);
+        TopicPartitionState state = assignedState(partition);
+        state.beginPositionIntent();
+        state.reset(offsetResetStrategy);
     }
 
     public synchronized void requestOffsetReset(Collection<TopicPartition> partitions, AutoOffsetResetStrategy offsetResetStrategy) {
         partitions.forEach(tp -> {
             log.info("Seeking to {} offset of partition {}", offsetResetStrategy, tp);
-            assignedState(tp).reset(offsetResetStrategy);
+            TopicPartitionState state = assignedState(tp);
+            state.beginPositionIntent();
+            state.reset(offsetResetStrategy);
         });
     }
 
@@ -844,6 +877,7 @@ public class SubscriptionState {
     public synchronized void requestOffsetResetIfPartitionAssigned(TopicPartition partition) {
         final TopicPartitionState state = assignedStateOrNull(partition);
         if (state != null) {
+            state.beginPositionIntent();
             state.reset(defaultResetStrategy);
         }
     }
@@ -882,6 +916,55 @@ public class SubscriptionState {
         return collectPartitions(TopicPartitionState::shouldInitialize);
     }
 
+    /**
+     * Capture the lifetime of each initializing partition without invalidating unaffected partitions
+     * when the assignment changes. A removed and re-added partition has a different state object.
+     * Callers combine the returned lifetime predicate with the state required by their own stage.
+     */
+    synchronized Predicate<TopicPartition> initializingPartitionsScope(Set<TopicPartition> partitions) {
+        Map<TopicPartition, TopicPartitionState> admitted = new HashMap<>();
+        for (TopicPartition partition : partitions) {
+            TopicPartitionState state = assignedStateOrNull(partition);
+            if (state != null && state.shouldInitialize())
+                admitted.put(partition, state);
+        }
+        return partitionScope(admitted);
+    }
+
+    /**
+     * Capture the current assignment lifetime and position intent of the given partitions.
+     * A seek or a new reset invalidates an older operation even when it returns the partition to
+     * the same apparent state.
+     */
+    synchronized Predicate<TopicPartition> assignedPartitionsScope(Set<TopicPartition> partitions) {
+        Map<TopicPartition, TopicPartitionState> admitted = new HashMap<>();
+        Map<TopicPartition, Long> admittedIntents = new HashMap<>();
+        for (TopicPartition partition : partitions) {
+            TopicPartitionState state = assignedStateOrNull(partition);
+            if (state != null) {
+                admitted.put(partition, state);
+                admittedIntents.put(partition, state.positionIntentVersion);
+            }
+        }
+        return partition -> {
+            synchronized (SubscriptionState.this) {
+                TopicPartitionState expected = admitted.get(partition);
+                Long expectedIntent = admittedIntents.get(partition);
+                return expected != null && assignedStateOrNull(partition) == expected &&
+                        expectedIntent != null && expected.positionIntentVersion == expectedIntent;
+            }
+        };
+    }
+
+    private Predicate<TopicPartition> partitionScope(Map<TopicPartition, TopicPartitionState> admitted) {
+        return partition -> {
+            synchronized (SubscriptionState.this) {
+                TopicPartitionState expected = admitted.get(partition);
+                return expected != null && assignedStateOrNull(partition) == expected;
+            }
+        };
+    }
+
     private Set<TopicPartition> collectPartitions(Predicate<TopicPartitionState> filter) {
         Set<TopicPartition> result = new HashSet<>();
         assignment.forEach((topicPartition, topicPartitionState) -> {
@@ -907,7 +990,7 @@ public class SubscriptionState {
                 if (defaultResetStrategy == AutoOffsetResetStrategy.NONE)
                     partitionsWithNoOffsets.add(tp);
                 else
-                    requestOffsetReset(tp);
+                    partitionState.reset(defaultResetStrategy);
             }
         });
 
@@ -1119,6 +1202,7 @@ public class SubscriptionState {
         private Integer preferredReadReplica;
         private Long preferredReadReplicaExpireTimeMs;
         private boolean endOffsetRequested;
+        private long positionIntentVersion;
         
         TopicPartitionState() {
             this.paused = false;
@@ -1133,6 +1217,11 @@ public class SubscriptionState {
             this.resetStrategy = null;
             this.nextRetryTimeMs = null;
             this.preferredReadReplica = null;
+            this.positionIntentVersion = 0L;
+        }
+
+        private void beginPositionIntent() {
+            positionIntentVersion++;
         }
 
         public boolean endOffsetRequested() {

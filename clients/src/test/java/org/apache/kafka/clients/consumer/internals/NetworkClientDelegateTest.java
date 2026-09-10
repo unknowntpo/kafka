@@ -87,7 +87,7 @@ public class NetworkClientDelegateTest {
     }
 
     @Test
-    void testPollResultTimer() throws Exception {
+    void testPollResultStagesRequests() throws Exception {
         try (NetworkClientDelegate ncd = newNetworkClientDelegate(false)) {
             NetworkClientDelegate.UnsentRequest req = new NetworkClientDelegate.UnsentRequest(
                     new FindCoordinatorRequest.Builder(
@@ -97,16 +97,10 @@ public class NetworkClientDelegateTest {
                     Optional.empty());
             req.setTimer(time, DEFAULT_REQUEST_TIMEOUT_MS);
 
-            // purposely setting a non-MAX time to ensure it is returning Long.MAX_VALUE upon success
-            NetworkClientDelegate.PollResult success = new NetworkClientDelegate.PollResult(
-                    10,
-                    Collections.singletonList(req));
-            assertEquals(10, ncd.addAll(success));
-
-            NetworkClientDelegate.PollResult failure = new NetworkClientDelegate.PollResult(
-                    10,
-                    new ArrayList<>());
-            assertEquals(10, ncd.addAll(failure));
+            ncd.addAll(new NetworkClientDelegate.PollResult(Collections.singletonList(req)));
+            assertEquals(Collections.singletonList(req), new ArrayList<>(ncd.unsentRequests()));
+            ncd.addAll(NetworkClientDelegate.PollResult.EMPTY);
+            assertEquals(Collections.singletonList(req), new ArrayList<>(ncd.unsentRequests()));
         }
     }
 
@@ -238,7 +232,7 @@ public class NetworkClientDelegateTest {
         doThrow(authException).when(metadata).maybeThrowAnyException();
 
         BlockingQueue<BackgroundEvent> backgroundEventQueue = new LinkedBlockingQueue<>();
-        this.backgroundEventHandler = new BackgroundEventHandler(backgroundEventQueue, time, mock(AsyncConsumerMetrics.class));
+        this.backgroundEventHandler = new BackgroundEventHandler(backgroundEventQueue, time, mock(AsyncConsumerMetrics.class), () -> { });
         NetworkClientDelegate networkClientDelegate = newNetworkClientDelegate(true);
 
         assertEquals(0, backgroundEventQueue.size());
@@ -256,7 +250,7 @@ public class NetworkClientDelegateTest {
         BootstrapResolutionException bootstrapException = new BootstrapResolutionException("DNS resolution failed");
 
         BlockingQueue<BackgroundEvent> backgroundEventQueue = new LinkedBlockingQueue<>();
-        this.backgroundEventHandler = new BackgroundEventHandler(backgroundEventQueue, time, mock(AsyncConsumerMetrics.class));
+        this.backgroundEventHandler = new BackgroundEventHandler(backgroundEventQueue, time, mock(AsyncConsumerMetrics.class), () -> { });
         Metadata realMetadata = new Metadata(50, 50, 5000, new LogContext(), new ClusterResourceListeners());
 
         LogContext logContext = new LogContext();

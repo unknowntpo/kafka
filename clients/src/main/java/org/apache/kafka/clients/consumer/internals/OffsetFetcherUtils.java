@@ -190,6 +190,11 @@ class OffsetFetcherUtils {
         return positionsValidator.refreshAndGetPartitionsToValidate(apiVersions);
     }
 
+    Map<TopicPartition, SubscriptionState.FetchPosition> refreshValidationAfterMetadataUpdate() {
+        positionsValidator.validatePositionsOnMetadataChange(apiVersions);
+        return subscriptionState.partitionsNeedingValidation(time.milliseconds());
+    }
+
     /**
      * If we have seen new metadata (as tracked by {@link org.apache.kafka.clients.Metadata#updateVersion()}), then
      * we should check that all the assignments have a valid position.
@@ -267,6 +272,10 @@ class OffsetFetcherUtils {
         } else {
             throw new NoOffsetForPartitionException(partition);
         }
+    }
+
+    long retryBackoffMs() {
+        return retryBackoffMs;
     }
 
     static Set<String> topicsForPartitions(Collection<TopicPartition> partitions) {

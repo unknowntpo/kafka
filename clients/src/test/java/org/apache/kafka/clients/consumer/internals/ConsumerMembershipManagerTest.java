@@ -129,7 +129,7 @@ public class ConsumerMembershipManagerTest {
         mockConsumer = mock(Consumer.class);
         backgroundEventQueue = new LinkedBlockingQueue<>();
         time = new MockTime(0);
-        backgroundEventHandler = spy(new BackgroundEventHandler(backgroundEventQueue, time, mock(AsyncConsumerMetrics.class)));
+        backgroundEventHandler = spy(new BackgroundEventHandler(backgroundEventQueue, time, mock(AsyncConsumerMetrics.class), () -> { }));
         metrics = new Metrics(time);
         rebalanceMetricsManager = new ConsumerRebalanceMetricsManager(metrics, subscriptionState);
 
@@ -209,6 +209,30 @@ public class ConsumerMembershipManagerTest {
         // When the ack is sent the member should go back to STABLE
         membershipManager.onHeartbeatRequestGenerated();
         assertEquals(MemberState.STABLE, membershipManager.state());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testConditionPreservesApplicationAutoCommitBoundary(boolean autoCommitEnabled) {
+        ConsumerMembershipManager manager = spy(new ConsumerMembershipManager(
+            GROUP_ID, Optional.empty(), Optional.empty(), REBALANCE_TIMEOUT, Optional.empty(),
+            subscriptionState, commitRequestManager, metadata, LOG_CONTEXT,
+            backgroundEventHandler, time, rebalanceMetricsManager, autoCommitEnabled));
+        manager.transitionToJoining();
+        Uuid topicId = Uuid.randomUuid();
+        when(metadata.topicNames()).thenReturn(Map.of(topicId, "topic"));
+        receiveAssignment(topicId, List.of(0), manager);
+
+        assertEquals(!autoCommitEnabled, manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        verify(manager, never()).markReconciliationInProgress();
+
+        manager.maybeReconcile(true);
+        assertEquals(MemberState.RECONCILING, manager.state());
+        assertTrue(manager.reconciliationInProgress());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        processAssignmentEventNoCallback(manager);
+        assertEquals(MemberState.ACKNOWLEDGING, manager.state());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
     }
 
     @Test
@@ -1002,7 +1026,9 @@ public class ConsumerMembershipManagerTest {
 
         // Until a new target arrives or new metadata resolves topicId2, further reconciles from either
         // thread must stay in RECONCILING - no redundant acks.
+        when(metadata.updateRequested()).thenReturn(true);
         for (int i = 0; i < 5; i++) {
+            assertFalse(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
             membershipManager.maybeReconcile(false);
             assertEquals(MemberState.RECONCILING, membershipManager.state());
             membershipManager.maybeReconcile(true);
@@ -2057,6 +2083,17 @@ public class ConsumerMembershipManagerTest {
         assertEquals(1, listener.revokedCount());
         assertEquals(0, listener.assignedCount());
         assertEquals(0, listener.lostCount());
+        clearInvocations(membershipManager);
+        for (int i = 0; i < 3; i++) {
+            membershipManager.poll(time.milliseconds());
+        }
+        assertFalse(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        verify(membershipManager, never()).markReconciliationInProgress();
+
+        membershipManager.maybeReconcile(true);
+        assertTrue(membershipManager.reconciliationInProgress());
+        verify(membershipManager).markReconciliationInProgress();
+        backgroundEventQueue.clear();
     }
 
     @Test
@@ -2127,6 +2164,17 @@ public class ConsumerMembershipManagerTest {
         assertEquals(1, listener.revokedCount());
         assertEquals(1, listener.assignedCount());
         assertEquals(0, listener.lostCount());
+        clearInvocations(membershipManager);
+        for (int i = 0; i < 3; i++) {
+            membershipManager.poll(time.milliseconds());
+        }
+        assertFalse(membershipManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        verify(membershipManager, never()).markReconciliationInProgress();
+
+        membershipManager.maybeReconcile(true);
+        assertTrue(membershipManager.reconciliationInProgress());
+        verify(membershipManager).markReconciliationInProgress();
+        backgroundEventQueue.clear();
     }
 
     @Test

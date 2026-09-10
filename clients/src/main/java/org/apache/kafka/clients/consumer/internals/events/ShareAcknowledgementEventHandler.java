@@ -32,7 +32,6 @@ import java.util.concurrent.BlockingQueue;
 public class ShareAcknowledgementEventHandler {
 
     private final BlockingQueue<ShareAcknowledgementEvent> eventQueue;
-
     public ShareAcknowledgementEventHandler(final BlockingQueue<ShareAcknowledgementEvent> eventQueue) {
         this.eventQueue = eventQueue;
     }

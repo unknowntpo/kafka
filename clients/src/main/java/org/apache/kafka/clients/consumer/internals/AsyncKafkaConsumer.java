@@ -509,14 +509,14 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
             ApiVersions apiVersions = new ApiVersions();
             final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
+            // This FetchBuffer is shared between the application and network threads.
+            this.fetchBuffer = new FetchBuffer(logContext);
             this.backgroundEventHandler = new BackgroundEventHandler(
                 backgroundEventQueue,
                 time,
-                asyncConsumerMetrics
+                asyncConsumerMetrics, fetchBuffer::wakeup
             );
 
-            // This FetchBuffer is shared between the application and network threads.
-            this.fetchBuffer = new FetchBuffer(logContext);
             this.positionsValidator = new PositionsValidator(logContext, time, subscriptions, metadata);
             final Supplier<NetworkClientDelegate> networkClientDelegateSupplier = NetworkClientDelegate.supplier(time,
                     logContext,
@@ -530,7 +530,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     false,
                     asyncConsumerMetrics
             );
-            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
+            this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
             this.groupMetadata.set(initializeGroupMetadata(config, groupRebalanceConfig));
             final Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(time,
                     logContext,
@@ -655,11 +655,11 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
         this.clientTelemetryReporter = Optional.empty();
         this.autoCommitEnabled = autoCommitEnabled;
-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
+        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
         this.backgroundEventHandler = new BackgroundEventHandler(
             backgroundEventQueue,
             time,
-            asyncConsumerMetrics
+            asyncConsumerMetrics, fetchBuffer::wakeup
         );
         this.positionsValidator = positionsValidator;
     }
@@ -712,7 +712,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.backgroundEventHandler = new BackgroundEventHandler(
             backgroundEventQueue,
             time,
-            asyncConsumerMetrics
+            asyncConsumerMetrics, fetchBuffer::wakeup
         );
         this.rebalanceCallbackMetricsManager = new RebalanceCallbackMetricsManager(metrics);
         this.rebalanceListenerInvoker = new ConsumerRebalanceListenerInvoker(
@@ -733,7 +733,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             false,
             asyncConsumerMetrics
         );
-        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
+        this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors, fetchBuffer::wakeup);
         Supplier<RequestManagers> requestManagersSupplier = RequestManagers.supplier(
             time,
             logContext,
@@ -1002,7 +1002,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         boolean newlySubmittedEvent = false;
 
         if (inflightPoll == null) {
-            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds());
+            inflightPoll = new AsyncPollEvent(calculateDeadlineMs(timer), time.milliseconds(), fetchBuffer::wakeup);
             newlySubmittedEvent = true;
             log.trace("Inflight event {} submitted", inflightPoll);
             applicationEventHandler.add(inflightPoll);
@@ -1985,7 +1985,9 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             return fetch;
         }
 
-        long pollTimeout = Math.min(applicationEventHandler.maximumTimeToWait(), timer.remainingMs());
+        long pollTimeout = Math.min(
+                applicationEventHandler.applicationPollCondition().remainingMs(time.milliseconds()),
+                timer.remainingMs());
 
         // Bound the wait when background progress may make fetching possible soon.
         // Use the current application-thread state to avoid relying on stale state from the network thread.

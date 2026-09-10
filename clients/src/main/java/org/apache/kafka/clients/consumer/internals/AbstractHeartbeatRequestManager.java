@@ -145,21 +145,28 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      *     <li>The heartbeat interval has expired, or the member is in a state that indicates
      *     that it should heartbeat without waiting for the interval.</li>
      * </ol>
-     * This will also determine the maximum wait time until the next poll based on the member's
-     * state.
-     * <ol>
-     *     <li>If the member is without a coordinator or is in a failed state, the timer is set
-     *     to Long.MAX_VALUE, as there's no need to send a heartbeat.</li>
-     *     <li>If the member cannot send a heartbeat due to either exponential backoff, it will
-     *     return the remaining time left on the backoff timer.</li>
-     *     <li>If the member's heartbeat timer has not expired, It will return the remaining time
-     *     left on the heartbeat timer.</li>
-     *     <li>If the member can send a heartbeat, the timer is set to the current heartbeat interval.</li>
-     * </ol>
-     *
-     * @return {@link PollResult} that includes a heartbeat request if one must be sent, and the
-     * time to wait until the next poll.
+     * Scheduling eligibility and deadlines are exposed separately by this query. Request production
+     * is performed by {@link #poll(long)} after the loop checks eligibility.
      */
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
+            // Processing may still be necessary even though no heartbeat can be sent.
+            return membershipManager().state() == MemberState.LEAVING || coordinatorRequestManager.fatalError().isPresent()
+                ? NextPollCondition.ready() : NextPollCondition.idle();
+        }
+        pollTimer.update(currentTimeMs);
+        NextPollCondition condition = membershipManager().isLeavingGroup()
+            ? NextPollCondition.idle() : NextPollCondition.after(currentTimeMs, pollTimer.remainingMs());
+        if (shouldSendLeaveHeartbeatNow() ||
+            (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()))
+            return NextPollCondition.ready();
+        if (heartbeatRequestState.requestInFlight())
+            return condition;
+        return NextPollCondition.either(condition,
+            NextPollCondition.after(currentTimeMs, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
+    }
+
     @Override
     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
@@ -181,7 +188,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             // We can ignore the leave response because we can join before or after receiving the response.
             heartbeatRequestState.reset();
             resetHeartbeatState();
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(leaveHeartbeat));
+            return new NetworkClientDelegate.PollResult(Collections.singletonList(leaveHeartbeat));
         }
 
         // Case 1: The member state is LEAVING - if the member is a share consumer, we should immediately send leave;
@@ -192,11 +199,11 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
             (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight());
 
         if (!heartbeatRequestState.canSendRequest(currentTimeMs) && !heartbeatNow) {
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+            return NetworkClientDelegate.PollResult.EMPTY;
         }
 
         NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, false);
-        return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+        return new NetworkClientDelegate.PollResult(Collections.singletonList(request));
     }
 
     /**
@@ -231,7 +238,7 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
     public PollResult pollOnClose(long currentTimeMs) {
         if (membershipManager().isLeavingGroup()) {
             NetworkClientDelegate.UnsentRequest request = makeHeartbeatRequest(currentTimeMs, true);
-            return new NetworkClientDelegate.PollResult(heartbeatRequestState.heartbeatIntervalMs(), Collections.singletonList(request));
+            return new NetworkClientDelegate.PollResult(Collections.singletonList(request));
         }
         return EMPTY;
     }
@@ -248,21 +255,21 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
      * <p>When the member is {@link MemberState#UNSUBSCRIBED} or in the terminal {@link MemberState#FATAL} state,
      * this returns {@code Long.MAX_VALUE} to indicate there is no next heartbeat to wait for, allowing the application
      * thread to block for the full user-specified poll timeout rather than spinning in a busy loop.
-     */
+    */
     @Override
-    public long maximumTimeToWait(long currentTimeMs) {
+    public NextPollCondition applicationPollCondition(long currentTimeMs) {
         pollTimer.update(currentTimeMs);
         MemberState state = membershipManager().state();
         // No heartbeat can be sent in these states: UNSUBSCRIBED has nothing to heartbeat for,
         // and FATAL is terminal. The fatal error has already been propagated to the
         // application thread, so there is no need to wake it before its poll timeout expires.
         if (state == MemberState.UNSUBSCRIBED || state == MemberState.FATAL) {
-            return Long.MAX_VALUE;
+            return NextPollCondition.idle();
         }
         // Unblock the application thread so STALE/FENCED members can run
         // assignment-release callbacks and rejoin during the next poll.
         if (pollTimer.isExpired()) {
-            return 0L;
+            return NextPollCondition.ready();
         }
         // Mirror the guard in poll(). A heartbeat is only sent when the coordinator is known and the
         // member is in a state that can send heartbeats. This covers cases such as:
@@ -273,12 +280,13 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         // Return retryBackoffMs rather than the heartbeat interval, since the interval remains 0 until
         // the first heartbeat response is received, which would also lead to busy-spinning.
         if (coordinatorRequestManager.coordinator().isEmpty() || membershipManager().shouldSkipHeartbeat()) {
-            return heartbeatRequestState.retryBackoffMs();
+            return NextPollCondition.after(currentTimeMs, heartbeatRequestState.retryBackoffMs());
         }
         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
-            return 0L;
+            return NextPollCondition.ready();
         }
-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+        return NextPollCondition.after(currentTimeMs,
+                Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs)));
     }
 
     /**

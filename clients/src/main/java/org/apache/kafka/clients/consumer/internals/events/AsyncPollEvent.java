@@ -24,6 +24,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.utils.Time;
 
 import java.time.Duration;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -45,6 +46,7 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
 
     private final long deadlineMs;
     private final long pollTimeMs;
+    private final Runnable wakeupApplication;
     private volatile KafkaException error;
     private volatile boolean isComplete;
     private volatile boolean isValidatePositionsComplete;
@@ -56,11 +58,14 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
      * @param deadlineMs        Time, in milliseconds, at which point the event must be completed; based on the
      *                          {@link Duration} passed to {@link Consumer#poll(Duration)}
      * @param pollTimeMs        Time, in milliseconds, at which point the event was created
+     * @param wakeupApplication Wakes the application after an error is published. Successful preparation
+     *                          alone does not imply application progress and must not self-trigger another poll.
      */
-    public AsyncPollEvent(long deadlineMs, long pollTimeMs) {
+    public AsyncPollEvent(long deadlineMs, long pollTimeMs, Runnable wakeupApplication) {
         super(Type.ASYNC_POLL);
         this.deadlineMs = deadlineMs;
         this.pollTimeMs = pollTimeMs;
+        this.wakeupApplication = Objects.requireNonNull(wakeupApplication);
     }
 
     public long deadlineMs() {
@@ -118,18 +123,23 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
         return isComplete;
     }
 
-    public void completeSuccessfully() {
+    public synchronized void completeSuccessfully() {
+        if (isComplete)
+            return;
+        isComplete = true;
         // Complete reconciliation future as safety net in case it wasn't already marked complete
         reconciliationCheckFuture.complete(null);
-        isComplete = true;
     }
 
-    public void completeExceptionally(KafkaException e) {
+    public synchronized void completeExceptionally(KafkaException e) {
+        if (isComplete)
+            return;
+        error = e;
+        isComplete = true;
         // Complete reconciliation future to unblock any waiters - the error will be surfaced
         // through the normal checkInflightPoll() mechanism via the error field
         reconciliationCheckFuture.complete(null);
-        error = e;
-        isComplete = true;
+        wakeupApplication.run();
     }
 
     @Override

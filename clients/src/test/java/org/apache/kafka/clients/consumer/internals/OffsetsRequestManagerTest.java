@@ -24,6 +24,7 @@ import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.ClusterResource;
 import org.apache.kafka.common.IsolationLevel;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
@@ -48,6 +49,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
@@ -62,6 +64,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -70,6 +74,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -77,6 +82,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -106,6 +112,15 @@ public class OffsetsRequestManagerTest {
         LogContext logContext = new LogContext();
         metadata = mock(ConsumerMetadata.class);
         subscriptionState = mock(SubscriptionState.class);
+        when(subscriptionState.initializingPartitionsScope(any())).thenAnswer(invocation -> {
+            Set<TopicPartition> partitions = invocation.getArgument(0);
+            return (Predicate<TopicPartition>) partitions::contains;
+        });
+        when(subscriptionState.assignedPartitionsScope(any())).thenAnswer(invocation -> {
+            Set<TopicPartition> partitions = invocation.getArgument(0);
+            return (Predicate<TopicPartition>) partitions::contains;
+        });
+        when(subscriptionState.matchesPosition(any(), any(), any())).thenReturn(true);
         apiVersions = mock(ApiVersions.class);
         requestManager = new OffsetsRequestManager(
                 subscriptionState,
@@ -578,9 +593,166 @@ public class OffsetsRequestManagerTest {
         mockFailedRequest_MissingLeader();
         when(subscriptionState.partitionsNeedingReset(time.milliseconds())).thenReturn(Collections.singleton(TEST_PARTITION_1));
         when(subscriptionState.resetStrategy(any())).thenReturn(AutoOffsetResetStrategy.EARLIEST);
-        requestManager.resetPositionsIfNeeded();
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
         verify(metadata).requestUpdate(true);
         assertEquals(0, requestManager.requestsToSend());
+        assertEquals(1, requestManager.resetRequests());
+        assertFalse(result.isDone());
+        assertFalse(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        CompletableFuture<Void> repeatedResult = requestManager.resetPositionsIfNeeded();
+        assertEquals(1, requestManager.resetRequests());
+        assertFalse(repeatedResult.isDone());
+
+        mockSuccessfulRequest(Collections.singletonMap(TEST_PARTITION_1, LEADER_1));
+        requestManager.onUpdate(new ClusterResource(""));
+        assertEquals(1, requestManager.requestsToSend());
+        assertTrue(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+        ClientResponse response = buildClientResponse(pollResult.unsentRequests.get(0),
+                Collections.singletonMap(TEST_PARTITION_1,
+                        new OffsetAndTimestampInternal(5L, -1L, Optional.empty())));
+        response.onComplete();
+        assertTrue(result.isDone());
+        assertTrue(repeatedResult.isDone());
+        assertEquals(0, requestManager.resetRequests());
+    }
+
+    @Test
+    public void testResetWaitingForMetadataCompletesWhenPartitionLifetimeEnds() {
+        useRealSubscriptionState();
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+        subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+        when(metadata.currentLeader(TEST_PARTITION_1)).thenReturn(
+            new Metadata.LeaderAndEpoch(Optional.empty(), Optional.of(1)));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        assertFalse(result.isDone());
+        assertEquals(1, requestManager.resetRequests());
+
+        subscriptionState.assignFromUser(Set.of());
+        assertTrue(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        requestManager.poll(time.milliseconds());
+        assertTrue(result.isDone());
+        assertEquals(0, requestManager.resetRequests());
+    }
+
+    @Test
+    public void testResetPositionsRetriableResponseContinuesAfterMetadataAndBackoff() {
+        AtomicLong currentTimeMs = new AtomicLong();
+        when(time.milliseconds()).thenAnswer(invocation -> currentTimeMs.get());
+        when(subscriptionState.partitionsNeedingReset(time.milliseconds())).thenReturn(Set.of(TEST_PARTITION_1));
+        when(subscriptionState.resetStrategy(TEST_PARTITION_1)).thenReturn(AutoOffsetResetStrategy.EARLIEST);
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        NetworkClientDelegate.PollResult firstPoll = requestManager.poll(time.milliseconds());
+        buildClientResponseWithErrors(firstPoll.unsentRequests.get(0),
+            Map.of(TEST_PARTITION_1, Errors.NOT_LEADER_OR_FOLLOWER)).onComplete();
+
+        assertFalse(result.isDone());
+        assertEquals(1, requestManager.resetRequests());
+        assertFalse(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        requestManager.onUpdate(new ClusterResource(""));
+        assertEquals(RETRY_BACKOFF_MS,
+            requestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
+        currentTimeMs.set(RETRY_BACKOFF_MS - 1);
+        assertFalse(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        currentTimeMs.set(RETRY_BACKOFF_MS);
+        assertTrue(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        NetworkClientDelegate.PollResult retryPoll = requestManager.poll(time.milliseconds());
+        assertEquals(1, retryPoll.unsentRequests.size());
+        buildClientResponse(retryPoll.unsentRequests.get(0), Map.of(TEST_PARTITION_1,
+            new OffsetAndTimestampInternal(8L, -1L, Optional.empty()))).onComplete();
+        assertTrue(result.isDone());
+        assertEquals(0, requestManager.resetRequests());
+    }
+
+    @Test
+    public void testResetRetryRetainsMetadataUpdateThatArrivesWhileRequestIsInFlight() {
+        AtomicLong currentTimeMs = new AtomicLong();
+        when(time.milliseconds()).thenAnswer(invocation -> currentTimeMs.get());
+        when(subscriptionState.partitionsNeedingReset(time.milliseconds())).thenReturn(Set.of(TEST_PARTITION_1));
+        when(subscriptionState.resetStrategy(TEST_PARTITION_1)).thenReturn(AutoOffsetResetStrategy.EARLIEST);
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        NetworkClientDelegate.PollResult firstPoll = requestManager.poll(time.milliseconds());
+
+        requestManager.onUpdate(new ClusterResource(""));
+        buildClientResponseWithErrors(firstPoll.unsentRequests.get(0),
+            Map.of(TEST_PARTITION_1, Errors.NOT_LEADER_OR_FOLLOWER)).onComplete();
+        assertEquals(RETRY_BACKOFF_MS,
+            requestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
+
+        currentTimeMs.set(RETRY_BACKOFF_MS);
+        assertTrue(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        NetworkClientDelegate.PollResult retryPoll = requestManager.poll(time.milliseconds());
+        buildClientResponse(retryPoll.unsentRequests.get(0), Map.of(TEST_PARTITION_1,
+            new OffsetAndTimestampInternal(8L, -1L, Optional.empty()))).onComplete();
+        assertTrue(result.isDone());
+        assertEquals(0, requestManager.resetRequests());
+    }
+
+    @Test
+    public void testResetResponseIgnoresRemovedAndReaddedPartition() {
+        useRealSubscriptionState();
+        Set<TopicPartition> partitions = Set.of(TEST_PARTITION_1, TEST_PARTITION_2);
+        when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of(
+            TEST_PARTITION_1, LEADER_1,
+            TEST_PARTITION_2, LEADER_1)));
+        subscriptionState.assignFromUser(partitions);
+        subscriptionState.requestOffsetReset(partitions, AutoOffsetResetStrategy.EARLIEST);
+        CompletableFuture<Void> result = requestManager.resetPositionsIfNeeded();
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_2));
+        subscriptionState.assignFromUser(partitions);
+        subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+        CompletableFuture<Void> replacementResult = requestManager.resetPositionsIfNeeded();
+        assertEquals(2, requestManager.resetRequests());
+        buildClientResponse(pollResult.unsentRequests.get(0), Map.of(
+            TEST_PARTITION_1, new OffsetAndTimestampInternal(10L, -1L, Optional.empty()),
+            TEST_PARTITION_2, new OffsetAndTimestampInternal(20L, -1L, Optional.empty()))).onComplete();
+
+        assertTrue(result.isDone());
+        assertFalse(replacementResult.isDone());
+        assertNull(subscriptionState.position(TEST_PARTITION_1));
+        assertEquals(20L, subscriptionState.position(TEST_PARTITION_2).offset);
+
+        NetworkClientDelegate.PollResult replacementPoll = requestManager.poll(time.milliseconds());
+        assertEquals(1, replacementPoll.unsentRequests.size());
+        buildClientResponse(replacementPoll.unsentRequests.get(0), Map.of(
+            TEST_PARTITION_1, new OffsetAndTimestampInternal(30L, -1L, Optional.empty()))).onComplete();
+        assertTrue(replacementResult.isDone());
+        assertEquals(30L, subscriptionState.position(TEST_PARTITION_1).offset);
+        assertEquals(0, requestManager.resetRequests());
+    }
+
+    @Test
+    public void testSameLifetimeResetIntentDoesNotReuseOlderAttempt() {
+        useRealSubscriptionState();
+        when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of(TEST_PARTITION_1, LEADER_1)));
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+        subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+        CompletableFuture<Void> oldResult = requestManager.resetPositionsIfNeeded();
+        NetworkClientDelegate.PollResult oldPoll = requestManager.poll(time.milliseconds());
+
+        subscriptionState.seek(TEST_PARTITION_1, 99L);
+        subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+        CompletableFuture<Void> newResult = requestManager.resetPositionsIfNeeded();
+        assertEquals(2, requestManager.resetRequests());
+        assertFalse(newResult.isDone());
+
+        buildClientResponse(oldPoll.unsentRequests.get(0), Map.of(TEST_PARTITION_1,
+            new OffsetAndTimestampInternal(10L, -1L, Optional.empty()))).onComplete();
+        assertTrue(oldResult.isDone());
+        assertFalse(newResult.isDone());
+        assertNull(subscriptionState.position(TEST_PARTITION_1));
+
+        NetworkClientDelegate.PollResult newPoll = requestManager.poll(time.milliseconds());
+        buildClientResponse(newPoll.unsentRequests.get(0), Map.of(TEST_PARTITION_1,
+            new OffsetAndTimestampInternal(30L, -1L, Optional.empty()))).onComplete();
+        assertTrue(newResult.isDone());
+        assertEquals(30L, subscriptionState.position(TEST_PARTITION_1).offset);
     }
 
     @Test
@@ -629,6 +801,27 @@ public class OffsetsRequestManagerTest {
     }
 
     @Test
+    public void testStaleResetFailureDoesNotPoisonNewPartitionLifetime() {
+        boolean[] validLifetime = {true};
+        doReturn((Predicate<TopicPartition>) partition -> validLifetime[0])
+            .when(subscriptionState).assignedPartitionsScope(any());
+        when(subscriptionState.partitionsNeedingReset(time.milliseconds())).thenReturn(Set.of(TEST_PARTITION_1));
+        when(subscriptionState.resetStrategy(TEST_PARTITION_1)).thenReturn(AutoOffsetResetStrategy.EARLIEST);
+        mockSuccessfulRequest(Map.of(TEST_PARTITION_1, LEADER_1));
+        CompletableFuture<Void> staleReset = requestManager.resetPositionsIfNeeded();
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+
+        validLifetime[0] = false;
+        buildClientResponseWithErrors(pollResult.unsentRequests.get(0),
+            Map.of(TEST_PARTITION_1, Errors.TOPIC_AUTHORIZATION_FAILED)).onComplete();
+        assertTrue(staleReset.isDone());
+        when(subscriptionState.partitionsNeedingReset(time.milliseconds())).thenReturn(Set.of());
+        CompletableFuture<Void> nextReset = assertDoesNotThrow(requestManager::resetPositionsIfNeeded);
+        assertTrue(nextReset.isDone());
+        assertFalse(nextReset.isCompletedExceptionally());
+    }
+
+    @Test
     public void testValidatePositionsSuccess() {
         int currentOffset = 5;
         int expectedEndOffset = 100;
@@ -670,6 +863,136 @@ public class OffsetsRequestManagerTest {
         requestManager.validatePositionsIfNeeded();
         verify(metadata).requestUpdate(true);
         assertEquals(0, requestManager.requestsToSend());
+        assertEquals(1, requestManager.validationRequests());
+        requestManager.validatePositionsIfNeeded();
+        assertEquals(1, requestManager.validationRequests());
+    }
+
+    @Test
+    public void testValidationWithMissingLeaderContinuesAfterMetadataUpdate() {
+        SubscriptionState.FetchPosition missingLeaderPosition = new SubscriptionState.FetchPosition(5L,
+            Optional.of(10), new Metadata.LeaderAndEpoch(Optional.of(Node.noNode()), Optional.of(3)));
+        SubscriptionState.FetchPosition knownLeaderPosition = new SubscriptionState.FetchPosition(5L,
+            Optional.of(10), new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3)));
+        SubscriptionState.FetchPosition[] currentPosition = {missingLeaderPosition};
+        when(subscriptionState.partitionsNeedingValidation(anyLong())).thenAnswer(invocation ->
+            Map.of(TEST_PARTITION_1, currentPosition[0]));
+        when(subscriptionState.matchesPosition(any(), any(), any())).thenAnswer(invocation ->
+            currentPosition[0].equals(invocation.getArgument(1)));
+        when(apiVersions.get(LEADER_1.idString())).thenReturn(NodeApiVersions.create());
+
+        requestManager.validatePositionsIfNeeded();
+        assertEquals(1, requestManager.validationRequests());
+        assertEquals(0, requestManager.requestsToSend());
+        currentPosition[0] = knownLeaderPosition;
+        requestManager.onUpdate(new ClusterResource(""));
+        assertEquals(1, requestManager.validationRequests());
+        assertEquals(1, requestManager.requestsToSend());
+
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+        buildOffsetsForLeaderEpochResponse(pollResult.unsentRequests.get(0),
+            List.of(TEST_PARTITION_1), 100).onComplete();
+        assertEquals(0, requestManager.validationRequests());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testValidatePositionsRetryRetainsMetadataAndBackoff(boolean metadataBeforeResponse) {
+        AtomicLong currentTimeMs = new AtomicLong();
+        when(time.milliseconds()).thenAnswer(invocation -> currentTimeMs.get());
+        SubscriptionState.FetchPosition position = new SubscriptionState.FetchPosition(5L,
+            Optional.of(10), new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3)));
+        mockSuccessfulBuildRequestForValidatingPositions(position, LEADER_1);
+
+        requestManager.validatePositionsIfNeeded();
+        NetworkClientDelegate.PollResult firstPoll = requestManager.poll(time.milliseconds());
+        if (metadataBeforeResponse)
+            requestManager.onUpdate(new ClusterResource(""));
+        buildOffsetsForLeaderEpochResponseWithErrors(firstPoll.unsentRequests.get(0),
+            Map.of(TEST_PARTITION_1, Errors.NOT_LEADER_OR_FOLLOWER)).onComplete();
+        if (!metadataBeforeResponse)
+            requestManager.onUpdate(new ClusterResource(""));
+
+        assertEquals(1, requestManager.validationRequests());
+        assertEquals(RETRY_BACKOFF_MS,
+            requestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
+        currentTimeMs.set(RETRY_BACKOFF_MS - 1);
+        assertFalse(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        currentTimeMs.set(RETRY_BACKOFF_MS);
+        assertTrue(requestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        NetworkClientDelegate.PollResult retryPoll = requestManager.poll(time.milliseconds());
+        buildOffsetsForLeaderEpochResponse(retryPoll.unsentRequests.get(0),
+            List.of(TEST_PARTITION_1), 100).onComplete();
+        assertEquals(0, requestManager.validationRequests());
+    }
+
+    @Test
+    public void testValidationResponseIgnoresRemovedAndReaddedPartition() {
+        useRealSubscriptionState();
+        Metadata.LeaderAndEpoch oldLeader = new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(1));
+        Metadata.LeaderAndEpoch currentLeader = new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3));
+        when(metadata.currentLeader(any())).thenReturn(currentLeader);
+        when(apiVersions.get(LEADER_1.idString())).thenReturn(NodeApiVersions.create());
+        Set<TopicPartition> partitions = Set.of(TEST_PARTITION_1, TEST_PARTITION_2);
+        subscriptionState.assignFromUser(partitions);
+        partitions.forEach(partition -> {
+            subscriptionState.seekUnvalidated(partition,
+                new SubscriptionState.FetchPosition(5L, Optional.of(10), oldLeader));
+            assertTrue(subscriptionState.maybeValidatePositionForCurrentLeader(
+                apiVersions, partition, currentLeader));
+        });
+
+        requestManager.validatePositionsIfNeeded();
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_2));
+        subscriptionState.assignFromUser(partitions);
+        subscriptionState.seekUnvalidated(TEST_PARTITION_1,
+            new SubscriptionState.FetchPosition(5L, Optional.of(10), oldLeader));
+        assertTrue(subscriptionState.maybeValidatePositionForCurrentLeader(
+            apiVersions, TEST_PARTITION_1, currentLeader));
+
+        buildOffsetsForLeaderEpochResponse(pollResult.unsentRequests.get(0),
+            List.of(TEST_PARTITION_1, TEST_PARTITION_2), 100).onComplete();
+        assertTrue(subscriptionState.awaitingValidation(TEST_PARTITION_1));
+        assertFalse(subscriptionState.awaitingValidation(TEST_PARTITION_2));
+        assertEquals(0, requestManager.validationRequests());
+    }
+
+    @Test
+    public void testSameLifetimeValidationIntentDoesNotReuseOlderAttemptAtSamePosition() {
+        useRealSubscriptionState();
+        Metadata.LeaderAndEpoch oldLeader = new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(1));
+        Metadata.LeaderAndEpoch currentLeader = new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3));
+        when(metadata.currentLeader(TEST_PARTITION_1)).thenReturn(currentLeader);
+        when(apiVersions.get(LEADER_1.idString())).thenReturn(NodeApiVersions.create());
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+        SubscriptionState.FetchPosition originalPosition = new SubscriptionState.FetchPosition(
+            5L, Optional.of(10), oldLeader);
+        subscriptionState.seekUnvalidated(TEST_PARTITION_1, originalPosition);
+        assertTrue(subscriptionState.maybeValidatePositionForCurrentLeader(
+            apiVersions, TEST_PARTITION_1, currentLeader));
+
+        requestManager.validatePositionsIfNeeded();
+        NetworkClientDelegate.PollResult oldPoll = requestManager.poll(time.milliseconds());
+
+        subscriptionState.seek(TEST_PARTITION_1, 99L);
+        subscriptionState.seekUnvalidated(TEST_PARTITION_1, originalPosition);
+        assertTrue(subscriptionState.maybeValidatePositionForCurrentLeader(
+            apiVersions, TEST_PARTITION_1, currentLeader));
+        requestManager.validatePositionsIfNeeded();
+        assertEquals(2, requestManager.validationRequests());
+
+        buildOffsetsForLeaderEpochResponse(oldPoll.unsentRequests.get(0),
+            List.of(TEST_PARTITION_1), 100).onComplete();
+        assertEquals(1, requestManager.validationRequests());
+        assertTrue(subscriptionState.awaitingValidation(TEST_PARTITION_1));
+
+        NetworkClientDelegate.PollResult newPoll = requestManager.poll(time.milliseconds());
+        buildOffsetsForLeaderEpochResponse(newPoll.unsentRequests.get(0),
+            List.of(TEST_PARTITION_1), 100).onComplete();
+        assertEquals(0, requestManager.validationRequests());
+        assertFalse(subscriptionState.awaitingValidation(TEST_PARTITION_1));
     }
 
     @Test
@@ -696,6 +1019,22 @@ public class OffsetsRequestManagerTest {
         // request
         assertThrows(TopicAuthorizationException.class, () -> requestManager.validatePositionsIfNeeded());
         assertEquals(0, requestManager.requestsToSend());
+    }
+
+    @Test
+    public void testStaleValidationFailureDoesNotPoisonNewPartitionLifetime() {
+        SubscriptionState.FetchPosition position = new SubscriptionState.FetchPosition(5L,
+            Optional.of(10), new Metadata.LeaderAndEpoch(Optional.of(LEADER_1), Optional.of(3)));
+        mockSuccessfulBuildRequestForValidatingPositions(position, LEADER_1);
+        requestManager.validatePositionsIfNeeded();
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+
+        when(subscriptionState.matchesPosition(any(), any(), any())).thenReturn(false);
+        buildOffsetsForLeaderEpochResponseWithErrors(pollResult.unsentRequests.get(0),
+            Map.of(TEST_PARTITION_1, Errors.TOPIC_AUTHORIZATION_FAILED)).onComplete();
+        when(subscriptionState.partitionsNeedingValidation(anyLong())).thenReturn(Map.of());
+        assertDoesNotThrow(requestManager::validatePositionsIfNeeded);
+        assertEquals(0, requestManager.validationRequests());
     }
 
     @Test
@@ -786,6 +1125,201 @@ public class OffsetsRequestManagerTest {
         SubscriptionState.FetchPosition expectedPosition = new SubscriptionState.FetchPosition(
                 offsetAndMetadata.offset(), offsetAndMetadata.leaderEpoch(), leaderAndEpoch);
         verify(subscriptionState).seekUnvalidated(tp1, expectedPosition);
+    }
+
+    @Test
+    public void testOlderOffsetFetchCompletionDoesNotClearNewerPendingRequest() {
+        long deadline = time.milliseconds() + DEFAULT_API_TIMEOUT_MS;
+        Set<TopicPartition> firstPartitions = Set.of(TEST_PARTITION_1);
+        Set<TopicPartition> secondPartitions = Set.of(TEST_PARTITION_1, TEST_PARTITION_2);
+        Metadata.LeaderAndEpoch leader = testLeaderEpoch(LEADER_1, Optional.of(1));
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> first = new CompletableFuture<>();
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> second = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(firstPartitions, deadline)).thenReturn(first);
+        when(commitRequestManager.fetchOffsets(secondPartitions, deadline)).thenReturn(second);
+
+        mockAssignedPartitionsMissingPositions(firstPartitions, firstPartitions, leader);
+        CompletableFuture<Void> firstUpdate = requestManager.updateFetchPositions(deadline);
+        mockAssignedPartitionsMissingPositions(secondPartitions, secondPartitions, leader);
+        CompletableFuture<Void> secondUpdate = requestManager.updateFetchPositions(deadline);
+        first.completeExceptionally(new KafkaException("old request failed"));
+        assertTrue(firstUpdate.isCompletedExceptionally());
+
+        CompletableFuture<Void> reusedUpdate = requestManager.updateFetchPositions(deadline);
+        verify(commitRequestManager, times(1)).fetchOffsets(secondPartitions, deadline);
+        assertFalse(secondUpdate.isDone());
+        assertFalse(reusedUpdate.isDone());
+        second.complete(new CommitRequestManager.OffsetFetchResult(Map.of(), Map.of()));
+        assertTrue(secondUpdate.isDone());
+        assertTrue(reusedUpdate.isDone());
+    }
+
+    @Test
+    public void testAlreadyFailedOffsetFetchDoesNotRemainPending() {
+        long deadline = time.milliseconds() + DEFAULT_API_TIMEOUT_MS;
+        Set<TopicPartition> partitions = Set.of(TEST_PARTITION_1);
+        mockAssignedPartitionsMissingPositions(partitions, partitions, testLeaderEpoch(LEADER_1, Optional.of(1)));
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> retry = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(partitions, deadline))
+            .thenReturn(CompletableFuture.failedFuture(new KafkaException("immediate failure")))
+            .thenReturn(retry);
+
+        assertTrue(requestManager.updateFetchPositions(deadline).isCompletedExceptionally());
+        CompletableFuture<Void> next = requestManager.updateFetchPositions(deadline);
+        verify(commitRequestManager, times(2)).fetchOffsets(partitions, deadline);
+        assertFalse(next.isDone());
+        retry.complete(new CommitRequestManager.OffsetFetchResult(Map.of(), Map.of()));
+        assertTrue(next.isDone());
+    }
+
+    @Test
+    public void testCommittedOffsetsKeepUnaffectedPartitionButIgnoreRemovedAndReaddedPartition() {
+        LogContext logContext = new LogContext();
+        subscriptionState = new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST);
+        requestManager = new OffsetsRequestManager(subscriptionState, metadata, DEFAULT_ISOLATION_LEVEL,
+            time, RETRY_BACKOFF_MS, REQUEST_TIMEOUT_MS, DEFAULT_API_TIMEOUT_MS, apiVersions,
+            mock(NetworkClientDelegate.class), commitRequestManager,
+            new PositionsValidator(logContext, time, subscriptionState, metadata), logContext);
+        Set<TopicPartition> partitions = Set.of(TEST_PARTITION_1, TEST_PARTITION_2);
+        subscriptionState.assignFromUser(partitions);
+        when(metadata.currentLeader(any())).thenReturn(testLeaderEpoch(LEADER_1, Optional.empty()));
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> response = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(partitions, DEFAULT_API_TIMEOUT_MS)).thenReturn(response);
+        requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_2));
+        subscriptionState.assignFromUser(partitions);
+        response.complete(new CommitRequestManager.OffsetFetchResult(Map.of(
+            TEST_PARTITION_1, new OffsetAndMetadata(10), TEST_PARTITION_2, new OffsetAndMetadata(20)), Map.of()));
+
+        assertNull(subscriptionState.position(TEST_PARTITION_1));
+        assertTrue(subscriptionState.initializingPartitions().contains(TEST_PARTITION_1));
+        assertEquals(20, subscriptionState.position(TEST_PARTITION_2).offset);
+    }
+
+    @Test
+    public void testReassignedPartitionStartsNewOffsetFetchBeforeOldResponse() {
+        useRealSubscriptionState();
+        Set<TopicPartition> partitions = Set.of(TEST_PARTITION_1, TEST_PARTITION_2);
+        subscriptionState.assignFromUser(partitions);
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> oldResponse = new CompletableFuture<>();
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> newResponse = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(partitions, DEFAULT_API_TIMEOUT_MS))
+            .thenReturn(oldResponse).thenReturn(newResponse);
+        requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_2));
+        subscriptionState.assignFromUser(partitions);
+        CompletableFuture<Void> newUpdate = requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+        verify(commitRequestManager, times(2)).fetchOffsets(partitions, DEFAULT_API_TIMEOUT_MS);
+        oldResponse.complete(new CommitRequestManager.OffsetFetchResult(Map.of(
+            TEST_PARTITION_1, new OffsetAndMetadata(10), TEST_PARTITION_2, new OffsetAndMetadata(20)), Map.of()));
+
+        assertFalse(newUpdate.isDone());
+        assertNull(subscriptionState.position(TEST_PARTITION_1));
+        assertEquals(20, subscriptionState.position(TEST_PARTITION_2).offset);
+        newResponse.complete(new CommitRequestManager.OffsetFetchResult(Map.of(
+            TEST_PARTITION_1, new OffsetAndMetadata(30), TEST_PARTITION_2, new OffsetAndMetadata(40)), Map.of()));
+        assertTrue(newUpdate.isDone());
+        assertFalse(newUpdate.isCompletedExceptionally());
+        assertEquals(30, subscriptionState.position(TEST_PARTITION_1).offset);
+        assertEquals(20, subscriptionState.position(TEST_PARTITION_2).offset);
+    }
+
+    @Test
+    public void testMissingOldCommittedOffsetsDoNotResetReassignedPartition() {
+        useRealSubscriptionState();
+        Set<TopicPartition> partitions = Set.of(TEST_PARTITION_1, TEST_PARTITION_2);
+        subscriptionState.assignFromUser(partitions);
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> response = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(partitions, DEFAULT_API_TIMEOUT_MS)).thenReturn(response);
+        requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_2));
+        subscriptionState.assignFromUser(partitions);
+        response.complete(new CommitRequestManager.OffsetFetchResult(Map.of(), Map.of()));
+
+        assertTrue(subscriptionState.initializingPartitions().contains(TEST_PARTITION_1));
+        assertFalse(subscriptionState.isOffsetResetNeeded(TEST_PARTITION_1));
+        assertTrue(subscriptionState.isOffsetResetNeeded(TEST_PARTITION_2));
+    }
+
+    @Test
+    public void testUpdateFetchPositionsIncludesResetRequestedBeforeOperationStarts() {
+        useRealSubscriptionState();
+        when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of(TEST_PARTITION_1, LEADER_1)));
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+        subscriptionState.seek(TEST_PARTITION_1, 99L);
+        subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+
+        CompletableFuture<Void> update = requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+
+        assertFalse(update.isDone());
+        assertEquals(1, requestManager.resetRequests());
+        assertEquals(1, requestManager.requestsToSend());
+    }
+
+    @Test
+    public void testPendingCommittedOffsetFetchDoesNotAdoptLaterResetIntent() {
+        useRealSubscriptionState();
+        when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of(TEST_PARTITION_1, LEADER_1)));
+        subscriptionState.assignFromUser(Set.of(TEST_PARTITION_1));
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> committedOffsets = new CompletableFuture<>();
+        when(commitRequestManager.fetchOffsets(Set.of(TEST_PARTITION_1), DEFAULT_API_TIMEOUT_MS))
+            .thenReturn(committedOffsets);
+        CompletableFuture<Void> oldUpdate = requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+
+        subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.EARLIEST);
+        committedOffsets.complete(new CommitRequestManager.OffsetFetchResult(Map.of(), Map.of()));
+
+        assertTrue(oldUpdate.isDone());
+        assertEquals(0, requestManager.resetRequests());
+        assertEquals(0, requestManager.requestsToSend());
+        assertTrue(subscriptionState.isOffsetResetNeeded(TEST_PARTITION_1));
+
+        CompletableFuture<Void> newUpdate = requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+        assertFalse(newUpdate.isDone());
+        assertEquals(1, requestManager.resetRequests());
+        assertEquals(1, requestManager.requestsToSend());
+    }
+
+    @Test
+    public void testUpdateFetchPositionsCompletesAfterPartialResetAttemptMakesFetchProgress() {
+        useRealSubscriptionState();
+        Set<TopicPartition> partitions = Set.of(TEST_PARTITION_1, TEST_PARTITION_2);
+        when(metadata.fetch()).thenReturn(testClusterMetadata(Map.of(
+            TEST_PARTITION_1, LEADER_1,
+            TEST_PARTITION_2, LEADER_1)));
+        subscriptionState.assignFromUser(partitions);
+        subscriptionState.requestOffsetReset(TEST_PARTITION_1, AutoOffsetResetStrategy.LATEST);
+        subscriptionState.requestOffsetReset(TEST_PARTITION_2, AutoOffsetResetStrategy.EARLIEST);
+        CompletableFuture<Void> update = requestManager.updateFetchPositions(DEFAULT_API_TIMEOUT_MS);
+        NetworkClientDelegate.PollResult pollResult = requestManager.poll(time.milliseconds());
+
+        List<ListOffsetsResponseData.ListOffsetsTopicResponse> responses = List.of(
+            ListOffsetsResponse.singletonListOffsetsTopicResponse(
+                TEST_PARTITION_1, Errors.NONE, -1L, 50L, ListOffsetsResponse.UNKNOWN_EPOCH),
+            ListOffsetsResponse.singletonListOffsetsTopicResponse(
+                TEST_PARTITION_2, Errors.NOT_LEADER_OR_FOLLOWER,
+                ListOffsetsResponse.UNKNOWN_TIMESTAMP,
+                ListOffsetsResponse.UNKNOWN_OFFSET,
+                ListOffsetsResponse.UNKNOWN_EPOCH));
+        buildClientResponse(pollResult.unsentRequests.get(0), responses).onComplete();
+
+        assertTrue(update.isDone());
+        assertEquals(50L, subscriptionState.position(TEST_PARTITION_1).offset);
+        assertTrue(subscriptionState.isOffsetResetNeeded(TEST_PARTITION_2));
+        assertEquals(1, requestManager.resetRequests());
+    }
+
+    private void useRealSubscriptionState() {
+        LogContext logContext = new LogContext();
+        subscriptionState = new SubscriptionState(logContext, AutoOffsetResetStrategy.EARLIEST);
+        requestManager = new OffsetsRequestManager(subscriptionState, metadata, DEFAULT_ISOLATION_LEVEL,
+            time, RETRY_BACKOFF_MS, REQUEST_TIMEOUT_MS, DEFAULT_API_TIMEOUT_MS, apiVersions,
+            mock(NetworkClientDelegate.class), commitRequestManager,
+            new PositionsValidator(logContext, time, subscriptionState, metadata), logContext);
+        when(metadata.currentLeader(any())).thenReturn(testLeaderEpoch(LEADER_1, Optional.empty()));
     }
 
     @Test
