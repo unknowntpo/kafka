@@ -156,38 +156,32 @@
 
 **機制。** 文件（欄位 × writer 表）+ 既有測試（18160）+ 針對 `WakeupException`／`InterruptException` 在每種 callback 中的回報測試（目前 async 只有一個案例）。
 
-## 7. 效能工作（F7）
+## 7. 效能（只保留與契約直接相關的部分）
 
-目標不是「不退步」而是「用證據優化」。順序：
+KIP 正文只放兩類量測：(1) 證明契約修的問題有成本（busy loop：trunk unavailable 1.6 core → < 0.05 core）；(2) 證明契約本身不退步（consume CPU/record、idle 喚醒次數，JMH 交錯 A/B）。JMH 基線：loop-level（真 `ConsumerNetworkThread.runOnce` + `MockClient`：idle／blocked／consume／recovery）與 end-to-end（本機真 broker）。
 
-1. **JMH 基線**（`jmh-benchmarks`）：
-   - loop-level：真 `ConsumerNetworkThread.runOnce` + 真 managers + `MockClient`，情境 idle（成員穩定、無資料）、blocked（coordinator unknown／HB in-flight）、consume（每輪一個 fetch response）、recovery（coordinator 從 unknown 變 known）。指標：ns/pass、alloc/pass。
-   - end-to-end：本機真 broker 的 JMH（沿用 `next-poll-condition/fable-review/bench` 的 workload），指標 records/s、CPU/record、app 與 network thread CPU、alloc/record、idle CPU/s、time-to-first-record。
-2. **候選優化**（每個單一變因、A/B、附代價）：
-   - 交接：`FetchBuffer.wakeup` 無 waiter 不取 lock；`AbstractFetch:297` 每個 fetch 完成無條件 wakeup → 只在 buffer 有新資料或有 waiter；`ApplicationEventHandler.add` 的 `Selector.wakeup` 只在背景 parked 時（in-select flag）。
-   - 每 pass 配置：`drainTo` 的 `LinkedList`、`uncompletedEvents()` 的 `ArrayList`、`coordinator()` 的 `Optional` ≥4 次/pass、`OffsetsRequestManager.poll` 無條件 `ArrayList + PollResult`、HB STABLE 每輪 `new PollResult`（§8）。
-   - app 端 100 ms ticker：C3 的通知到位後，把 `pollForFetches` 的三個 `retry.backoff.ms` 分支改成「有通知來源就不縮短」；每移除一個都要 liveness 測試與 idle 喚醒次數量測。
-3. 不做：跳過 manager poll、TreeSet／Signal 排程、post-I/O 額外 pass（Codex 量到 CPU +5–6%）。
+邊角優化（`FetchBuffer.wakeup` 無 waiter 不取 lock、`Selector.wakeup` 只在 parked 時、每 pass 的 `LinkedList`／`ArrayList`／`Optional` 配置、HB STABLE 每輪 `new PollResult`）**不放進 KIP**；各自以 MINOR PR 附 JMH 處理，見附錄 `perf-notes.md`。唯一例外是「移除 app 端 100 ms retry」：它是 C3 通知契約的直接後果，放在 C3 的效益段落，且必須在通知到位後才做。
 
 ## 8. 假設與未驗證
 
-- H1：C1 的 factory 與 clamp 不改變任何 share／Streams 測試行為（靠全套測試）。
+- H1：C1 的 factory 與 clamp 不改變任何 share／Streams 測試行為（全套測試）。
 - H2：C3 通知到位後移除 app 端短 retry，idle 喚醒次數下降且 time-to-first-record 不退（JMH + 真 broker）。
-- H3：交接優化在 consume 情境可量到 CPU 改善（JMH）。
-- H4：C2 (1) 的行為變更被 reviewer 接受（需 mailing list 討論；先以 opt-in 或只在 close 路徑實作作為 fallback）。
+- H3：C2 的行為變更（未嘗試的 commit 在 deadline 後過期）被 reviewer 接受；fallback 是只在 close 路徑實作。
 
-## 9. 實作切片（可各自成 PR）
+## 9. KIP 的章節結構（一份 KIP，先重點再深入）
 
-| 切片 | 內容 | 前置 | 證據 |
-|---|---|---|---|
-| P0 | `EventLoopContractRegressionTest`：20397、18641 殘留的「改前失敗」測試 | — | 測試在 HEAD 失敗 |
-| P1 | C1：`PollResult` factory、zero-wait clamp + metric、21031 修法、21049 floor、表格驅動的 no-spin 測試 | P0 | 單元 + JMH blocked 情境 CPU |
-| P2 | C3：背景→app 喚醒 hook（BackgroundEvent、metadata error）、`FetchBuffer.wakeup` 無 waiter 不取 lock | P0 | 20397 測試轉綠；idle 喚醒次數 |
-| P3 | C3：auto-commit 快照隨 `AsyncPollEvent` | P0 | 18641 測試轉綠；consume CPU 不退 |
-| P4 | C2：未嘗試操作的過期、ListOffsets deadline、晚到回應測試矩陣 | — | 單元；行為變更文件 |
-| P5 | C4／C5：close 終止表與測試、writer 表、callback 中斷測試 | — | 單元 + 整合 |
-| P6 | JMH loop-level 與 end-to-end 基線；交接與配置優化各一 commit | P1–P3 | JMH 報告 |
-| KIP | 文件：契約、public interface（無變更；新增 1 個 metric）、rejected alternatives（S1–S4 的量測） | 全部 | — |
+reviewer 偏好（`reviewer-preferences.md`）：最小修法、每個 manager 一個 `...DoesNotSpin` 測試、內部結構不開 KIP、不要新框架。因此 KIP 的正文只講契約與它們修的問題；機制放在各契約的「最小落地」小節，量測與替代方案放附錄。
+
+1. **Summary**（半頁）：五條契約各一句；解決的 issue 家族；public interface 變更只有一個 metric；沒有 scheduler、沒有新執行緒模型。
+2. **Motivation**：3.3 的六種形狀 + 「同一方法修四次」的證據（issues-traceability）。
+3. **Contracts**：C1–C5 各一節，固定格式：定義 → 現況違反處（file:line）→ 最小落地 → 釘住的測試 → 對應 issue。
+4. **Public Interfaces**：`network-thread-invalid-poll-result-total`；C2 的行為變更（明列前後差異）。
+5. **Compatibility**：Consumer／Share／Streams 各自受影響的契約；classic 不動。
+6. **Test Plan**：契約測試表（每條契約 × 每個 manager）；整合與系統測試清單。
+7. **Rejected Alternatives**：S1（NextPollCondition 排程，+31%）、S2（pass snapshot）、S3（operation framework）、S4（post-I/O pass，+5–6%），各附量測來源。
+8. **Appendix**：core inventory、issue traceability、benchmark 方法與原始數據、邊角優化清單（不在 KIP 範圍）。
+
+實作切片（同一分支、依序 commit，但每個 commit 對應一條契約，方便 reviewer 逐條看）：P0 改前失敗測試 → P1 C1 → P2 C3 通知 → P3 C3 快照 → P4 C2 → P5 C4/C5 文件與測試 → JMH 基線與契約相關量測。
 
 ## 10. 待補
 
