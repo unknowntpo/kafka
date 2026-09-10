@@ -221,7 +221,7 @@ Gap: the design asked for one table-driven test that polls every manager twice i
 
 What is claimed: the C1 fixes remove the busy loop in the blocked scenarios, and the C1–C3 changes do not change the cost of the consume and idle paths beyond noise. What is not claimed: any throughput or latency improvement.
 
-Benchmarks added on the branch (`jmh-benchmarks/README-consumer-loop.md`):
+Benchmarks added on the branch (`jmh-benchmarks/src/main/java/org/apache/kafka/jmh/consumer/README.md`):
 - `ConsumerNetworkThreadPassBenchmark`: one `runOnce()` pass over `MockClient` and `MockTime` with real `RequestManagers`; scenarios `IDLE`, `BLOCKED` (FindCoordinator never answered), `BLOCKED_HEARTBEAT_INFLIGHT` (first heartbeat never answered), `CONSUME`, `RECOVERY`. Counters include `zeroWaitEmptyResults`, `zeroNetworkTimeoutPasses` and `zeroMaximumTimeToWaitPasses` per pass.
 - `AsyncConsumerBrokerBenchmark`: real `KafkaConsumer` against a running broker; modes `consume`, `idle`, `unavailable`; counters `records`, `processCpuMillis`, `networkThreadCpuMillis`.
 
@@ -279,6 +279,6 @@ Evidence documents (in `experiments/kip-1371-fable/` unless noted):
 | `reviewer-preferences.md` | Reviewer evidence from 15 PRs; implications in §4 |
 | `codex-model-summary.md` | What the earlier prototypes proved and disproved |
 | `../next-poll-condition/fable-review/REPORT.md` | S1 review: regressions, real-broker A/B numbers, profiles |
-| `jmh-benchmarks/README-consumer-loop.md` | Benchmark method |
+| `jmh-benchmarks/src/main/java/org/apache/kafka/jmh/consumer/README.md` | Benchmark method |
 
 Out of scope (each goes in its own MINOR PR with its own JMH numbers): `Selector.wakeup` only when the network thread is parked; per-pass `LinkedList` / `ArrayList` / `Optional` allocations in `runOnce`; a new `PollResult` per heartbeat pass in `STABLE`; removing the application-side 100 ms re-check in `pollForFetches` (a consequence of C3, to be done after the notification path has soaked); `ShareConsumeRequestManager` acknowledgement expiry; `SubscriptionState.seekUnvalidated` synchronization; `AsyncPollEvent` termination in `cleanup()`; Streams topology push close hook.

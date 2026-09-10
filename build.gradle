@@ -291,6 +291,8 @@ if (repo != null) {
         'trogdor/README.md',
         '**/README.md',
         '**/AGENTS.md',
+        // Design notes and benchmark evidence for the KIP-1371 event-loop work; not shipped.
+        'experiments/**',
         '**/id_rsa',
         '**/id_rsa.pub',
         'checkstyle/suppressions.xml',
