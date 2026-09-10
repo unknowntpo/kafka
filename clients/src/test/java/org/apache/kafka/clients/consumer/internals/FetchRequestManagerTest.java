@@ -407,6 +407,37 @@ public class FetchRequestManagerTest {
     }
 
     @Test
+    public void testMaximumTimeToWaitBoundedToAtLeastOneMsWhenRetryBackoffIsZero() {
+        buildFetcher();
+
+        // KAFKA-21049: retry.backoff.ms may be configured to 0. With no fetch in flight the bound is a re-check
+        // interval for the application thread and must never be 0, which would busy-loop pollForFetches().
+        FetchConfig fetchConfig = new FetchConfig(
+                minBytes,
+                maxBytes,
+                maxWaitMs,
+                fetchSize,
+                Integer.MAX_VALUE,
+                true, // check crc
+                CommonClientConfigs.DEFAULT_CLIENT_RACK,
+                IsolationLevel.READ_UNCOMMITTED);
+        LogContext logContext = new LogContext();
+        FetchRequestManager zeroBackoffFetcher = new FetchRequestManager(
+                logContext,
+                time,
+                metadata,
+                subscriptions,
+                fetchConfig,
+                new FetchBuffer(logContext),
+                metricsManager,
+                networkClientDelegate,
+                apiVersions,
+                0L);
+
+        assertEquals(1L, zeroBackoffFetcher.maximumTimeToWait(time.milliseconds()));
+    }
+
+    @Test
     public void testMaximumTimeToWaitUnboundedWhenPartitionsSkippedDueToInflight() {
         buildFetcher();
 

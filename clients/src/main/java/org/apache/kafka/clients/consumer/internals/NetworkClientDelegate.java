@@ -305,9 +305,29 @@ public class NetworkClientDelegate implements AutoCloseable {
         this.client.close();
     }
 
+    /** Wake an application thread parked inside {@code poll()}; see {@link BackgroundEventHandler#wakeupApplication()}. */
+    public void wakeupApplication() {
+        backgroundEventHandler.wakeupApplication();
+    }
+
+    /**
+     * Stage the requests of a {@link PollResult} and return the delay the network poll must respect for it.
+     * <p>
+     * A {@link PollResult} that asks for an immediate re-poll ({@code timeUntilNextPollMs == 0}) without staging
+     * any request violates the {@link PollResult wait contract}: nothing in this pass can complete the work, so
+     * polling again immediately would only spin. Such a result is counted in the
+     * {@code network-thread-invalid-poll-result-total} metric and treated as a retry after
+     * {@code retry.backoff.ms} (at least one millisecond). This is a safety net that makes the violation
+     * visible; request managers are expected to return {@link PollResult#awaitInput()} or
+     * {@link PollResult#retryAfter(long)} instead.
+     */
     public long addAll(PollResult pollResult) {
         Objects.requireNonNull(pollResult);
         addAll(pollResult.unsentRequests);
+        if (pollResult.timeUntilNextPollMs == 0 && pollResult.unsentRequests.isEmpty()) {
+            asyncConsumerMetrics.recordInvalidPollResult();
+            return Math.max(1L, retryBackoffMs);
+        }
         return pollResult.timeUntilNextPollMs;
     }
 
@@ -325,11 +345,50 @@ public class NetworkClientDelegate implements AutoCloseable {
         unsentRequests.add(r);
     }
 
+    /**
+     * The result of one {@link RequestManager#poll(long)}: the requests to stage now and how long the network
+     * thread may wait before polling this manager again.
+     * <p>
+     * The wait contract. A request manager must express why it is not done:
+     * <ul>
+     *     <li>{@link #progress(List)}: it staged requests. Only this case may ask for an immediate re-poll.</li>
+     *     <li>{@link #retryAfter(long)}: it is waiting for time to pass (backoff, interval, timer).</li>
+     *     <li>{@link #awaitInput()}: it is waiting for its own in-flight request to complete, or for another
+     *     owner (coordinator, membership, metadata, positions) to change state. The network thread re-polls
+     *     every manager after each network poll and after each application event, so no timer is needed.</li>
+     * </ul>
+     * Returning zero without staging a request is a contract violation: the network thread would spin. It is
+     * detected in {@link NetworkClientDelegate#addAll(PollResult)} and clamped to {@code retry.backoff.ms}.
+     * The same reasoning applies to {@link RequestManager#maximumTimeToWait(long)}: it must only bound the
+     * application thread by deadlines of actions the application thread itself has to start and that are
+     * currently possible (poll timer refresh, auto-commit when the coordinator is known), never by the
+     * completion of background work.
+     */
     public static class PollResult {
         public static final long WAIT_FOREVER = Long.MAX_VALUE;
         public static final PollResult EMPTY = new PollResult(WAIT_FOREVER);
         public final long timeUntilNextPollMs;
         public final List<UnsentRequest> unsentRequests;
+
+        /** The manager staged requests and made progress; the network poll should send them right away. */
+        public static PollResult progress(final List<UnsentRequest> unsentRequests) {
+            return new PollResult(0L, unsentRequests);
+        }
+
+        /** The manager is waiting for time to pass; re-poll it after {@code delayMs}, which must be positive. */
+        public static PollResult retryAfter(final long delayMs) {
+            if (delayMs <= 0)
+                throw new IllegalArgumentException("delayMs must be positive: " + delayMs);
+            return new PollResult(delayMs);
+        }
+
+        /**
+         * The manager is waiting for an in-flight request or for another owner's state to change. The next
+         * network poll or application event re-evaluates it; no timer is registered.
+         */
+        public static PollResult awaitInput() {
+            return EMPTY;
+        }
 
         public PollResult(final long timeUntilNextPollMs, final List<UnsentRequest> unsentRequests) {
             this.timeUntilNextPollMs = timeUntilNextPollMs;

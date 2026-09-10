@@ -81,7 +81,8 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public long maximumTimeToWait(long currentTimeMs) {
-        return nodesWithPendingFetchRequests.isEmpty() ? retryBackoffMs : Long.MAX_VALUE;
+        // A re-check interval, never zero: retry.backoff.ms may be configured to 0 (KAFKA-21049).
+        return nodesWithPendingFetchRequests.isEmpty() ? Math.max(1L, retryBackoffMs) : Long.MAX_VALUE;
     }
 
     /**

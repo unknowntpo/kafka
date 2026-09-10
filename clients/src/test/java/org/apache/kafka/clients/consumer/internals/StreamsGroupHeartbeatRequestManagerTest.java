@@ -2528,7 +2528,10 @@ class StreamsGroupHeartbeatRequestManagerTest {
     public void testMaximumTimeToWaitWhenHeartbeatShouldBeNotSentImmediately(final boolean isRequestInFlight,
                                                                              final boolean shouldNotWaitForHeartbeatInterval) {
         final long remainingMs = 12L;
-        final long timeToNextHeartbeatMs = 6L;
+        final long timeToNextHeartbeatMs = 4L;
+        // KAFKA-21031: while a heartbeat is in flight the application thread is bounded by the poll timer
+        // refresh only (half the remaining poll interval); otherwise by the earlier of the two.
+        final long expectedMaximumTimeToWait = isRequestInFlight ? remainingMs / 2 : timeToNextHeartbeatMs;
         try (
             final MockedConstruction<Timer> timerMockedConstruction =
                 mockConstruction(Timer.class, (mock, context) -> when(mock.remainingMs()).thenReturn(remainingMs));
@@ -2547,8 +2550,47 @@ class StreamsGroupHeartbeatRequestManagerTest {
 
             final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
 
-            assertEquals(timeToNextHeartbeatMs, maximumTimeToWait);
+            assertEquals(expectedMaximumTimeToWait, maximumTimeToWait);
             verify(pollTimer).update(time.milliseconds());
+        }
+    }
+
+    /**
+     * KAFKA-21031: the first heartbeat is sent with a zero interval (the interval is only learned from the
+     * first response). While it is in flight, the expired interval must not make poll() or
+     * maximumTimeToWait() return 0, which would busy-spin the network and application threads.
+     * Uses the real {@link HeartbeatRequestState} and poll timer.
+     */
+    @Test
+    public void testInFlightFirstHeartbeatWithExpiredIntervalDoesNotSpin() {
+        final StreamsGroupHeartbeatRequestManager heartbeatRequestManager = createStreamsGroupHeartbeatRequestManager();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        when(membershipManager.state()).thenReturn(MemberState.STABLE);
+        when(membershipManager.groupId()).thenReturn(GROUP_ID);
+        when(membershipManager.memberId()).thenReturn(MEMBER_ID);
+        when(membershipManager.memberEpoch()).thenReturn(MEMBER_EPOCH);
+
+        NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size(), "The first heartbeat should be sent");
+
+        // The heartbeat never completes; the (zero) interval is already expired.
+        final long retryBackoffMs = config.getLong(ConsumerConfig.RETRY_BACKOFF_MS_CONFIG);
+        time.sleep(1);
+        for (int i = 0; i < 10; i++) {
+            final long now = time.milliseconds();
+            result = heartbeatRequestManager.poll(now);
+            assertEquals(0, result.unsentRequests.size(), "No heartbeat can be sent while one is in flight");
+            assertTrue(result.timeUntilNextPollMs > 0,
+                "poll() must not ask for an immediate re-poll while a heartbeat is in flight; got " +
+                    result.timeUntilNextPollMs + " at step " + i);
+            assertEquals(Math.max(1, retryBackoffMs), result.timeUntilNextPollMs);
+
+            final long maximumTimeToWait = heartbeatRequestManager.maximumTimeToWait(now);
+            assertTrue(maximumTimeToWait > 0,
+                "maximumTimeToWait must be > 0 while a heartbeat is in flight; got " + maximumTimeToWait + " at step " + i);
+            assertTrue(maximumTimeToWait <= DEFAULT_MAX_POLL_INTERVAL_MS / 2,
+                "maximumTimeToWait must still return in time to refresh the poll timer; got " + maximumTimeToWait);
+            time.sleep(1);
         }
     }
 

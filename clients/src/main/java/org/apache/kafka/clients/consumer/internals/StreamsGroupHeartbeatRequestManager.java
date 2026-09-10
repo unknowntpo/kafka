@@ -547,7 +547,13 @@ public class StreamsGroupHeartbeatRequestManager implements RequestManager {
         if (membershipManager.shouldNotWaitForHeartbeatInterval() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
         }
-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+        // Same reasoning as AbstractHeartbeatRequestManager: the application thread only has to come back
+        // to refresh the poll timer, never in the last millisecond, and never to wait on an in-flight heartbeat.
+        long pollTimerWaitMs = Math.max(1L, pollTimer.remainingMs() / 2);
+        if (heartbeatRequestState.requestInFlight()) {
+            return pollTimerWaitMs;
+        }
+        return Math.min(pollTimerWaitMs, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
 
     public void resetPollTimer(final long pollMs) {

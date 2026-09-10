@@ -19,6 +19,7 @@ package org.apache.kafka.clients.consumer.internals.metrics;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
+import org.apache.kafka.common.metrics.stats.CumulativeSum;
 import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.metrics.stats.Value;
 
@@ -34,6 +35,7 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
     public static final String BACKGROUND_EVENT_QUEUE_PROCESSING_TIME_SENSOR_NAME = "background-event-queue-processing-time";
     public static final String UNSENT_REQUESTS_QUEUE_SIZE_SENSOR_NAME = "unsent-requests-queue-size";
     public static final String UNSENT_REQUESTS_QUEUE_TIME_SENSOR_NAME = "unsent-requests-queue-time";
+    public static final String INVALID_POLL_RESULT_SENSOR_NAME = "network-thread-invalid-poll-result";
     private final Sensor timeBetweenNetworkThreadPollSensor;
     private final Sensor applicationEventQueueSizeSensor;
     private final Sensor applicationEventQueueTimeSensor;
@@ -44,6 +46,7 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
     private final Sensor backgroundEventQueueProcessingTimeSensor;
     private final Sensor unsentRequestsQueueSizeSensor;
     private final Sensor unsentRequestsQueueTimeSensor;
+    private final Sensor invalidPollResultSensor;
 
     public AsyncConsumerMetrics(Metrics metrics, String groupName) {
         this(new MetricsLedger(metrics), groupName);
@@ -197,6 +200,17 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
             ),
             new Max()
         );
+
+        this.invalidPollResultSensor = metrics.sensor(INVALID_POLL_RESULT_SENSOR_NAME);
+        this.invalidPollResultSensor.add(
+            metrics.metricName(
+                "network-thread-invalid-poll-result-total",
+                groupName,
+                "The total number of request manager poll results that asked for an immediate re-poll without " +
+                    "staging any request. Such results are clamped to retry.backoff.ms to avoid a busy loop."
+            ),
+            new CumulativeSum()
+        );
     }
 
     public void recordTimeBetweenNetworkThreadPoll(long timeBetweenNetworkThreadPoll) {
@@ -237,5 +251,9 @@ public class AsyncConsumerMetrics extends AbstractConsumerMetricsManager {
 
     public void recordBackgroundEventQueueProcessingTime(long processingTime) {
         this.backgroundEventQueueProcessingTimeSensor.record(processingTime);
+    }
+
+    public void recordInvalidPollResult() {
+        this.invalidPollResultSensor.record(1);
     }
 }

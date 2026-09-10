@@ -278,7 +278,14 @@ public abstract class AbstractHeartbeatRequestManager<R extends AbstractResponse
         if (membershipManager().shouldHeartbeatNow() && !heartbeatRequestState.requestInFlight()) {
             return 0L;
         }
-        return Math.min(pollTimer.remainingMs() / 2, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
+        // The application thread only needs to return to poll() in time to refresh the poll timer; never
+        // in the last millisecond, which would round to a zero wait (KAFKA-21031).
+        long pollTimerWaitMs = Math.max(1L, pollTimer.remainingMs() / 2);
+        if (heartbeatRequestState.requestInFlight()) {
+            // Nothing the application thread can do speeds up the in-flight heartbeat.
+            return pollTimerWaitMs;
+        }
+        return Math.min(pollTimerWaitMs, heartbeatRequestState.timeToNextHeartbeatMs(currentTimeMs));
     }
 
     /**

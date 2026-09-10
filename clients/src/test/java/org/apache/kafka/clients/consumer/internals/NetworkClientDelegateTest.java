@@ -53,26 +53,33 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.apache.kafka.clients.consumer.ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.GROUP_ID_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG;
+import static org.apache.kafka.clients.consumer.ConsumerConfig.RETRY_BACKOFF_MS_CONFIG;
 import static org.apache.kafka.clients.consumer.ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG;
+import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.CONSUMER_METRIC_GROUP;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 public class NetworkClientDelegateTest {
     private static final int REQUEST_TIMEOUT_MS = 5000;
     private static final String GROUP_ID = "group";
     private static final long DEFAULT_REQUEST_TIMEOUT_MS = 500;
+    private static final long RETRY_BACKOFF_MS = 100;
     private MockTime time;
     private MockClient client;
     private Metadata metadata;
@@ -108,6 +115,93 @@ public class NetworkClientDelegateTest {
                     new ArrayList<>());
             assertEquals(10, ncd.addAll(failure));
         }
+    }
+
+    @Test
+    void testAddAllClampsZeroDelayWithoutRequestsToRetryBackoff() throws Exception {
+        try (Metrics metrics = new Metrics();
+             AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
+             NetworkClientDelegate ncd = newNetworkClientDelegate(false, asyncConsumerMetrics)) {
+            // A zero delay without any staged request violates the PollResult wait contract: the network
+            // thread would spin. The delegate must clamp it to retry.backoff.ms and count the violation.
+            NetworkClientDelegate.PollResult invalid = new NetworkClientDelegate.PollResult(0, new ArrayList<>());
+            assertEquals(RETRY_BACKOFF_MS, ncd.addAll(invalid));
+            assertFalse(ncd.hasAnyPendingRequests());
+            assertEquals(1.0, invalidPollResultTotal(metrics));
+
+            assertEquals(RETRY_BACKOFF_MS, ncd.addAll(invalid));
+            assertEquals(2.0, invalidPollResultTotal(metrics));
+        }
+    }
+
+    @Test
+    void testAddAllClampsZeroDelayWithoutRequestsToAtLeastOneMs() throws Exception {
+        try (Metrics metrics = new Metrics();
+             AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
+             NetworkClientDelegate ncd = newNetworkClientDelegate(false, asyncConsumerMetrics, 0L)) {
+            // retry.backoff.ms may be configured to 0; the clamp must still never return 0.
+            NetworkClientDelegate.PollResult invalid = new NetworkClientDelegate.PollResult(0, new ArrayList<>());
+            assertEquals(1L, ncd.addAll(invalid));
+            assertEquals(1.0, invalidPollResultTotal(metrics));
+        }
+    }
+
+    @Test
+    void testAddAllProgressResultStagesRequestAndReturnsZero() throws Exception {
+        try (Metrics metrics = new Metrics();
+             AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
+             NetworkClientDelegate ncd = newNetworkClientDelegate(false, asyncConsumerMetrics)) {
+            NetworkClientDelegate.UnsentRequest unsentRequest = newUnsentFindCoordinatorRequest();
+            NetworkClientDelegate.PollResult progress =
+                NetworkClientDelegate.PollResult.progress(Collections.singletonList(unsentRequest));
+
+            assertEquals(0L, progress.timeUntilNextPollMs);
+            assertEquals(0L, ncd.addAll(progress));
+            assertTrue(ncd.hasAnyPendingRequests());
+            assertTrue(ncd.unsentRequests().contains(unsentRequest));
+            assertEquals(0.0, invalidPollResultTotal(metrics));
+        }
+    }
+
+    @Test
+    void testAddAllAwaitInputResultWaitsForever() throws Exception {
+        try (Metrics metrics = new Metrics();
+             AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
+             NetworkClientDelegate ncd = newNetworkClientDelegate(false, asyncConsumerMetrics)) {
+            NetworkClientDelegate.PollResult awaitInput = NetworkClientDelegate.PollResult.awaitInput();
+
+            assertSame(NetworkClientDelegate.PollResult.EMPTY, awaitInput);
+            assertEquals(Long.MAX_VALUE, awaitInput.timeUntilNextPollMs);
+            assertTrue(awaitInput.unsentRequests.isEmpty());
+            assertEquals(Long.MAX_VALUE, ncd.addAll(awaitInput));
+            assertFalse(ncd.hasAnyPendingRequests());
+            assertEquals(0.0, invalidPollResultTotal(metrics));
+        }
+    }
+
+    @Test
+    void testAddAllRetryAfterResultReturnsDelay() throws Exception {
+        try (Metrics metrics = new Metrics();
+             AsyncConsumerMetrics asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_METRIC_GROUP);
+             NetworkClientDelegate ncd = newNetworkClientDelegate(false, asyncConsumerMetrics)) {
+            NetworkClientDelegate.PollResult retryAfter = NetworkClientDelegate.PollResult.retryAfter(42L);
+
+            assertEquals(42L, retryAfter.timeUntilNextPollMs);
+            assertTrue(retryAfter.unsentRequests.isEmpty());
+            assertEquals(42L, ncd.addAll(retryAfter));
+            assertEquals(0.0, invalidPollResultTotal(metrics));
+        }
+    }
+
+    @Test
+    void testRetryAfterRejectsNegativeDelay() {
+        assertThrows(IllegalArgumentException.class, () -> NetworkClientDelegate.PollResult.retryAfter(-1L));
+    }
+
+    private static double invalidPollResultTotal(Metrics metrics) {
+        return (double) metrics.metric(
+            metrics.metricName("network-thread-invalid-poll-result-total", CONSUMER_METRIC_GROUP)
+        ).metricValue();
     }
 
     @Test
@@ -214,6 +308,28 @@ public class NetworkClientDelegateTest {
             assertFalse(networkClientDelegate.hasAnyPendingRequests());
             assertTrue(networkClientDelegate.unsentRequests().isEmpty());
             assertFalse(client.hasInFlightRequests());
+        }
+    }
+
+    @Test
+    public void testWakeupApplicationDelegatesToBackgroundEventHandler() throws Exception {
+        try (NetworkClientDelegate ncd = newNetworkClientDelegate(false)) {
+            ncd.wakeupApplication();
+            verify(backgroundEventHandler).wakeupApplication();
+        }
+    }
+
+    @Test
+    public void testWakeupApplicationRunsHookWithoutPublishingEvent() throws Exception {
+        AtomicInteger wakeups = new AtomicInteger();
+        BlockingQueue<BackgroundEvent> backgroundEventQueue = new LinkedBlockingQueue<>();
+        this.backgroundEventHandler = new BackgroundEventHandler(
+            backgroundEventQueue, time, mock(AsyncConsumerMetrics.class), wakeups::incrementAndGet);
+
+        try (NetworkClientDelegate ncd = newNetworkClientDelegate(false)) {
+            ncd.wakeupApplication();
+            assertEquals(1, wakeups.get());
+            assertTrue(backgroundEventQueue.isEmpty());
         }
     }
 
@@ -380,8 +496,15 @@ public class NetworkClientDelegateTest {
     }
 
     public NetworkClientDelegate newNetworkClientDelegate(boolean notifyMetadataErrorsViaErrorQueue, AsyncConsumerMetrics asyncConsumerMetrics) {
+        return newNetworkClientDelegate(notifyMetadataErrorsViaErrorQueue, asyncConsumerMetrics, RETRY_BACKOFF_MS);
+    }
+
+    public NetworkClientDelegate newNetworkClientDelegate(boolean notifyMetadataErrorsViaErrorQueue,
+                                                          AsyncConsumerMetrics asyncConsumerMetrics,
+                                                          long retryBackoffMs) {
         LogContext logContext = new LogContext();
         Properties properties = new Properties();
+        properties.put(RETRY_BACKOFF_MS_CONFIG, retryBackoffMs);
         properties.put(KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         properties.put(GROUP_ID_CONFIG, GROUP_ID);

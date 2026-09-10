@@ -157,10 +157,14 @@ public class ConsumerHeartbeatRequestManagerTest
     }
 
     private void createHeartbeatRequestStateWithZeroHeartbeatInterval() {
+        createHeartbeatRequestStateWithHeartbeatInterval(0);
+    }
+
+    private void createHeartbeatRequestStateWithHeartbeatInterval(final long heartbeatIntervalMs) {
         this.heartbeatRequestState = spy(new HeartbeatRequestState(
                 logContext,
                 time,
-                0,
+                heartbeatIntervalMs,
                 DEFAULT_RETRY_BACKOFF_MS,
                 DEFAULT_RETRY_BACKOFF_MAX_MS,
                 DEFAULT_HEARTBEAT_JITTER_MS));
@@ -354,6 +358,66 @@ public class ConsumerHeartbeatRequestManagerTest
 
         assertTrue(result > 0, "maximumTimeToWait must be > 0 while the member is joining and the coordinator is unknown to avoid a busy-spin; got " + result);
         assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
+    }
+
+    /**
+     * KAFKA-21031: while a heartbeat is in flight and its interval has already expired, neither poll() nor
+     * maximumTimeToWait() may return 0. The interval is 0 until the first response arrives, and a longer
+     * interval can be exceeded by a slow coordinator. The retry backoff is measured from the last response,
+     * which does not exist yet, so both used to round to a zero wait and busy-spin the network and
+     * application threads.
+     */
+    @ParameterizedTest
+    @ValueSource(longs = {0, 5000})
+    public void testInFlightHeartbeatWithExpiredIntervalDoesNotSpin(final long heartbeatIntervalMs) {
+        createHeartbeatRequestStateWithHeartbeatInterval(heartbeatIntervalMs);
+        when(membershipManager.state()).thenReturn(MemberState.JOINING);
+        when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
+
+        NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size(), "The first heartbeat should be sent");
+        assertTrue(heartbeatRequestState.requestInFlight());
+
+        // Let the interval expire while the heartbeat is still in flight (no response is ever delivered).
+        time.sleep(heartbeatIntervalMs + 1);
+        long expectedPollWaitMs = Math.max(1, DEFAULT_RETRY_BACKOFF_MS);
+        for (int i = 0; i < 10; i++) {
+            long now = time.milliseconds();
+            result = heartbeatRequestManager.poll(now);
+            assertEquals(0, result.unsentRequests.size(), "No heartbeat can be sent while one is in flight");
+            assertTrue(result.timeUntilNextPollMs > 0,
+                "poll() must not ask for an immediate re-poll while a heartbeat is in flight; got " +
+                    result.timeUntilNextPollMs + " at step " + i);
+            assertEquals(expectedPollWaitMs, result.timeUntilNextPollMs);
+
+            long waitMs = heartbeatRequestManager.maximumTimeToWait(now);
+            assertTrue(waitMs > 0,
+                "maximumTimeToWait must be > 0 while a heartbeat is in flight; got " + waitMs + " at step " + i);
+            assertEquals(Math.max(1, pollTimer.remainingMs() / 2), waitMs,
+                "While a heartbeat is in flight the application thread is bounded by the poll timer only");
+            time.sleep(1);
+        }
+    }
+
+    /**
+     * KAFKA-21031: with 1 ms left on the poll timer, {@code remainingMs / 2} rounds to 0. The application
+     * thread must still wait that last millisecond rather than spin; once the timer expires it is woken
+     * (0) so the member can rejoin, which is the existing behaviour.
+     */
+    @Test
+    public void testMaximumTimeToWaitWithOneMsLeftOnPollTimerDoesNotRoundToZero() {
+        // A heartbeat interval longer than the poll interval so the heartbeat timer is not the binding bound.
+        createHeartbeatRequestStateWithHeartbeatInterval(2L * DEFAULT_MAX_POLL_INTERVAL_MS);
+        when(membershipManager.state()).thenReturn(MemberState.STABLE);
+
+        time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS - 1);
+        long waitMs = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+        assertEquals(1, pollTimer.remainingMs());
+        assertEquals(1, waitMs, "maximumTimeToWait must wait the last millisecond of the poll timer, not 0");
+
+        time.sleep(1);
+        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()),
+            "An expired poll timer must wake the application thread so the member can rejoin");
     }
 
     @Test
