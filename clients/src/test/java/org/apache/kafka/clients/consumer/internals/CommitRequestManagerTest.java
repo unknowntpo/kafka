@@ -238,6 +238,27 @@ public class CommitRequestManagerTest {
         assertPoll(true, 0, commitRequestManager);
     }
 
+    /**
+     * A request that can be sent right now keeps its one attempt even if its deadline has already
+     * passed: the sending path only expires requests that were attempted before. This keeps
+     * commitSync(Duration.ZERO) behaving as it does on trunk and in the classic consumer. Expiry of
+     * never-attempted requests is limited to the coordinator-unknown path, where sending is impossible.
+     */
+    @Test
+    public void testExpiredCommitIsStillAttemptedOnceWhenCoordinatorIsKnown() {
+        CommitRequestManager commitRequestManager = create(false, 0);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("t1", 0), new OffsetAndMetadata(0));
+
+        // Deadline equal to "now", as commitSync(Duration.ZERO) produces.
+        CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitResult =
+            commitRequestManager.commitSync(offsets, time.milliseconds());
+
+        NetworkClientDelegate.PollResult result = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size(), "A sendable request must still get its one attempt");
+        assertFalse(commitResult.isDone());
+    }
+
     @Test
     public void testFetchOffsetsExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered() {
         CommitRequestManager commitRequestManager = create(false, 0);

@@ -1571,13 +1571,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         }
 
         /**
-         * Find the unsent requests that have expired, remove them and complete their futures with a
-         * TimeoutException. Commits expire whether or not they were attempted. Fetches expire here only
-         * if they were never attempted; a fetch that was already sent keeps the existing retry handling,
-         * which observes the deadline when the response arrives (see handleGroupLevelError).
-         */
-        /**
-         * Complete and remove buffered requests whose deadline has passed.
+         * Complete and remove buffered requests whose deadline has passed, failing their futures with a
+         * TimeoutException. A fetch that was already sent is not touched here: it keeps the existing retry
+         * handling, which observes the deadline when the response arrives (see handleGroupLevelError).
          *
          * @param includeNeverAttempted when true, also expire requests that were never sent. This is
          *                              only correct where sending was impossible anyway (the coordinator
