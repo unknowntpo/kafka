@@ -271,7 +271,7 @@ Real broker on the same laptop, 2,000,000 records of 128 B, one partition, `-f 1
 | idle | process CPU ms/s | 18.29 | 17.43 | -4.7% |
 | idle | network-thread CPU ms/s | 7.38 | 6.52 | -11.6% |
 
-Consume and idle are within noise, which is what this KIP claims. Inside a single variant, consume throughput moved from 1.22M to 4.21M records/s across runs as the page cache warmed, far more than the 3% between variants; the idle rows have n=2 and absolute values under 1% of a core.
+Consume and idle are within noise, which is what this KIP claims. The detection floor is wide: this run can rule out a large regression, not a small one, because the page cache warmed monotonically across runs and the interleaving had only two pairs per mode. `benchmark-method.md` records the method and what it should have done instead. Inside a single variant, consume throughput moved from 1.22M to 4.21M records/s across runs as the page cache warmed, far more than the 3% between variants; the idle rows have n=2 and absolute values under 1% of a core.
 
 The `unavailable` mode of this harness is **not** evidence in either direction and its numbers are not quoted here. It points the bootstrap at a closed port, so every connection is refused at once and the client sits in reconnect backoff, which trunk already handles correctly. The busy loop needs a peer that accepts the connection and never answers the heartbeat; that is what the loop-level `BLOCKED_HEARTBEAT_INFLIGHT` scenario builds and where the effect is measured. Teaching the end-to-end harness to do the same is a follow-up.
 
@@ -300,6 +300,7 @@ The `unavailable` mode of this harness is **not** evidence in either direction a
 | `test-inventory.md` | Use case by consumer type, loop-driving tests, coverage gaps |
 | `reviewer-preferences.md` | Evidence from 15 reviewed PRs and what it implies for this proposal |
 | `codex-model-summary.md` | What the earlier prototypes proved and disproved |
+| `benchmark-method.md` | How these numbers were produced, what the method got wrong, and the rules that follow |
 | `jmh-ab/`, `e2e-ab/` | Benchmark raw data and summaries |
 | `../next-poll-condition/fable-review/REPORT.md` | The scheduler review: regressions, real-broker A/B, profiles |
 
