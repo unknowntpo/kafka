@@ -271,9 +271,25 @@ Real broker on the same laptop, 2,000,000 records of 128 B, one partition, `-f 1
 | idle | process CPU ms/s | 18.29 | 17.43 | -4.7% |
 | idle | network-thread CPU ms/s | 7.38 | 6.52 | -11.6% |
 
-Consume and idle are within noise, which is what this KIP claims. The detection floor is wide: this run can rule out a large regression, not a small one, because the page cache warmed monotonically across runs and the interleaving had only two pairs per mode. `benchmark-method.md` records the method and what it should have done instead. Inside a single variant, consume throughput moved from 1.22M to 4.21M records/s across runs as the page cache warmed, far more than the 3% between variants; the idle rows have n=2 and absolute values under 1% of a core.
+Consume and idle are within noise, which is what this KIP claims.
 
-The `unavailable` mode of this harness is **not** evidence in either direction and its numbers are not quoted here. It points the bootstrap at a closed port, so every connection is refused at once and the client sits in reconnect backoff, which trunk already handles correctly. The busy loop needs a peer that accepts the connection and never answers the heartbeat; that is what the loop-level `BLOCKED_HEARTBEAT_INFLIGHT` scenario builds and where the effect is measured. Teaching the end-to-end harness to do the same is a follow-up.
+A second run followed the method in `benchmark-method.md`: the page cache and the broker were pre-warmed by reading the whole topic 51 times, an A/A pair of the trunk jar measured the noise envelope, and each mode used interleaved pairs with per-pair ratios rather than a pooled mean. The A/A envelope on this shared laptop was ±16% on throughput and ±0.1% on allocation per operation. Against it, the consume median ratio was 0.897 with per-pair values spanning 0.847 to 1.224 and an allocation ratio of exactly 1.000, so the honest statement is that no regression above the detection floor was measured, not that the regression is smaller than any particular percentage. Raw data in `e2e-ab2/`.
+
+One signal there is worth following but not claiming: `idle` allocation per operation was above 1.0 in all three pairs (1.137, 1.638, 1.820) while the trunk jar differed from itself by only 1.9%. That belongs in the loop-level IDLE scenario, where allocation is measured without a broker; the loop-level run showed the two variants allocating exactly the same 240.3 B per pass, so the end-to-end reading is unexplained rather than a known cost. Inside a single variant, consume throughput moved from 1.22M to 4.21M records/s across runs as the page cache warmed, far more than the 3% between variants; the idle rows have n=2 and absolute values under 1% of a core.
+
+### 8.3 The busy loop on a real broker
+
+The first end-to-end run could not show the busy loop at all: its `unavailable` mode pointed the bootstrap at a closed port, so every connection was refused and the client sat in reconnect backoff, a path trunk already handles. A peer that accepts the connection and stays silent is not enough either, because the connection then waits in `CHECKING_API_VERSIONS` and no request, including the heartbeat, is ever sent.
+
+The harness now has a `heartbeat-blackhole` mode: a byte-level TCP proxy in front of the broker listener that forwards everything and swallows only `ConsumerGroupHeartbeat`, so the first heartbeat stays in flight forever while ApiVersions, metadata and FindCoordinator complete normally. Three interleaved pairs, same host and settings as above:
+
+| | trunk | branch |
+|---|---:|---:|
+| process CPU ms/s | 1,699–1,725 | 23–25 |
+| allocation per poll | 154 MB | 16–18 kB |
+| polls/s | 10.0 | 9.3 |
+
+That is about 1.7 cores against about 0.02, and roughly four orders of magnitude less allocation, far outside the noise envelope below. Note that `polls/s` is almost identical: the loop spins inside `poll()`, so a throughput metric hides it entirely. CPU and allocation are the metrics that show it.
 
 ## 9. Rejected alternatives
 

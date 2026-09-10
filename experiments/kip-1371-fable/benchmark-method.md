@@ -41,6 +41,14 @@ harness 把 bootstrap 指向一個**關閉**的 port，連線立刻被拒絕，c
 
 **規則**：情境的名字不等於情境的內容。每個 benchmark 情境要能說出「它讓程式走到哪一段」，並且用 counter 證明（例如 zero-wait pass 數）。說不出來就是還沒設計好。
 
+補充（重跑後才學到）：光是「接受連線但不回應」也不夠。silent peer 讓連線停在 `CHECKING_API_VERSIONS`，此狀態下 `isReady(node)` 為 false，任何 request 都送不出去，`FindCoordinator` 送不出 → coordinator 永遠 unknown → `AbstractHeartbeatRequestManager.poll` 在第一個 guard 就回 `EMPTY`，根本不會產生 heartbeat。要走到 heartbeat in-flight，需要一個讓 `ApiVersions`、`Metadata`、`FindCoordinator` 正常通過、只吞掉 `ConsumerGroupHeartbeat` 的 peer。Kafka 的 wire format 是「4 bytes 長度 + message，message 前 2 bytes 是 api key」，所以一個 byte-level proxy 就夠，不需要假 broker。
+
+### 2.6 主指標選錯會看不見 busy loop
+
+`heartbeat-blackhole` 模式下，trunk 與 branch 的 polls/s 幾乎一樣（10.0 vs 9.3），但 CPU 差 71 倍（1,699 vs 24 cpuMs/s）、每次 poll 的配置量差約 9,000 倍（154 MB vs 17 kB）。原因是 busy loop 發生在 `poll()` **內部**，不會改變 `poll()` 被呼叫的次數。
+
+**規則**：量 busy loop 類問題時，主指標是 CPU 與配置量，不是吞吐或呼叫次數。
+
 ### 2.5 清理腳本殺掉了別人的 broker
 
 `kafka-server-stop` 是用 pattern 比對殺掉所有 `kafka.Kafka` 行程，連帶停掉了另一個 session 的 broker。
@@ -80,7 +88,7 @@ harness 把 bootstrap 指向一個**關閉**的 port，連線立刻被拒絕，c
 
 ## 5. 本輪的原始資料
 
-- 2026-09-10 依本文件 §3 重跑的 e2e：`e2e-ab2/results/summary.md`（含 A/A 包絡、逐對比值、偵測下限）
+- 2026-09-10 依本文件 §3 重跑的 e2e：`e2e-ab2/summary.md`（含 A/A 包絡、逐對比值、偵測下限），原始 JSON 同目錄
 - loop-level：`jmh-ab/results/`（第一版）與 `jmh-ab/results2/`（修掉 2.3 的回歸後重跑），`jmh-ab/results/summary.md`
 - end-to-end：`e2e-ab/`
 - 前一條線（NextPollCondition 審查）的真 broker harness 與數字：`../next-poll-condition/fable-review/bench/`
