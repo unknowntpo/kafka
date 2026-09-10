@@ -62,6 +62,10 @@
 
     <subpackage name="cache">
     </subpackage>
+    <subpackage name="consumer">
+        <!-- AsyncConsumerBrokerBenchmark reads process CPU time. -->
+        <allow class="com.sun.management.OperatingSystemMXBean"/>
+    </subpackage>
     <subpackage name="metadata">
         <allow class="org.apache.kafka.raft.KRaftConfigs"/>
     </subpackage>
