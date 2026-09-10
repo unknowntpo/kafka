@@ -279,11 +279,10 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
             ApiVersions apiVersions = new ApiVersions();
             final BlockingQueue<ApplicationEvent> applicationEventQueue = new LinkedBlockingQueue<>();
             this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue);
-            this.backgroundEventHandler = new BackgroundEventHandler(
-                backgroundEventQueue, time, asyncConsumerMetrics);
-
             // This FetchBuffer is shared between the application and network threads.
             this.fetchBuffer = new ShareFetchBuffer(logContext);
+            this.backgroundEventHandler = new BackgroundEventHandler(
+                backgroundEventQueue, time, asyncConsumerMetrics, fetchBuffer::wakeup);
             final Supplier<NetworkClientDelegate> networkClientDelegateSupplier = NetworkClientDelegate.supplier(
                     time,
                     logContext,
@@ -401,7 +400,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
         this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue);
         this.backgroundEventQueue = new LinkedBlockingQueue<>();
         this.backgroundEventHandler = new BackgroundEventHandler(
-            backgroundEventQueue, time, asyncConsumerMetrics);
+            backgroundEventQueue, time, asyncConsumerMetrics, fetchBuffer::wakeup);
 
         final Supplier<NetworkClientDelegate> networkClientDelegateSupplier =
                 NetworkClientDelegate.supplier(time, config, logContext, client, metadata, backgroundEventHandler, true, asyncConsumerMetrics);
@@ -498,7 +497,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
         this.asyncConsumerMetrics = new AsyncConsumerMetrics(metrics, CONSUMER_SHARE_METRIC_GROUP);
         this.acknowledgementEventHandler = new ShareAcknowledgementEventHandler(acknowledgementEventQueue);
         this.backgroundEventHandler = new BackgroundEventHandler(
-                backgroundEventQueue, time, asyncConsumerMetrics);
+                backgroundEventQueue, time, asyncConsumerMetrics, fetchBuffer::wakeup);
     }
 
     // auxiliary interface for testing

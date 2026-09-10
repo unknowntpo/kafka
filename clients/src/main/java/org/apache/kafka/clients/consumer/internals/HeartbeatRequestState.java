@@ -70,6 +70,13 @@ public class HeartbeatRequestState extends RequestState {
 
     public long timeToNextHeartbeatMs(final long currentTimeMs) {
         if (heartbeatTimer.isExpired()) {
+            // KAFKA-21031: while a heartbeat is in flight no other heartbeat can be sent, so an expired
+            // interval must not translate into a zero wait. The backoff is measured from the last
+            // response (which does not exist before the first one), so it can be zero here. Wait a retry
+            // backoff instead; the response itself wakes the network thread earlier.
+            if (requestInFlight()) {
+                return Math.max(1L, retryBackoffMs());
+            }
             return remainingBackoffMs(currentTimeMs);
         }
         return heartbeatTimer.remainingMs();

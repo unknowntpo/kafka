@@ -259,6 +259,15 @@ public class AsyncKafkaConsumerTest {
         ConsumerInterceptors<String, String> interceptors,
         ConsumerRebalanceListenerInvoker rebalanceListenerInvoker,
         SubscriptionState subscriptions) {
+        return newConsumer(fetchBuffer, interceptors, rebalanceListenerInvoker, subscriptions, 100L);
+    }
+
+    private AsyncKafkaConsumer<String, String> newConsumer(
+        FetchBuffer fetchBuffer,
+        ConsumerInterceptors<String, String> interceptors,
+        ConsumerRebalanceListenerInvoker rebalanceListenerInvoker,
+        SubscriptionState subscriptions,
+        long retryBackoffMs) {
         int requestTimeoutMs = 30000;
         int defaultApiTimeoutMs = 1000;
         return new AsyncKafkaConsumer<>(
@@ -278,7 +287,7 @@ public class AsyncKafkaConsumerTest {
             metrics,
             subscriptions,
             metadata,
-            100L,
+            retryBackoffMs,
             requestTimeoutMs,
             defaultApiTimeoutMs,
             "group-id",
@@ -435,6 +444,38 @@ public class AsyncKafkaConsumerTest {
         completeAsyncPollEventSuccessfully();
         assertThrows(WakeupException.class, () -> consumer.poll(Duration.ZERO));
         assertDoesNotThrow(() -> consumer.poll(Duration.ZERO));
+    }
+
+    /**
+     * KAFKA-18641: the {@link AsyncPollEvent} carries a committable-offsets snapshot only when the network thread
+     * has asked for one. The request flag is private to the consumer and is handed only to
+     * {@code RequestManagers.supplier}, which these tests replace with a mocked {@link ApplicationEventHandler},
+     * so only the "not requested" branch can be driven here: with auto-commit enabled but no snapshot requested,
+     * the event carries no offsets.
+     */
+    @Test
+    public void testPollEventCarriesNoCommittableOffsetsWhenSnapshotNotRequested() {
+        Properties props = requiredConsumerConfigAndGroupId("consumer-group");
+        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, true);
+        consumer = newConsumer(props);
+        final TopicPartition tp = new TopicPartition("foo", 3);
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+        doReturn(LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(any());
+        completeAssignmentChangeEventSuccessfully();
+        consumer.assign(singleton(tp));
+
+        AtomicReference<AsyncPollEvent> capturedEvent = new AtomicReference<>();
+        doAnswer(invocation -> {
+            AsyncPollEvent event = invocation.getArgument(0);
+            capturedEvent.set(event);
+            event.completeSuccessfully();
+            return null;
+        }).when(applicationEventHandler).add(isA(AsyncPollEvent.class));
+
+        consumer.poll(Duration.ZERO);
+
+        assertNotNull(capturedEvent.get(), "AsyncPollEvent should have been submitted");
+        assertNull(capturedEvent.get().committableOffsets());
     }
 
     @Test
@@ -1700,6 +1741,7 @@ public class AsyncKafkaConsumerTest {
             any(),
             applicationThreadMemberStateListener.capture(),
             any(),
+            any(),
             any()
         ));
         return applicationThreadMemberStateListener.getValue();
@@ -1773,6 +1815,7 @@ public class AsyncKafkaConsumerTest {
             any(),
             any(),
             streamRebalanceData.capture(),
+            any(),
             any()
         ));
         return streamRebalanceData.getValue();
@@ -2165,6 +2208,51 @@ public class AsyncKafkaConsumerTest {
 
         // Only a single wait cycle should have happened
         verify(fetchBuffer, times(1)).awaitWakeup(any(Timer.class));
+    }
+
+    /**
+     * KAFKA-21049: pollForFetches() bounds its wait to retry.backoff.ms when a fetchable partition has no
+     * buffered data. With retry.backoff.ms configured to 0 that bound must still be at least 1 ms; otherwise
+     * awaitWakeup() is handed a zero timer and the application thread spins until the poll timeout expires.
+     */
+    @Test
+    public void testPollWithZeroRetryBackoffDoesNotBusyLoop() {
+        FetchBuffer fetchBuffer = mock(FetchBuffer.class);
+        ConsumerInterceptors<String, String> interceptors = mock(ConsumerInterceptors.class);
+        ConsumerRebalanceListenerInvoker rebalanceListenerInvoker = mock(ConsumerRebalanceListenerInvoker.class);
+        SubscriptionState subscriptions = new SubscriptionState(new LogContext(), AutoOffsetResetStrategy.NONE);
+        consumer = newConsumer(fetchBuffer, interceptors, rebalanceListenerInvoker, subscriptions, 0L);
+
+        final TopicPartition tp = new TopicPartition("topic1", 0);
+        subscriptions.assignFromUser(singleton(tp));
+        subscriptions.seek(tp, 0);
+
+        // Nothing else bounds the wait, so the only bound comes from the retry.backoff.ms re-check interval.
+        doReturn(Long.MAX_VALUE).when(applicationEventHandler).maximumTimeToWait();
+        doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
+        doReturn(LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(any());
+        // The partition is fetchable and has no buffered data, so pollForFetches bounds the wait.
+        doReturn(Collections.emptySet()).when(fetchBuffer).bufferedPartitions();
+
+        List<Long> awaitTimeoutsMs = new ArrayList<>();
+        doAnswer(invocation -> {
+            Timer pollTimer = invocation.getArgument(0, Timer.class);
+            awaitTimeoutsMs.add(pollTimer.remainingMs());
+            // Always advance time so a zero timer (the bug) fails the assertions below instead of hanging.
+            time.sleep(Math.max(1, pollTimer.remainingMs()));
+            pollTimer.update();
+            return null;
+        }).when(fetchBuffer).awaitWakeup(any(Timer.class));
+
+        final long pollTimeoutMs = 5;
+        consumer.poll(Duration.ofMillis(pollTimeoutMs));
+
+        assertFalse(awaitTimeoutsMs.isEmpty(), "fetchBuffer.awaitWakeup was never called");
+        assertEquals(1L, awaitTimeoutsMs.get(0),
+            "With retry.backoff.ms=0 the re-check interval must be clamped to 1 ms, not 0 (busy loop)");
+        awaitTimeoutsMs.forEach(timeoutMs -> assertTrue(timeoutMs >= 1,
+            "Every wait must be at least 1 ms, but awaitWakeup was given " + timeoutMs + " ms: " + awaitTimeoutsMs));
+        verify(fetchBuffer, times((int) pollTimeoutMs)).awaitWakeup(any(Timer.class));
     }
 
     /**

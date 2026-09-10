@@ -1,0 +1,6 @@
+BLOCKED    branch2  ns/pass=   296.6 ± 20.5  B/pass=   223.7 n=10
+RECOVERY   trunk    ns/pass=   277.0 ±  3.6  B/pass=   256.1 n=10
+RECOVERY   branch2  ns/pass=   273.5 ±  6.0  B/pass=   240.1 n=10
+IDLE       trunk    ns/pass=   296.7 ±  7.0  B/pass=   240.3 n=10
+IDLE       branch2  ns/pass=   298.4 ± 11.1  B/pass=   240.3 n=10
+

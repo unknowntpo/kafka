@@ -82,6 +82,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -99,6 +100,7 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -210,7 +212,68 @@ public class CommitRequestManagerTest {
         offsets.put(new TopicPartition("t1", 0), new OffsetAndMetadata(0));
         commitRequestManager.commitAsync(offsets);
         assertPoll(false, 0, commitRequestManager);
+        // commitAsync has no deadline, so it is still sent no matter how long the coordinator was unknown
+        time.sleep(defaultApiTimeoutMs * 2L);
+        assertPoll(false, 0, commitRequestManager);
         assertPoll(true, 1, commitRequestManager);
+    }
+
+    @Test
+    public void testCommitSyncExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered() {
+        CommitRequestManager commitRequestManager = create(false, 0);
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("t1", 0), new OffsetAndMetadata(0));
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitResult = commitRequestManager.commitSync(offsets, deadlineMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFalse(commitResult.isDone());
+
+        // The application deadline passes while the coordinator is still unknown. The commit was never
+        // attempted, so it must fail and leave the outbound buffer instead of waiting for the coordinator.
+        time.sleep(defaultApiTimeoutMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFutureThrows(TimeoutException.class, commitResult);
+        assertTrue(commitRequestManager.pendingRequests.unsentOffsetCommits.isEmpty());
+
+        // Once the coordinator is discovered, the expired commit must not reach the broker.
+        assertPoll(true, 0, commitRequestManager);
+    }
+
+    /**
+     * A request that can be sent right now keeps its one attempt even if its deadline has already
+     * passed: the sending path only expires requests that were attempted before. This keeps
+     * commitSync(Duration.ZERO) behaving as it does on trunk and in the classic consumer. Expiry of
+     * never-attempted requests is limited to the coordinator-unknown path, where sending is impossible.
+     */
+    @Test
+    public void testExpiredCommitIsStillAttemptedOnceWhenCoordinatorIsKnown() {
+        CommitRequestManager commitRequestManager = create(false, 0);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("t1", 0), new OffsetAndMetadata(0));
+
+        // Deadline equal to "now", as commitSync(Duration.ZERO) produces.
+        CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitResult =
+            commitRequestManager.commitSync(offsets, time.milliseconds());
+
+        NetworkClientDelegate.PollResult result = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size(), "A sendable request must still get its one attempt");
+        assertFalse(commitResult.isDone());
+    }
+
+    @Test
+    public void testFetchOffsetsExpiredWhileCoordinatorUnknownIsNotSentWhenCoordinatorDiscovered() {
+        CommitRequestManager commitRequestManager = create(false, 0);
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        CompletableFuture<CommitRequestManager.OffsetFetchResult> fetchResult =
+            commitRequestManager.fetchOffsets(Set.of(new TopicPartition("t1", 0)), deadlineMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFalse(fetchResult.isDone());
+
+        time.sleep(defaultApiTimeoutMs);
+        assertPoll(false, 0, commitRequestManager);
+        assertFutureThrows(TimeoutException.class, fetchResult);
+        assertEmptyPendingRequests(commitRequestManager);
+
+        assertPoll(true, 0, commitRequestManager);
     }
 
     @Test
@@ -381,6 +444,132 @@ public class CommitRequestManagerTest {
         assertPoll(0, commitRequestManager);
         Map<TopicPartition, OffsetAndMetadata> commitOffsets = assertDoesNotThrow(() -> future.get());
         assertTrue(commitOffsets.isEmpty());
+    }
+
+    /**
+     * KAFKA-18641: the poll-driven overload must not commit {@code allConsumed()} because the application thread
+     * may be advancing positions concurrently. When a commit is due but the poll carried no snapshot, it asks the
+     * application thread for one instead of committing.
+     */
+    @Test
+    public void testPollDrivenAutoCommitWithoutSnapshotRequestsSnapshotAndDoesNotCommit() {
+        TopicPartition tp = new TopicPartition("t1", 1);
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.seek(tp, 100);
+        AtomicBoolean snapshotRequested = new AtomicBoolean(false);
+        CommitRequestManager commitRequestManager = create(true, 100, snapshotRequested);
+        assertSame(snapshotRequested, commitRequestManager.autoCommitSnapshotRequested());
+
+        time.sleep(100);
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), null);
+
+        assertTrue(snapshotRequested.get(), "A snapshot should be requested from the application thread");
+        assertPoll(0, commitRequestManager);
+        assertEmptyPendingRequests(commitRequestManager);
+    }
+
+    @Test
+    public void testPollDrivenAutoCommitCommitsExactlyTheSnapshot() {
+        TopicPartition tp = new TopicPartition("t1", 1);
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.seek(tp, 100);
+        AtomicBoolean snapshotRequested = new AtomicBoolean(true);
+        CommitRequestManager commitRequestManager = create(true, 100, snapshotRequested);
+
+        // Snapshot taken by the application thread on entry to poll(); positions then advance before the
+        // network thread runs the auto-commit, so allConsumed() no longer matches the snapshot.
+        Map<TopicPartition, OffsetAndMetadata> snapshot = Map.of(tp, new OffsetAndMetadata(100));
+        subscriptionState.seek(tp, 200);
+        assertNotEquals(snapshot, subscriptionState.allConsumed());
+
+        time.sleep(100);
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), snapshot);
+
+        assertFalse(snapshotRequested.get(), "The snapshot request should be cleared once it is consumed");
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, res.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) res.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(1, data.topics().size());
+        assertEquals("t1", data.topics().get(0).name());
+        assertEquals(1, data.topics().get(0).partitions().size());
+        assertEquals(1, data.topics().get(0).partitions().get(0).partitionIndex());
+        assertEquals(100L, data.topics().get(0).partitions().get(0).committedOffset());
+    }
+
+    @Test
+    public void testPollDrivenAutoCommitDoesNothingBeforeIntervalElapses() {
+        TopicPartition tp = new TopicPartition("t1", 1);
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.seek(tp, 100);
+        AtomicBoolean snapshotRequested = new AtomicBoolean(false);
+        CommitRequestManager commitRequestManager = create(true, 100, snapshotRequested);
+
+        // The interval has not elapsed: neither a null nor a real snapshot has any effect.
+        time.sleep(50);
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), null);
+        assertFalse(snapshotRequested.get());
+        assertPoll(0, commitRequestManager);
+
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), Map.of(tp, new OffsetAndMetadata(100)));
+        assertFalse(snapshotRequested.get());
+        assertPoll(0, commitRequestManager);
+        assertEmptyPendingRequests(commitRequestManager);
+    }
+
+    @Test
+    public void testPollDrivenAutoCommitDoesNothingWhileCommitInFlight() {
+        TopicPartition tp = new TopicPartition("t1", 1);
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.seek(tp, 100);
+        AtomicBoolean snapshotRequested = new AtomicBoolean(true);
+        CommitRequestManager commitRequestManager = create(true, 100, snapshotRequested);
+
+        // First interval: commit the snapshot and leave the request in flight (no response).
+        time.sleep(100);
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), Map.of(tp, new OffsetAndMetadata(100)));
+        assertFalse(snapshotRequested.get());
+        List<NetworkClientDelegate.FutureCompletionHandler> inflight = assertPoll(1, commitRequestManager);
+
+        // Second interval while the first commit is still in flight: no request, flag untouched.
+        time.sleep(100);
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), null);
+        assertFalse(snapshotRequested.get(), "No snapshot should be requested while a commit is in flight");
+        assertPoll(0, commitRequestManager);
+
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), Map.of(tp, new OffsetAndMetadata(150)));
+        assertFalse(snapshotRequested.get());
+        assertPoll(0, commitRequestManager);
+
+        // Once the in-flight commit completes and the interval elapses again, a snapshot is requested as usual.
+        inflight.get(0).onComplete(mockOffsetCommitResponse("t1", 1, (short) 1, Errors.NONE));
+        time.sleep(100);
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds(), null);
+        assertTrue(snapshotRequested.get());
+        assertPoll(0, commitRequestManager);
+    }
+
+    /**
+     * The single-argument overload keeps the blocking-caller behaviour (e.g. {@code assign()}): it commits the
+     * live {@code allConsumed()} positions and never touches the snapshot request flag.
+     */
+    @Test
+    public void testBlockingAutoCommitOverloadCommitsAllConsumedWithoutSnapshotRequest() {
+        TopicPartition tp = new TopicPartition("t1", 1);
+        subscriptionState.assignFromUser(Collections.singleton(tp));
+        subscriptionState.seek(tp, 100);
+        AtomicBoolean snapshotRequested = new AtomicBoolean(false);
+        CommitRequestManager commitRequestManager = create(true, 100, snapshotRequested);
+
+        time.sleep(100);
+        commitRequestManager.updateTimerAndMaybeCommit(time.milliseconds());
+
+        assertFalse(snapshotRequested.get());
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(mockedNode));
+        NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
+        assertEquals(1, res.unsentRequests.size());
+        OffsetCommitRequestData data = (OffsetCommitRequestData) res.unsentRequests.get(0).requestBuilder().build().data();
+        assertEquals(100L, data.topics().get(0).partitions().get(0).committedOffset());
     }
 
     // This is the case of the async auto commit sent on calls to assign (async commit that
@@ -1812,6 +2001,24 @@ public class CommitRequestManagerTest {
                 "Failed to commit offsets: Coordinator unknown and consumer is closing");
     }
 
+    @Test
+    public void testPollWithClosingAndExpiredPendingCommitFailsWithCommitFailedException() {
+        CommitRequestManager commitRequestManager = create(true, 100);
+        Map<TopicPartition, OffsetAndMetadata> offsets = Map.of(new TopicPartition("topic", 1), new OffsetAndMetadata(0));
+        long deadlineMs = time.milliseconds() + defaultApiTimeoutMs;
+        CompletableFuture<Map<TopicPartition, OffsetAndMetadata>> commitFuture = commitRequestManager.commitSync(offsets, deadlineMs);
+
+        // Closing with an unknown coordinator takes precedence over the expired deadline (KAFKA-19357)
+        time.sleep(defaultApiTimeoutMs);
+        commitRequestManager.signalClose();
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        assertEquals(NetworkClientDelegate.PollResult.EMPTY, commitRequestManager.poll(time.milliseconds()));
+
+        TestUtils.assertFutureThrows(CommitFailedException.class, commitFuture,
+                "Failed to commit offsets: Coordinator unknown and consumer is closing");
+        assertEmptyPendingRequests(commitRequestManager);
+    }
+
     // Supplies (error, isRetriable)
     private static Stream<Arguments> partitionDataErrorSupplier() {
         return Stream.of(
@@ -1911,6 +2118,12 @@ public class CommitRequestManagerTest {
     }
 
     private CommitRequestManager create(final boolean autoCommitEnabled, final long autoCommitInterval) {
+        return create(autoCommitEnabled, autoCommitInterval, new AtomicBoolean());
+    }
+
+    private CommitRequestManager create(final boolean autoCommitEnabled,
+                                        final long autoCommitInterval,
+                                        final AtomicBoolean autoCommitSnapshotRequested) {
         props.setProperty(AUTO_COMMIT_INTERVAL_MS_CONFIG, String.valueOf(autoCommitInterval));
         props.setProperty(ENABLE_AUTO_COMMIT_CONFIG, String.valueOf(autoCommitEnabled));
         props.setProperty(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
@@ -1931,7 +2144,8 @@ public class CommitRequestManagerTest {
                 retryBackoffMaxMs,
                 OptionalDouble.of(0),
                 metrics,
-                metadata));
+                metadata,
+                autoCommitSnapshotRequested));
     }
 
     private ClientResponse buildOffsetFetchClientResponse(

@@ -36,13 +36,27 @@ public class BackgroundEventHandler {
     private final BlockingQueue<BackgroundEvent> backgroundEventQueue;
     private final Time time;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
+    private final Runnable applicationWakeup;
 
     public BackgroundEventHandler(final BlockingQueue<BackgroundEvent> backgroundEventQueue,
                                   final Time time,
                                   final AsyncConsumerMetrics asyncConsumerMetrics) {
+        this(backgroundEventQueue, time, asyncConsumerMetrics, () -> { });
+    }
+
+    /**
+     * @param applicationWakeup Invoked after an event is published so that an application thread parked
+     *                          inside {@code poll()} sees the event promptly instead of after its wait
+     *                          bound. Publication happens before the wakeup, so a wakeup can never be lost.
+     */
+    public BackgroundEventHandler(final BlockingQueue<BackgroundEvent> backgroundEventQueue,
+                                  final Time time,
+                                  final AsyncConsumerMetrics asyncConsumerMetrics,
+                                  final Runnable applicationWakeup) {
         this.backgroundEventQueue = backgroundEventQueue;
         this.time = time;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
+        this.applicationWakeup = Objects.requireNonNull(applicationWakeup);
     }
 
     /**
@@ -55,6 +69,16 @@ public class BackgroundEventHandler {
         event.setEnqueuedMs(time.milliseconds());
         asyncConsumerMetrics.recordBackgroundEventQueueSize(backgroundEventQueue.size() + 1);
         backgroundEventQueue.add(event);
+        // Publish first, then notify: the application thread re-checks the queue after waking up.
+        applicationWakeup.run();
+    }
+
+    /**
+     * Wake an application thread parked inside {@code poll()} without publishing an event, e.g. after the
+     * network thread marked the in-flight poll with a metadata error.
+     */
+    public void wakeupApplication() {
+        applicationWakeup.run();
     }
 
     /**

@@ -108,7 +108,9 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
 
         assertEquals(1, result.unsentRequests.size());
         assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, result.timeUntilNextPollMs);
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        // KAFKA-21031: the heartbeat just sent is in flight, so the application thread is only bounded by
+        // the poll timer refresh (half the remaining poll interval), not by the heartbeat interval.
+        assertEquals(Math.max(1, pollTimer.remainingMs() / 2), heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
         verify(membershipManager).onHeartbeatRequestGenerated();
     }
 

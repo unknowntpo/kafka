@@ -17,13 +17,17 @@
 package org.apache.kafka.clients.consumer.internals.events;
 
 import org.apache.kafka.clients.consumer.Consumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.consumer.internals.AsyncKafkaConsumer;
 import org.apache.kafka.clients.consumer.internals.ClassicKafkaConsumer;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.Time;
 
 import java.time.Duration;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
@@ -45,6 +49,8 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
 
     private final long deadlineMs;
     private final long pollTimeMs;
+    private final Map<TopicPartition, OffsetAndMetadata> committableOffsets;
+    private final Runnable onError;
     private volatile KafkaException error;
     private volatile boolean isComplete;
     private volatile boolean isValidatePositionsComplete;
@@ -58,9 +64,39 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
      * @param pollTimeMs        Time, in milliseconds, at which point the event was created
      */
     public AsyncPollEvent(long deadlineMs, long pollTimeMs) {
+        this(deadlineMs, pollTimeMs, null);
+    }
+
+    /**
+     * @param committableOffsets Positions captured by the application thread on entry to {@code poll()}, before
+     *                           any record of this poll is collected. This is the only snapshot an interval
+     *                           auto-commit may use: it contains exactly the positions of records already
+     *                           returned by completed polls (KAFKA-18641). {@code null} when no auto-commit is
+     *                           due, so the common path copies nothing.
+     */
+    public AsyncPollEvent(long deadlineMs, long pollTimeMs, Map<TopicPartition, OffsetAndMetadata> committableOffsets) {
+        this(deadlineMs, pollTimeMs, committableOffsets, () -> { });
+    }
+
+    /**
+     * @param onError Run after an error has been published on this event, so that an application thread parked
+     *                waiting for fetch data is woken to surface it (KAFKA-20397). The error is visible before the
+     *                hook runs; the hook must not run application callbacks.
+     */
+    public AsyncPollEvent(long deadlineMs,
+                          long pollTimeMs,
+                          Map<TopicPartition, OffsetAndMetadata> committableOffsets,
+                          Runnable onError) {
         super(Type.ASYNC_POLL);
         this.deadlineMs = deadlineMs;
         this.pollTimeMs = pollTimeMs;
+        this.committableOffsets = committableOffsets;
+        this.onError = Objects.requireNonNull(onError);
+    }
+
+    /** Positions safe to auto-commit at this poll, or {@code null} if none were captured. */
+    public Map<TopicPartition, OffsetAndMetadata> committableOffsets() {
+        return committableOffsets;
     }
 
     public long deadlineMs() {
@@ -130,6 +166,8 @@ public class AsyncPollEvent extends ApplicationEvent implements MetadataErrorNot
         reconciliationCheckFuture.complete(null);
         error = e;
         isComplete = true;
+        // Publish first (volatile writes above), then notify the application thread.
+        onError.run();
     }
 
     @Override

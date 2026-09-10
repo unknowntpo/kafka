@@ -26,6 +26,7 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.BufferSupplier;
 import org.apache.kafka.common.utils.internals.LogContext;
+import org.apache.kafka.test.TestUtils;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -34,6 +35,9 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.createFetchMetricsManager;
 import static org.apache.kafka.clients.consumer.internals.ConsumerUtils.createMetrics;
@@ -183,6 +187,88 @@ public class FetchBufferTest {
             fetchBuffer.wakeup();
             waitingThread.join(Duration.ofSeconds(30).toMillis());
             assertFalse(waitingThread.isAlive());
+        }
+    }
+
+    /**
+     * A {@link FetchBuffer#wakeup()} issued while no thread is waiting must not be lost: the next
+     * {@link FetchBuffer#awaitWakeup(Timer)} returns immediately instead of waiting out its timer.
+     */
+    @Test
+    public void testWakeupBeforeAwaitIsSticky() {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            fetchBuffer.wakeup();
+
+            long startNs = System.nanoTime();
+            fetchBuffer.awaitWakeup(time.timer(Duration.ofSeconds(10)));
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs);
+            assertTrue(elapsedMs < 5_000, "awaitWakeup should return immediately, took " + elapsedMs + " ms");
+        }
+    }
+
+    /**
+     * A thread that is actually parked in {@link FetchBuffer#awaitWakeup(Timer)} is released promptly by a
+     * {@link FetchBuffer#wakeup()} from another thread. The waiter is confirmed to be parked (not merely started)
+     * before the wakeup is issued so the signalling path is exercised, not only the sticky flag.
+     */
+    @Test
+    public void testWakeupReleasesParkedThreadPromptly() throws Exception {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            final CountDownLatch started = new CountDownLatch(1);
+            final AtomicLong waitedMs = new AtomicLong(-1);
+            final Thread waitingThread = new Thread(() -> {
+                final Timer timer = time.timer(Duration.ofSeconds(30));
+                started.countDown();
+                long startNs = System.nanoTime();
+                fetchBuffer.awaitWakeup(timer);
+                waitedMs.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs));
+            });
+            waitingThread.start();
+            assertTrue(started.await(5, TimeUnit.SECONDS));
+            TestUtils.waitForCondition(() -> waitingThread.getState() == Thread.State.TIMED_WAITING,
+                "Waiting thread never parked in awaitWakeup");
+
+            fetchBuffer.wakeup();
+
+            waitingThread.join(TimeUnit.SECONDS.toMillis(5));
+            assertFalse(waitingThread.isAlive(), "Waiting thread was not released by wakeup()");
+            assertTrue(waitedMs.get() >= 0 && waitedMs.get() < 5_000,
+                "awaitWakeup should return well before its 30 s timer, took " + waitedMs.get() + " ms");
+        }
+    }
+
+    /**
+     * Stress test for the hand-off between {@link FetchBuffer#awaitWakeup(Timer)} and
+     * {@link FetchBuffer#wakeup()}. {@code wakeup()} sets the sticky flag first and only takes the lock when it
+     * observes a waiter, so a wakeup that races with the waiter between marking itself waiting, checking the flag
+     * and parking must never be lost. That interleaving cannot be forced deterministically from a test, so this
+     * test races the two threads many times with the wakeup issued as close as possible to the wait and requires
+     * every wait to return far sooner than its timer. A lost wakeup shows up as a wait that runs to the timer.
+     */
+    @Test
+    public void testWakeupRacingWithAwaitIsNeverLost() throws Exception {
+        final int iterations = 200;
+        final long timerMs = 2_000;
+        final long maxAcceptableWaitMs = 500;
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            for (int i = 0; i < iterations; i++) {
+                final CountDownLatch aboutToWait = new CountDownLatch(1);
+                final AtomicLong waitedMs = new AtomicLong(-1);
+                final Thread waitingThread = new Thread(() -> {
+                    final Timer timer = time.timer(Duration.ofMillis(timerMs));
+                    aboutToWait.countDown();
+                    long startNs = System.nanoTime();
+                    fetchBuffer.awaitWakeup(timer);
+                    waitedMs.set(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNs));
+                });
+                waitingThread.start();
+                assertTrue(aboutToWait.await(5, TimeUnit.SECONDS));
+                fetchBuffer.wakeup();
+                waitingThread.join(timerMs + 5_000);
+                assertFalse(waitingThread.isAlive(), "Iteration " + i + ": waiting thread did not return");
+                assertTrue(waitedMs.get() < maxAcceptableWaitMs,
+                    "Iteration " + i + ": wakeup was lost, awaitWakeup took " + waitedMs.get() + " ms");
+            }
         }
     }
 

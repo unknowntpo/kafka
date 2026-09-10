@@ -72,7 +72,8 @@ public class RequestManagersTest {
             mock(OffsetCommitCallbackInvoker.class),
             listener,
             Optional.empty(),
-            new PositionsValidator(logContext, time, subscriptions, metadata)
+            new PositionsValidator(logContext, time, subscriptions, metadata),
+            new java.util.concurrent.atomic.AtomicBoolean()
         ).get();
         assertTrue(requestManagers.consumerMembershipManager.isPresent());
         assertTrue(requestManagers.streamsMembershipManager.isEmpty());
@@ -119,7 +120,8 @@ public class RequestManagersTest {
             mock(OffsetCommitCallbackInvoker.class),
             listener,
             Optional.of(new StreamsRebalanceData(UUID.randomUUID(), Optional.empty(), Optional.empty(), Map.of(), Map.of(), Map::of, Map::of)),
-            new PositionsValidator(logContext, time, subscriptions, metadata)
+            new PositionsValidator(logContext, time, subscriptions, metadata),
+            new java.util.concurrent.atomic.AtomicBoolean()
         ).get();
         assertTrue(requestManagers.streamsMembershipManager.isPresent());
         assertTrue(requestManagers.streamsGroupHeartbeatRequestManager.isPresent());

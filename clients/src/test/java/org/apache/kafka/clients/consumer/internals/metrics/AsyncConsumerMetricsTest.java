@@ -78,7 +78,8 @@ public class AsyncConsumerMetricsTest extends AbstractConsumerMetricsManagerTest
             metrics.metricName("background-event-queue-time-avg", groupName),
             metrics.metricName("background-event-queue-time-max", groupName),
             metrics.metricName("background-event-queue-processing-time-avg", groupName),
-            metrics.metricName("background-event-queue-processing-time-max", groupName)
+            metrics.metricName("background-event-queue-processing-time-max", groupName),
+            metrics.metricName("network-thread-invalid-poll-result-total", groupName)
         );
         expectedMetrics.forEach(
             metricName -> assertTrue(
@@ -224,6 +225,21 @@ public class AsyncConsumerMetricsTest extends AbstractConsumerMetricsManagerTest
         // Then:
         assertMetricValue("background-event-queue-processing-time-avg", groupName);
         assertMetricValue("background-event-queue-processing-time-max", groupName);
+    }
+
+    @ParameterizedTest
+    @MethodSource("groupNameProvider")
+    public void shouldRecordInvalidPollResult(String groupName) {
+        consumerMetrics = new AsyncConsumerMetrics(metrics, groupName);
+        MetricName total = metrics.metricName("network-thread-invalid-poll-result-total", groupName);
+        assertEquals((double) 0, metrics.metric(total).metricValue());
+
+        // When:
+        consumerMetrics.recordInvalidPollResult();
+        consumerMetrics.recordInvalidPollResult();
+
+        // Then: the metric is a cumulative count of violations, not a rate.
+        assertEquals((double) 2, metrics.metric(total).metricValue());
     }
 
     private void assertMetricValue(final String name, final String groupName) {
