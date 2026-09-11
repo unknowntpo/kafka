@@ -80,6 +80,11 @@ public abstract class AbstractFetch implements Closeable {
 
     private final Map<Integer, FetchSessionHandler> sessionHandlers;
 
+    /** The offset each partition's next fetch asks for, which runs ahead of the position while data is outstanding. */
+    private final FetchCursors cursors;
+
+    private int lastAssignmentId = -1;
+
     private final ApiVersions apiVersions;
 
     public AbstractFetch(final LogContext logContext,
@@ -99,6 +104,7 @@ public abstract class AbstractFetch implements Closeable {
         this.fetchBuffer = fetchBuffer;
         this.decompressionBufferSupplier = BufferSupplier.create();
         this.sessionHandlers = new HashMap<>();
+        this.cursors = new FetchCursors(logContext);
         this.nodesWithPendingFetchRequests = new HashSet<>();
         this.metricsManager = metricsManager;
         this.time = time;
@@ -214,6 +220,9 @@ public abstract class AbstractFetch implements Closeable {
                     }
                 }
 
+                if (partitionError == Errors.NONE)
+                    cursors.advance(partition, fetchOffset, FetchResponse.recordsOrFail(partitionData));
+
                 CompletedFetch completedFetch = new CompletedFetch(
                         completedFetchLog,
                         subscriptions,
@@ -244,7 +253,7 @@ public abstract class AbstractFetch implements Closeable {
                 );
             }
         } finally {
-            removePendingFetchRequest(fetchTarget, data.metadata().sessionId());
+            removePendingFetchRequest(fetchTarget, data);
         }
     }
 
@@ -266,7 +275,7 @@ public abstract class AbstractFetch implements Closeable {
                 handler.sessionTopicPartitions().forEach(subscriptions::clearPreferredReadReplica);
             }
         } finally {
-            removePendingFetchRequest(fetchTarget, data.metadata().sessionId());
+            removePendingFetchRequest(fetchTarget, data);
         }
     }
 
@@ -274,7 +283,7 @@ public abstract class AbstractFetch implements Closeable {
                                                   final FetchSessionHandler.FetchRequestData data,
                                                   final ClientResponse ignored) {
         int sessionId = data.metadata().sessionId();
-        removePendingFetchRequest(fetchTarget, sessionId);
+        removePendingFetchRequest(fetchTarget, data);
         log.debug("Successfully sent a close message for fetch session: {} to node: {}", sessionId, fetchTarget);
     }
 
@@ -282,14 +291,18 @@ public abstract class AbstractFetch implements Closeable {
                                                final FetchSessionHandler.FetchRequestData data,
                                                final Throwable t) {
         int sessionId = data.metadata().sessionId();
-        removePendingFetchRequest(fetchTarget, sessionId);
+        removePendingFetchRequest(fetchTarget, data);
         log.debug("Unable to send a close message for fetch session: {} to node: {}. " +
                 "This may result in unnecessary fetch sessions at the broker.", sessionId, fetchTarget, t);
     }
 
-    private void removePendingFetchRequest(Node fetchTarget, int sessionId) {
+    private void removePendingFetchRequest(Node fetchTarget, FetchSessionHandler.FetchRequestData data) {
+        int sessionId = data.metadata().sessionId();
         log.debug("Removing pending request for fetch session: {} for node: {}", sessionId, fetchTarget);
         nodesWithPendingFetchRequests.remove(fetchTarget.id());
+        // Whatever the outcome was, nothing is outstanding for these partitions any more, so their cursors are free
+        // to be re-seeded from the position if the application moved it.
+        cursors.completed(data.sessionPartitions().keySet());
 
         // Wake the buffer whenever a node stops having a request in flight, whatever the outcome was: data, an
         // empty response, a fetch session error, or a failure. This ensures the caller is not left waiting on a
@@ -327,6 +340,7 @@ public abstract class AbstractFetch implements Closeable {
         // will be invoked synchronously.
         log.debug("Adding pending request for node {}", fetchTarget);
         nodesWithPendingFetchRequests.add(fetchTarget.id());
+        cursors.sent(requestData.sessionPartitions().keySet());
 
         return request;
     }
@@ -444,6 +458,13 @@ public abstract class AbstractFetch implements Closeable {
 
         Set<Integer> bufferedNodes = bufferedNodes(buffered, currentTimeMs);
 
+        int assignmentId = subscriptions.assignmentId();
+
+        if (assignmentId != lastAssignmentId) {
+            cursors.retainAll(subscriptions.assignedPartitions());
+            lastAssignmentId = assignmentId;
+        }
+
         for (TopicPartition partition : unbuffered) {
             SubscriptionState.FetchPosition position = positionForPartition(partition);
             Optional<Node> nodeOpt = maybeNodeForPosition(partition, position, currentTimeMs);
@@ -475,16 +496,19 @@ public abstract class AbstractFetch implements Closeable {
                     return fetchSessionHandler.newBuilder();
                 });
                 Uuid topicId = topicIds.getOrDefault(partition.topic(), Uuid.ZERO_UUID);
+                // Ask for the offset after what has already been requested for this partition, which is the position
+                // only while nothing fetched for it is still outstanding.
+                long fetchOffset = cursors.nextFetchOffset(partition, position.offset, buffered.contains(partition));
                 FetchRequest.PartitionData partitionData = new FetchRequest.PartitionData(topicId,
-                        position.offset,
+                        fetchOffset,
                         FetchRequest.INVALID_LOG_START_OFFSET,
                         fetchConfig.fetchSize,
                         position.currentLeader.epoch,
                         Optional.empty());
                 builder.add(partition, partitionData);
 
-                log.debug("Added {} fetch request for partition {} at position {} to node {}", fetchConfig.isolationLevel,
-                        partition, position, node);
+                log.debug("Added {} fetch request for partition {} at offset {} (position {}) to node {}",
+                        fetchConfig.isolationLevel, partition, fetchOffset, position, node);
             }
         }
 
