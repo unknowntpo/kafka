@@ -312,8 +312,7 @@ public class ConsumerNetworkThreadTest {
     }
 
     private long applicationWaitMs() {
-        long currentTimeMs = time.milliseconds();
-        return consumerNetworkThread.applicationPollCondition().remainingMs(currentTimeMs);
+        return consumerNetworkThread.maximumTimeToWait();
     }
 
     @Test

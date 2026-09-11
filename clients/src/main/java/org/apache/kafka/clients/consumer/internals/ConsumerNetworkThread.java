@@ -82,7 +82,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
     private final CountDownLatch initializationLatch = new CountDownLatch(1);
     private final AtomicReference<KafkaException> initializationError = new AtomicReference<>();
     private volatile Duration closeTimeout = Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS);
-    private volatile long cachedApplicationPollWaitMs = MAX_POLL_TIMEOUT_MS;
+    private volatile long cachedMaximumTimeToWait = MAX_POLL_TIMEOUT_MS;
     private long lastPollTimeMs = 0L;
 
     public ConsumerNetworkThread(LogContext logContext,
@@ -242,7 +242,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
             applicationPollWaitMs = Math.min(applicationPollWaitMs,
                     rm.applicationPollCondition(managerTimeMs).remainingMs(managerTimeMs));
         }
-        cachedApplicationPollWaitMs = applicationPollWaitMs;
+        cachedMaximumTimeToWait = applicationPollWaitMs;
 
         reapExpiredApplicationEvents(time.milliseconds());
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
@@ -348,10 +348,8 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      *
      * @return The maximum delay in milliseconds
      */
-    public NextPollCondition applicationPollCondition() {
-        return cachedApplicationPollWaitMs == Long.MAX_VALUE
-                ? NextPollCondition.idle()
-                : NextPollCondition.after(time.milliseconds(), cachedApplicationPollWaitMs);
+    public long maximumTimeToWait() {
+        return cachedMaximumTimeToWait;
     }
 
     @Override

@@ -702,9 +702,7 @@ public class ShareConsumerImpl<K, V> implements ShareConsumerDelegate<K, V> {
     }
 
     private ShareFetch<K, V> pollForFetches(final Timer timer) {
-        long pollTimeout = Math.min(
-                applicationEventHandler.applicationPollCondition().remainingMs(time.milliseconds()),
-                timer.remainingMs());
+        long pollTimeout = Math.min(applicationEventHandler.maximumTimeToWait(), timer.remainingMs());
 
         Map<TopicIdPartition, NodeAcknowledgements> acknowledgementsMap = currentFetch.takeAcknowledgedRecords();
 

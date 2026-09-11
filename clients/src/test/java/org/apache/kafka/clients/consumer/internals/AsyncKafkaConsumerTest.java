@@ -184,10 +184,6 @@ public class AsyncKafkaConsumerTest {
     private final LinkedBlockingQueue<BackgroundEvent> backgroundEventQueue = new LinkedBlockingQueue<>();
     private final CompletableEventReaper backgroundEventReaper = mock(CompletableEventReaper.class);
 
-    public AsyncKafkaConsumerTest() {
-        doReturn(NextPollCondition.ready()).when(applicationEventHandler).applicationPollCondition();
-    }
-
     @AfterEach
     public void resetAll() {
         backgroundEventQueue.clear();
@@ -2091,8 +2087,7 @@ public class AsyncKafkaConsumerTest {
         subscriptions.seek(tp, 0);
 
         // Make pollForFetches() "wait" by advancing mock time.
-        doAnswer(invocation -> NextPollCondition.after(time.milliseconds(), 100L))
-            .when(applicationEventHandler).applicationPollCondition();
+        doReturn(100L).when(applicationEventHandler).maximumTimeToWait();
         doAnswer(invocation -> {
             Timer pollTimer = invocation.getArgument(0, Timer.class);
             ((MockTime) time).sleep(pollTimer.remainingMs());
@@ -2134,13 +2129,13 @@ public class AsyncKafkaConsumerTest {
 
         final TopicPartition tp = new TopicPartition("topic1", 0);
 
-        // Manual assignment with a valid position, so nothing here overrides the mocked applicationPollCondition() below.
+        // Manual assignment with a valid position, so nothing here overrides the mocked maximumTimeToWait() below.
         subscriptions.assignFromUser(singleton(tp));
         subscriptions.seek(tp, 0);
 
         // Simulate the FIXED behavior of AbstractHeartbeatRequestManager#applicationPollCondition() when the
         // membership state is UNSUBSCRIBED, i.e. user called assign().
-        doReturn(NextPollCondition.idle()).when(applicationEventHandler).applicationPollCondition();
+        doReturn(Long.MAX_VALUE).when(applicationEventHandler).maximumTimeToWait();
 
         doReturn(Fetch.empty()).when(fetchCollector).collectFetch(any(FetchBuffer.class));
         doReturn(LeaderAndEpoch.noLeaderOrEpoch()).when(metadata).currentLeader(any());

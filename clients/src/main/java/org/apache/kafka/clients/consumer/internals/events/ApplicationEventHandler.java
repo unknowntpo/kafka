@@ -19,7 +19,6 @@ package org.apache.kafka.clients.consumer.internals.events;
 import org.apache.kafka.clients.consumer.internals.ConsumerNetworkThread;
 import org.apache.kafka.clients.consumer.internals.ConsumerUtils;
 import org.apache.kafka.clients.consumer.internals.NetworkClientDelegate;
-import org.apache.kafka.clients.consumer.internals.NextPollCondition;
 import org.apache.kafka.clients.consumer.internals.RequestManagers;
 import org.apache.kafka.clients.consumer.internals.metrics.AsyncConsumerMetrics;
 import org.apache.kafka.common.KafkaException;
@@ -120,8 +119,8 @@ public class ApplicationEventHandler implements Closeable {
      *
      * @return The maximum delay in milliseconds
      */
-    public NextPollCondition applicationPollCondition() {
-        return networkThread.applicationPollCondition();
+    public long maximumTimeToWait() {
+        return networkThread.maximumTimeToWait();
     }
 
     /**
