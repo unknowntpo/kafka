@@ -55,7 +55,14 @@
 
 ## 2. 現況的三個成本（trunk 程式碼位置）
 
-**C1 續發的時機綁在應用執行緒。** `FetchRequestManager.java:155-157`：沒有 `pendingFetchRequestFuture` 就直接回 `PollResult.EMPTY`。那個 future 只有 `CreateFetchRequestsEvent` 會設，由應用執行緒在 `AsyncKafkaConsumer.java:2120` 送出（呼叫點 `:965`，拿到非空 fetch 之後）。**回應到達本身不會觸發下一個 fetch。** 前一條線量到：三方（app、背景、broker）各只用 22–29% CPU，全部在等彼此。
+**C1 續發被兩道 gate 擋住，不是一道。**
+
+- **C1a 時機綁在應用執行緒。** `FetchRequestManager.java:155-157`：沒有 `pendingFetchRequestFuture` 就直接回 `PollResult.EMPTY`。那個 future 只有 `CreateFetchRequestsEvent` 會設，由應用執行緒在 `AsyncKafkaConsumer.java:2120` 送出（呼叫點 `:965`，拿到非空 fetch 之後）。**回應到達本身不會觸發下一個 fetch。**
+- **C1b 已經有 buffer 的 partition 被排除在下一個 fetch 之外。** `AbstractFetch.java:343-350` 的 `fetchablePartitions(isNotBuffered)`：註解自己寫明「for which we don't already have some messages sitting in our buffer」。所以**每個 partition 最多只能有一份已收到的資料，不可能同時有資料在 buffer 又有 fetch 在飛**——per-partition 的管線深度被結構性地鎖在 1。
+
+這兩道是獨立的：就算把 C1a 改成回應驅動，C1b 仍然讓同一個 partition 的下一個 fetch 必須等 app 執行緒把 buffer 吃完。**只解決 C1a 拿不到 §1.1 的 1.91×。** 前一條線量到：三方（app、背景、broker）各只用 22–29% CPU，全部在等彼此。
+
+順帶一個對照事實：trunk 每個 broker 也是**一個 fetch 在飛**（`AbstractFetch.java:462` 的 `nodesWithPendingFetchRequests.contains`），跟 consumer-ng 相同。所以差別不在每個 broker 的在途深度，而在 C1a 的觸發時機與 C1b 的管線深度。
 
 **C2 接收 buffer 每次重新配置。** consumer 的 `Selector` 用的是不帶 `MemoryPool` 的六參數建構子（`ClientUtils.java:279-284`），所以走 `MemoryPool.NONE`：每個回應配置一塊新的 heap buffer，JVM 先清零，再從 socket 讀進去，再複製一次給 record 解析。profile：背景執行緒 memset 佔 15%、JDK 暫存複製佔 10%。
 
