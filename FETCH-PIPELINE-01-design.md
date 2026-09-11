@@ -58,9 +58,22 @@
 **C1 續發被兩道 gate 擋住，不是一道。**
 
 - **C1a 時機綁在應用執行緒。** `FetchRequestManager.java:155-157`：沒有 `pendingFetchRequestFuture` 就直接回 `PollResult.EMPTY`。那個 future 只有 `CreateFetchRequestsEvent` 會設，由應用執行緒在 `AsyncKafkaConsumer.java:2120` 送出（呼叫點 `:965`，拿到非空 fetch 之後）。**回應到達本身不會觸發下一個 fetch。**
-- **C1b 已經有 buffer 的 partition 被排除在下一個 fetch 之外。** `AbstractFetch.java:343-350` 的 `fetchablePartitions(isNotBuffered)`：註解自己寫明「for which we don't already have some messages sitting in our buffer」。所以**每個 partition 最多只能有一份已收到的資料，不可能同時有資料在 buffer 又有 fetch 在飛**——per-partition 的管線深度被結構性地鎖在 1。
+- **C1b 已經有 buffer 的 partition 被排除在下一個 fetch 之外。** `AbstractFetch.java:343-350` 的 `fetchablePartitions(isNotBuffered)`：註解自己寫明「for which we don't already have some messages sitting in our buffer」。per-partition 的管線深度被結構性地鎖在 1。
+- **C1c 只要一個 node 上有任何 partition 有 buffer，那個 node 上的所有 partition 都不發 fetch。** `AbstractFetch.java:466-471`：
 
-這兩道是獨立的：就算把 C1a 改成回應驅動，C1b 仍然讓同一個 partition 的下一個 fetch 必須等 app 執行緒把 buffer 吃完。**只解決 C1a 拿不到 §1.1 的 1.91×。** 前一條線量到：三方（app、背景、broker）各只用 22–29% CPU，全部在等彼此。
+  ```java
+  } else if (bufferedNodes.contains(node.id())) {
+      // While a node has buffered data, don't fetch other partition data from it. Because the buffered
+      // partitions are not included in the fetch request, those partitions will be inadvertently dropped
+      // from the broker fetch session cache. In some cases, that could lead to the entire fetch session
+      // being evicted.
+  ```
+
+**C1c 是三道裡最根本的，而且它解釋了為什麼收益那麼大。** 沒有預抓 cursor 的話，一個已經有 buffer 的 partition 陷入兩難：把它放進下一個 incremental fetch 請求，就會重抓已經拿到的資料；把它省略，broker 的 fetch session cache 就會把它丟掉（嚴重時整個 session 被 evict）。trunk 選的是第三條路——**那個 broker 完全不發 fetch，整條連線閒置，直到 app 執行緒把 buffer 吃完**。
+
+這三道是獨立的，而且只修前兩道不夠：C1a 讓續發等 app 執行緒，C1b 讓 partition 等自己的 buffer 排空，C1c 讓**整個 broker** 等任一 partition 的 buffer 排空。**只解決 C1a 拿不到 §1.1 的 1.91×。**
+
+好消息是三道用**同一個改動**解決：給每個 partition 一個私有的預抓 cursor（「已請求到哪」，與 position 的「已交付到哪」分開）之後，每個可 fetch 的 partition 都能永遠出現在每一個送給它 leader 的 fetch 請求裡，於是 session cache 不會掉 partition，也沒有「要不要跳過 buffered partition」這個問題——`buffered` / `bufferedNodes` 這整套機制連同它要防的 eviction 一起消失。consumer-ng 的 `FetchPipeline` 沒有這段程式碼，原因就是它有 cursor。 前一條線量到：三方（app、背景、broker）各只用 22–29% CPU，全部在等彼此。
 
 順帶一個對照事實：trunk 每個 broker 也是**一個 fetch 在飛**（`AbstractFetch.java:462` 的 `nodesWithPendingFetchRequests.contains`），跟 consumer-ng 相同。所以差別不在每個 broker 的在途深度，而在 C1a 的觸發時機與 C1b 的管線深度。
 

@@ -94,7 +94,7 @@ trunk 不需要它：`ConsumerUtils.java:77` 的 `CONSUMER_MAX_INFLIGHT_REQUESTS
 ### 3.6 L1 在 trunk 上的具體改動清單
 
 1. **給每個 partition 一個私有的 prefetch cursor**（consumer-ng 的 `PartitionQueue.nextFetchOffset`），從 position 起算。建 fetch 請求時讀 cursor，**不讀** `subscriptions.position(tp)`（取代 `AbstractFetch.java:554`）。這是預抓的前提：position 是「已交付到哪」，cursor 是「已請求到哪」，兩者必須分開。
-2. **拿掉 C1b**：`AbstractFetch.java:343-350` 的 `isNotBuffered` 排除改成 credit admission（在途 bytes + 已 buffer 未交付 bytes < credit）。`FetchBuffer` 今天不記 bytes，要加。
+2. **拿掉 C1b 與 C1c**：`AbstractFetch.java:343-350` 的 `isNotBuffered` 與 `:466-471` 的 `bufferedNodes` 一起刪掉（連同 `bufferedNodes(...)` 這個 method，`:641-654`），改成 credit admission（在途 bytes + 已 buffer 未交付 bytes < credit）。有了第 1 項的 cursor，每個可 fetch 的 partition 永遠在每個 fetch 請求裡，所以 C1c 要防的 fetch-session eviction 不會發生。`FetchBuffer` 今天不記 bytes，要加。
 3. **把 C1a 改成回應驅動**：`FetchRequestManager.java:155-157` 的 gate 移除，改由回應處理完成後在同一條背景執行緒上續發。
 4. **fencing**：seek / reset / 撤銷指派要讓 cursor 與已 buffer 的資料一起作廢。`FetchCollector.java:168` 的等式守衛在「連續 offset、依序交付」的前提下仍然成立（第二份 `CompletedFetch` 的起始 offset 等於第一份的結束），但 seek 之後不成立，所以 cursor 要帶 position epoch。**這是 L1 唯一的正確性風險。**
 5. **不要動 `AsyncKafkaConsumer.java:2068-2080` 的 validate-positions 屏障**：它擋的是 position 的雙寫，跟預抓無關，拿掉會引入 §3.5 說的那個 race。
