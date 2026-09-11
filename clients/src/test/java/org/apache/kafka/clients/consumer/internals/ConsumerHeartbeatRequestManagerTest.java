@@ -225,7 +225,7 @@ public class ConsumerHeartbeatRequestManagerTest
         assertEquals(0, result.unsentRequests.size());
 
         createHeartbeatRequestStateWithZeroHeartbeatInterval();
-        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(0, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size());
 
@@ -247,7 +247,7 @@ public class ConsumerHeartbeatRequestManagerTest
 
         // Create a ConsumerHeartbeatRequest and verify the payload
         mockJoiningMemberData(DEFAULT_GROUP_INSTANCE_ID);
-        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(0, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         NetworkClientDelegate.PollResult pollResult = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, pollResult.unsentRequests.size());
         NetworkClientDelegate.UnsentRequest request = pollResult.unsentRequests.get(0);
@@ -282,10 +282,10 @@ public class ConsumerHeartbeatRequestManagerTest
 
         if (!shouldSkipHeartbeat) {
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(0, result.timeUntilNextPollMs);
+            assertTrue(heartbeatRequestState.requestInFlight());
         } else {
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+            assertFalse(heartbeatRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
 
         }
     }
@@ -293,8 +293,8 @@ public class ConsumerHeartbeatRequestManagerTest
     /**
      * When the consumer uses manual partition assignment (assign()) instead of subscribe(), the
      * member stays in UNSUBSCRIBED state indefinitely. Because heartbeats are skipped in that
-     * state and heartbeatIntervalMs initialises to 0, maximumTimeToWait used to return 0, causing
-     * a busy-loop in pollForFetches. Verify that maximumTimeToWait returns Long.MAX_VALUE whenever
+     * state and heartbeatIntervalMs initialises to 0, applicationPollCondition used to return 0, causing
+     * a busy-loop in pollForFetches. Verify that applicationPollCondition returns Long.MAX_VALUE whenever
      * the member is in UNSUBSCRIBED state so the application thread can block for the full poll
      * timeout.
      */
@@ -305,21 +305,21 @@ public class ConsumerHeartbeatRequestManagerTest
         createHeartbeatRequestStateWithZeroHeartbeatInterval();
         when(membershipManager.state()).thenReturn(isUnsubscribed ? MemberState.UNSUBSCRIBED : MemberState.JOINING);
 
-        long result = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
         if (isUnsubscribed) {
             assertEquals(Long.MAX_VALUE, result,
-                "maximumTimeToWait should return Long.MAX_VALUE when in UNSUBSCRIBED state " +
+                "applicationPollCondition should return Long.MAX_VALUE when in UNSUBSCRIBED state " +
                     "(e.g., manual assignment) to prevent a busy loop");
         } else {
             assertEquals(0, result,
-                "maximumTimeToWait should return 0 when heartbeat interval timer has already expired");
+                "applicationPollCondition should return 0 when heartbeat interval timer has already expired");
         }
     }
 
     /**
      * KAFKA-20253: when the coordinator is unavailable (e.g. after a re-authentication failure),
-     * poll() returns EMPTY, so no heartbeat can be sent. maximumTimeToWait() must return a positive
+     * poll() returns EMPTY, so no heartbeat can be sent. applicationPollCondition() must return a positive
      * value in that case; returning 0 busy-spins the application thread (and, via wakeups, the
      * consumer network thread), which is the AsyncKafkaConsumer high-CPU loop in this ticket.
      */
@@ -329,17 +329,17 @@ public class ConsumerHeartbeatRequestManagerTest
         when(membershipManager.state()).thenReturn(MemberState.STABLE);
         when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
 
-        long result = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
         assertTrue(result > 0,
-            "maximumTimeToWait must be > 0 when the coordinator is unavailable to avoid a busy-spin; got " + result);
+            "applicationPollCondition must be > 0 when the coordinator is unavailable to avoid a busy-spin; got " + result);
         assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
     }
 
     /**
      * While bootstrap DNS resolution is still in progress the coordinator is unknown,
      * and a member that wants to join has a zero heartbeat interval, since the interval is only
-     * learned from the first heartbeat response. maximumTimeToWait() must wait a retry backoff
+     * learned from the first heartbeat response. applicationPollCondition() must wait a retry backoff
      * rather than the (zero) heartbeat interval; returning 0 busy-spins the application and
      * network threads.
      */
@@ -350,9 +350,9 @@ public class ConsumerHeartbeatRequestManagerTest
         when(membershipManager.state()).thenReturn(MemberState.JOINING);
         when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
 
-        long result = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
-        assertTrue(result > 0, "maximumTimeToWait must be > 0 while the member is joining and the coordinator is unknown to avoid a busy-spin; got " + result);
+        assertTrue(result > 0, "applicationPollCondition must be > 0 while the member is joining and the coordinator is unknown to avoid a busy-spin; got " + result);
         assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
     }
 
@@ -361,8 +361,8 @@ public class ConsumerHeartbeatRequestManagerTest
         createHeartbeatRequestStateWithZeroHeartbeatInterval();
         when(membershipManager.state()).thenReturn(MemberState.FATAL);
 
-        assertEquals(Long.MAX_VALUE, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()),
-            "maximumTimeToWait should return Long.MAX_VALUE in the terminal FATAL state");
+        assertEquals(Long.MAX_VALUE, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()),
+            "applicationPollCondition should return Long.MAX_VALUE in the terminal FATAL state");
     }
 
     @Test
@@ -371,9 +371,9 @@ public class ConsumerHeartbeatRequestManagerTest
         when(membershipManager.state()).thenReturn(MemberState.FENCED);
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(true);
 
-        long result = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
-        assertTrue(result > 0, "maximumTimeToWait must be > 0 while the member is fenced to avoid a busy-spin; got " + result);
+        assertTrue(result > 0, "applicationPollCondition must be > 0 while the member is fenced to avoid a busy-spin; got " + result);
         assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
     }
 
@@ -432,8 +432,8 @@ public class ConsumerHeartbeatRequestManagerTest
                 // the coordinator never becomes known since there is no real broker to respond.
                 networkClientDelegate.poll(50, time.milliseconds());
 
-                long waitMs = realHeartbeatRequestManager.maximumTimeToWait(time.milliseconds());
-                assertTrue(waitMs > 0, "maximumTimeToWait must be > 0 while real bootstrap DNS resolution is pending; got " + waitMs);
+                long waitMs = realHeartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+                assertTrue(waitMs > 0, "applicationPollCondition must be > 0 while real bootstrap DNS resolution is pending; got " + waitMs);
 
                 Optional<Exception> metadataError = networkClientDelegate.getAndClearMetadataError();
                 if (metadataError.isPresent()) {
@@ -780,7 +780,7 @@ public class ConsumerHeartbeatRequestManagerTest
         // On poll timer expiration, the member should send a last heartbeat to leave the group
         // and notify the membership manager
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager);
         verify(membershipManager).transitionToSendingLeaveGroup(true);
         verify(heartbeatState).reset();
         verify(heartbeatRequestState).reset();
@@ -792,7 +792,7 @@ public class ConsumerHeartbeatRequestManagerTest
         assertTrue(pollTimer.notExpired());
         verify(membershipManager).maybeRejoinStaleMember();
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager);
     }
 
     @ParameterizedTest
@@ -812,7 +812,7 @@ public class ConsumerHeartbeatRequestManagerTest
             assertNoHeartbeat(heartbeatRequestManager);
             verify(membershipManager, never()).onHeartbeatRequestGenerated();
         } else {
-            assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+            assertHeartbeat(heartbeatRequestManager);
             verify(membershipManager).onHeartbeatRequestGenerated();
         }
 
@@ -916,7 +916,7 @@ public class ConsumerHeartbeatRequestManagerTest
         
         // heartbeat request manager resets the sentFields to null HeartbeatState.reset()
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager);
         verify(heartbeatRequestState).reset();
         
         // following HB will include tp0 (and act as ack), tp0 != null
@@ -1038,10 +1038,9 @@ public class ConsumerHeartbeatRequestManagerTest
         assertNull(data.rackId());
     }
 
-    private void assertHeartbeat(AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> hrm, int nextPollMs) {
+    private void assertHeartbeat(AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> hrm) {
         NetworkClientDelegate.PollResult pollResult = hrm.poll(time.milliseconds());
         assertEquals(1, pollResult.unsentRequests.size());
-        assertEquals(nextPollMs, pollResult.timeUntilNextPollMs);
         pollResult.unsentRequests.get(0).handler().onComplete(createHeartbeatResponse(pollResult.unsentRequests.get(0),
             Errors.NONE));
     }

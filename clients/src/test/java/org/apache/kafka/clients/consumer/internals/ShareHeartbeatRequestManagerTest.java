@@ -57,6 +57,7 @@ import java.util.concurrent.TimeUnit;
 import static org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManager.SHARE_PROTOCOL_NOT_SUPPORTED_MSG;
 import static org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManager.SHARE_PROTOCOL_VERSION_NOT_SUPPORTED_MSG;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -168,10 +169,10 @@ public class ShareHeartbeatRequestManagerTest
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(true);
         when(heartbeatRequestState.timeToNextHeartbeatMs(anyLong())).thenReturn(0L);
 
-        long result = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
         assertTrue(result > 0,
-            "maximumTimeToWait must be > 0 while heartbeats are skipped to avoid a busy-spin; got " + result);
+            "applicationPollCondition must be > 0 while heartbeats are skipped to avoid a busy-spin; got " + result);
         assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
     }
 
@@ -180,14 +181,14 @@ public class ShareHeartbeatRequestManagerTest
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(new Node(1, "localhost", 9999)));
         when(membershipManager.state()).thenReturn(MemberState.FATAL);
 
-        assertEquals(Long.MAX_VALUE, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()),
-            "maximumTimeToWait should return Long.MAX_VALUE in the terminal FATAL state");
+        assertEquals(Long.MAX_VALUE, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()),
+            "applicationPollCondition should return Long.MAX_VALUE in the terminal FATAL state");
     }
 
     /**
      * While bootstrap DNS resolution is still in progress the coordinator is unknown,
      * and a member that wants to join has a zero heartbeat interval, since the interval is only
-     * learned from the first heartbeat response. maximumTimeToWait() must wait a retry backoff
+     * learned from the first heartbeat response. applicationPollCondition() must wait a retry backoff
      * rather than the (zero) heartbeat interval; returning 0 busy-spins the application and
      * network threads.
      */
@@ -198,10 +199,10 @@ public class ShareHeartbeatRequestManagerTest
         when(membershipManager.state()).thenReturn(MemberState.JOINING);
         when(membershipManager.shouldHeartbeatNow()).thenReturn(true);
 
-        long result = heartbeatRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
         assertTrue(result > 0,
-            "maximumTimeToWait must be > 0 while the member is joining and the coordinator is unknown " +
+            "applicationPollCondition must be > 0 while the member is joining and the coordinator is unknown " +
                 "to avoid a busy-spin; got " + result);
         assertEquals(DEFAULT_RETRY_BACKOFF_MS, result);
     }
@@ -212,7 +213,7 @@ public class ShareHeartbeatRequestManagerTest
         assertEquals(0, result.unsentRequests.size());
 
         createHeartbeatRequestStateWithZeroHeartbeatInterval();
-        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(0, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, result.unsentRequests.size());
 
@@ -234,7 +235,7 @@ public class ShareHeartbeatRequestManagerTest
 
         // Create a ShareGroupHeartbeatRequest and verify the payload
         mockJoiningMemberData();
-        assertEquals(0, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(0, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         NetworkClientDelegate.PollResult pollResult = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(1, pollResult.unsentRequests.size());
         NetworkClientDelegate.UnsentRequest request = pollResult.unsentRequests.get(0);
@@ -265,10 +266,10 @@ public class ShareHeartbeatRequestManagerTest
 
         if (!shouldSkipHeartbeat) {
             assertEquals(1, result.unsentRequests.size());
-            assertEquals(0, result.timeUntilNextPollMs);
+            assertTrue(heartbeatRequestState.requestInFlight());
         } else {
             assertEquals(0, result.unsentRequests.size());
-            assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+            assertFalse(heartbeatRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
         }
     }
 
@@ -454,7 +455,7 @@ public class ShareHeartbeatRequestManagerTest
         // On poll timer expiration, the member should send a last heartbeat to leave the group
         // and notify the membership manager
         time.sleep(DEFAULT_MAX_POLL_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager);
         verify(membershipManager).transitionToSendingLeaveGroup(true);
         verify(heartbeatState).reset();
         verify(heartbeatRequestState).reset();
@@ -466,7 +467,7 @@ public class ShareHeartbeatRequestManagerTest
         assertTrue(pollTimer.notExpired());
         verify(membershipManager).maybeRejoinStaleMember();
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(false);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager);
     }
 
     @Test
@@ -478,12 +479,12 @@ public class ShareHeartbeatRequestManagerTest
 
         // test poll
         time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager);
         time.sleep(1000);
         assertEquals(1.0, getMetric("heartbeat-total").metricValue());
         assertEquals((double) TimeUnit.MILLISECONDS.toSeconds(DEFAULT_HEARTBEAT_INTERVAL_MS), getMetric("last-heartbeat-seconds-ago").metricValue());
 
-        assertHeartbeat(heartbeatRequestManager, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertHeartbeat(heartbeatRequestManager);
         assertEquals(0.06d, (double) getMetric("heartbeat-rate").metricValue(), 0.005d);
         assertEquals(2.0, getMetric("heartbeat-total").metricValue());
 
@@ -494,10 +495,9 @@ public class ShareHeartbeatRequestManagerTest
         assertEquals((double) randomSleepS, getMetric("last-heartbeat-seconds-ago").metricValue());
     }
 
-    private void assertHeartbeat(AbstractHeartbeatRequestManager<ShareGroupHeartbeatResponse> hrm, int nextPollMs) {
+    private void assertHeartbeat(AbstractHeartbeatRequestManager<ShareGroupHeartbeatResponse> hrm) {
         NetworkClientDelegate.PollResult pollResult = hrm.poll(time.milliseconds());
         assertEquals(1, pollResult.unsentRequests.size());
-        assertEquals(nextPollMs, pollResult.timeUntilNextPollMs);
         pollResult.unsentRequests.get(0).handler().onComplete(createHeartbeatResponse(pollResult.unsentRequests.get(0),
                 Errors.NONE));
     }

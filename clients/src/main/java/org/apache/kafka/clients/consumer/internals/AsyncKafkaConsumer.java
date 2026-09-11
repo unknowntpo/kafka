@@ -1985,7 +1985,9 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             return fetch;
         }
 
-        long pollTimeout = Math.min(applicationEventHandler.maximumTimeToWait(), timer.remainingMs());
+        long pollTimeout = Math.min(
+                applicationEventHandler.applicationPollCondition().remainingMs(time.milliseconds()),
+                timer.remainingMs());
 
         // Bound the wait when background progress may make fetching possible soon.
         // Use the current application-thread state to avoid relying on stale state from the network thread.

@@ -90,14 +90,14 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
         assertEquals(0, result.unsentRequests.size());
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS - 100, result.timeUntilNextPollMs);
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS - 100, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS - 100, heartbeatRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
+        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS - 100, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
 
         // Member in state where it should not send Heartbeat anymore
         when(subscriptions.hasAutoAssignedPartitions()).thenReturn(true);
         when(membershipManager.shouldSkipHeartbeat()).thenReturn(true);
         result = heartbeatRequestManager.poll(time.milliseconds());
-        assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
+        assertEquals(Long.MAX_VALUE, heartbeatRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
     }
 
     @Test
@@ -107,8 +107,8 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
         assertEquals(1, result.unsentRequests.size());
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, result.timeUntilNextPollMs);
-        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertTrue(heartbeatRequestState.requestInFlight());
+        assertEquals(DEFAULT_HEARTBEAT_INTERVAL_MS, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         verify(membershipManager).onHeartbeatRequestGenerated();
     }
 
@@ -117,9 +117,40 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
 
-        assertEquals(Long.MAX_VALUE, result.timeUntilNextPollMs);
-        assertEquals(DEFAULT_RETRY_BACKOFF_MS, heartbeatRequestManager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, heartbeatRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
+        assertEquals(DEFAULT_RETRY_BACKOFF_MS, heartbeatRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         assertEquals(0, result.unsentRequests.size());
+    }
+
+    @Test
+    public void testConditionCanProcessFailureWithoutCoordinator() {
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        assertFalse(heartbeatRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        when(coordinatorRequestManager.fatalError()).thenReturn(Optional.of(Errors.GROUP_AUTHORIZATION_FAILED.exception()));
+        assertTrue(heartbeatRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertTrue(heartbeatRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        verify(coordinatorRequestManager, never()).getAndClearFatalError();
+
+        when(coordinatorRequestManager.fatalError()).thenReturn(Optional.empty());
+        when(membershipManager.state()).thenReturn(MemberState.LEAVING);
+        assertTrue(heartbeatRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        verify(membershipManager, never()).onHeartbeatRequestSkipped();
+    }
+
+    @Test
+    public void testInflightConditionRetainsPollExpiryWithoutExpiredHeartbeatSpin() {
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assertEquals(1, heartbeatRequestManager.poll(time.milliseconds()).unsentRequests.size());
+        time.sleep(DEFAULT_HEARTBEAT_INTERVAL_MS + 1);
+
+        NextPollCondition condition = heartbeatRequestManager.nextPollCondition(time.milliseconds());
+        assertFalse(condition.isReady(time.milliseconds()));
+        assertEquals(DEFAULT_MAX_POLL_INTERVAL_MS - 2 * DEFAULT_HEARTBEAT_INTERVAL_MS - 1,
+            condition.remainingMs(time.milliseconds()));
+
+        time.sleep(condition.remainingMs(time.milliseconds()));
+        assertTrue(heartbeatRequestManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
     }
 
     /**
@@ -150,7 +181,7 @@ abstract class AbstractHeartbeatRequestManagerTest<R extends AbstractResponse> {
         NetworkClientDelegate.PollResult result = heartbeatRequestManager.poll(time.milliseconds());
         assertEquals(0, result.unsentRequests.size(),
             "No heartbeat should be sent while interval has not expired");
-        assertEquals(heartbeatRequestState.timeToNextHeartbeatMs(time.milliseconds()), result.timeUntilNextPollMs);
+        assertEquals(heartbeatRequestState.timeToNextHeartbeatMs(time.milliseconds()), heartbeatRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         assertNextHeartbeatTiming(DEFAULT_HEARTBEAT_INTERVAL_MS);
 
         result = heartbeatRequestManager.poll(time.milliseconds());

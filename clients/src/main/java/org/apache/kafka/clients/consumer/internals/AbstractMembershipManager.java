@@ -1447,6 +1447,39 @@ public abstract class AbstractMembershipManager<R extends AbstractResponse> impl
         this.stateUpdatesListeners.add(listener);
     }
 
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (state != MemberState.RECONCILING || reconciliationInProgress || targetAssignmentReconciled())
+            return NextPollCondition.idle();
+
+        // Inspect the same projection that reconciliation uses without changing owner state.
+        Map<Uuid, SortedSet<Integer>> resolved = new HashMap<>();
+        Set<TopicPartition> resolvedPartitions = new HashSet<>();
+        Map<Uuid, String> topicNames = metadata.topicNames();
+        boolean unresolved = false;
+        for (Map.Entry<Uuid, SortedSet<Integer>> entry : currentTargetAssignment.partitions.entrySet()) {
+            String name = topicNames.get(entry.getKey());
+            if (name == null)
+                name = assignedTopicNamesCache.get(entry.getKey());
+            if (name == null) {
+                unresolved = true;
+            } else {
+                resolved.put(entry.getKey(), entry.getValue());
+                for (int partition : entry.getValue())
+                    resolvedPartitions.add(new TopicPartition(name, partition));
+            }
+        }
+        if (unresolved && !metadata.updateRequested())
+            return NextPollCondition.ready();
+        if (!currentAssignment.isNone() && resolved.equals(currentAssignment.partitions)) {
+            return currentAssignment.localEpoch == currentTargetAssignment.localEpoch
+                ? NextPollCondition.idle() : NextPollCondition.ready();
+        }
+        if (autoCommitEnabled || !resolvedPartitions.containsAll(subscriptions.assignedPartitions()))
+            return NextPollCondition.idle();
+        return NextPollCondition.ready();
+    }
+
     /**
      * During normal operation of the {@link Consumer}, a request manager may need to send out network requests.
      * Implementations can return {@link NetworkClientDelegate.PollResult their need for network I/O} by returning

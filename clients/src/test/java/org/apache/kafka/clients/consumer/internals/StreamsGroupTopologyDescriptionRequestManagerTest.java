@@ -90,6 +90,27 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
     }
 
+    @Test
+    public void testConditionRechecksDependencyCompletionAndRetryDeadline() {
+        streamsRebalanceData.setWireTopologyDescription(
+            new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
+        streamsRebalanceData.setTopologyPushRequired(true);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
+        assertEquals(1, result.unsentRequests.size());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        result.unsentRequests.get(0).handler().onFailure(time.milliseconds(), Errors.COORDINATOR_LOAD_IN_PROGRESS.exception());
+        long retryMs = manager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+        assertTrue(retryMs > 0 && retryMs < Long.MAX_VALUE);
+        time.sleep(retryMs);
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
     /**
      * Test the situation when the wire-format topology description has not yet been populated:
      * no request should be sent.
@@ -118,7 +139,7 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
     }
 
     /**
-     * Test the situation when the topologyPushRequired flag is not set: maximumTimeToWait should
+     * Test the situation when the topologyPushRequired flag is not set: applicationPollCondition should
      * return Long.MAX_VALUE and no request should be sent even if every other precondition is satisfied.
      */
     @Test
@@ -127,12 +148,12 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
             new StreamsGroupTopologyDescriptionUpdateRequestData.TopologyDescription());
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
 
-        assertEquals(Long.MAX_VALUE, manager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(Long.MAX_VALUE, manager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
         assertEquals(0, manager.poll(time.milliseconds()).unsentRequests.size());
     }
 
     /**
-     * Test the situation when all preconditions are satisfied: maximumTimeToWait should return 0
+     * Test the situation when all preconditions are satisfied: applicationPollCondition should return 0
      * to wake the poll loop immediately, and the subsequent poll should build a request with the
      * correct groupId, memberId, and target coordinator node.
      */
@@ -143,7 +164,7 @@ public class StreamsGroupTopologyDescriptionRequestManagerTest {
         streamsRebalanceData.setTopologyPushRequired(true);
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.of(coordinatorNode));
 
-        assertEquals(0L, manager.maximumTimeToWait(time.milliseconds()));
+        assertEquals(0L, manager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
 
         final NetworkClientDelegate.PollResult result = manager.poll(time.milliseconds());
 

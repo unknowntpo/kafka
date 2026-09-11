@@ -127,6 +127,10 @@ public class ShareConsumerImplTest {
     private final LinkedBlockingQueue<BackgroundEvent> backgroundEventQueue = new LinkedBlockingQueue<>();
     private final CompletableEventReaper backgroundEventReaper = mock(CompletableEventReaper.class);
 
+    public ShareConsumerImplTest() {
+        doReturn(NextPollCondition.ready()).when(applicationEventHandler).applicationPollCondition();
+    }
+
     @AfterEach
     public void resetAll() {
         backgroundEventQueue.clear();
@@ -386,7 +390,7 @@ public class ShareConsumerImplTest {
         completeShareSubscriptionChangeApplicationEventSuccessfully(subscriptions, topics);
         consumer.subscribe(topics);
 
-        doReturn(0L).when(applicationEventHandler).maximumTimeToWait();
+        doReturn(NextPollCondition.ready()).when(applicationEventHandler).applicationPollCondition();
         // Check that only 1 ShareFetchEvent is sent per poll
         consumer.poll(Duration.ofMillis(100));
         verify(applicationEventHandler, times(1)).add(argThat(event -> event instanceof ShareFetchEvent));
@@ -838,7 +842,8 @@ public class ShareConsumerImplTest {
         subscriptions.seek(tp, 0);
 
         // Keep pollForFetches from spinning by making it "wait" and advance MockTime.
-        doReturn(100L).when(applicationEventHandler).maximumTimeToWait();
+        doAnswer(invocation -> NextPollCondition.after(time.milliseconds(), 100L))
+            .when(applicationEventHandler).applicationPollCondition();
         doAnswer(invocation -> {
             Timer pollTimer = invocation.getArgument(0, Timer.class);
             ((MockTime) time).sleep(pollTimer.remainingMs());

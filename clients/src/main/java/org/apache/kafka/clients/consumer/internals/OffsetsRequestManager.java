@@ -166,6 +166,11 @@ public final class OffsetsRequestManager implements RequestManager, ClusterResou
      * containing it.
      */
     @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        return requestsToSend.isEmpty() ? NextPollCondition.idle() : NextPollCondition.ready();
+    }
+
+    @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         // Copy the outgoing request list and clear it.
         List<NetworkClientDelegate.UnsentRequest> unsentRequests = new ArrayList<>(requestsToSend);

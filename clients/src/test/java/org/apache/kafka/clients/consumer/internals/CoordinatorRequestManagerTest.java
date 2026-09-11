@@ -83,6 +83,39 @@ public class CoordinatorRequestManagerTest {
         assertEquals(Collections.emptyList(), pollResult.unsentRequests);
     }
 
+    @Test
+    public void testConditionTracksAttemptCompletionAndBackoffWithoutSending() {
+        CoordinatorRequestManager manager = setupCoordinatorManager(GROUP_ID);
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        NetworkClientDelegate.PollResult first = manager.poll(time.milliseconds());
+        assertEquals(1, first.unsentRequests.size());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        first.unsentRequests.get(0).handler().onFailure(time.milliseconds(), Errors.NETWORK_EXCEPTION.exception());
+        long remainingMs = manager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+        assertTrue(remainingMs > 0);
+        time.sleep(remainingMs);
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertEquals(1, manager.poll(time.milliseconds()).unsentRequests.size());
+        manager.signalClose();
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
+    @Test
+    public void testConditionRechecksCoordinatorInvalidation() {
+        CoordinatorRequestManager manager = setupCoordinatorManager(GROUP_ID);
+        expectFindCoordinatorRequest(manager, Errors.NONE);
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        manager.markCoordinatorUnknown("disconnected", time.milliseconds());
+
+        long backoffMs = manager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+        assertTrue(backoffMs > 0 && backoffMs < Long.MAX_VALUE);
+        time.sleep(backoffMs);
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
     /**
      * This test mimics a client that has been disconnected from the coordinator. When the client remains disconnected
      * from the coordinator for 60 seconds, the client will begin to emit a warning log every minute thereafter to
@@ -240,10 +273,8 @@ public class CoordinatorRequestManagerTest {
 
     @Test
     public void testNoBusyPollWhileFindCoordinatorRequestInFlight() {
-        // KAFKA-20253: while a FindCoordinator request is in flight and its backoff has already
-        // elapsed, poll() must not return timeUntilNextPollMs == 0. Doing so drives the consumer
-        // network thread into a NetworkClient.poll(0) busy-spin, since there is nothing to send
-        // until the in-flight request completes.
+        // KAFKA-20253: an in-flight FindCoordinator request must not create immediate eligibility
+        // after its backoff expires. Its response supplies the next enabling input.
         CoordinatorRequestManager coordinatorManager = setupCoordinatorManager(GROUP_ID);
 
         // First poll sends a FindCoordinator request, marking it in-flight. Do NOT complete it.
@@ -255,9 +286,8 @@ public class CoordinatorRequestManagerTest {
 
         NetworkClientDelegate.PollResult res2 = coordinatorManager.poll(time.milliseconds());
         assertEquals(0, res2.unsentRequests.size(), "no new request should be sent while one is in flight");
-        assertTrue(res2.timeUntilNextPollMs > 0,
-            "must not busy-poll (timeUntilNextPollMs == 0) while a FindCoordinator request is in flight; got "
-                + res2.timeUntilNextPollMs);
+        assertFalse(coordinatorManager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()),
+            "An in-flight coordinator request must not make the network loop busy-poll");
     }
 
     @ParameterizedTest
