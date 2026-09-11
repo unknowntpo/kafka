@@ -801,6 +801,12 @@ public class SubscriptionState {
         }
     }
 
+    /** Return the recorded preferred replica without expiring its lease. */
+    synchronized Optional<Integer> preferredReadReplicaId(TopicPartition tp) {
+        TopicPartitionState state = assignedStateOrNull(tp);
+        return state == null ? Optional.empty() : Optional.ofNullable(state.preferredReadReplica);
+    }
+
     /**
      * Unset the preferred read replica. This causes the fetcher to go back to the leader for fetches.
      *

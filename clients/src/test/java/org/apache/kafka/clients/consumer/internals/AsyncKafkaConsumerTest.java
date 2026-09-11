@@ -2113,10 +2113,10 @@ public class AsyncKafkaConsumerTest {
     /**
      * Verifies that with manual partition assignment, poll() blocks for
      * the full user-supplied timeout instead of spinning in a busy loop.
-     * Before the fix, AbstractHeartbeatRequestManager.maximumTimeToWait() returned 0
+     * Before the fix, AbstractHeartbeatRequestManager.applicationPollCondition() returned 0
      * while the membership state was UNSUBSCRIBED (the state used for manual assignment),
      * causing pollForFetches() to call fetchBuffer.awaitWakeup() with a 0-timeout timer
-     * and re-enter the poll loop immediately. After KAFKA-20426, maximumTimeToWait() returns
+     * and re-enter the poll loop immediately. After KAFKA-20426, applicationPollCondition() returns
      * Long.MAX_VALUE in that state so the application thread can block for the full timeout.
      */
     @Test
@@ -2133,7 +2133,7 @@ public class AsyncKafkaConsumerTest {
         subscriptions.assignFromUser(singleton(tp));
         subscriptions.seek(tp, 0);
 
-        // Simulate the FIXED behavior of AbstractHeartbeatRequestManager#maximumTimeToWait() when the
+        // Simulate the FIXED behavior of AbstractHeartbeatRequestManager#applicationPollCondition() when the
         // membership state is UNSUBSCRIBED, i.e. user called assign().
         doReturn(Long.MAX_VALUE).when(applicationEventHandler).maximumTimeToWait();
 
@@ -2158,7 +2158,7 @@ public class AsyncKafkaConsumerTest {
         consumer.poll(Duration.ofMillis(pollTimeoutMs));
 
         // The poll timer passed to awaitWakeup must have been set to the full user timeout,
-        // proving pollTimeout was NOT clamped to 0 (busy loop) by maximumTimeToWait().
+        // proving pollTimeout was NOT clamped to 0 (busy loop) by applicationPollCondition().
         assertNotNull(awaitTimerInitialMs.get(), "fetchBuffer.awaitWakeup was never called");
         assertEquals(pollTimeoutMs, awaitTimerInitialMs.get(),
             "Expected poll wait timer to use the full user timeout (no busy loop), but was " + awaitTimerInitialMs.get());

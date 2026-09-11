@@ -261,6 +261,7 @@ public class StreamsMembershipManager implements RequestManager {
      * It is equal to LocalAssignment.NONE whenever we are not in a group.
      */
     private LocalAssignment targetAssignment = LocalAssignment.NONE;
+    private LocalAssignment failedReconciliationTarget;
 
     /**
      * Assignment that the member received from the server and successfully processed, together with
@@ -651,6 +652,7 @@ public class StreamsMembershipManager implements RequestManager {
      */
     private void clearCurrentTaskAssignment() {
         currentAssignment = LocalAssignment.NONE;
+        failedReconciliationTarget = null;
     }
 
     /**
@@ -661,6 +663,7 @@ public class StreamsMembershipManager implements RequestManager {
         notifyAssignmentChange(Collections.emptySet());
         currentAssignment = LocalAssignment.NONE;
         targetAssignment = LocalAssignment.NONE;
+        failedReconciliationTarget = null;
     }
 
     /**
@@ -1126,6 +1129,13 @@ public class StreamsMembershipManager implements RequestManager {
      * Called by the network thread to reconcile the current and target assignment.
      */
     @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        return state == MemberState.RECONCILING && !reconciliationInProgress &&
+            !targetAssignmentReconciled() && !targetAssignment.equals(failedReconciliationTarget)
+            ? NextPollCondition.ready() : NextPollCondition.idle();
+    }
+
+    @Override
     public NetworkClientDelegate.PollResult poll(long currentTimeMs) {
         if (state == MemberState.RECONCILING) {
             maybeReconcile();
@@ -1142,6 +1152,8 @@ public class StreamsMembershipManager implements RequestManager {
      *  - Another reconciliation is already in progress.
      */
     private void maybeReconcile() {
+        if (targetAssignment.equals(failedReconciliationTarget))
+            return;
         if (targetAssignmentReconciled()) {
             log.trace("Ignoring reconciliation attempt. Target assignment is equal to the " +
                 "current assignment.");
@@ -1216,10 +1228,13 @@ public class StreamsMembershipManager implements RequestManager {
             if (callbackError != null) {
                 log.error("Reconciliation failed for tasks {}",
                     currentTargetAssignment, callbackError);
+                if (state == MemberState.RECONCILING && !rejoinedWhileReconciliationInProgress)
+                    failedReconciliationTarget = currentTargetAssignment;
                 markReconciliationCompleted();
             } else {
                 if (reconciliationInProgress && !maybeAbortReconciliation()) {
                     currentAssignment = currentTargetAssignment;
+                    failedReconciliationTarget = null;
                     transitionTo(MemberState.ACKNOWLEDGING);
                     markReconciliationCompleted();
                 }

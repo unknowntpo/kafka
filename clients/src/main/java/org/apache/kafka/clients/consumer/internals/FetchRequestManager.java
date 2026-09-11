@@ -78,10 +78,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * If any request is in flight, its completion will wake the application thread regardless of the outcome, so
      * no separate bound is needed. Otherwise, the application thread's wait is bounded by {@code retryBackoffMs}
      * so it can re-evaluate subscription state changes promptly.
-     */
+    */
     @Override
-    public long maximumTimeToWait(long currentTimeMs) {
-        return nodesWithPendingFetchRequests.isEmpty() ? retryBackoffMs : Long.MAX_VALUE;
+    public NextPollCondition applicationPollCondition(long currentTimeMs) {
+        return nodesWithPendingFetchRequests.isEmpty() || hasFetchablePartitionWithoutPendingNode()
+                ? NextPollCondition.after(currentTimeMs, retryBackoffMs)
+                : NextPollCondition.idle();
     }
 
     /**
@@ -114,6 +116,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     /**
      * {@inheritDoc}
      */
+    @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        // This represents preparation demand, not the lifetime of a broker fetch or delivered records.
+        return pendingFetchRequestFuture == null ? NextPollCondition.idle() : NextPollCondition.ready();
+    }
+
     @Override
     public PollResult poll(long currentTimeMs) {
         return pollInternal(

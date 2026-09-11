@@ -53,7 +53,6 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.slf4j.Logger;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -178,6 +177,32 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      * Poll for the {@link OffsetFetchRequest} and {@link OffsetCommitRequest} request if there's any.
      */
     @Override
+    public NextPollCondition nextPollCondition(long currentTimeMs) {
+        if (coordinatorRequestManager.coordinator().isEmpty()) {
+            return pendingRequests.hasUnsentRequests() && (coordinatorRequestManager.fatalError().isPresent() || closing)
+                ? NextPollCondition.ready() : NextPollCondition.idle();
+        }
+        if (!pendingRequests.hasUnsentRequests())
+            return NextPollCondition.idle();
+        if (closing)
+            return NextPollCondition.ready();
+
+        NextPollCondition condition = NextPollCondition.idle();
+        for (OffsetCommitRequestState request : unsentOffsetCommitRequests()) {
+            condition = NextPollCondition.either(condition,
+                NextPollCondition.after(currentTimeMs, request.remainingBackoffMs(currentTimeMs)));
+            // The owner expires retries in poll; an initial admitted attempt is allowed even at zero budget.
+            if (request.numAttempts > 0)
+                condition = NextPollCondition.either(condition, NextPollCondition.after(currentTimeMs, request.remainingMs()));
+        }
+        for (OffsetFetchRequestState request : unsentOffsetFetchRequests()) {
+            condition = NextPollCondition.either(condition,
+                NextPollCondition.after(currentTimeMs, request.remainingBackoffMs(currentTimeMs)));
+        }
+        return condition;
+    }
+
+    @Override
     public NetworkClientDelegate.PollResult poll(final long currentTimeMs) {
         // poll when the coordinator node is known and fatal error is not present
         if (coordinatorRequestManager.coordinator().isEmpty()) {
@@ -201,11 +226,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             return EMPTY;
 
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drain(currentTimeMs);
-        // min of the remainingBackoffMs of all the request that are still backing off
-        final long timeUntilNextPoll = Math.min(
-            findMinTime(unsentOffsetCommitRequests(), currentTimeMs),
-            findMinTime(unsentOffsetFetchRequests(), currentTimeMs));
-        return new NetworkClientDelegate.PollResult(timeUntilNextPoll, requests);
+        return new NetworkClientDelegate.PollResult(requests);
     }
 
     @Override
@@ -218,11 +239,11 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
      * to results from the request managers. For example, the subscription state can change when heartbeats
      * are sent, so blocking for longer than the heartbeat interval might mean the application thread is not
      * responsive to changes.
-     */
+    */
     @Override
-    public long maximumTimeToWait(long currentTimeMs) {
+    public NextPollCondition applicationPollCondition(long currentTimeMs) {
         if (autoCommitState.isEmpty()) {
-            return Long.MAX_VALUE;
+            return NextPollCondition.idle();
         }
         AutoCommitState autoCommit = autoCommitState.get();
         // An auto-commit is only sent when the coordinator is known; poll() returns EMPTY otherwise.
@@ -232,16 +253,9 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         // application and network threads to busy-spin. Wait a retry backoff instead of the auto-commit
         // interval, which may be configured to zero and is consistent with the other request managers.
         if (coordinatorRequestManager.coordinator().isEmpty()) {
-            return retryBackoffMs;
+            return NextPollCondition.after(currentTimeMs, retryBackoffMs);
         }
-        return autoCommit.remainingMs(currentTimeMs);
-    }
-
-    private static long findMinTime(final Collection<? extends RequestState> requests, final long currentTimeMs) {
-        return requests.stream()
-            .mapToLong(request -> request.remainingBackoffMs(currentTimeMs))
-            .min()
-            .orElse(Long.MAX_VALUE);
+        return NextPollCondition.after(currentTimeMs, autoCommit.remainingMs(currentTimeMs));
     }
 
     private KafkaException maybeWrapAsTimeoutException(Throwable t) {
@@ -734,7 +748,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
         if (pendingRequests.unsentOffsetCommits.isEmpty())
             return EMPTY;
         List<NetworkClientDelegate.UnsentRequest> requests = pendingRequests.drainPendingCommits();
-        return new NetworkClientDelegate.PollResult(Long.MAX_VALUE, requests);
+        return new NetworkClientDelegate.PollResult(requests);
     }
 
     private void maybeUpdateLastSeenEpochIfNewer(final Map<TopicPartition, OffsetAndMetadata> offsets) {
@@ -1562,7 +1576,7 @@ public class CommitRequestManager implements RequestManager, MemberStateListener
             // in-flight (for example it cannot complete because the coordinator is unavailable after a
             // failed re-authentication), a new auto-commit cannot be started yet. Returning 0 here would
             // busy-spin the application thread, since this value feeds AsyncKafkaConsumer.pollForFetches()
-            // via maximumTimeToWait(). Wait for the interval instead; the network thread still wakes on the
+            // via applicationPollCondition(). Wait for the interval instead; the network thread still wakes on the
             // in-flight commit's response, which resets this timer.
             if (this.timer.isExpired() && this.hasInflightCommit) {
                 return autoCommitInterval;

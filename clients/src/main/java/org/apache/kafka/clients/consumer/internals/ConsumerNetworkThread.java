@@ -195,7 +195,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      *     </li>
      *     <li>
      *         Iterate through the {@link RequestManager} list and invoke {@link RequestManager#poll(long)} to get
-     *         the {@link NetworkClientDelegate.UnsentRequest} list and the poll time for the network poll
+     *         the {@link NetworkClientDelegate.UnsentRequest} list
      *     </li>
      *     <li>
      *         Stage each {@link AbstractRequest.Builder request} to be sent via
@@ -217,26 +217,34 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
         }
         lastPollTimeMs = currentTimeMs;
 
-        long pollWaitTimeMs = MAX_POLL_TIMEOUT_MS;
-
         for (RequestManager rm : requestManagers.entries()) {
-            NetworkClientDelegate.PollResult pollResult = rm.poll(currentTimeMs);
-            long timeoutMs = networkClientDelegate.addAll(pollResult);
-            pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
+            long managerTimeMs = time.milliseconds();
+            if (rm.nextPollCondition(managerTimeMs).isReady(managerTimeMs)) {
+                NetworkClientDelegate.PollResult pollResult = rm.poll(time.milliseconds());
+                networkClientDelegate.addAll(pollResult);
+            }
         }
 
-        networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
-
-        long maxTimeToWaitMs = Long.MAX_VALUE;
-
+        // A later manager may enable an earlier manager. Re-query after the ordered pass so that
+        // the network wait cannot hide that local progress behind the fallback timeout.
+        NextPollCondition nextPoll = NextPollCondition.after(currentTimeMs, MAX_POLL_TIMEOUT_MS);
         for (RequestManager rm : requestManagers.entries()) {
-            long waitMs = rm.maximumTimeToWait(currentTimeMs);
-            maxTimeToWaitMs = Math.min(maxTimeToWaitMs, waitMs);
+            long managerTimeMs = time.milliseconds();
+            nextPoll = NextPollCondition.either(nextPoll, rm.nextPollCondition(managerTimeMs));
         }
 
-        cachedMaximumTimeToWait = maxTimeToWaitMs;
+        long networkPollTimeMs = time.milliseconds();
+        networkClientDelegate.poll(nextPoll.remainingMs(networkPollTimeMs), networkPollTimeMs);
 
-        reapExpiredApplicationEvents(currentTimeMs);
+        long applicationPollWaitMs = Long.MAX_VALUE;
+        for (RequestManager rm : requestManagers.entries()) {
+            long managerTimeMs = time.milliseconds();
+            applicationPollWaitMs = Math.min(applicationPollWaitMs,
+                    rm.applicationPollCondition(managerTimeMs).remainingMs(managerTimeMs));
+        }
+        cachedMaximumTimeToWait = applicationPollWaitMs;
+
+        reapExpiredApplicationEvents(time.milliseconds());
         List<CompletableEvent<?>> uncompletedEvents = applicationEventReaper.uncompletedEvents();
         maybeFailOnMetadataError(uncompletedEvents);
     }
@@ -291,7 +299,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      * <ol>
      *     <li>
      *         Iterate through the {@link RequestManager} list and invoke {@link RequestManager#pollOnClose(long)}
-     *         to get the {@link NetworkClientDelegate.UnsentRequest} list and the poll time for the network poll
+     *         to get the {@link NetworkClientDelegate.UnsentRequest} list
      *     </li>
      *     <li>
      *         Stage each {@link AbstractRequest.Builder request} to be sent via

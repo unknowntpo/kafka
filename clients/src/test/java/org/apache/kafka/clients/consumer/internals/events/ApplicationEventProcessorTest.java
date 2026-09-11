@@ -166,7 +166,7 @@ public class ApplicationEventProcessorTest {
     public void testPrepClosingCommitEvents() {
         setupProcessor(true);
         List<NetworkClientDelegate.UnsentRequest> results = mockCommitResults();
-        doReturn(new NetworkClientDelegate.PollResult(100, results)).when(commitRequestManager).pollOnClose(anyLong());
+        doReturn(new NetworkClientDelegate.PollResult(results)).when(commitRequestManager).pollOnClose(anyLong());
         processor.process(new CommitOnCloseEvent());
         verify(commitRequestManager).signalClose();
     }

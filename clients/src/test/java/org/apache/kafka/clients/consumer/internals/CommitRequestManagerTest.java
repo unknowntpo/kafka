@@ -202,6 +202,24 @@ public class CommitRequestManagerTest {
     }
 
     @Test
+    public void testConditionStopsAfterPendingWorkFailsWithCoordinatorError() {
+        CommitRequestManager manager = create(false, 0);
+        when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
+        CompletableFuture<?> result = manager.commitAsync(Map.of(new TopicPartition("topic", 0), new OffsetAndMetadata(1)));
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+
+        when(coordinatorRequestManager.fatalError()).thenReturn(Optional.of(new GroupAuthorizationException("denied")));
+        assertTrue(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+        assertFalse(result.isDone());
+        manager.poll(time.milliseconds());
+
+        assertTrue(result.isCompletedExceptionally());
+        // Commit processing does not consume the coordinator's error; no pending work means no reason to run.
+        assertTrue(coordinatorRequestManager.fatalError().isPresent());
+        assertFalse(manager.nextPollCondition(time.milliseconds()).isReady(time.milliseconds()));
+    }
+
+    @Test
     public void testAsyncCommitWhileCoordinatorUnknownIsSentOutWhenCoordinatorDiscovered() {
         CommitRequestManager commitRequestManager = create(false, 0);
         assertPoll(false, 0, commitRequestManager);
@@ -751,10 +769,10 @@ public class CommitRequestManagerTest {
         when(coordinatorRequestManager.coordinator()).thenReturn(Optional.empty());
 
         time.sleep(100);
-        long result = commitRequestManager.maximumTimeToWait(time.milliseconds());
+        long result = commitRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
 
         assertTrue(result > 0,
-            "maximumTimeToWait must be > 0 when the coordinator is unknown to avoid a busy-spin; got " + result);
+            "applicationPollCondition must be > 0 when the coordinator is unknown to avoid a busy-spin; got " + result);
         assertEquals(retryBackoffMs, result);
     }
 
@@ -808,8 +826,8 @@ public class CommitRequestManagerTest {
                 // the coordinator never becomes known since there is no real broker to respond.
                 networkClientDelegate.poll(50, time.milliseconds());
 
-                long waitMs = realCommitRequestManager.maximumTimeToWait(time.milliseconds());
-                assertTrue(waitMs > 0, "maximumTimeToWait must be > 0 while real bootstrap DNS resolution is pending; got " + waitMs);
+                long waitMs = realCommitRequestManager.applicationPollCondition(time.milliseconds()).remainingMs(time.milliseconds());
+                assertTrue(waitMs > 0, "applicationPollCondition must be > 0 while real bootstrap DNS resolution is pending; got " + waitMs);
 
                 Optional<Exception> metadataError = networkClientDelegate.getAndClearMetadataError();
                 if (metadataError.isPresent()) {
@@ -1278,7 +1296,7 @@ public class CommitRequestManagerTest {
     private void assertPollDoesNotReturn(CommitRequestManager commitRequestManager, long assertNextPollMs) {
         NetworkClientDelegate.PollResult res = commitRequestManager.poll(time.milliseconds());
         assertEquals(0, res.unsentRequests.size());
-        assertEquals(assertNextPollMs, res.timeUntilNextPollMs);
+        assertEquals(assertNextPollMs, commitRequestManager.nextPollCondition(time.milliseconds()).remainingMs(time.milliseconds()));
     }
 
     private void assertRetryBackOff(CommitRequestManager commitRequestManager, long retryBackoffMs) {

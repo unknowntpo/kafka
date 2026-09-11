@@ -69,6 +69,7 @@ public class HeartbeatRequestState extends RequestState {
     }
 
     public long timeToNextHeartbeatMs(final long currentTimeMs) {
+        update(currentTimeMs);
         if (heartbeatTimer.isExpired()) {
             return remainingBackoffMs(currentTimeMs);
         }
