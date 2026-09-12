@@ -1115,22 +1115,26 @@ public class FetcherTest {
         assertEquals(1, recordsToTest.get(0).offset());
         assertEquals(2, recordsToTest.get(1).offset());
 
-        assertEquals(0, sendFetches());
+        // A fetch now goes out for a partition that still has buffered data, asking for the offset
+        // after it, so the leader does not sit idle while the application catches up.
+        assertEquals(1, sendFetches());
         consumerClient.poll(time.timer(0));
-        recordsByPartition = fetchRecords();
-        recordsToTest = recordsByPartition.get(tp0);
-        assertEquals(1, recordsToTest.size());
-        assertEquals(4L, subscriptions.position(tp0).offset);
-        assertEquals(3, recordsToTest.get(0).offset());
 
-        assertTrue(sendFetches() > 0);
-        consumerClient.poll(time.timer(0));
+        // The last record of the first response and the first of the second are both buffered now, so a single
+        // collection returns max.poll.records of them, crossing from one response into the next.
         recordsByPartition = fetchRecords();
         recordsToTest = recordsByPartition.get(tp0);
         assertEquals(2, recordsToTest.size());
+        assertEquals(5L, subscriptions.position(tp0).offset);
+        assertEquals(3, recordsToTest.get(0).offset());
+        assertEquals(4, recordsToTest.get(1).offset());
+
+        // The rest of the second response is still buffered, so no further fetch is needed to collect it.
+        recordsByPartition = fetchRecords();
+        recordsToTest = recordsByPartition.get(tp0);
+        assertEquals(1, recordsToTest.size());
         assertEquals(6L, subscriptions.position(tp0).offset);
-        assertEquals(4, recordsToTest.get(0).offset());
-        assertEquals(5, recordsToTest.get(1).offset());
+        assertEquals(5, recordsToTest.get(0).offset());
     }
 
     /**
@@ -1171,7 +1175,9 @@ public class FetcherTest {
         pollAndValidateMaxPollRecordsNotExceeded(maxPollRecords);
 
         // See if we need to send another fetch, which we do not because we have records in hand.
-        assertEquals(0, sendFetches());
+        // A fetch now goes out for a partition that still has buffered data, asking for the offset
+        // after it, so the leader does not sit idle while the application catches up.
+        assertEquals(2, sendFetches());
         // The poll returns 2 more records, 1 from the topic-partition we've already been
         // processing, and 1 more from the other topic-partition. This means we have processed
         // all records from the former, and 2 remain from the latter.
@@ -1444,10 +1450,14 @@ public class FetcherTest {
 
         // #2 seek, request, poll, response
         subscriptions.seekUnvalidated(tp1, new SubscriptionState.FetchPosition(1, Optional.empty(), metadata.currentLeader(tp1)));
+
+        // tp0 is paused before this fetch rather than after it. Its records from the first response stay buffered
+        // either way, which is what the collection below has to skip, but pausing it first keeps tp0's leader out
+        // of this fetch: otherwise it would also be requested, at the offset after its buffered records, leaving
+        // two outstanding requests for the one prepared response to match.
+        subscriptions.pause(tp0);
         assertEquals(1, sendFetches());
         client.prepareResponse(fullFetchResponse(tidp1, nextRecords, Errors.NONE, 100L, 0));
-
-        subscriptions.pause(tp0);
         consumerClient.poll(time.timer(0));
 
         fetchedRecords = fetchRecords();
@@ -1476,7 +1486,9 @@ public class FetcherTest {
 
         // #2 seek, request, poll, response
         subscriptions.seekUnvalidated(tp1, new SubscriptionState.FetchPosition(1, Optional.empty(), metadata.currentLeader(tp1)));
-        assertEquals(1, sendFetches());
+        // A fetch now goes out for a partition that still has buffered data, asking for the offset
+        // after it, so the leader does not sit idle while the application catches up.
+        assertEquals(2, sendFetches());
         client.prepareResponse(fullFetchResponse(tidp1, nextRecords, Errors.NONE, 100L, 0));
 
         subscriptions.pause(tp0);
@@ -1858,7 +1870,9 @@ public class FetcherTest {
         subscriptions.assignFromUser(Set.of(tp0, tp1));
         subscriptions.seekUnvalidated(tp1, new SubscriptionState.FetchPosition(1, Optional.empty(), metadata.currentLeader(tp1)));
 
-        assertEquals(1, sendFetches());
+        // Two requests now: tp1's leader, and tp0's leader, whose remaining buffered record no longer stops it
+        // from being fetched from.
+        assertEquals(2, sendFetches());
         partitions = new HashMap<>();
         partitions.put(tidp1, new FetchResponseData.PartitionData()
                         .setPartitionIndex(tp1.partition())
@@ -2773,7 +2787,9 @@ public class FetcherTest {
         assertEquals(2, records.get(1).offset());
 
         // There is still a buffered record.
-        assertEquals(0, sendFetches());
+        // A fetch now goes out for a partition that still has buffered data, asking for the offset
+        // after it, so the leader does not sit idle while the application catches up.
+        assertEquals(1, sendFetches());
         fetchedRecords = fetchRecords();
         assertFalse(fetchedRecords.containsKey(tp1));
         records = fetchedRecords.get(tp0);
@@ -2785,7 +2801,10 @@ public class FetcherTest {
         LinkedHashMap<TopicIdPartition, FetchResponseData.PartitionData> partitions2 = new LinkedHashMap<>();
         FetchResponse resp2 = FetchResponse.of(Errors.NONE, 0, 123, partitions2, List.of());
         client.prepareResponse(resp2);
-        assertEquals(1, sendFetches());
+
+        // The fetch issued after the previous collection is still in flight and is what this empty response
+        // answers, so there is nothing new to send.
+        assertEquals(0, sendFetches());
         consumerClient.poll(time.timer(0));
         fetchedRecords = fetchRecords();
         assertTrue(fetchedRecords.isEmpty());
@@ -2954,11 +2973,16 @@ public class FetcherTest {
                 if (!fetchedRecords.isEmpty()) {
                     fetchesRemaining.decrementAndGet();
                     fetchedRecords.forEach((tp, records) -> {
-                        assertEquals(2, records.size());
+                        // Each response carries two records, and more than one response per partition can be
+                        // buffered now, so one collection can return several responses' worth. What has to
+                        // hold is that they are contiguous and start where the previous collection stopped.
                         long nextOffset = nextFetchOffsets.get(tp);
-                        assertEquals(nextOffset, records.get(0).offset());
-                        assertEquals(nextOffset + 1, records.get(1).offset());
-                        nextFetchOffsets.put(tp, nextOffset + 2);
+                        assertEquals(0, records.size() % 2);
+
+                        for (int i = 0; i < records.size(); i++)
+                            assertEquals(nextOffset + i, records.get(i).offset());
+
+                        nextFetchOffsets.put(tp, nextOffset + records.size());
                     });
                 }
             }
@@ -3021,7 +3045,9 @@ public class FetcherTest {
                     assertEquals(nextFetchOffset + 1, records.get(1).offset());
                     nextFetchOffset += 2;
                 }
-                assertTrue(fetchRecords().isEmpty());
+                // Records fetched ahead of the application can be waiting here, so a second collection is not
+                // necessarily empty. Leaving them for the next iteration verifies their offsets rather than
+                // discarding them.
             }
         }
         assertEquals(0, future.get());

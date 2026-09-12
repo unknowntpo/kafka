@@ -182,7 +182,7 @@ public class FetchRequestManagerTest {
             RequestTestUtils.metadataUpdateWithIds(1, singletonMap(topicName, 4), topicIds);
 
     private final int minBytes = 1;
-    private final int maxBytes = Integer.MAX_VALUE;
+    private int maxBytes = Integer.MAX_VALUE;
     private final int maxWaitMs = 0;
     private final int fetchSize = 1000;
     private final long retryBackoffMs = 100;
@@ -390,13 +390,17 @@ public class FetchRequestManagerTest {
 
     @Test
     public void testMaximumTimeToWaitBoundedWhenNoInflightRequest() {
+        // Buffered data alone no longer stops a partition from being fetched, so the credit is what creates the
+        // state this test is about: nothing to send and nothing in flight. The smallest value makes any buffered
+        // response exceed the credit.
+        maxBytes = 1;
         buildFetcher();
 
         assignFromUser(singleton(tp0));
         subscriptions.seek(tp0, 0);
 
-        // Fetch data for tp0, but leave it buffered (unconsumed) so the next prepare() finds every fetchable
-        // partition already buffered. With no in-flight request, maximumTimeToWait is bounded.
+        // Fetch data for tp0 and leave it buffered (unconsumed), which takes the node over its credit. With no
+        // in-flight request, maximumTimeToWait is bounded.
         client.prepareResponse(fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
         assertEquals(1, sendFetches());
         networkClientDelegate.poll(time.timer(0));
@@ -1368,22 +1372,26 @@ public class FetchRequestManagerTest {
         assertEquals(1, recordsToTest.get(0).offset());
         assertEquals(2, recordsToTest.get(1).offset());
 
-        assertEquals(0, sendFetches());
+        // A fetch now goes out for a partition that still has buffered data, asking for the offset
+        // after it, so the leader does not sit idle while the application catches up.
+        assertEquals(1, sendFetches());
         networkClientDelegate.poll(time.timer(0));
-        recordsByPartition = fetchRecords();
-        recordsToTest = recordsByPartition.get(tp0);
-        assertEquals(1, recordsToTest.size());
-        assertEquals(4L, subscriptions.position(tp0).offset);
-        assertEquals(3, recordsToTest.get(0).offset());
 
-        assertTrue(sendFetches() > 0);
-        networkClientDelegate.poll(time.timer(0));
+        // The last record of the first response and the first of the second are both buffered now, so a single
+        // collection returns max.poll.records of them, crossing from one response into the next.
         recordsByPartition = fetchRecords();
         recordsToTest = recordsByPartition.get(tp0);
         assertEquals(2, recordsToTest.size());
+        assertEquals(5L, subscriptions.position(tp0).offset);
+        assertEquals(3, recordsToTest.get(0).offset());
+        assertEquals(4, recordsToTest.get(1).offset());
+
+        // The rest of the second response is still buffered, so no further fetch is needed to collect it.
+        recordsByPartition = fetchRecords();
+        recordsToTest = recordsByPartition.get(tp0);
+        assertEquals(1, recordsToTest.size());
         assertEquals(6L, subscriptions.position(tp0).offset);
-        assertEquals(4, recordsToTest.get(0).offset());
-        assertEquals(5, recordsToTest.get(1).offset());
+        assertEquals(5, recordsToTest.get(0).offset());
     }
 
     /**
@@ -1636,10 +1644,14 @@ public class FetchRequestManagerTest {
 
         // #2 seek, request, poll, response
         subscriptions.seekUnvalidated(tp1, new SubscriptionState.FetchPosition(1, Optional.empty(), metadata.currentLeader(tp1)));
+
+        // tp0 is paused before this fetch rather than after it. Its records from the first response stay buffered
+        // either way, which is what the collection below has to skip, but pausing it first keeps tp0's leader out
+        // of this fetch: otherwise it would also be requested, at the offset after its buffered records, leaving
+        // two outstanding requests for the one prepared response to match.
+        subscriptions.pause(tp0);
         assertEquals(1, sendFetches());
         client.prepareResponse(fullFetchResponse(tidp1, nextRecords, Errors.NONE, 100L, 0));
-
-        subscriptions.pause(tp0);
         networkClientDelegate.poll(time.timer(0));
 
         fetchedRecords = fetchRecords();
@@ -1668,7 +1680,9 @@ public class FetchRequestManagerTest {
 
         // #2 seek, request, poll, response
         subscriptions.seekUnvalidated(tp1, new SubscriptionState.FetchPosition(1, Optional.empty(), metadata.currentLeader(tp1)));
-        assertEquals(1, sendFetches());
+        // A fetch now goes out for a partition that still has buffered data, asking for the offset
+        // after it, so the leader does not sit idle while the application catches up.
+        assertEquals(2, sendFetches());
         client.prepareResponse(fullFetchResponse(tidp1, nextRecords, Errors.NONE, 100L, 0));
 
         subscriptions.pause(tp0);
@@ -2102,7 +2116,9 @@ public class FetchRequestManagerTest {
         subscriptions.assignFromUser(Set.of(tp0, tp1));
         subscriptions.seekUnvalidated(tp1, new SubscriptionState.FetchPosition(1, Optional.empty(), metadata.currentLeader(tp1)));
 
-        assertEquals(1, sendFetches());
+        // Two requests now: tp1's leader, and tp0's leader, whose remaining buffered record no longer stops it
+        // from being fetched from.
+        assertEquals(2, sendFetches());
         partitions = new HashMap<>();
         partitions.put(tidp1, new FetchResponseData.PartitionData()
                 .setPartitionIndex(tp1.partition())
@@ -3017,7 +3033,9 @@ public class FetchRequestManagerTest {
         assertEquals(2, recordsToTest.get(1).offset());
 
         // There is still a buffered record.
-        assertEquals(0, sendFetches());
+        // A fetch now goes out for a partition that still has buffered data, asking for the offset
+        // after it, so the leader does not sit idle while the application catches up.
+        assertEquals(1, sendFetches());
         fetchedRecords = fetchRecords();
         assertFalse(fetchedRecords.containsKey(tp1));
         recordsToTest = fetchedRecords.get(tp0);
@@ -3029,7 +3047,10 @@ public class FetchRequestManagerTest {
         LinkedHashMap<TopicIdPartition, FetchResponseData.PartitionData> partitions2 = new LinkedHashMap<>();
         FetchResponse resp2 = FetchResponse.of(Errors.NONE, 0, 123, partitions2, List.of());
         client.prepareResponse(resp2);
-        assertEquals(1, sendFetches());
+
+        // The fetch issued after the previous collection is still in flight and is what this empty response
+        // answers, so there is nothing new to send.
+        assertEquals(0, sendFetches());
         networkClientDelegate.poll(time.timer(0));
         fetchedRecords = fetchRecords();
         assertTrue(fetchedRecords.isEmpty());
@@ -3687,8 +3708,9 @@ public class FetchRequestManagerTest {
     }
 
     /**
-     * This test makes several calls to {@link #sendFetches()}, and after each, the buffered partitions are
-     * modified to either cause (or prevent) a fetch from being requested.
+     * A partition that still has buffered data stays in the fetch request for its leader, asking for the offset after
+     * that data. Leaving it out is what used to stop the leader from being fetched from at all, because a partition
+     * missing from an incremental fetch request is dropped from the broker's fetch session.
      */
     @Test
     public void testFetchRequestWithBufferedPartitions() {
@@ -3703,110 +3725,66 @@ public class FetchRequestManagerTest {
         // Seek each partition so that it becomes eligible to fetch.
         partitions.forEach(tp -> subscriptions.seek(tp, 0));
 
-        // Get all the nodes serving as the leader for these partitions.
         List<Node> nodes = nodesForPartitionLeaders(partitions);
-
-        // Extract the nodes and their respective set of partitions to make things easier to keep track of later.
         assertEquals(2, nodes.size());
         Node node0 = nodes.get(0);
         Node node1 = nodes.get(1);
         List<TopicPartition> node0Partitions = partitionsForNode(node0, partitions);
         List<TopicPartition> node1Partitions = partitionsForNode(node1, partitions);
-        assertEquals(2, node0Partitions.size());
-        assertEquals(2, node1Partitions.size());
-        TopicPartition node0Partition1 = node0Partitions.get(0);
-        TopicPartition node0Partition2 = node0Partitions.get(1);
-        TopicPartition node1Partition1 = node1Partitions.get(0);
-        TopicPartition node1Partition2 = node1Partitions.get(1);
 
-        // sendFetches() call #1 should issue requests to node 0 or node 1 since neither has buffered data.
+        // Nothing is buffered yet, so every partition is requested at its position.
         List<NetworkClientDelegate.UnsentRequest> call1 = fetcher.sendFetches();
         assertEquals(2, call1.size());
         assertEquals(partitions, partitionsRequested(call1));
         assertEquals(new HashSet<>(nodes), nodesRequested(call1));
+        offsetsRequested(call1).forEach((tp, offset) -> assertEquals(0L, offset));
 
+        // Ten records per partition, starting at offset 0, none of them collected.
         prepareFetchResponses(node0, node0Partitions, 0);
         prepareFetchResponses(node1, node1Partitions, 0);
         networkClientDelegate.poll(time.timer(0));
-
         assertEquals(4, fetcher.fetchBuffer.bufferedPartitions().size());
-        collectSelectedPartition(node0Partition1, partitions);
-        node0Partitions.remove(node0Partition1);
-        assertEquals(3, fetcher.fetchBuffer.bufferedPartitions().size());
 
-        // sendFetches() call #2 shouldn't issue requests to either node 0 or node 1 since they both have buffered data.
+        // Every partition is requested again even though all of them have buffered data, and each is requested at
+        // the offset after its buffered records, so nothing is fetched twice and nothing is left out of the request.
         List<NetworkClientDelegate.UnsentRequest> call2 = fetcher.sendFetches();
-        assertEquals(0, call2.size());
+        assertEquals(2, call2.size());
+        assertEquals(partitions, partitionsRequested(call2));
+        assertEquals(new HashSet<>(nodes), nodesRequested(call2));
+        offsetsRequested(call2).forEach((tp, offset) -> assertEquals(10L, offset,
+            "The fetch for " + tp + " should continue after its buffered records rather than repeat them"));
+    }
 
+    /**
+     * Fetching runs ahead of the application only as far as the credit allows. Once a node holds that many bytes that
+     * have been fetched and not yet delivered, it stops being fetched from, leaving the rest of the data on the
+     * broker instead of in this client's memory.
+     */
+    @Test
+    public void testFetchRequestStopsWhenCreditIsExhausted() {
+        // Small enough that a single response's worth of records exceeds the credit, which is two of these.
+        maxBytes = 100;
+        buildFetcher();
+
+        assignFromUser(Set.of(tp0));
+        subscriptions.seek(tp0, 0);
+
+        Node node = metadata.fetch().leaderFor(tp0);
+        assertNotNull(node);
+
+        assertEquals(1, fetcher.sendFetches().size());
+        prepareFetchResponses(node, List.of(tp0), 0);
         networkClientDelegate.poll(time.timer(0));
-        collectSelectedPartition(node1Partition1, partitions);
-        node1Partitions.remove(node1Partition1);
-        assertEquals(2, fetcher.fetchBuffer.bufferedPartitions().size());
-
-        // sendFetches() call #3 shouldn't issue requests to either node 0 or node 1 since they both have buffered data.
-        List<NetworkClientDelegate.UnsentRequest> call3 = fetcher.sendFetches();
-        assertEquals(0, call3.size());
-
-        networkClientDelegate.poll(time.timer(0));
-        collectSelectedPartition(node0Partition2, partitions);
-        node0Partitions.remove(node0Partition2);
         assertEquals(1, fetcher.fetchBuffer.bufferedPartitions().size());
 
-        // Validate that all of node 0's partitions have all been collected.
-        assertTrue(node0Partitions.isEmpty());
+        // The undelivered records are over the credit, so nothing more is requested from this node.
+        assertEquals(0, fetcher.sendFetches().size());
 
-        // Reset the list of partitions for node 0 so the next fetch pass requests data.
-        node0Partitions = partitionsForNode(node0, partitions);
-
-        // sendFetches() call #4 should issue a request to node 0 since its buffered data was collected.
-        List<NetworkClientDelegate.UnsentRequest> call4 = fetcher.sendFetches();
-        assertEquals(1, call4.size());
-        assertEquals(Set.of(node0Partition1, node0Partition2), partitionsRequested(call4));
-        assertEquals(Set.of(node0), nodesRequested(call4));
-
-        prepareFetchResponses(node0, node0Partitions, 10);
-        networkClientDelegate.poll(time.timer(0));
-
-        collectSelectedPartition(node1Partition2, partitions);
-        node1Partitions.remove(node1Partition2);
-        assertEquals(2, fetcher.fetchBuffer.bufferedPartitions().size());
-
-        // Node 1's partitions have likewise all been collected, so validate that.
-        assertTrue(node1Partitions.isEmpty());
-
-        // Again, reset the list of partitions, this time for node 1, so the next fetch pass requests data.
-        node1Partitions = partitionsForNode(node1, partitions);
-
-        // sendFetches() call #5 should issue a request to node 1 since its buffered data was collected.
-        List<NetworkClientDelegate.UnsentRequest> call5 = fetcher.sendFetches();
-        assertEquals(1, call5.size());
-        assertEquals(Set.of(node1Partition1, node1Partition2), partitionsRequested(call5));
-        assertEquals(Set.of(node1), nodesRequested(call5));
-
-        prepareFetchResponses(node1, node1Partitions, 10);
-        networkClientDelegate.poll(time.timer(0));
-        assertEquals(4, fetcher.fetchBuffer.bufferedPartitions().size());
-
-        // Collect all the records and make sure they include all the partitions, and validate that there is no data
-        // remaining in the fetch buffer.
-        assertEquals(partitions, fetchRecords().keySet());
-        assertEquals(0, fetcher.fetchBuffer.bufferedPartitions().size());
-
-        // sendFetches() call #6 should issue a request to nodes 0 and 1 since its buffered data was collected.
-        List<NetworkClientDelegate.UnsentRequest> call6 = fetcher.sendFetches();
-        assertEquals(2, call6.size());
-        assertEquals(partitions, partitionsRequested(call6));
-        assertEquals(new HashSet<>(nodes), nodesRequested(call6));
-
-        prepareFetchResponses(node0, node0Partitions, 20);
-        prepareFetchResponses(node1, node1Partitions, 20);
-        networkClientDelegate.poll(time.timer(0));
-        assertEquals(4, fetcher.fetchBuffer.bufferedPartitions().size());
-
-        // Just for completeness, collect all the records and make sure they include all the partitions, and validate
-        // that there is no data remaining in the fetch buffer.
-        assertEquals(partitions, fetchRecords().keySet());
-        assertEquals(0, fetcher.fetchBuffer.bufferedPartitions().size());
+        // Delivering them returns the credit, and the next fetch goes out at the offset after them.
+        assertEquals(10, fetchRecords().get(tp0).size());
+        List<NetworkClientDelegate.UnsentRequest> resumed = fetcher.sendFetches();
+        assertEquals(1, resumed.size());
+        assertEquals(10L, offsetsRequested(resumed).get(tp0));
     }
 
     @Test
@@ -3867,13 +3845,13 @@ public class FetchRequestManagerTest {
         assertDoesNotThrow(() -> subscriptions.position(node0Partition1));
         assertThrows(IllegalStateException.class, () -> subscriptions.position(node0Partition2));
 
-        // sendFetches() call #2 should issue a request to node 0 because the first partition in node 0 was collected
-        // (and its buffer removed) and the second partition for node 0 was unassigned. As a result, there are now no
-        // *assigned* partitions for node 0 that are buffered.
+        // sendFetches() call #2 should issue a request to node 0 for its one remaining assigned partition, and to
+        // node 1 for both of its partitions: their buffered data is under the credit, so it does not hold them back.
+        // The unassigned partition is in neither request.
         List<NetworkClientDelegate.UnsentRequest> call2 = fetcher.sendFetches();
-        assertEquals(1, call2.size());
-        assertEquals(Set.of(node0Partition1), partitionsRequested(call2));
-        assertEquals(Set.of(node0), nodesRequested(call2));
+        assertEquals(2, call2.size());
+        assertEquals(Set.of(node0Partition1, node1Partition1, node1Partition2), partitionsRequested(call2));
+        assertEquals(Set.of(node0, node1), nodesRequested(call2));
     }
 
     @Test
@@ -4130,6 +4108,22 @@ public class FetchRequestManagerTest {
             .map(Map::keySet)
             .flatMap(Set::stream)
             .collect(Collectors.toSet());
+    }
+
+    /**
+     * Returns the offset that was requested for each partition in the given requests.
+     */
+    private Map<TopicPartition, Long> offsetsRequested(List<NetworkClientDelegate.UnsentRequest> requests) {
+        Map<TopicPartition, Long> offsets = new HashMap<>();
+
+        requests.stream()
+            .map(NetworkClientDelegate.UnsentRequest::requestBuilder)
+            .filter(FetchRequest.Builder.class::isInstance)
+            .map(FetchRequest.Builder.class::cast)
+            .map(FetchRequest.Builder::fetchData)
+            .forEach(data -> data.forEach((tp, partitionData) -> offsets.put(tp, partitionData.fetchOffset)));
+
+        return offsets;
     }
 
     /**

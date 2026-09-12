@@ -60,6 +60,7 @@ public class CompletedFetch {
 
     final TopicPartition partition;
     final FetchResponseData.PartitionData partitionData;
+    private final int sizeInBytes;
 
     private final Logger log;
     private final SubscriptionState subscriptions;
@@ -95,11 +96,17 @@ public class CompletedFetch {
         this.partition = partition;
         this.partitionData = partitionData;
         this.metricAggregator = metricAggregator;
+        this.sizeInBytes = FetchResponse.recordsOrFail(partitionData).sizeInBytes();
         this.batches = FetchResponse.recordsOrFail(partitionData).batches().iterator();
         this.nextFetchOffset = fetchOffset;
         this.lastEpoch = Optional.empty();
         this.abortedProducerIds = new HashSet<>();
         this.abortedTransactions = abortedTransactions(partitionData);
+    }
+
+    /** The size of the records this holds, for bounding how much may be fetched but not yet delivered. */
+    int sizeInBytes() {
+        return sizeInBytes;
     }
 
     long nextFetchOffset() {

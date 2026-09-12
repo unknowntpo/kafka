@@ -26,8 +26,10 @@ import org.slf4j.Logger;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
@@ -233,6 +235,28 @@ public class FetchBuffer implements AutoCloseable {
             return true;
         } else {
             return false;
+        }
+    }
+
+    /**
+     * Return the number of bytes held for each {@link TopicPartition partition} that has data in the buffer, which is
+     * what bounds how far the fetcher may run ahead of the application.
+     *
+     * @return bytes buffered per {@link TopicPartition partition}
+     */
+    Map<TopicPartition, Long> bufferedBytesByPartition() {
+        try {
+            lock.lock();
+
+            final Map<TopicPartition, Long> bytes = new HashMap<>();
+
+            if (nextInLineFetch != null && !nextInLineFetch.isConsumed())
+                bytes.merge(nextInLineFetch.partition, (long) nextInLineFetch.sizeInBytes(), Long::sum);
+
+            completedFetches.forEach(cf -> bytes.merge(cf.partition, (long) cf.sizeInBytes(), Long::sum));
+            return bytes;
+        } finally {
+            lock.unlock();
         }
     }
 
