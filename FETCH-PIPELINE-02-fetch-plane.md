@@ -65,6 +65,34 @@
 
 `inFlightBytes` 現在是資料平面私有的 `long`（單執行緒），`queuedBytes` 是 `AtomicLong`（app 執行緒會減）。分片之後 credit 要切成「每個分片一份 + 一個全域溢出份額」，理由在 §4.3。**現在就用「分片持有自己的在途帳、共享一個原子的排隊帳」這個形狀寫**，之後不用改。
 
+### 3.35 天花板在哪：app 停等的三層，與 fetch session 的硬限制
+
+真正要最小化的不是「連線忙不忙」，而是**app 有多少時間想吃卻沒東西吃**。這兩件事不一樣：連線上永遠有一個 fetch 在飛（duty cycle = 1.0）時，只要 buffer 排空得比 fetch 來回時間快，app 還是要停下來等。
+
+設 app 消費速率 R（bytes/s）、fetch 來回時間 T、一個回應帶回 B bytes：
+
+```
+每個週期 = T（等回應）+ B/R（吃 buffer）
+app 停等比例 = T / (T + B/R)
+不停等的條件：B/R ≥ T
+```
+
+| 狀態 | app 每週期停等 |
+|---|---|
+| trunk（三道 gate） | T + app 執行緒喚醒 + event 來回 + 排空**整個** buffer 的時間 |
+| 拿掉三道 gate（每個 node 深度 1，永遠有一個在飛） | **T** |
+| 每個 node 深度 ≥ 2 | 0 |
+
+**第二層是這個 KIP 的天花板**，因為第三層被 incremental fetch session 擋住：`FetchSessionHandler` 的 `nextMetadata` 是單一欄位（`FetchSessionHandler.java:68`），由 `handleResponse` 推進（`:605`），builder 建請求時把當下的值蓋進去（`:293`、`:371`）。同一個 session 上並發兩個請求會帶相同的 epoch，broker 會判定成重送。要讓一個 node 有多個 fetch 同時在飛，就需要**每個 node 多個 fetch session**，而 broker 的 session slot 是有限資源（`max.incremental.fetch.session.cache.slots`）。這跟 §4.4 的連線數問題同一類，是另一個 KIP 的範圍。
+
+同一個 partition 無論如何不可能有兩個 fetch 在飛：下一個 offset 要等回應才知道。所以深度只能靠「把 partition 分散到並發請求」取得，上限是每個 node 的 partition 數，單 partition 沒有這條路。
+
+**這一層分析改變了 credit 的形式。** 「4 × fetch.max.bytes」是拍出來的。正確的條件是 buffer 要撐過一個 RTT，也就是 `credit ≥ R × T`。R 和 T 都已經有 metric（消費速率、`fetch-latency-avg`，`FetchMetricsRegistry.java:93`），所以 credit 可以自調而不新增 config，符合參數最少原則。固定倍數只在 `B/R ≥ T` 的部署（大 `fetch.max.bytes` 或低延遲網路）恰好夠用。
+
+這也解釋了量到的增益形狀：預設 `fetch.min.bytes=1`，broker 有多少就回多少，所以小 record 場景的 B 很小、`B/R << T`、停等主導——1p×100B 是 1.86×，而 6p×1KB 只有 1.39×。
+
+**待量測**：`duty cycle = fetch-rate × fetch-latency-avg` 可以用現有 metric 在未改動的 trunk 上算出連線閒置比例；更精確的 app 停等要一行唯讀 instrumentation（app 執行緒阻塞在 `AsyncKafkaConsumer.java:2024` 的 `awaitWakeup` 且 `nodesWithPendingFetchRequests` 為空的時間）。RTT 主導的 regime 需要真實網路，跟 §4.6 的分片門檻是同一個前提。
+
 ### 3.4 這一版要拿掉的東西：`nodeFree`
 
 `FetchPipeline.sendFetches(now, nodeFree)` 有一個 `Predicate<Node>`，用來避免 fetch 把 broker 的唯一 in-flight 槽佔滿而餓死控制請求。那條規則在 consumer-ng 是必要的（引擎刻意每個 broker 只有一個 fetch 在飛），而且它**過度寬鬆**：任何沒有指定 node 的待送請求（FindCoordinator、metadata）會讓**所有** broker 都停止 fetch。
