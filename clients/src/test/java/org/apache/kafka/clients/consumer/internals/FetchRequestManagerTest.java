@@ -3652,6 +3652,29 @@ public class FetchRequestManagerTest {
         assertEquals(0, sendFetches(false));
     }
 
+    /**
+     * Once the application has asked for records, a response is followed by the next fetch on the network thread's
+     * own pass, without the application having to ask again. That is what keeps the connection busy while the
+     * application is still working through what it was given.
+     */
+    @Test
+    public void testFetchIsReissuedAfterAResponseWithoutTheApplicationAskingAgain() {
+        buildFetcher();
+
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 0);
+
+        // The application asks once.
+        assertEquals(1, sendFetches());
+        client.prepareResponse(fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
+        networkClientDelegate.poll(time.timer(0));
+        assertTrue(fetcher.hasCompletedFetches());
+
+        // It does not ask again, and the next fetch still goes out. Where that fetch starts is covered by
+        // testFetchRequestWithBufferedPartitions.
+        assertEquals(1, sendFetches(false));
+    }
+
     @Test
     public void testPollWithCreateFetchRequests() {
         buildFetcher();
