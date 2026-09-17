@@ -119,7 +119,7 @@ trunk 不需要它：`ConsumerUtils.java:77` 的 `CONSUMER_MAX_INFLIGHT_REQUESTS
 
 **metrics 本來就跨執行緒**：`Sensor.record` 是 thread-safe 的（`Sensor.java:226-236`，雙層 `synchronized`），但 **`FetchMetricsAggregator` 不是**（`FetchMetricsAggregator.java:31-56`，plain `HashSet` / `HashMap`、`record()` 沒有 `synchronized`），而它被一個 fetch 回應的所有 partition 共用（`AbstractFetch.java:178`）。consumer-ng 的 `FetchSegment.Owner` 做的是同一件事，但用原子 refcount。**移植時用 `Owner` 取代 `FetchMetricsAggregator` 的角色。**
 
-### 3.6 L1 在 trunk 上的具體改動清單
+### 3.6 L1 在 trunk 上的具體改動清單（已落地；與最終形式的差異見 01 §4.5a）
 
 1. **給每個 partition 一個私有的 prefetch cursor**（consumer-ng 的 `PartitionQueue.nextFetchOffset`），從 position 起算。建 fetch 請求時讀 cursor，**不讀** `subscriptions.position(tp)`（取代 `AbstractFetch.java:554`）。這是預抓的前提：position 是「已交付到哪」，cursor 是「已請求到哪」，兩者必須分開。
 2. **拿掉 C1b 與 C1c**：`AbstractFetch.java:343-350` 的 `isNotBuffered` 與 `:466-471` 的 `bufferedNodes` 一起刪掉（連同 `bufferedNodes(...)` 這個 method，`:641-654`），改成 credit admission（在途 bytes + 已 buffer 未交付 bytes < credit）。有了第 1 項的 cursor，每個可 fetch 的 partition 永遠在每個 fetch 請求裡，所以 C1c 要防的 fetch-session eviction 不會發生。`FetchBuffer` 今天不記 bytes，要加。

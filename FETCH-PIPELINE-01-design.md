@@ -55,7 +55,7 @@
 
 ## 2. 現況的三個成本（trunk 程式碼位置）
 
-**C1 續發被兩道 gate 擋住，不是一道。**
+**C1 續發被三道 gate 擋住，不是一道。**（以下是 trunk 原始碼的行號；三道都已在本 branch 拆除，實際落地的形式見 §4.6）
 
 - **C1a 時機綁在應用執行緒。** `FetchRequestManager.java:155-157`：沒有 `pendingFetchRequestFuture` 就直接回 `PollResult.EMPTY`。那個 future 只有 `CreateFetchRequestsEvent` 會設，由應用執行緒在 `AsyncKafkaConsumer.java:2120` 送出（呼叫點 `:965`，拿到非空 fetch 之後）。**回應到達本身不會觸發下一個 fetch。**
 - **C1b 已經有 buffer 的 partition 被排除在下一個 fetch 之外。** `AbstractFetch.java:343-350` 的 `fetchablePartitions(isNotBuffered)`：註解自己寫明「for which we don't already have some messages sitting in our buffer」。per-partition 的管線深度被結構性地鎖在 1。
@@ -73,7 +73,9 @@
 
 這三道是獨立的，而且只修前兩道不夠：C1a 讓續發等 app 執行緒，C1b 讓 partition 等自己的 buffer 排空，C1c 讓**整個 broker** 等任一 partition 的 buffer 排空。**只解決 C1a 拿不到 §1.1 的 1.91×。**
 
-好消息是三道用**同一個改動**解決：給每個 partition 一個私有的預抓 cursor（「已請求到哪」，與 position 的「已交付到哪」分開）之後，每個可 fetch 的 partition 都能永遠出現在每一個送給它 leader 的 fetch 請求裡，於是 session cache 不會掉 partition，也沒有「要不要跳過 buffered partition」這個問題——`buffered` / `bufferedNodes` 這整套機制連同它要防的 eviction 一起消失。consumer-ng 的 `FetchPipeline` 沒有這段程式碼，原因就是它有 cursor。 前一條線量到：三方（app、背景、broker）各只用 22–29% CPU，全部在等彼此。
+好消息是三道用**同一個改動**解決：給每個 partition 一個私有的預抓 cursor（「已請求到哪」，與 position 的「已交付到哪」分開）之後，每個可 fetch 的 partition 都能永遠出現在每一個送給它 leader 的 fetch 請求裡，於是 session cache 不會掉 partition，也沒有「要不要跳過 buffered partition」這個問題——`buffered` / `bufferedNodes` 這整套機制連同它要防的 eviction 一起消失。consumer-ng 的 `FetchPipeline` 沒有這段程式碼，原因就是它有 cursor。
+
+前一條線量到：三方（app、背景、broker）各只用 22–29% CPU，全部在等彼此。
 
 順帶一個對照事實：trunk 每個 broker 也是**一個 fetch 在飛**（`AbstractFetch.java:462` 的 `nodesWithPendingFetchRequests.contains`），跟 consumer-ng 相同。所以差別不在每個 broker 的在途深度，而在 C1a 的觸發時機與 C1b 的管線深度。
 
@@ -122,6 +124,17 @@
 
 - **控制請求優先**：我在另一條線上加了「有控制請求待送就停 fetch」的規則，因為那個引擎刻意讓每個 broker 只有一個 fetch 在飛。**trunk 不需要**：`ConsumerUtils.java:77` 的 `CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION = 100`，控制請求不會被 fetch 擠掉。這條規則不進這個 KIP。
 - **新的排程模型**：§1.2 已經證明迴圈本身是打平的。L1 不需要任何排程改動。
+
+### 4.5a 實際落地的形式（本 branch，五個 commit）
+
+實作之後有四點跟 §4.1–§4.3 的原始構想不同，以落地的為準：
+
+1. **credit 是 per-node、只算已 buffer 未交付的 bytes，上限 `1 × fetch.max.bytes`**（`AbstractFetch.creditBytes`），不是 §4.1 的「在途 + 已排隊 < 4×」全域帳。在途本來就被「每個 node 一個 fetch 在飛」結構性地限制住（`nodesWithPendingFetchRequests`），不需要再記帳；而 4× 的全域帳在 broker 數超過 4 時會把多 broker 的 fetch 全部擋住。1× 是「一份在 buffer、一份在飛」所需的最小值，每個 node 的最壞情況從 trunk 的約 1 份變成約 2 份，這是 KIP 要明說的記憶體變更。
+2. **不需要 position epoch。** §4.3 假設 fencing 要在 `SubscriptionState` 加 epoch。實際上 `FetchCollector.java:258-263` 現有的 `position.offset != fetchOffset` 守衛天生能處理管線化：同一個 partition 的多份 buffer 是連續 offset 且依序初始化；seek 之後會逐份被丟棄。cursor 端的 fencing 是「沒有在途、沒有 buffer 時 cursor 必須等於 position，否則重設」（`FetchCursors.nextFetchOffset`），雙向 seek 都覆蓋，`SubscriptionState` 零改動。
+3. **gate 1 保留一個「app 要過一次」的閂**（`FetchRequestManager.fetchingStarted`）。完全拆掉會讓 `assign()` + `endOffsets()` 而從不 `poll()` 的 consumer 在背後預抓；`KafkaConsumerTest.testListOffsetShouldUpdateSubscriptions` 因此卡死 120 秒。第一次 `poll()` 之後續發完全由回應驅動。
+4. **`poll()` 回傳資料前送的 `CreateFetchRequestsEvent`（`sendPrefetches`）整個刪除。** 背景執行緒自己續發之後它只剩設閂的作用，而 `AsyncPollEvent` 已經設了。每次回傳資料的 `poll()` 少一個 event、一次 queue 操作、一次跨執行緒 wakeup。
+
+`AbstractFetch` 是 classic 與 async consumer 共用的，所以兩者都吃到這個行為變更；`FetcherTest` 的失敗與修改就是這樣來的。share consumer 用 `ShareConsumeRequestManager`，不受影響。
 
 ### 4.5 與 KAFKA-20854 的關係
 
