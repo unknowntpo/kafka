@@ -3779,13 +3779,13 @@ public class FetchRequestManagerTest {
     }
 
     /**
-     * Fetching runs ahead of the application only as far as the credit allows. Once a node holds that many bytes that
-     * have been fetched and not yet delivered, it stops being fetched from, leaving the rest of the data on the
-     * broker instead of in this client's memory.
+     * Fetching runs ahead of the application only as far as the credit allows: one response's worth per node. Once a
+     * node holds that many bytes that have been fetched and not yet delivered, it stops being fetched from, leaving
+     * the rest of the data on the broker instead of in this client's memory.
      */
     @Test
     public void testFetchRequestStopsWhenCreditIsExhausted() {
-        // Small enough that a single response's worth of records exceeds the credit, which is two of these.
+        // Small enough that a single response's worth of records exceeds the credit.
         maxBytes = 100;
         buildFetcher();
 

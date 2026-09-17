@@ -85,11 +85,14 @@ public abstract class AbstractFetch implements Closeable {
 
     /**
      * How many bytes may be fetched from one node but not yet delivered to the application before that node stops
-     * being fetched from. Two responses' worth, so that one can be delivered while the next is in flight.
+     * being fetched from: one response's worth. That is the least that lets a response be delivered while the next
+     * one is in flight, and it keeps the worst case per node at about two responses (one buffered, one arriving)
+     * where it used to be one, since a node was not fetched from at all while it had buffered data.
      *
-     * <p>Derived from {@code fetch.max.bytes} rather than configured separately. It is a fixed multiple for now; the
-     * bound that actually matters is that the undelivered data outlasts one fetch round trip, which is a product of
-     * the consumption rate and the fetch latency, both of which the consumer already measures.
+     * <p>Derived from {@code fetch.max.bytes} rather than configured separately. The bound that actually matters is
+     * that the undelivered data outlasts one fetch round trip, which is a product of the consumption rate and the
+     * fetch latency, both of which the consumer already measures; a fixed amount is the simplest thing that is
+     * enough in the common case.
      */
     private final long creditBytes;
 
@@ -113,7 +116,7 @@ public abstract class AbstractFetch implements Closeable {
         this.decompressionBufferSupplier = BufferSupplier.create();
         this.sessionHandlers = new HashMap<>();
         this.cursors = new FetchCursors(logContext);
-        this.creditBytes = 2L * fetchConfig.maxBytes;
+        this.creditBytes = fetchConfig.maxBytes;
         this.nodesWithPendingFetchRequests = new HashSet<>();
         this.metricsManager = metricsManager;
         this.time = time;
