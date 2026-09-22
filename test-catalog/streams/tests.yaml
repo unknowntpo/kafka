@@ -32,6 +32,7 @@ org.apache.kafka.streams.KafkaStreamsTest:
 - shouldNotBlockInCloseForZeroDuration
 - shouldNotBlockInCloseWithCloseOptionLeaveGroupFalseForZeroDuration
 - shouldNotBlockInCloseWithCloseOptionLeaveGroupTrueForZeroDuration
+- shouldNotBlockOtherThreadChangesWhileRemovalWaitsForShutdown
 - shouldNotCallCleanOnStartupByDefault
 - shouldNotCrashButThrowLaterIfAdminTelemetryDisabled
 - shouldNotCreateStreamThreadsForGlobalOnlyTopology
@@ -46,6 +47,8 @@ org.apache.kafka.streams.KafkaStreamsTest:
 - shouldNotTriggerRecordingOfRocksDBMetricsIfRecordingLevelIsInfo
 - shouldPropagatePartitionerAndHeadersToStreamsMetadataState
 - shouldPropagateSerializerAndHeadersToStreamsMetadataState
+- shouldRemoveStartedThreadStillInCreatedState
+- shouldRemoveStoreProviderForReusedThreadNameUnlessReplacementCanServeQueries
 - shouldRemoveThread
 - shouldReturnAdminInstanceID
 - shouldReturnEmptyLocalStorePartitionLags
@@ -53,6 +56,7 @@ org.apache.kafka.streams.KafkaStreamsTest:
 - shouldReturnFalseOnCloseWithCloseOptionWithLeaveGroupFalseWhenThreadsHaventTerminated
 - shouldReturnFalseOnCloseWithCloseOptionWithLeaveGroupTrueWhenThreadsHaventTerminated
 - shouldReturnProducerAndConsumerInstanceIds
+- shouldSkipThreadWhoseShutdownWasAlreadyRequestedWhenRemovingThread
 - shouldThrowExceptionSettingStateListenerNotInCreateState
 - shouldThrowExceptionSettingStreamsUncaughtExceptionHandlerNotInCreateState
 - shouldThrowExceptionSettingUncaughtExceptionHandlerNotInCreateState
@@ -126,6 +130,8 @@ org.apache.kafka.streams.StreamsBuilderTest:
 - shouldNotThrowWhenRepartitionWithRepartitionName
 - shouldNotThrowWhenSuppressWithSuppressName
 - shouldNowAllowStreamAndTableFromSameTopic
+- shouldPlaceProcessorsInSameSubtopologyWhenMixingStoreNameAndStoreBuilderLinking
+- shouldPlaceProcessorsLinkedByStoreBuilderInSameSubtopology
 - shouldProcessViaRepartitionTopic
 - shouldProcessingFromSinkTopic
 - shouldReuseSourceTopicAsChangelogsWithOptimization20
@@ -283,6 +289,7 @@ org.apache.kafka.streams.StreamsConfigTest:
 - shouldNotEnableAnyOptimizationsWithNoOptimizationConfig
 - shouldNotLeakInternalDocMembers
 - shouldNotLogWarningWhenProcessingExceptionHandlerIsEnabledOnGlobalThread
+- shouldNotLogWarningWhenUserSpecifiedBootstrapResolveTimeoutMatchesStreamsDefault
 - shouldNotOverrideUserConfigCommitIntervalMsIfExactlyOnceV2Enabled
 - shouldNotOverrideUserConfigRetriesIfExactlyV2OnceEnabled
 - shouldNotSetEnableMetricCollectionByDefault
@@ -1758,6 +1765,7 @@ org.apache.kafka.streams.processor.internals.AbstractProcessorContextTest:
 - appConfigsShouldReturnUnrecognizedValues
 - shouldNotThrowIllegalStateExceptionOnRegisterWhenContextIsNotInitialized
 - shouldNotThrowNullPointerExceptionOnTopicIfRecordContextTopicIsNull
+- shouldReturnDummyOffsetIfNoRecordContext
 - shouldReturnDummyPartitionIfNoRecordContext
 - shouldReturnDummyTimestampIfNoRecordContext
 - shouldReturnEmptyHeadersIfHeadersAreNotSet
@@ -1769,7 +1777,6 @@ org.apache.kafka.streams.processor.internals.AbstractProcessorContextTest:
 - shouldReturnTimestampFromRecordContext
 - shouldReturnTopicFromRecordContext
 - shouldThrowErrorIfSerdeDefaultNotSet
-- shouldThrowIllegalStateExceptionOnOffsetIfNoRecordContext
 - shouldThrowIllegalStateExceptionOnRegisterWhenContextIsInitialized
 - shouldThrowNullPointerOnRegisterIfStateStoreIsNull
 org.apache.kafka.streams.processor.internals.ActiveTaskCreatorTest:
@@ -2134,7 +2141,6 @@ org.apache.kafka.streams.processor.internals.InternalTopologyBuilderTest:
 - shouldAddSourceWithoutOffsetReset
 - shouldAddTimestampExtractorPerSource
 - shouldAddTimestampExtractorWithPatternPerSource
-- shouldAllowAddingSameStoreBuilderMultipleTimes
 - shouldAllowIncrementalBuilds
 - shouldAssociateStateStoreNameWhenStateStoreSupplierIsExternal
 - shouldAssociateStateStoreNameWhenStateStoreSupplierIsInternal
@@ -2173,6 +2179,7 @@ org.apache.kafka.streams.processor.internals.InternalTopologyBuilderTest:
 - shouldThrowIfNameIsNull
 - shouldThrowIfTopicAndPatternAreNull
 - shouldThrowOnInvalidProcessorWrapperClassName
+- shouldUniteProcessorsWhenAddStateStoreCalledMultipleTimesWithSameBuilder
 - shouldUseNonDeprecatedConfigToSetCacheBytesWhenBothDeprecatedAndNonDeprecatedConfigsUsed
 - shouldWrapFixedKeyProcessorSupplier
 - shouldWrapProcessorSupplier
@@ -2740,6 +2747,9 @@ org.apache.kafka.streams.processor.internals.StateManagerUtilConverterTest:
 - shouldReturnTimestampedConverterForTimestampedToHeadersPersistentKeyValueStore
 - shouldReturnTimestampedConverterForTimestampedToHeadersPersistentWindowStore
 org.apache.kafka.streams.processor.internals.StateManagerUtilTest:
+- shouldLogDebugWhenUnableToLockAndOwnerAlreadyReleased
+- shouldLogDebugWhenUnableToLockBecauseAnotherLiveThreadHoldsIt
+- shouldLogWarnWhenUnableToLockBecauseOwnerThreadTerminated
 - shouldNotCloseStateManagerIfUnableToLockTaskDirectory
 - shouldNotWipeStateStoresIfUnableToLockTaskDirectory
 - shouldStillWipeStateStoresIfCloseThrowsException
@@ -2769,6 +2779,7 @@ org.apache.kafka.streams.processor.internals.StoreChangelogReaderTest:
 - shouldCheckCompletionIfPositionLargerThanEndOffset
 - shouldDecrementRemainingRecordsToZeroWithOffsetGaps
 - shouldFallBackNoStoredOffsetToBeginningAndStoredOffsetToItsFloor
+- shouldFallBackToFloorWhenNothingHasExpiredYet
 - shouldFallBackToStoredOffsetAndBackOffWhenProbeNeverAnswers
 - shouldInitializeChangelogAndCheckForCompletion
 - shouldKeepPollingWhileTheWindowIsStillResolvingPartitions
@@ -2779,6 +2790,7 @@ org.apache.kafka.streams.processor.internals.StoreChangelogReaderTest:
 - shouldNotGiveUpOnPollsThatHaveNotWaited
 - shouldNotProbeStandbyWithStoredOffset
 - shouldNotProbeWhenStoredOffsetGapIsSmall
+- shouldNotProbeWindowedStoreWithUnboundedRetention
 - shouldNotRegisterSameStoreMultipleTimes
 - shouldNotRegisterStoreWithoutMetadata
 - shouldNotSeekBelowStoredOffsetWhenTimestampOffsetIsBehindIt
@@ -2795,6 +2807,7 @@ org.apache.kafka.streams.processor.internals.StoreChangelogReaderTest:
 - shouldRestoreMultipleChangelogs
 - shouldRestoreToLimitInStandbyState
 - shouldRetryProbePollBeforeFallingBackToLogStart
+- shouldRouteEachStoredOffsetPartitionIndependentlyInOneRestore
 - shouldSeekByTimestampForWindowedStoreWithoutStoredOffset
 - shouldSeekFromTheNewestTimestampInTheProbedWindow
 - shouldSeekPastStoredOffsetByTimestampWhenGapIsLarge
@@ -2942,6 +2955,7 @@ org.apache.kafka.streams.processor.internals.StreamThreadTest:
 - shouldGetMainAndRestoreConsumerInstanceIdWithInternalTimeout
 - shouldInjectProducerPerThreadUsingClientSupplierOnCreateIfEosV2Enabled
 - shouldInjectSharedProducerForAllTasksUsingClientSupplierOnCreateIfEosDisabled
+- shouldKeepGroupMembershipOperationOfTheCallerThatInitiatedShutdown
 - shouldLogAndRecordSkippedMetricForDeserializationException
 - shouldLogAndRecordSkippedRecordsForInvalidTimestamps
 - shouldNotCauseExceptionIfNothingCommitted
@@ -2960,6 +2974,7 @@ org.apache.kafka.streams.processor.internals.StreamThreadTest:
 - shouldNotEnforceRebalanceOnTaskCorruptedExceptionUnderStreamsProtocol
 - shouldNotEnforceRebalanceWhenCurrentlyRebalancing
 - shouldNotEnforceRebalanceWhenTaskCorruptedExceptionIsThrownForAnInactiveTask
+- shouldNotOverrideShutdownOperationWhenThreadFailsAfterShutdownWasInitiated
 - shouldNotPopulateWireTopologyDescriptionWhenPushDisabled
 - shouldNotProcessWhenPartitionRevoked
 - shouldNotPurgeBeforeThePurgeInterval
@@ -3482,7 +3497,6 @@ org.apache.kafka.streams.processor.internals.assignment.AssignorConfigurationTes
 - configsShouldRejectZeroWarmups
 - shouldSupportAllUpgradeFromVersionsFromCooperativeRebalancingOn
 org.apache.kafka.streams.processor.internals.assignment.ClientStateTest:
-- previousStateConstructorShouldCreateAValidObject
 - shouldAddActiveTasksToBothAssignedAndActive
 - shouldAddPreviousActiveTasksToPreviousAssignedAndPreviousActive
 - shouldAddPreviousStandbyTasksToPreviousAssignedAndPreviousStandby
@@ -3490,7 +3504,6 @@ org.apache.kafka.streams.processor.internals.assignment.ClientStateTest:
 - shouldAddTasksInOffsetSumsMapToPrevStandbyTasks
 - shouldAddTasksWithLatestOffsetToPrevActiveTasks
 - shouldComputeTaskLags
-- shouldCopyState
 - shouldFilterOutUnrecognizedPartitionsAndInitializePrevTasksWhenUsingNamedTopologies
 - shouldHaveAssignedTaskIfActiveTaskAssigned
 - shouldHaveAssignedTaskIfStandbyTaskAssigned
@@ -5316,6 +5329,9 @@ org.apache.kafka.streams.state.internals.MaybeTest:
 - shouldThrowOnGetUndefinedValue
 - shouldUpholdEqualityCorrectness
 - shouldUpholdHashCodeCorrectness
+org.apache.kafka.streams.state.internals.MemoryLRUCacheTest:
+- shouldResetRestoringFlagWhenRestoreThrows
+- shouldSuppressEvictionListenerDuringRestoreAndResumeAfter
 org.apache.kafka.streams.state.internals.MergedSortedCacheKeyValueBytesStoreIteratorTest:
 - shouldIgnoreIfDeletedInCacheButExistsInStore
 - shouldIterateCacheOnly

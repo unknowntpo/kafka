@@ -198,6 +198,7 @@ org.apache.kafka.server.log.remote.storage.RemoteLogManagerTest:
 - testFindNextSegmentWithTxnIndex
 - testFindNextSegmentWithTxnIndexTraversesNextEpoch
 - testFindOffsetByTimestamp
+- testFindOffsetByTimestampRejectsRemoteRecordExceedingMaxDecompressedMessageBytes
 - testFindOffsetByTimestampWithInvalidEpochSegments
 - testFindOffsetByTimestampWithSegmentNotReady
 - testGetClassLoaderAwareRemoteStorageManager
@@ -214,6 +215,7 @@ org.apache.kafka.server.log.remote.storage.RemoteLogManagerTest:
 - testReadForFirstBatchInLogCompaction
 - testReadForFirstBatchMoreThanMaxFetchBytes
 - testReadForMissingFirstBatchInRemote
+- testRemoteDeleteLagResetsToZeroOnBecomingFollower
 - testRemoteDeleteLagsOnRetentionBreachedSegments
 - testRemoteLogManagerRemoteMetrics
 - testRemoteLogManagerTasksAvgIdlePercentAndMetadataCountMetrics
@@ -288,22 +290,64 @@ org.apache.kafka.storage.internals.checkpoint.PartitionMetadataFileTest:
 - testRead
 - testSetRecordWithDifferentTopicId
 - testSetRecordWithSameTopicId
+org.apache.kafka.storage.internals.epoch.LeaderEpochFileCacheTest:
+- shouldAddEpochAndMessageOffsetToCache
+- shouldClearAllEntries
+- shouldClearEarliestOnEmptyCache
+- shouldClearLatestOnEmptyCache
+- shouldDropEntriesBetweenEpochBoundaryWhenRemovingNewest
+- shouldDropEntriesOnEpochBoundaryWhenRemovingLatestEntries
+- shouldEnforceMonotonicallyIncreasingEpochs
+- shouldEnforceMonotonicallyIncreasingStartOffsets
+- shouldEnforceOffsetsIncreaseMonotonically
+- shouldFetchEndOffsetOfEmptyCache
+- shouldFetchEpochForGivenOffset
+- shouldFetchLatestEpochOfEmptyCache
+- shouldGetFirstOffsetOfSubsequentEpochWhenOffsetRequestedForPreviousEpoch
+- shouldIncreaseAndTrackEpochsAsFollowerReceivesManyMessages
+- shouldIncreaseAndTrackEpochsAsLeadersChangeManyTimes
+- shouldNotClearAnythingIfOffsetIsFirstOffset
+- shouldNotClearAnythingIfOffsetTooEarly
+- shouldNotOverwriteOffsetForALeaderEpochOnceItHasBeenAssigned
+- shouldNotResetEpochHistoryHeadIfUndefinedPassed
+- shouldNotResetEpochHistoryTailIfUndefinedPassed
+- shouldPersistEpochsBetweenInstances
+- shouldPreserveResetOffsetOnClearEarliestIfOneExists
+- shouldRetainLatestEpochOnClearAllEarliest
+- shouldRetainLatestEpochOnClearAllEarliestAndUpdateItsOffset
+- shouldReturnEpochEntriesInRangeWithoutMutatingCache
+- shouldReturnFirstEpochIfRequestedEpochLessThanFirstEpoch
+- shouldReturnInvalidOffsetIfEpochIsRequestedWhichIsNotCurrentlyTracked
+- shouldReturnLogEndOffsetIfLatestEpochRequested
+- shouldReturnNextAvailableEpochIfThereIsNoExactEpochForTheOneRequested
+- shouldReturnNoEpochEntriesForEmptyRange
+- shouldReturnUndefinedOffsetIfUndefinedEpochRequested
+- shouldReturnUnsupportedIfNoEpochRecorded
+- shouldReturnUnsupportedIfNoEpochRecordedAndUndefinedEpochRequested
+- shouldSupportEpochsThatDoNotStartFromZero
+- shouldTruncateIfMatchingEpochButEarlierStartingOffset
+- shouldUpdateOffsetBetweenEpochBoundariesOnClearEarliest
+- shouldUpdateOffsetBetweenFirstTwoEpochBoundariesOnClearEarliest
+- shouldWriteCheckpointOnTruncation
+- testFindNextEpoch
+- testFindPreviousEntry
+- testFindPreviousEpoch
+- testGetEpochEntry
+- testPreviousEpoch
 org.apache.kafka.storage.internals.log.AbstractIndexTest:
-- testCloseInvokeFlush
 - testResizeInvokeUnmap
 org.apache.kafka.storage.internals.log.BrokerCompressionTest:
 - testBrokerSideCompression
 org.apache.kafka.storage.internals.log.LocalLogTest:
+- testCloseIdempotent
+- testClosePreventsAppend
+- testCloseQuietlyIdempotent
+- testCloseQuietlyPreventsAppend
 - testCreateAndDeleteSegment
 - testDeleteSegmentFilesAsync
 - testDeleteSegmentFilesSync
 - testFlushingNonExistentDir
 - testLogAppend
-- testLogCloseFailureWhenInMemoryBufferClosed
-- testLogCloseHandlers
-- testLogCloseHandlersIdempotent
-- testLogCloseIdempotent
-- testLogCloseSuccess
 - testLogDeleteDirName
 - testLogDeleteDirSuccessWhenEmptyAndFailureWhenNonEmpty
 - testLogDeleteSegmentsSuccess
@@ -384,6 +428,7 @@ org.apache.kafka.storage.internals.log.LogCleanerTest:
 - testBuildPartialOffsetMap
 - testCleanCorruptMessageSet
 - testCleanEmptyControlBatch
+- testCleanRejectsRecordExceedingConfiguredMaxDecompressedMessageBytes
 - testCleanSegments
 - testCleanSegmentsNotRetainingLastEmptyBatch
 - testCleanSegmentsRetainingLastEmptyBatch
@@ -574,6 +619,7 @@ org.apache.kafka.storage.internals.log.LogValidatorTest:
 - testAbsoluteOffsetAssignmentNonCompressed
 - testBatchWithInvalidRecordsAndInvalidTimestamp
 - testBatchWithoutRecordsNotAllowed
+- testCompressedRecordExceedingMaxRecordBodySizeIsRejected
 - testControlRecordsNotAllowedFromClients
 - testControlRecordsNotCompressed
 - testCreateTimeUpConversionV1ToV2
@@ -624,9 +670,11 @@ org.apache.kafka.storage.internals.log.OffsetIndexTest:
 - truncate
 org.apache.kafka.storage.internals.log.OffsetMapTest:
 - testBasicValidation
+- testBytesPerEntryMatchesDigestLength
 - testClear
 - testGetWhenFull
 - testLatestOffset
+- testUnknownAlgorithmThrows
 - testUpdateLatestOffset
 - testUtilization
 org.apache.kafka.storage.internals.log.ProducerStateManagerTest:
@@ -777,6 +825,7 @@ org.apache.kafka.storage.internals.log.UnifiedLogTest:
 - testAppendAndReadWithNonSequentialOffsets
 - testAppendAndReadWithSequentialOffsets
 - testAppendAsLeaderWithRaftLeader
+- testAppendCompressedRecordExceedingMaxDecompressedMessageBytesIsRejected
 - testAppendInfoFirstOffset
 - testAppendMessageWithNullPayload
 - testAppendToOrReadFromLogInFailedLogDir
@@ -812,8 +861,10 @@ org.apache.kafka.storage.internals.log.UnifiedLogTest:
 - testFetchEarliestPendingUploadTimestampWithRemoteStorageNoLocalDeletion
 - testFetchLatestTieredTimestampNoRemoteStorage
 - testFetchLatestTieredTimestampWithRemoteStorage
+- testFetchOffsetByMaxTimestampRejectsCompressedRecordExceedingMaxDecompressedMessageBytes
 - testFetchOffsetByTimestampFromRemoteStorage
 - testFetchOffsetByTimestampIncludesLeaderEpoch
+- testFetchOffsetByTimestampRejectsCompressedRecordExceedingMaxDecompressedMessageBytes
 - testFetchOffsetByTimestampShouldReadOnlyLocalLogWhenLogIsEmpty
 - testFetchOffsetByTimestampWithMaxTimestampIncludesTimestamp
 - testFetchUpToHighWatermark
@@ -847,7 +898,7 @@ org.apache.kafka.storage.internals.log.UnifiedLogTest:
 - testLogOffsetsListener
 - testLogRecoversTopicId
 - testLogReinitializeAfterManualDelete
-- testLogRollAfterLogHandlerClosed
+- testLogRollAfterCloseQuietly
 - testLogRolls
 - testLogSegmentsCallCorrect
 - testLogStartOffsetMovementDeletesSnapshots
@@ -866,6 +917,7 @@ org.apache.kafka.storage.internals.log.UnifiedLogTest:
 - testOffsetSnapshot
 - testOldProducerEpoch
 - testPeriodicProducerIdExpiration
+- testPrepareActiveSegmentForCloseAppendsTimeIndexAndTrimsIndexes
 - testProducerExpireCheckAfterDelete
 - testProducerIdExpirationOnSegmentDeletion
 - testProducerIdMapOffsetUpdatedForNonIdempotentData
