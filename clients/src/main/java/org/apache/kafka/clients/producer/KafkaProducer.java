@@ -66,6 +66,7 @@ import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.internals.Plugin;
+import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.metrics.KafkaMetric;
 import org.apache.kafka.common.metrics.KafkaMetricsContext;
 import org.apache.kafka.common.metrics.MetricConfig;
@@ -583,7 +584,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 maxInflightRequests,
                 metadata,
                 throttleTimeSensor,
-                clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null));
+                clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null),
+                MemoryPool.NONE);
 
         short acks = Short.parseShort(producerConfig.getString(ProducerConfig.ACKS_CONFIG));
         return new Sender(logContext,

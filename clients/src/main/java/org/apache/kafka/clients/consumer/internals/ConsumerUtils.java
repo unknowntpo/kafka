@@ -32,11 +32,25 @@ import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.metrics.KafkaMetricsContext;
 import org.apache.kafka.common.metrics.MetricConfig;
+import org.apache.kafka.common.memory.CachingMemoryPool;
+import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.MetricsContext;
 import org.apache.kafka.common.metrics.MetricsReporter;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.telemetry.internals.ClientTelemetrySender;
+import org.apache.kafka.common.serialization.BooleanDeserializer;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.ByteBufferDeserializer;
+import org.apache.kafka.common.serialization.BytesDeserializer;
+import org.apache.kafka.common.serialization.DoubleDeserializer;
+import org.apache.kafka.common.serialization.FloatDeserializer;
+import org.apache.kafka.common.serialization.IntegerDeserializer;
+import org.apache.kafka.common.serialization.LongDeserializer;
+import org.apache.kafka.common.serialization.ShortDeserializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.UUIDDeserializer;
+import org.apache.kafka.common.serialization.VoidDeserializer;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
@@ -79,6 +93,30 @@ public final class ConsumerUtils {
     private static final String CONSUMER_CLIENT_ID_METRIC_TAG = "client-id";
     private static final Logger log = LoggerFactory.getLogger(ConsumerUtils.class);
 
+    /**
+     * Deserializers shipped with Kafka that copy their input. A record produced through one of these never
+     * references the fetch response's receive buffer, so the buffer may be reused once the fetch is drained.
+     * {@link ByteBufferDeserializer} hands the input through, and a custom deserializer may retain it, so they
+     * keep the default, non-reusing pool.
+     */
+    private static final Set<Class<?>> COPYING_DESERIALIZERS = Set.of(
+            ByteArrayDeserializer.class, BytesDeserializer.class, StringDeserializer.class,
+            IntegerDeserializer.class, LongDeserializer.class, ShortDeserializer.class,
+            DoubleDeserializer.class, FloatDeserializer.class, BooleanDeserializer.class,
+            UUIDDeserializer.class, VoidDeserializer.class);
+
+    /**
+     * The pool fetch responses are received into: a reusing pool when no view of a receive buffer can reach the
+     * application, otherwise {@link MemoryPool#NONE}. The reusing pool keeps up to twice
+     * {@code fetch.max.bytes}, which covers one buffered and one in-flight response per node.
+     */
+    public static MemoryPool receiveMemoryPool(ConsumerConfig config, Deserializers<?, ?> deserializers) {
+        if (COPYING_DESERIALIZERS.contains(deserializers.keyDeserializer().getClass())
+                && COPYING_DESERIALIZERS.contains(deserializers.valueDeserializer().getClass()))
+            return new CachingMemoryPool(2L * config.getInt(ConsumerConfig.FETCH_MAX_BYTES_CONFIG));
+        return MemoryPool.NONE;
+    }
+
     public static ConsumerNetworkClient createConsumerNetworkClient(ConsumerConfig config,
                                                                     Metrics metrics,
                                                                     LogContext logContext,
@@ -87,7 +125,8 @@ public final class ConsumerUtils {
                                                                     Metadata metadata,
                                                                     Sensor throttleTimeSensor,
                                                                     long retryBackoffMs,
-                                                                    ClientTelemetrySender clientTelemetrySender) {
+                                                                    ClientTelemetrySender clientTelemetrySender,
+                                                                    MemoryPool receiveMemoryPool) {
         NetworkClient netClient = ClientUtils.createNetworkClient(config,
                 config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG),
                 metrics,
@@ -98,7 +137,8 @@ public final class ConsumerUtils {
                 CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION,
                 metadata,
                 throttleTimeSensor,
-                clientTelemetrySender);
+                clientTelemetrySender,
+                receiveMemoryPool);
 
         // Will avoid blocking an extended period of time to prevent heartbeat thread starvation
         int heartbeatIntervalMs = config.getInt(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG);
