@@ -159,20 +159,39 @@
 
 **請你決定走哪一條**，這會決定 L3 要不要拆成獨立的 KIP。
 
+### 5a. 已落地：接收 buffer 重用（heap，只對複製型 deserializer）
+
+KIP 現在包含這一項。它走的是 §5 的第一條路，而且只做 heap。數字在 03 §7：6p×1KB 最終版本對 base 吞吐 +49%、CPU/GB −15%。
+
+省掉的是背景執行緒每個回應新配 buffer 的配置與 memset（03 §5 的 19%）。direct 重用還能再省掉 JDK 暫存 direct buffer 的那次複製（14%），但原型裡它沒有吞吐優勢，還多了 native 記憶體與 `Cleaner` 的風險。所以不做 §6 原本寫的 off-heap 池。
+
+設計決定（不新增 config）：
+
+1. **新的 `CachingMemoryPool`**（`org.apache.kafka.common.memory`）：只用 heap；只快取 ≥ 1 MiB 的已釋放 buffer；上限 `2 × fetch.max.bytes`（每個 node 一份已 buffer、一份在飛）。它從不阻塞。漏掉一次釋放只是少一次重用，buffer 會被 GC 收走。
+2. **釋放點**：`NetworkClient` 把 `NetworkReceive` 的釋放交給 `ClientResponse.releaseBuffer()`。`AbstractFetch` 再把它交給 `FetchMetricsAggregator`，後者本來就知道一個 fetch 回應的所有 partition 何時都被取完。取完一定發生在 app 執行緒，而且 record 已經複製出來。
+3. **安全閘**（`ConsumerUtils.receiveMemoryPool`）：key 與 value deserializer 都是內建的複製型（`ByteArray`、`Bytes`、`String`、`Integer`、`Long`、`Short`、`Double`、`Float`、`Boolean`、`UUID`、`Void`）才重用。`ByteBufferDeserializer` 會把 buffer 直接交出去，自訂 deserializer 可能留住它，所以兩者都維持 `MemoryPool.NONE`。
+4. **`CompletedFetch` 不再讓任何東西引用接收 buffer**：header 的 key/value 改成立即解碼（`RecordHeader` 原本是 lazy），`RecordDeserializationException` 裡的 key/value 改成複製。
+5. **範圍**：producer、admin、share consumer 維持 `MemoryPool.NONE`。share consumer 沒有釋放的管線。
+
+**未來工作**：
+
+- 擴充 `Deserializer` API，讓自訂 deserializer 可以宣告「我會複製輸入」，它們也就能用上重用。這是公開介面變更，另走 KIP。
+- 03 §5 裡 app 執行緒的項目（例如每批快取 leader epoch 的 `Optional`）還沒量。
+
 ---
 
 ## 6. 公開介面影響
 
-**不新增設定。** credit 由 `fetch.max.bytes` 推導（4 倍），池容量由 credit 加 2 倍 `fetch.max.bytes` 推導。理由是你定過的規則：參數越少越好，不要把內部複雜度暴露給使用者。如果 reviewer 要求可調，我的立場是先給固定倍數 + metric，證明有人真的需要調再說。
+**不新增設定。** credit 是 `1 × fetch.max.bytes`（§4.5a），接收 buffer 池的上限是 `2 × fetch.max.bytes`（§5a）。兩者都從既有設定推導。理由是你定過的規則：參數越少越好，不要把內部複雜度暴露給使用者。如果 reviewer 要求可調，我的立場是先給固定倍數，證明有人真的需要調再說。
 
-**記憶體行為變更（必須寫進 KIP）**：
-- 接收 buffer 從 heap 移到 off-heap 池，總量有上限。實測：heap 256 MB 時 RSS 326 MB（heap 256 + 池 47 + JVM），而且不隨 partition 數或 broker 吐資料速度成長。
-- 池滿時 `tryAllocate` 回 null，網路層停止讀該連線，資料留在 broker。這是新的 backpressure 行為。
-- 使用者若依賴 `-Xmx` 就能框住整個 consumer 的記憶體，現在要改看 off-heap。
+**記憶體行為（落地版本，跟原本的 off-heap 計畫不同）**：
+- 接收 buffer 仍在 heap 上，`-Xmx` 仍然框住整個 consumer 的記憶體。差別只在於已釋放的大 buffer 會被留下來重用，總量上限 `2 × fetch.max.bytes`。
+- 池從不阻塞、從不回 null。快取裡沒有合用的 buffer 就照舊配一塊新的。所以沒有新的 backpressure 行為，也沒有「池滿」這種狀態要對使用者解釋。
+- 對使用者可見的差異只有：steady state 下 heap 裡多常駐最多 `2 × fetch.max.bytes` 的 byte[]，換來背景執行緒少 25% 的 CPU。
 
-**新增 metrics（待討論）**：池的使用量與耗盡次數、admission 拒絕次數、預抓深度。這些是 KIP 的公開介面部分。
+**新增 metrics**：目前沒有。原本設想的池使用量與耗盡次數在落地版本裡沒有意義，因為池不會耗盡。預抓深度是否要暴露，留到 reviewer 討論。
 
-**`Deserializer` 契約**：見 §5，取決於你選哪條路。
+**`Deserializer` 契約**：不變。重用只在 §5a 的安全閘成立時啟用，任何現有 deserializer 的行為都不受影響。讓自訂 deserializer 宣告「我會複製輸入」是後續另一個 KIP。
 
 ---
 
@@ -231,8 +250,8 @@
 
 ## 11. 待你拍板的問題
 
-1. **§5 的三條路要走哪一條？** 這決定 L3 是不是要拆成獨立 KIP，也決定 1,770 MB/s 那個數字能不能引用。
+1. ~~**§5 的三條路要走哪一條？**~~ 已決定：走第一條，heap 重用加安全閘（§5a）。L3 不拆成獨立 KIP；自訂 deserializer 的 opt-in API 才是另一個 KIP。
 2. **KIP 的範圍**：一個 KIP 涵蓋 L1+L2+L3，還是 L1+L2 走 JIRA、L3 單獨一個 KIP？我傾向後者，因為只有 L3 動到公開語意。
-3. **要不要在第一階段就把 share consumer 一起改？** 我傾向不要，先只動 regular consumer 的續發時機。
-4. **metrics 要暴露到什麼程度？** 池使用量與 admission 拒絕次數是我認為最低必要的兩個。
+3. ~~**要不要在第一階段就把 share consumer 一起改？**~~ 已決定：不改。share consumer 維持原本的 fetch 時機與 `MemoryPool.NONE`。
+4. **metrics 要暴露到什麼程度？** 落地版本沒有池耗盡與 admission 拒絕這兩種事件（§6），所以目前一個都沒加。要不要暴露預抓深度，留給 reviewer。
 5. **效能的驗收門檻怎麼定？** 我建議用「同機器 A/A 包絡之外才算訊號」而不是固定百分比，因為前一條線在這件事上吃過苦頭。

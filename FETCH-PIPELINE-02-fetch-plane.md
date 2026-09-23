@@ -174,12 +174,20 @@ trunk 不需要它：`ConsumerUtils.java:77` 的 `CONSUMER_MAX_INFLIGHT_REQUESTS
 3. **（新增）sensor 競爭的隔離量測**：在單執行緒上把 fetch metrics 全關，量吞吐與 CPU/GB 的上界；那是分片能拿到的最好情況。
 4. 只有當飽和點低於網路上限才實作，驗收：每加一條分片的邊際吞吐 ≥ 70% 線性、CPU/GB ≤ 單執行緒的 110%、閒置喚醒不隨分片數增加。
 
+### 4.7 decode 分片的門檻實驗：已跑，只有 zstd 過（03 §6）
+
+condition-1 是「app 執行緒 ≥ 0.9 核，且背景執行緒 < 0.7 核」，也就是 app 飽和而背景有餘裕。在 morefine 上跑了 6p×100B、6p lz4（1 KB）、6p zstd（1 KB）三種工作負載。
+
+- 6p×100B（app 0.77 核）與 lz4（app 0.77、背景 0.68）都沒過。
+- 只有 zstd 過：app 0.87 核（含啟動，穩態約 1 核）、背景 0.37 核，瓶頸是解壓縮。
+- 所以 decode 分片只會幫到重度壓縮的工作負載。**維持延後**，不進這個 KIP。
+
 ---
 
 ## 5. 不做的事
 
 - **每個 partition 一條執行緒**：交接成本與 partition 數成正比。
-- **把反序列化搬到分片**：`Deserializer` 不要求 thread-safe；而且 03 量到 app 側成本在 per-record 物件（01 的 L2），不是執行緒數。
+- **把反序列化搬到分片**：`Deserializer` 不要求 thread-safe；而且 03 量到 app 側成本在 per-record 物件（01 的 L2），不是執行緒數。condition-1 實驗也只有 zstd 過門檻（§4.7）。
 - **把控制平面拆成多執行緒**：manager 之間有 read-then-clear 的共享狀態，順序是契約（見 06 R6）。
 - **現在就做 §4**：門檻沒過，見 §1。
 
