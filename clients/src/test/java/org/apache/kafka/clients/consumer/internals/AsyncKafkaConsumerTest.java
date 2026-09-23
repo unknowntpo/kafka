@@ -685,9 +685,10 @@ public class AsyncKafkaConsumerTest {
 
         assertDoesNotThrow(() -> consumer.poll(Duration.ZERO));
 
-        // When poll() returns records, the next fetch is pipelined so a fetch request stays pending on the
-        // broker while the application processes the returned records.
-        verify(applicationEventHandler, atLeastOnce()).add(isA(CreateFetchRequestsEvent.class));
+        // Returning records does not ask the background thread for the next fetch: it issues that itself when the
+        // previous response arrives, so the request is already pending on the broker while the application
+        // processes these records. The only fetch-related event poll() sends is the AsyncPollEvent itself.
+        verify(applicationEventHandler, never()).add(isA(CreateFetchRequestsEvent.class));
     }
 
     /**

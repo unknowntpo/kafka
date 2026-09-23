@@ -22,7 +22,10 @@ import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.RecordDeserializationException;
+import org.apache.kafka.common.errors.SerializationException;
+import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.metrics.Metrics;
@@ -46,6 +49,7 @@ import org.apache.kafka.common.utils.internals.LogContext;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -303,5 +307,45 @@ public class CompletedFetchTest {
         abortedTransaction.setFirstOffset(0);
         abortedTransaction.setProducerId(PRODUCER_ID);
         return Collections.singletonList(abortedTransaction);
+    }
+
+    @Test
+    public void testRecordsDoNotReferenceTheReceiveBuffer() {
+        MemoryRecords records;
+        try (MemoryRecordsBuilder builder = MemoryRecords.builder(ByteBuffer.allocate(1024), Compression.NONE, TimestampType.CREATE_TIME, 0L)) {
+            builder.append(0L, "key".getBytes(), "value".getBytes(), new Header[] {new RecordHeader("h", "hv".getBytes())});
+            records = builder.build();
+        }
+        FetchResponseData.PartitionData partitionData = new FetchResponseData.PartitionData().setRecords(records);
+        CompletedFetch completedFetch = newCompletedFetch(0, partitionData);
+
+        List<ConsumerRecord<String, String>> fetched = completedFetch.fetchRecords(
+                newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true), newStringDeserializers(), 10);
+        assertEquals(1, fetched.size());
+
+        // Once the fetch is drained its receive buffer may be reused. Wipe it and check that nothing handed to
+        // the application, including the lazily copied header value, still points into it.
+        Arrays.fill(records.buffer().array(), (byte) 0);
+        ConsumerRecord<String, String> record = fetched.get(0);
+        assertEquals("key", record.key());
+        assertEquals("value", record.value());
+        assertArrayEquals("hv".getBytes(), record.headers().lastHeader("h").value());
+    }
+
+    @Test
+    public void testDeserializationExceptionDoesNotReferenceTheReceiveBuffer() {
+        MemoryRecords records = (MemoryRecords) newRecords(0, 1, 0);
+        FetchResponseData.PartitionData partitionData = new FetchResponseData.PartitionData().setRecords(records);
+        CompletedFetch completedFetch = newCompletedFetch(0, partitionData);
+        Deserializers<String, String> failing = new Deserializers<>(new StringDeserializer(), (topic, data) -> {
+            throw new SerializationException("boom");
+        }, null);
+
+        RecordDeserializationException e = assertThrows(RecordDeserializationException.class,
+                () -> completedFetch.fetchRecords(newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true), failing, 10));
+
+        Arrays.fill(records.buffer().array(), (byte) 0);
+        assertEquals("key", Utils.utf8(e.keyBuffer()));
+        assertEquals("value-0", Utils.utf8(e.valueBuffer()));
     }
 }

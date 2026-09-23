@@ -53,7 +53,6 @@ import org.apache.kafka.clients.consumer.internals.events.CompletableApplication
 import org.apache.kafka.clients.consumer.internals.events.CompletableEvent;
 import org.apache.kafka.clients.consumer.internals.events.CompletableEventReaper;
 import org.apache.kafka.clients.consumer.internals.events.ConsumerRebalanceListenerCallbackCompletedEvent;
-import org.apache.kafka.clients.consumer.internals.events.CreateFetchRequestsEvent;
 import org.apache.kafka.clients.consumer.internals.events.CurrentLagEvent;
 import org.apache.kafka.clients.consumer.internals.events.ErrorEvent;
 import org.apache.kafka.clients.consumer.internals.events.EventProcessor;
@@ -528,7 +527,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null),
                     backgroundEventHandler,
                     false,
-                    asyncConsumerMetrics
+                    asyncConsumerMetrics,
+                    ConsumerUtils.receiveMemoryPool(config, deserializers)
             );
             this.offsetCommitCallbackInvoker = new OffsetCommitCallbackInvoker(interceptors);
             this.groupMetadata.set(initializeGroupMetadata(config, groupRebalanceConfig));
@@ -956,14 +956,12 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 firstPass = false;
                 final Fetch<K, V> fetch = pollForFetches(timer);
                 if (!fetch.isEmpty()) {
-                    // before returning the fetched records, we can send off the next round of fetches
-                    // and avoid block waiting for their responses to enable pipelining while the user
-                    // is handling the fetched records.
+                    // The next round of fetches does not have to be asked for here: the background thread issues it
+                    // itself as soon as the previous responses arrive (see FetchRequestManager), so it is already
+                    // in flight while the user handles these records.
                     //
                     // NOTE: since the consumed position has already been updated, we must not allow
                     // wakeups or any other errors to be triggered prior to returning the fetched records.
-                    sendPrefetches(timer);
-
                     if (fetch.records().isEmpty()) {
                         log.trace("Returning empty records from `poll()` "
                             + "since the consumer's position has advanced for at least one topic partition");
@@ -987,8 +985,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
      * <em>inflight</em> event has completed; if so, a new event is submitted in its place so a fetch request
      * stays in flight. If the completed event left records buffered no new
      * event is submitted here (it would gate those records behind a fresh validate-positions stage).
-     * Instead the buffered records are returned and the next fetch is pipelined by {@link #poll(Duration)} via
-     * {@link #sendPrefetches(Timer)}.
+     * Instead the buffered records are returned; the next fetch needs no event at all, the background thread
+     * issues it on its own when the previous response arrives.
      */
     private void checkInflightPoll(Timer timer, boolean firstPass) {
         // Clear the current inflight poll if we can, so a new one (and a new fetch) is submitted below.
@@ -2102,28 +2100,6 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             wakeupTrigger.clearTask();
         }
         return true;
-    }
-
-    /**
-     * This method signals the background thread to {@link CreateFetchRequestsEvent create fetch requests} for the
-     * pre-fetch case, i.e. right before {@link #poll(Duration)} exits. In the pre-fetch case, the application thread
-     * will not wait for confirmation of the request creation before continuing.
-     *
-     * <p/>
-     *
-     * At the point this method is called, {@link KafkaConsumer#poll(Duration)} has data ready to return to the user,
-     * which means the consumed position was already updated. In order to prevent potential gaps in records, this
-     * method is designed to suppress all exceptions.
-     *
-     * @param timer Provides an upper bound for the event and its {@link CompletableFuture future}
-     */
-    private void sendPrefetches(Timer timer) {
-        try {
-            applicationEventHandler.add(new CreateFetchRequestsEvent(calculateDeadlineMs(timer)));
-        } catch (Throwable t) {
-            // Any unexpected errors will be logged for troubleshooting, but not thrown.
-            log.warn("An unexpected error occurred while pre-fetching data in Consumer.poll(), but was suppressed", t);
-        }
     }
 
     @Override
