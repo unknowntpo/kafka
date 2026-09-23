@@ -101,8 +101,16 @@ Solution Space 不算窄：S1、S2、S3 是真的結構不同的選項（記憶�
 - Solution Form：釋放時把大 buffer 放進有上限的快取；配置時先找快取裡容量夠的；找不到就照舊配新的。漏還的 buffer 交給 GC。**池從不阻塞、從不回 null**。
 - Consequences：heap 常駐最多「上限」那麼多的 byte[]；重用率取決於釋放的可靠度；歸還後不可再碰，這個責任轉給 PT2。
 - Resulting Context：產生 P2（誰負責歸還）；容量需要推導（PT5）。
-- 證據：broker 端的 `SimpleMemoryPool`（形狀相同但語意是 admission，不是重用）；Netty 的 pooled allocator。本案：03 §7。
-- 信心與問題：高。未量的是多 node 部署的重用率。
+- 證據：broker 端的 `SimpleMemoryPool`（形狀相同但語意是 admission，不是重用）；producer 端的 `BufferPool`（見 §5.7）；Netty 的 pooled allocator。本案：03 §7。
+- 命中率（morefine，量測用 jar 加計數器，跑兩次取值相近）：
+
+  | Topic | 回應數 | hit | miss | 命中率 | 平均回應 | 高峰存活 buffer |
+  |---|---|---|---|---|---|---|
+  | t6p12（6 partition） | 2593 | 2583 | 10 | 99.6% | 4.6 MB | 10 個 ≈ 46 MB |
+  | t1p（1 partition） | 3949 | 3905 | 44 | 98.9% | 1.0 MB | 44 個 ≈ 44 MB |
+
+  三個附帶的觀察：`releases = hits + misses`，每個回應都被歸還，PT2 在這兩個 workload 上沒有漏；`releaseOverflow = 0`，PT5 的上限沒被撞到；miss 數等於高峰同時存活的 buffer 數，而它 ≈ credit（1 × `fetch.max.bytes` = 50 MB）÷ 回應大小，跟 F14 的推導一致。
+- 信心與問題：高。未量的是多 node 部署（每個 node 各有自己的 credit，高峰存活量會乘上 node 數，可能撞到 2 × `fetch.max.bytes` 的上限）。
 
 ### PT2 完成計數釋放（Completion-Counted Release）
 
@@ -167,6 +175,31 @@ P1 固定配置成本
 
 順序是被迫的，不是選的：先有 PT1 才有擁有權問題；PT2 沒有 PT4 與 PT3 就不安全；PT5 是 PT1 的參數。每套一層都改變 Context：PT1 之後「漏釋放」從 bug 變成可接受的退化，PT2 之後「drain 的執行緒」從無關緊要變成不變式，PT3 之後「哪些 deserializer 會複製」從沒人在意變成需要維護的清單。
 
+### 5.7 對照：producer 的 `BufferPool`
+
+Producer 早就有一個 buffer 池（`clients/producer/internals/BufferPool.java`）。它跟 `CachingMemoryPool` 是同一個 Pattern 家族的兩個成員，差異全部來自資料流方向相反，所以值得放在一起看。
+
+| | Producer `BufferPool` | Consumer `CachingMemoryPool` |
+|---|---|---|
+| 資料流 | app → buffer → 網路 | 網路 → buffer → app |
+| PT1 回收 | 固定尺寸（`batch.size`）free list | 變動尺寸，容量 ≥ 需求即重用 |
+| 池的語意 | admission：`buffer.memory` 硬上限、阻塞 `send()`、`max.block.ms` 超時例外 | best-effort：不阻塞、不回 null、漏還交 GC |
+| PT2 擁有權 | 單一 owner（`ProducerBatch`），`Sender` 在回應後顯式 `deallocate` | N 個 partition 共享一塊，完成計數釋放 |
+| PT4 邊界複製 | 天然成立：資料是 app 寫進 buffer，buffer 從不交給 app | 必須刻意做：header eager、例外複製 |
+| PT3 安全閘 | 不需要：serializer 的輸出被複製進 batch | 需要：deserializer 可能保留輸入 |
+| PT5 容量 | 獨立設定 `buffer.memory` | 推導 2 × `fetch.max.bytes` |
+| 阻塞點 | app 的 `send()`，阻塞是合理的 backpressure | 網路執行緒，不能阻塞 |
+| metrics | `bufferpool-wait-ratio`、`buffer-exhausted-rate` | 無（見下） |
+
+關鍵在第一列。Producer 的 buffer 從不流向 app，擁有權由構造保證，PT3 與 PT4 根本不存在；它可以放心做硬上限與阻塞，因為阻塞的是 app 自己的 `send()`。Consumer 的 buffer 流向 app，設計的重量全在邊界上，而且池不能在網路執行緒上阻塞——heartbeat 和其他 request 都在同一條執行緒。這就是兩邊長得不同的原因，也是不直接重用 `BufferPool` 的原因：它會把阻塞與 `Metrics`/`Time` 相依帶進 `Selector`。
+
+兩個借鏡：
+
+1. Producer 的 batch 全部一樣大，free list 幾乎每次命中。Consumer 的回應大小變動，但穩態下很穩定（`max.partition.fetch.bytes` × partition 數），量到的命中率 99%（PT1 證據欄）。所以不需要像 `ChunkedRecordAccumulator`（KAFKA-20578）那樣切成固定 chunk；`NetworkReceive` 需要連續 buffer 給 `FetchResponse` 解析，chunk 化要改整條解析路徑，收益只有碎片。
+2. Producer 的兩個 metric 對 consumer 池沒意義（它不等、不耗盡）。若要加 metric，該加的是命中率：它是營運判斷 `fetch.max.bytes` 是否設對的訊號。
+
+不做的事：抽一個共用的 free-list core。兩邊語意不同（admission vs best-effort），共用會讓一個 API 背兩種契約；現在各自都在 100 行內。
+
 ## 6. 具體對應
 
 | Pattern | Kafka 機制 | 程式碼 | 可替換性 |
@@ -196,8 +229,8 @@ P1 固定配置成本
 **可以推翻這個論證的驗證問題**：
 1. 是否存在任何路徑，讓使用白名單 deserializer 的 app 拿到接收 buffer 的 view？目前的答案是「沒有」，證據是 `CompletedFetchTest` 的抹除測試，但它只涵蓋 header 與例外。
 2. 是否存在背景執行緒呼叫 `drain()` 的路徑？目前查過 `retainAll` 的四個呼叫點都在 app 執行緒。未來加路徑時這個不變式沒有測試保護。
-3. 多 broker 部署下，`2 × fetch.max.bytes` 的快取重用率是多少？低於單 node 的話，PT5 需要乘上 node 數。
-4. heap 常駐是否真的不超過上限？`CachingMemoryPoolTest.testCacheIsBounded` 測了池本身；整體 RSS 未在真實負載下量。
+3. 多 broker 部署下，`2 × fetch.max.bytes` 的快取重用率是多少？單 node 已量到 99%（§5.1），高峰存活量 ≈ credit ÷ 回應大小；多 node 時這個量會乘上 node 數，低於單 node 的話 PT5 需要乘上 node 數。
+4. heap 常駐是否真的不超過上限？`CachingMemoryPoolTest.testCacheIsBounded` 測了池本身；單 node 負載下 `releaseOverflow = 0`，高峰存活 44–46 MB；整體 RSS 未量。
 
 ## 8. 一句話
 
