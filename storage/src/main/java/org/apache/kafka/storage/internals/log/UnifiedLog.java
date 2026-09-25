@@ -71,16 +71,20 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentNavigableMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -151,6 +155,11 @@ public class UnifiedLog implements AutoCloseable {
     private volatile Optional<PartitionMetadataFile> partitionMetadataFile = Optional.empty();
     // This is the offset(inclusive) until which segments are copied to the remote storage.
     private volatile long highestOffsetInRemoteStorage = -1L;
+    // The time at which each remote log segment overlapping the local log finished copying to the remote storage,
+    // keyed by the inclusive end offset of the remote segment. It serves as the retention anchor for local segments
+    // whose records carry future timestamps, see deleteRetentionMsBreachedSegments(). Entries below the
+    // local-log-start-offset are pruned as the local log is cleaned up.
+    private final ConcurrentNavigableMap<Long, Long> remoteCopyFinishedTimestamps = new ConcurrentSkipListMap<>();
 
     /* Keep track of the current high watermark in order to ensure that segments containing offsets at or above it are
      * not eligible for deletion. This means that the active segment is only eligible for deletion if the high watermark
@@ -460,6 +469,8 @@ public class UnifiedLog implements AutoCloseable {
     // visible for testing
     public void updateLocalLogStartOffset(long offset) throws IOException {
         localLogStartOffset = offset;
+        // remote segments ending before the local-log-start-offset can no longer anchor any local segment
+        remoteCopyFinishedTimestamps.headMap(offset).clear();
         if (highWatermark() < offset) {
             updateHighWatermark(offset);
         }
@@ -819,6 +830,45 @@ public class UnifiedLog implements AutoCloseable {
         } else if (offset > highestOffsetInRemoteStorage()) {
             highestOffsetInRemoteStorage = offset;
         }
+    }
+
+    /**
+     * Records the time at which the remote log segment ending at the given offset (inclusive) finished copying to
+     * the remote storage. When a local segment contains future timestamps, this time is used as its retention anchor
+     * instead of the largest record timestamp. Unlike the last-modified time of the segment file, it is immutable and
+     * survives partition reassignment and disk replacement.
+     * <p>
+     * The timestamp is ignored when remote storage is disabled or the remote segment lies entirely before the
+     * local-log-start-offset, since it can no longer anchor any local segment.
+     *
+     * @param remoteSegmentEndOffset  the inclusive end offset of the remote log segment
+     * @param copyFinishedTimestampMs the epoch time in milliseconds at which the copy finished
+     */
+    public void updateRemoteCopyFinishedTimestamp(long remoteSegmentEndOffset, long copyFinishedTimestampMs) {
+        if (!remoteLogEnabled() || remoteSegmentEndOffset < localLogStartOffset()) {
+            return;
+        }
+        // keep the latest time if the same range was copied more than once (e.g. after leader changes)
+        remoteCopyFinishedTimestamps.merge(remoteSegmentEndOffset, copyFinishedTimestampMs, Math::max);
+    }
+
+    /**
+     * Returns the copy-finished time of the remote log segment covering the last offset of the given local segment,
+     * if known.
+     */
+    // visible for testing
+    public OptionalLong remoteCopyFinishedTimestamp(LogSegment segment, Optional<LogSegment> nextSegmentOpt) {
+        long lastOffset = nextSegmentOpt.map(next -> next.baseOffset() - 1).orElseGet(() -> logEndOffset() - 1);
+        if (lastOffset < segment.baseOffset()) {
+            return OptionalLong.empty();
+        }
+        Map.Entry<Long, Long> entry = remoteCopyFinishedTimestamps.ceilingEntry(lastOffset);
+        return entry == null ? OptionalLong.empty() : OptionalLong.of(entry.getValue());
+    }
+
+    // visible for testing
+    public NavigableMap<Long, Long> remoteCopyFinishedTimestamps() {
+        return Collections.unmodifiableNavigableMap(remoteCopyFinishedTimestamps);
     }
 
     // Rebuild producer state until lastOffset. This method may be called from the recovery code path, and thus must be
@@ -1346,6 +1396,8 @@ public class UnifiedLog implements AutoCloseable {
         synchronized (lock) {
             if (newLocalLogStartOffset > localLogStartOffset()) {
                 localLogStartOffset = newLocalLogStartOffset;
+                // remote segments ending before the local-log-start-offset can no longer anchor any local segment
+                remoteCopyFinishedTimestamps.headMap(newLocalLogStartOffset).clear();
                 logger.info("Incremented local log start offset to {} due to reason {}", localLogStartOffset(), reason);
             }
         }
@@ -2019,17 +2071,11 @@ public class UnifiedLog implements AutoCloseable {
         if (retentionMs < 0) return 0;
         long startMs = time().milliseconds();
 
+        Map<Long, RetentionAnchor> anchors = new HashMap<>();
         DeletionCondition shouldDelete = (segment, nextSegmentOpt) -> {
-            long anchorTimestamp = segment.largestTimestamp();
-            if (startMs < anchorTimestamp) {
-                if (remoteLogEnabledAndRemoteCopyEnabled) {
-                    anchorTimestamp = segment.lastModified();
-                    futureTimestampLogger.warn("{} contains future timestamp(s), using lastModified time {} as the retention anchor", segment, anchorTimestamp);
-                } else {
-                    futureTimestampLogger.warn("{} contains future timestamp(s), making it ineligible to be deleted", segment);
-                }
-            }
-            boolean delete = startMs - anchorTimestamp > retentionMs;
+            RetentionAnchor anchor = retentionAnchor(segment, nextSegmentOpt, startMs, remoteLogEnabledAndRemoteCopyEnabled);
+            anchors.put(segment.baseOffset(), anchor);
+            boolean delete = startMs - anchor.timestampMs() > retentionMs;
             logger.debug("{} retentionMs breached: {}, startMs={}, retentionMs={}",
                     segment, delete, startMs, retentionMs);
             return delete;
@@ -2037,13 +2083,45 @@ public class UnifiedLog implements AutoCloseable {
         return deleteOldSegments(shouldDelete, toDelete -> {
             String retentionScope = remoteLogEnabledAndRemoteCopyEnabled ? "local log retention" : "log retention";
             for (LogSegment segment : toDelete) {
-                String anchor = segment.largestRecordTimestamp().isEmpty() || (remoteLogEnabledAndRemoteCopyEnabled && startMs < segment.largestTimestamp())
-                        ? "last modified time of the segment"
-                        : "largest record timestamp in the segment";
+                RetentionAnchor anchor = anchors.get(segment.baseOffset());
                 logger.info("Deleting segment {} due to {} time {}ms breach based on the {}",
-                        segment, retentionScope, retentionMs, anchor);
+                        segment, retentionScope, retentionMs, anchor.description());
             }
         });
+    }
+
+    private record RetentionAnchor(long timestampMs, String description) { }
+
+    /**
+     * Determines the timestamp against which the time-based retention of the given segment is evaluated.
+     * Normally this is the largest record timestamp in the segment (or the last-modified time of the file when the
+     * segment carries no record timestamps). When the largest record timestamp lies in the future it can never expire,
+     * so if the segment has been copied to remote storage the copy-finished time recorded in the remote log metadata
+     * is used instead, falling back to the last-modified time of the segment file when that is not known.
+     */
+    private RetentionAnchor retentionAnchor(LogSegment segment,
+                                            Optional<LogSegment> nextSegmentOpt,
+                                            long nowMs,
+                                            boolean remoteLogEnabledAndRemoteCopyEnabled) throws IOException {
+        long largestTimestamp = segment.largestTimestamp();
+        if (nowMs >= largestTimestamp) {
+            return segment.largestRecordTimestamp().isEmpty()
+                    ? new RetentionAnchor(largestTimestamp, "last modified time of the segment")
+                    : new RetentionAnchor(largestTimestamp, "largest record timestamp in the segment");
+        }
+        if (!remoteLogEnabledAndRemoteCopyEnabled) {
+            futureTimestampLogger.warn("{} contains future timestamp(s), making it ineligible to be deleted", segment);
+            return new RetentionAnchor(largestTimestamp, "largest record timestamp in the segment");
+        }
+        OptionalLong copyFinishedTimestamp = remoteCopyFinishedTimestamp(segment, nextSegmentOpt);
+        if (copyFinishedTimestamp.isPresent()) {
+            futureTimestampLogger.warn("{} contains future timestamp(s), using remote copy-finished time {} as the retention anchor",
+                    segment, copyFinishedTimestamp.getAsLong());
+            return new RetentionAnchor(copyFinishedTimestamp.getAsLong(), "copy-finished time of the remote segment");
+        }
+        long lastModified = segment.lastModified();
+        futureTimestampLogger.warn("{} contains future timestamp(s), using lastModified time {} as the retention anchor", segment, lastModified);
+        return new RetentionAnchor(lastModified, "last modified time of the segment");
     }
 
     private int deleteRetentionSizeBreachedSegments() throws IOException {
@@ -2410,6 +2488,7 @@ public class UnifiedLog implements AutoCloseable {
                     logger.debug("Truncate and start at offset {}, logStartOffset: {}", newOffset, logStartOffsetOpt.orElse(newOffset));
                     synchronized (lock)  {
                         localLog.truncateFullyAndStartAt(newOffset);
+                        remoteCopyFinishedTimestamps.headMap(newOffset).clear();
                         leaderEpochCache.clearAndFlush();
                         producerStateManager.truncateFullyAndStartAt(newOffset);
                         logStartOffset = logStartOffsetOpt.orElse(newOffset);

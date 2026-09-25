@@ -607,6 +607,124 @@ public class UnifiedLogTest {
     }
 
     @Test
+    public void shouldDeleteLocalLogSegmentsWithFutureTimestampBasedOnRemoteCopyFinishedTime() throws IOException {
+        long futureTimestamp = mockTime.milliseconds() + 60_000;
+        Supplier<MemoryRecords> futureRecords = () -> singletonRecords("test".getBytes(), "test".getBytes(), futureTimestamp);
+        int recordSize = futureRecords.get().sizeInBytes();
+        LogConfig logConfig = new LogTestUtils.LogConfigBuilder()
+                .segmentBytes(recordSize * 2)
+                .localRetentionMs(5000)
+                .cleanupPolicy("")
+                .remoteLogStorageEnable(true)
+                .build();
+        log = createLog(logDir, logConfig, true);
+
+        for (int i = 0; i < 10; i++) {
+            log.appendAsLeader(futureRecords.get(), 0);
+        }
+
+        // The segment files were just written, so their lastModified time is within the local retention and would
+        // keep the segments. The remote copy of every segment however finished long before the local retention.
+        List<LogSegment> segments = log.logSegments();
+        for (int i = 0; i < segments.size() - 1; i++) {
+            long lastOffset = segments.get(i + 1).baseOffset() - 1;
+            log.updateRemoteCopyFinishedTimestamp(lastOffset, mockTime.milliseconds() - 20000);
+        }
+
+        int segmentsBefore = log.numberOfSegments();
+        log.updateHighWatermark(log.logEndOffset());
+        log.updateHighestOffsetInRemoteStorage(log.logEndOffset() - 1);
+        int deletedSegments = log.deleteOldSegments();
+
+        assertTrue(log.numberOfSegments() < segmentsBefore, "Segments with future timestamps should be deleted based on the remote copy-finished time");
+        assertTrue(deletedSegments > 0, "At least one segment should be deleted");
+        // the copy-finished times of the deleted segments are no longer needed and should have been pruned
+        assertTrue(log.remoteCopyFinishedTimestamps().keySet().stream().allMatch(endOffset -> endOffset >= log.localLogStartOffset()),
+                "Copy-finished times below the local-log-start-offset should be pruned");
+    }
+
+    @Test
+    public void shouldNotDeleteLocalLogSegmentsWithFutureTimestampWhenRemoteCopyFinishedWithinRetention() throws IOException {
+        long futureTimestamp = mockTime.milliseconds() + 60_000;
+        Supplier<MemoryRecords> futureRecords = () -> singletonRecords("test".getBytes(), "test".getBytes(), futureTimestamp);
+        int recordSize = futureRecords.get().sizeInBytes();
+        LogConfig logConfig = new LogTestUtils.LogConfigBuilder()
+                .segmentBytes(recordSize * 2)
+                .localRetentionMs(5000)
+                .cleanupPolicy("")
+                .remoteLogStorageEnable(true)
+                .build();
+        log = createLog(logDir, logConfig, true);
+
+        for (int i = 0; i < 10; i++) {
+            log.appendAsLeader(futureRecords.get(), 0);
+        }
+
+        // The lastModified time would make the segments eligible for deletion, but the remote copy finished just
+        // now, so the copy-finished time takes precedence and the segments are retained.
+        for (LogSegment segment : log.logSegments()) {
+            segment.setLastModified(mockTime.milliseconds() - 20000);
+        }
+        log.updateRemoteCopyFinishedTimestamp(log.logEndOffset() - 1, mockTime.milliseconds());
+
+        int segmentsBefore = log.numberOfSegments();
+        log.updateHighWatermark(log.logEndOffset());
+        log.updateHighestOffsetInRemoteStorage(log.logEndOffset() - 1);
+
+        assertEquals(0, log.deleteOldSegments(), "Segments should be retained when the remote copy-finished time is within local retention");
+        assertEquals(segmentsBefore, log.numberOfSegments());
+    }
+
+    @Test
+    public void testRemoteCopyFinishedTimestampLookupAndPruning() throws IOException {
+        LogConfig logConfig = new LogTestUtils.LogConfigBuilder()
+                .segmentBytes(1024)
+                .remoteLogStorageEnable(true)
+                .build();
+        log = createLog(logDir, logConfig, true);
+        for (int i = 0; i < 10; i++) {
+            log.appendAsLeader(singletonRecords("test".getBytes(), "test".getBytes(), mockTime.milliseconds()), 0);
+        }
+        log.roll(Optional.empty());
+        LogSegment firstSegment = log.logSegments().get(0);
+        LogSegment activeSegment = log.activeSegment();
+
+        // remote segments [0, 4] and [5, 9] finished copying at different times
+        log.updateRemoteCopyFinishedTimestamp(4L, 1000L);
+        log.updateRemoteCopyFinishedTimestamp(9L, 2000L);
+        // the local segment [0, 9] is covered by the remote segment ending at 9
+        assertEquals(OptionalLong.of(2000L), log.remoteCopyFinishedTimestamp(firstSegment, Optional.of(activeSegment)));
+        // the empty active segment has no last offset and thus no anchor
+        assertEquals(OptionalLong.empty(), log.remoteCopyFinishedTimestamp(activeSegment, Optional.empty()));
+        // a later copy of the same range wins over an earlier one
+        log.updateRemoteCopyFinishedTimestamp(9L, 1500L);
+        assertEquals(OptionalLong.of(2000L), log.remoteCopyFinishedTimestamp(firstSegment, Optional.of(activeSegment)));
+
+        // advancing the local-log-start-offset prunes the entries that can no longer anchor a local segment
+        log.updateLocalLogStartOffset(5L);
+        assertEquals(Map.of(9L, 2000L), log.remoteCopyFinishedTimestamps());
+        // and entries entirely before the local-log-start-offset are ignored
+        log.updateRemoteCopyFinishedTimestamp(4L, 3000L);
+        assertEquals(Map.of(9L, 2000L), log.remoteCopyFinishedTimestamps());
+
+        // truncating from the end keeps the entries: the truncated range is fetched again from the leader whose
+        // remote segments the entries describe
+        log.truncateTo(7L);
+        assertEquals(Map.of(9L, 2000L), log.remoteCopyFinishedTimestamps());
+        // truncating the whole log and restarting at a later offset prunes the entries below it
+        log.truncateFullyAndStartAt(20L, Optional.empty());
+        assertTrue(log.remoteCopyFinishedTimestamps().isEmpty());
+    }
+
+    @Test
+    public void testRemoteCopyFinishedTimestampIgnoredWhenRemoteStorageDisabled() throws IOException {
+        LogConfig logConfig = new LogTestUtils.LogConfigBuilder().build();
+        log = createLog(logDir, logConfig, false);
+        log.updateRemoteCopyFinishedTimestamp(9L, 2000L);
+        assertTrue(log.remoteCopyFinishedTimestamps().isEmpty());
+    }
+
+    @Test
     public void testLogDeletionAfterDeleteRecords() throws IOException {
         Supplier<MemoryRecords> records = () -> singletonRecords("test".getBytes());
         LogConfig logConfig = new LogTestUtils.LogConfigBuilder()

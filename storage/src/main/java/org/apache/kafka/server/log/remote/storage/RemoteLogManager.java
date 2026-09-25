@@ -923,6 +923,7 @@ public class RemoteLogManager implements Closeable, AsyncOffsetReader {
                 copiedOffsetOption = Optional.of(findHighestRemoteOffset(topicIdPartition, log));
                 logger.info("Found the highest copiedRemoteOffset: {} for partition: {} after becoming leader", copiedOffsetOption, topicIdPartition);
                 copiedOffsetOption.ifPresent(offsetAndEpoch ->  log.updateHighestOffsetInRemoteStorage(offsetAndEpoch.offset()));
+                updateRemoteCopyFinishedTimestamps(topicIdPartition, log);
             }
         }
 
@@ -1173,6 +1174,7 @@ public class RemoteLogManager implements Closeable, AsyncOffsetReader {
             // Update the highest offset in remote storage for this partition's log so that the local log segments
             // are not deleted before they are copied to remote storage.
             log.updateHighestOffsetInRemoteStorage(endOffset);
+            log.updateRemoteCopyFinishedTimestamp(endOffset, copySegmentFinishedRlsm.eventTimestampMs());
             logger.info("Copied {} to remote storage with segment-id: {}",
                     logFileName, copySegmentFinishedRlsm.remoteLogSegmentId());
         }
@@ -1702,6 +1704,9 @@ public class RemoteLogManager implements Closeable, AsyncOffsetReader {
     }
 
     class RLMFollowerTask extends RLMTask {
+        // The highest remote offset seen by the previous run, used to refresh the copy-finished timestamps only
+        // when the leader has copied new segments.
+        private long lastSeenHighestRemoteOffset = Long.MIN_VALUE;
 
         public RLMFollowerTask(TopicIdPartition topicIdPartition) {
             super(topicIdPartition);
@@ -1713,6 +1718,28 @@ public class RemoteLogManager implements Closeable, AsyncOffsetReader {
             // Update the highest offset in remote storage for this partition's log so that the local log segments
             // are not deleted before they are copied to remote storage.
             log.updateHighestOffsetInRemoteStorage(offsetAndEpoch.offset());
+            if (offsetAndEpoch.offset() > lastSeenHighestRemoteOffset) {
+                updateRemoteCopyFinishedTimestamps(topicIdPartition, log);
+                lastSeenHighestRemoteOffset = offsetAndEpoch.offset();
+            }
+        }
+    }
+
+    /**
+     * Loads the copy-finished time of every remote log segment that overlaps the local log into the given log, so
+     * that local segments containing future timestamps can use it as their retention anchor. The time is taken from
+     * the {@code COPY_SEGMENT_FINISHED} event in the remote log metadata and therefore survives leader changes,
+     * partition reassignment and disk replacement, unlike the last-modified time of the local segment file.
+     */
+    // visible for testing
+    void updateRemoteCopyFinishedTimestamps(TopicIdPartition topicIdPartition, UnifiedLog log) throws RemoteStorageException {
+        long localLogStartOffset = log.localLogStartOffset();
+        Iterator<RemoteLogSegmentMetadata> iterator = remoteLogMetadataManagerPlugin.get().listRemoteLogSegments(topicIdPartition);
+        while (iterator.hasNext()) {
+            RemoteLogSegmentMetadata metadata = iterator.next();
+            if (metadata.state() == RemoteLogSegmentState.COPY_SEGMENT_FINISHED && metadata.endOffset() >= localLogStartOffset) {
+                log.updateRemoteCopyFinishedTimestamp(metadata.endOffset(), metadata.eventTimestampMs());
+            }
         }
     }
 
