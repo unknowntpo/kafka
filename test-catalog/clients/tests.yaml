@@ -2491,7 +2491,7 @@ org.apache.kafka.clients.consumer.internals.ShareFetchCollectorTest:
 - testFetchWithTopicAuthorizationFailed
 - testFetchWithUnknownLeaderEpoch
 - testFetchWithUnknownServerError
-- testRepeatedFetchesForSamePartitionDoNoAccumulateRetainedFetches
+- testRepeatedFetchesForSamePartitionDoesNotAccumulateRetainedFetches
 - testSecondFetchForSamePartitionMergesWithoutLeaking
 - testWithRenew
 org.apache.kafka.clients.consumer.internals.ShareFetchMetricsManagerTest:
@@ -2501,6 +2501,16 @@ org.apache.kafka.clients.consumer.internals.ShareFetchMetricsManagerTest:
 - testLatency
 - testNodeLatency
 - testRecordsFetched
+org.apache.kafka.clients.consumer.internals.ShareFetchTest:
+- testAcquisitionLockTimeoutTakenFromLatestBatch
+- testEmptyFetch
+- testRecordsCombinesMultipleBatchesForPartition
+- testRecordsEmptyAfterAllAcknowledged
+- testRecordsGroupedByPartition
+- testRecordsIncludesPartitionWithGapsAndRecordsInSeparateBatches
+- testRecordsIsUnmodifiable
+- testRecordsOmitsPartitionWithOnlyGaps
+- testRecordsOnlyIncludesUnacknowledgedRecords
 org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManagerTest:
 - testDisconnect
 - testFailureOnFatalException
@@ -3753,6 +3763,9 @@ org.apache.kafka.common.config.AbstractConfigTest:
 - testAutomaticConfigProvidersWithFullClassName
 - testClassConfigs
 - testConfigProviderConfigurationWithConfigParams
+- testConfigProvidersClosedWhenGetThrows
+- testConfigProvidersClosedWhenLaterProviderClassNotFound
+- testConfigProvidersClosedWhenLaterProviderConfigureThrows
 - testConfigProvidersPropsAsParam
 - testConfiguredInstances
 - testConfiguredInstancesClosedOnFailure
@@ -4434,9 +4447,11 @@ org.apache.kafka.common.protocol.types.ProtocolSerializationTest:
 - testDefault
 - testNullableDefault
 - testNulls
+- testReadArrayLengthAboveMaxIsRejected
 - testReadArraySizeTooLarge
 - testReadBytesBeyondItsSize
 - testReadBytesSizeTooLarge
+- testReadCompactArrayLengthAboveMaxIsRejected
 - testReadCompactArraySizeTooLarge
 - testReadIgnoringExtraDataAtTheEnd
 - testReadNegativeArraySize
@@ -5839,6 +5854,11 @@ org.apache.kafka.common.utils.UtilsTest:
 - testEntriesWithPrefix
 - testFileAsStringNamedPipe
 - testFileAsStringSimpleFile
+- testFlushPathIfExistsSwallowsNoSuchFileException
+- testFlushPathThrowsForMissingPath
+- testFlushPathWithExistingDirectory
+- testFlushPathWithExistingFile
+- testFlushPathWithNullIsNoOp
 - testFormatAddress
 - testFormatBytes
 - testGetHostInvalid
