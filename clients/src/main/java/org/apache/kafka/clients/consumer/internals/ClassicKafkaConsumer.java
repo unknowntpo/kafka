@@ -206,7 +206,8 @@ public class ClassicKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                     metadata,
                     fetchMetricsManager.throttleTimeSensor(),
                     retryBackoffMs,
-                    clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null));
+                    clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null),
+                    ConsumerUtils.receiveMemoryPool(config, deserializers));
 
             this.assignors = ConsumerPartitionAssignor.getAssignorInstances(
                     config.getList(ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG),

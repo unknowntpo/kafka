@@ -34,10 +34,20 @@ class FetchMetricsAggregator {
     private final Set<TopicPartition> unrecordedPartitions;
     private final FetchMetrics fetchFetchMetrics = new FetchMetrics();
     private final Map<String, FetchMetrics> perTopicFetchMetrics = new HashMap<>();
+    private final Runnable onComplete;
 
     FetchMetricsAggregator(FetchMetricsManager metricsManager, Set<TopicPartition> partitions) {
+        this(metricsManager, partitions, null);
+    }
+
+    /**
+     * @param onComplete runs once every partition of the fetch has been drained, i.e. when nothing in the
+     *                   fetch response can be handed to the application any more.
+     */
+    FetchMetricsAggregator(FetchMetricsManager metricsManager, Set<TopicPartition> partitions, Runnable onComplete) {
         this.metricsManager = metricsManager;
         this.unrecordedPartitions = new HashSet<>(partitions);
+        this.onComplete = onComplete;
     }
 
     /**
@@ -78,6 +88,8 @@ class FetchMetricsAggregator {
             metricsManager.recordBytesFetched(topic, fetchMetrics.bytes);
             metricsManager.recordRecordsFetched(topic, fetchMetrics.records);
         }
+        if (onComplete != null)
+            onComplete.run();
     }
 
     private static class FetchMetrics {

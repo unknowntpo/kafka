@@ -174,6 +174,7 @@ import org.apache.kafka.common.message.UnregisterBrokerRequestData;
 import org.apache.kafka.common.message.UnregisterControllerRequestData;
 import org.apache.kafka.common.message.UpdateFeaturesRequestData;
 import org.apache.kafka.common.message.UpdateFeaturesResponseData.UpdatableFeatureResult;
+import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.metrics.KafkaMetric;
 import org.apache.kafka.common.metrics.KafkaMetricsContext;
 import org.apache.kafka.common.metrics.MetricConfig;
@@ -628,7 +629,8 @@ public class KafkaAdminClient extends AdminClient {
                 metadataManager.updater(),
                 (hostResolver == null) ? new DefaultHostResolver() : hostResolver,
                 null,
-                clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null));
+                clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null),
+                MemoryPool.NONE);
             return new KafkaAdminClient(config, clientId, time, metadataManager, metrics, networkClient,
                 timeoutProcessorFactory, logContext, clientTelemetryReporter);
         } catch (Throwable exc) {

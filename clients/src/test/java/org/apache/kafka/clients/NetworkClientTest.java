@@ -23,10 +23,11 @@ import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.RebootstrapRequiredException;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
 import org.apache.kafka.common.internals.UnsupportedProtocolFieldException;
+import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.message.ApiMessageType;
-import org.apache.kafka.common.message.ApiVersionsResponseData;
 import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersion;
 import org.apache.kafka.common.message.ApiVersionsResponseData.ApiVersionCollection;
+import org.apache.kafka.common.message.ApiVersionsResponseData;
 import org.apache.kafka.common.message.GetTelemetrySubscriptionsRequestData;
 import org.apache.kafka.common.message.GetTelemetrySubscriptionsResponseData;
 import org.apache.kafka.common.message.ProduceRequestData;
@@ -64,6 +65,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ScatteringByteChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -1760,4 +1762,69 @@ public class NetworkClientTest {
         assertTrue(metadataUpdater.isBootstrapped());
     }
 
+    @Test
+    public void testResponseReleasesReceiveBufferToThePool() throws IOException {
+        awaitReady(client, node);
+        short requestVersion = PRODUCE.latestVersion();
+        ProduceRequest.Builder builder = new ProduceRequest.Builder(requestVersion, requestVersion,
+                new ProduceRequestData().setAcks((short) 1).setTimeoutMs(1000));
+        ClientRequest request = client.newClientRequest(node.idString(), builder, time.milliseconds(),
+                true, defaultRequestTimeoutMs, new TestCallbackHandler());
+        client.send(request, time.milliseconds());
+        client.poll(1, time.milliseconds());
+
+        List<ByteBuffer> released = new ArrayList<>();
+        MemoryPool pool = new MemoryPool() {
+            @Override
+            public ByteBuffer tryAllocate(int sizeBytes) {
+                return ByteBuffer.allocate(sizeBytes);
+            }
+
+            @Override
+            public void release(ByteBuffer previouslyAllocated) {
+                released.add(previouslyAllocated);
+            }
+
+            @Override
+            public long size() {
+                return Long.MAX_VALUE;
+            }
+
+            @Override
+            public long availableMemory() {
+                return Long.MAX_VALUE;
+            }
+
+            @Override
+            public boolean isOutOfMemory() {
+                return false;
+            }
+        };
+        ByteBuffer payload = RequestTestUtils.serializeResponseWithHeader(new ProduceResponse(new ProduceResponseData()),
+                requestVersion, request.correlationId());
+        ByteBuffer wire = ByteBuffer.allocate(4 + payload.remaining());
+        wire.putInt(payload.remaining()).put(payload).flip();
+        ScatteringByteChannel channel = mock(ScatteringByteChannel.class);
+        when(channel.read(any(ByteBuffer.class))).thenAnswer(invocation -> {
+            ByteBuffer dst = invocation.getArgument(0);
+            int n = Math.min(dst.remaining(), wire.remaining());
+            for (int i = 0; i < n; i++)
+                dst.put(wire.get());
+            return n;
+        });
+        NetworkReceive receive = new NetworkReceive(NetworkReceive.UNLIMITED, node.idString(), pool);
+        while (!receive.complete())
+            receive.readFrom(channel);
+        receive.payload().rewind();
+        selector.completeReceive(receive);
+
+        List<ClientResponse> responses = client.poll(1, time.milliseconds());
+        assertEquals(1, responses.size());
+        assertTrue(released.isEmpty(), "the response body still references the receive buffer");
+
+        responses.get(0).releaseBuffer();
+        assertEquals(1, released.size());
+        responses.get(0).releaseBuffer(); // a second release is a no-op
+        assertEquals(1, released.size());
+    }
 }

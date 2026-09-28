@@ -37,6 +37,7 @@ public class ClientResponse {
     private final UnsupportedVersionException versionMismatch;
     private final AuthenticationException authenticationException;
     private final AbstractResponse responseBody;
+    private final Runnable bufferRelease;
 
     /**
      * @param requestHeader The header of the corresponding request
@@ -94,6 +95,25 @@ public class ClientResponse {
                           UnsupportedVersionException versionMismatch,
                           AuthenticationException authenticationException,
                           AbstractResponse responseBody) {
+        this(requestHeader, callback, destination, createdTimeMs, receivedTimeMs, disconnected, timedOut,
+                versionMismatch, authenticationException, responseBody, null);
+    }
+
+    /**
+     * @param bufferRelease returns the receive buffer behind {@code responseBody} to its pool; {@code null} when the
+     *                      buffer needs no release. The caller must not touch the response body after running it.
+     */
+    public ClientResponse(RequestHeader requestHeader,
+                          RequestCompletionHandler callback,
+                          String destination,
+                          long createdTimeMs,
+                          long receivedTimeMs,
+                          boolean disconnected,
+                          boolean timedOut,
+                          UnsupportedVersionException versionMismatch,
+                          AuthenticationException authenticationException,
+                          AbstractResponse responseBody,
+                          Runnable bufferRelease) {
         if (!disconnected && timedOut)
             throw new IllegalStateException("The client response can't be in the state of connected, yet timed out");
 
@@ -107,6 +127,16 @@ public class ClientResponse {
         this.versionMismatch = versionMismatch;
         this.authenticationException = authenticationException;
         this.responseBody = responseBody;
+        this.bufferRelease = bufferRelease;
+    }
+
+    /**
+     * Returns the receive buffer behind the response body to its pool, if it came from one. Safe to call more
+     * than once; only the first call has an effect.
+     */
+    public void releaseBuffer() {
+        if (bufferRelease != null)
+            bufferRelease.run();
     }
 
     public long receivedTimeMs() {

@@ -47,6 +47,14 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     private final long retryBackoffMs;
     private CompletableFuture<Void> pendingFetchRequestFuture;
 
+    /**
+     * Whether the application has ever asked for records. Until it has, no fetch is issued: a consumer that only
+     * assigns partitions and calls something like {@code endOffsets()} should not have records being fetched behind
+     * that call. Once it has asked, fetching continues on its own, driven by the responses rather than by the
+     * application asking again.
+     */
+    private boolean fetchingStarted;
+
     FetchRequestManager(final LogContext logContext,
                         final Time time,
                         final ConsumerMetadata metadata,
@@ -92,6 +100,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * @return Future on which the caller can wait to ensure that the requests have been created
      */
     public CompletableFuture<Void> createFetchRequests() {
+        fetchingStarted = true;
         CompletableFuture<Void> future = new CompletableFuture<>();
 
         if (pendingFetchRequestFuture != null) {
@@ -116,6 +125,9 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public PollResult poll(long currentTimeMs) {
+        if (!fetchingStarted)
+            return PollResult.EMPTY;
+
         return pollInternal(
             this::prepareFetchRequests,
             this::handleFetchSuccess,
@@ -128,9 +140,6 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      */
     @Override
     public PollResult pollOnClose(long currentTimeMs) {
-        // There needs to be a pending fetch request for pollInternal to create the requests.
-        createFetchRequests();
-
         // TODO: move the logic to poll to handle signal close
         return pollInternal(
                 this::prepareCloseFetchSessionRequests,
@@ -149,14 +158,20 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * @param errorHandler         {@link ResponseHandler Handler for failure responses}
      * @return {@link PollResult}
      */
+    /**
+     * Prepares fetch requests on every pass of the network thread rather than only on the passes where the
+     * application asked for them. A fetch response is handled at the end of a pass, so the fetch that continues
+     * from it goes out at the start of the next one, without waiting for the application to call {@code poll()}
+     * again. How far this may run ahead of the application is bounded by the credit in {@link AbstractFetch}.
+     *
+     * <p>{@code pendingFetchRequestFuture} is no longer what permits a fetch; it only reports back to the
+     * application thread that a pass has run, which is what {@link CreateFetchRequestsEvent} waits for. Most
+     * passes complete no future because the application did not ask for one. What still gates fetching entirely
+     * is {@code fetchingStarted}: the application has to ask once, after which the responses keep it going.
+     */
     private PollResult pollInternal(FetchRequestPreparer fetchRequestPreparer,
                                     ResponseHandler<ClientResponse> successHandler,
                                     ResponseHandler<Throwable> errorHandler) {
-        if (pendingFetchRequestFuture == null) {
-            // If no explicit request for creating fetch requests was issued, just short-circuit.
-            return PollResult.EMPTY;
-        }
-
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
@@ -168,7 +183,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                     // the data in the fetch buffer is consumed.
                     fetchBuffer.wakeup();
                 }
-                pendingFetchRequestFuture.complete(null);
+                completePendingFetchRequestFuture();
                 return PollResult.EMPTY;
             }
 
@@ -186,17 +201,24 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
             }).collect(Collectors.toList());
 
-            pendingFetchRequestFuture.complete(null);
+            completePendingFetchRequestFuture();
             return new PollResult(requests);
         } catch (Throwable t) {
             // A "dummy" poll result is returned here rather than rethrowing the error because any error
             // that is thrown from any RequestManager.poll() method interrupts the polling of the other
             // request managers.
-            pendingFetchRequestFuture.completeExceptionally(t);
+            if (pendingFetchRequestFuture != null)
+                pendingFetchRequestFuture.completeExceptionally(t);
+
             return PollResult.EMPTY;
         } finally {
             pendingFetchRequestFuture = null;
         }
+    }
+
+    private void completePendingFetchRequestFuture() {
+        if (pendingFetchRequestFuture != null)
+            pendingFetchRequestFuture.complete(null);
     }
 
     /**
