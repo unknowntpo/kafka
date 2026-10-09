@@ -278,6 +278,13 @@ class StreamsTestBaseService(KafkaPathResolverMixin, JmxMixin, Service):
         for pid in self.pids(node):
             wait_until(lambda: not node.account.alive(pid), timeout_sec=timeout_sec, err_msg="Streams Test process on " + str(node.account) + " took too long to exit")
 
+    def clean(self, **kwargs):
+        # CLEAN_NODE_ENABLED = False only keeps files across restarts inside one test.
+        # The final clean after the test must remove them, otherwise the next test on
+        # this node sees a stale streams.stdout and its monitor_log offset is wrong.
+        self.CLEAN_NODE_ENABLED = True
+        super(StreamsTestBaseService, self).clean(**kwargs)
+
     def clean_node(self, node):
         node.account.kill_process("streams", clean_shutdown=False, allow_fail=True)
         if self.CLEAN_NODE_ENABLED:
