@@ -1425,6 +1425,7 @@ org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManagerTest:
 - testHeartbeatResponseErrorNotifiedToGroupManagerAfterErrorPropagated
 - testHeartbeatResponseOnErrorHandling
 - testHeartbeatState
+- testInitialHeartbeatIntervalUsesRequestTimeout
 - testLogsHeartbeatIntervalReceivedFromCoordinatorOnlyWhenChanged
 - testMaximumTimeToWaitDoesNotSpinDuringRealBootstrapDnsResolution
 - testMaximumTimeToWaitWhenCoordinatorUnavailableDoesNotSpin
@@ -2536,6 +2537,7 @@ org.apache.kafka.clients.consumer.internals.ShareHeartbeatRequestManagerTest:
 - testHeartbeatResponseErrorNotifiedToGroupManagerAfterErrorPropagated
 - testHeartbeatResponseOnErrorHandling
 - testHeartbeatState
+- testInitialHeartbeatIntervalUsesRequestTimeout
 - testLogsHeartbeatIntervalReceivedFromCoordinatorOnlyWhenChanged
 - testMaximumTimeToWaitWhenCoordinatorUnavailableDoesNotSpin
 - testMaximumTimeToWaitWhenFatalReturnsMaxValue
@@ -2652,6 +2654,7 @@ org.apache.kafka.clients.consumer.internals.StreamsGroupHeartbeatRequestManagerT
 - testHotWarmupTaskDisabledWhenOffsetMissing
 - testHotWarmupTaskDisabledWhenOffsetOrEndOffsetOverflowed
 - testHotWarmupTaskTriggersSendWhenLagAtOrBelowThreshold
+- testInitialHeartbeatIntervalUsesRequestTimeout
 - testJoiningRecordsSentOffsetsSoFollowUpHeartbeatSkipsUnchanged
 - testKnownFatalErrorResponse
 - testLogsNotProvidedWhenOlderBrokerOmitsConfig
@@ -4788,6 +4791,7 @@ org.apache.kafka.common.requests.FetchRequestTest:
 org.apache.kafka.common.requests.FindCoordinatorRequestTest:
 - getInvalidCoordinatorTypeId
 org.apache.kafka.common.requests.GetTelemetrySubscriptionsRequestTest:
+- testBuildV1SendsClientInstanceIdInHeaderOnly
 - testGetErrorResponse
 org.apache.kafka.common.requests.GetTelemetrySubscriptionsResponseTest:
 - testErrorCountsReturnsNoneWhenNoErrors
@@ -4873,6 +4877,7 @@ org.apache.kafka.common.requests.ProduceResponseTest:
 - produceResponseRecordErrorsTest
 - produceResponseVersionTest
 org.apache.kafka.common.requests.PushTelemetryRequestTest:
+- testBuildV1SendsClientInstanceIdInHeaderOnly
 - testGetErrorResponse
 - testMetricsDataCompression
 org.apache.kafka.common.requests.PushTelemetryResponseTest:
@@ -5750,6 +5755,7 @@ org.apache.kafka.common.telemetry.internals.ClientTelemetryReporterTest:
 - testInitTelemetryReporter
 - testInitTelemetryReporterNoCollector
 - testProducerLabels
+- testReporterRejectsInvalidClientInstanceId
 - testSequentialFailuresWithDifferentExceptionTypes
 - testTelemetryReporterClose
 - testTelemetryReporterCloseMultipleTimesNoException

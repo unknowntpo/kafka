@@ -177,6 +177,8 @@ org.apache.kafka.server.ClientMetricsManagerTest:
 - testGetTelemetrySubscriptionAfterPushTelemetryUnknownCompressionSucceeds
 - testGetTelemetrySubscriptionAfterPushTelemetryUnknownSubscriptionSucceeds
 - testGetTelemetryUpdateSubscription
+- testGetTelemetryV1RejectsReservedClientInstanceId
+- testGetTelemetryV1UsesClientInstanceIdFromRequestHeader
 - testGetTelemetryWithoutSubscription
 - testPushTelemetry
 - testPushTelemetryAfterPushIntervalTime
@@ -194,6 +196,8 @@ org.apache.kafka.server.ClientMetricsManagerTest:
 - testPushTelemetryTerminatingFlag
 - testPushTelemetryTerminatingFlagNotSetOnValidationFailure
 - testPushTelemetryThrottleError
+- testPushTelemetryV1RejectsReservedClientInstanceId
+- testPushTelemetryV1UsesClientInstanceIdFromRequestHeader
 - testRemoveConnection
 - testRemoveConnectionUnknownConnectionId
 - testUpdateSubscription
@@ -423,6 +427,8 @@ org.apache.kafka.server.config.DelegationTokenManagerConfigsTest:
 - testOverride
 org.apache.kafka.server.config.DynamicBrokerConfigTest:
 - testBrokerConfigSynonyms
+- testDynamicClusterMirrorConfigReconfigurableConfigs
+- testDynamicClusterMirrorConfigValidation
 - testValidateConfigTypesResolvesConfigProviders
 org.apache.kafka.server.config.DynamicConfigTest:
 - testGroupIsRemovedWhenDynamicConfigsAreRemoved

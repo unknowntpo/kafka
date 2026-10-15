@@ -822,6 +822,9 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testStreamsGroupHeartbeatPartialResponseWhenNothingChanges
 - testStreamsGroupHeartbeatRefinementStepBumpsEpochWithoutRunningAssignor
 - testStreamsGroupHeartbeatRejectsDuplicateTaskOffsets
+- testStreamsGroupHeartbeatResendsAssignmentAfterEpochBumpResponseLoss
+- testStreamsGroupHeartbeatResendsAssignmentAfterSameEpochResponseLoss
+- testStreamsGroupHeartbeatResendsRevocationAfterResponseLoss
 - testStreamsGroupHeartbeatResponseVersion0
 - testStreamsGroupHeartbeatResponseVersion1
 - testStreamsGroupHeartbeatStoresTaskOffsetsWithoutPersisting
@@ -839,6 +842,7 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testStreamsGroupMetadataReplayRoundTripsTopologyDescriptionEpochs
 - testStreamsGroupReconcilesTowardsTheRefinedAssignment
 - testStreamsGroupRefinerIsPassedTheGroupContextAndTheGroupsConfigs
+- testStreamsGroupRefinerIsPassedTheHeartbeatVersionsOfTheMembers
 - testStreamsGroupStagesAMigrationBehindAWarmupTask
 - testStreamsGroupStopsStagingOnceTheWarmupTaskIsCaughtUp
 - testStreamsGroupUsesBrokerDefaultAssignorWhenGroupUnset
@@ -1164,6 +1168,22 @@ org.apache.kafka.coordinator.group.assignor.UniformHomogeneousAssignmentBuilderT
 - testReassignmentWhenOneSubscriptionRemovedAfterInitialAssignmentWithTwoMembersTwoTopics
 - testReassignmentWhenPartitionsAreAddedForTwoMembersTwoTopics
 - testValidityAndBalanceForLargeSampleSet
+org.apache.kafka.coordinator.group.assignor.uniform2.CurrentAssignmentTest:
+- testOwnersAndAssignments
+- testPartitionsOfATopicThatNoLongerExistsAreStale
+- testPartitionsOfATopicTheMemberDoesNotSubscribeToAreStale
+- testTopicNobodyOwnsHasNoOwners
+org.apache.kafka.coordinator.group.assignor.uniform2.IndexedGroupTest:
+- testCohortsWithTheSameHashAreComparedExactly
+- testEmptyGroup
+- testHeterogeneousGroup
+- testHomogeneousGroup
+- testMembersAreNumberedInMemberIdOrder
+- testSecondBuildThrows
+- testSingleMember
+- testTopicsAreNumberedInTopicIdOrder
+- testTopicsThatAreNotSubscribedAreIgnored
+- testTopicsThatDoNotExistAreIgnored
 org.apache.kafka.coordinator.group.assignor.uniform2.util.IntListTest:
 - testAdd
 - testClear
@@ -1702,6 +1722,7 @@ org.apache.kafka.coordinator.group.streams.StreamsGroupTest:
 - testRelabelRefinedAssignmentOfUnknownMemberIsANoOp
 - testRemoveMember
 - testRemoveMemberClearsTaskOffsets
+- testRemoveMemberForgetsItsHeartbeatVersion
 - testRemoveMemberRemovesCacheEntry
 - testRemoveStaticMember
 - testRemoveTaskProcessIds
@@ -1712,6 +1733,7 @@ org.apache.kafka.coordinator.group.streams.StreamsGroupTest:
 - testShouldExpireTrueWhenStoredEpochIsDefault
 - testShutdownRequestedMethods
 - testTopologyDescriptionPluginEpochs
+- testUpdateAndRetrieveHeartbeatVersions
 - testUpdateAndRetrieveTaskOffsets
 - testUpdateMember
 - testUpdateMemberInvalidatesCache
@@ -1846,6 +1868,7 @@ org.apache.kafka.coordinator.group.streams.assignor.BalancedTaskAssignorTest:
 - shouldNotDependOnPreviousAssignmentAcrossProcessesUnlikeStickyAssignor
 - shouldPlaceTasksAcrossProcessesIndependentlyOfWarmupTasksAndReportedOffsets
 - shouldProduceValidAndLevelledAssignmentsForRandomGroupsWithPreviousAssignments
+- shouldSpreadTasksOfEachSubtopologyInProportionToMemberCounts
 - shouldSpreadTasksOfEachSubtopologyOverProcesses
 - shouldThrowWhenThereAreTasksButNoMembers
 - testToStringReturnsName
