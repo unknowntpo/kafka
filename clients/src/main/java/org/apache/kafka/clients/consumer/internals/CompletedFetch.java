@@ -24,6 +24,7 @@ import org.apache.kafka.common.errors.CorruptRecordException;
 import org.apache.kafka.common.errors.RecordDeserializationException;
 import org.apache.kafka.common.errors.RecordDeserializationException.DeserializationExceptionOrigin;
 import org.apache.kafka.common.errors.SerializationException;
+import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.FetchResponseData;
@@ -60,6 +61,7 @@ public class CompletedFetch {
 
     final TopicPartition partition;
     final FetchResponseData.PartitionData partitionData;
+    private final int sizeInBytes;
 
     private final Logger log;
     private final SubscriptionState subscriptions;
@@ -95,11 +97,17 @@ public class CompletedFetch {
         this.partition = partition;
         this.partitionData = partitionData;
         this.metricAggregator = metricAggregator;
+        this.sizeInBytes = FetchResponse.recordsOrFail(partitionData).sizeInBytes();
         this.batches = FetchResponse.recordsOrFail(partitionData).batches().iterator();
         this.nextFetchOffset = fetchOffset;
         this.lastEpoch = Optional.empty();
         this.abortedProducerIds = new HashSet<>();
         this.abortedTransactions = abortedTransactions(partitionData);
+    }
+
+    /** The size of the records this holds, for bounding how much may be fetched but not yet delivered. */
+    int sizeInBytes() {
+        return sizeInBytes;
     }
 
     long nextFetchOffset() {
@@ -317,6 +325,12 @@ public class CompletedFetch {
         ByteBuffer keyBytes = record.key();
         ByteBuffer valueBytes = record.value();
         Headers headers = new RecordHeaders(record.headers());
+        // Header keys and values are decoded lazily from the receive buffer; read them now so that the record
+        // never references the buffer, which may be reused once this fetch is drained.
+        for (Header header : headers) {
+            header.key();
+            header.value();
+        }
         K key;
         V value;
         try {
@@ -344,9 +358,18 @@ public class CompletedFetch {
                                                                                     Record record,
                                                                                     RuntimeException e,
                                                                                     Headers headers) {
-        return new RecordDeserializationException(origin, partition, record.offset(), record.timestamp(), timestampType, record.key(), record.value(), headers,
+        return new RecordDeserializationException(origin, partition, record.offset(), record.timestamp(), timestampType, copyOf(record.key()), copyOf(record.value()), headers,
                 "Error deserializing " + origin.name() + " for partition " + partition + " at offset " + record.offset()
                         + ". If needed, please seek past the record to continue consumption.", e);
+    }
+
+    /** The exception outlives the fetch, so it must not reference the receive buffer. */
+    private static ByteBuffer copyOf(ByteBuffer buffer) {
+        if (buffer == null)
+            return null;
+        ByteBuffer copy = ByteBuffer.allocate(buffer.remaining());
+        copy.put(buffer.duplicate()).flip();
+        return copy;
     }
 
     private Optional<Integer> maybeLeaderEpoch(int leaderEpoch) {

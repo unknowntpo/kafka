@@ -125,8 +125,11 @@ public class NetworkReceive implements Receive {
     }
 
 
+    /**
+     * Returns the payload buffer to the pool. The payload must not be used afterwards.
+     */
     @Override
-    public void close() throws IOException {
+    public void close() {
         if (buffer != null && buffer != EMPTY_BUFFER) {
             memoryPool.release(buffer);
             buffer = null;
