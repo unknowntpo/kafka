@@ -1227,6 +1227,7 @@ org.apache.kafka.coordinator.group.assignor.uniform2.util.IntListTest:
 - testClear
 - testGet
 - testIndexOf
+- testListsWithoutCapacityHoldTheirOwnElements
 - testNegativeCapacityThrows
 - testOf
 - testRemove
@@ -1939,6 +1940,13 @@ org.apache.kafka.coordinator.group.streams.assignor.ProcessStateTest:
 - shouldReturnFalseWhenCapacityIsFull
 - shouldReturnTrueIfTaskIsAssigned
 - shouldReturnTrueWhenCapacityIsAvailable
+org.apache.kafka.coordinator.group.streams.assignor.RackAwareStandbyPickerTest:
+- shouldGiveUpPriorityKeyOnceEveryValueIsUsed
+- shouldKeepLaterTagKeyAfterGivingUpAnEarlierOne
+- shouldMatchAScanOverAllProcesses
+- shouldOnlyPickEligibleProcessesWithNewValueForPriorityKey
+- shouldRankProcessesByNewValuesForLowerPriorityKeys
+- shouldStartOverForNextTask
 org.apache.kafka.coordinator.group.streams.assignor.StickyTaskAssignorTest:
 - shouldAssignActiveAndStandbyTasks
 - shouldAssignAtLeastOneTaskToEachClientIfPossible
