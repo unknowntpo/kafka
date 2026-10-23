@@ -626,6 +626,7 @@ org.apache.kafka.coordinator.group.GroupMetadataManagerTest:
 - testOnLoadedSchedulesClassicGroupMemberHeartbeats
 - testOnLoadedSessionTimeoutExpiration
 - testOnLoadedSessionTimeoutExpirationForShareMember
+- testOnLoadedUsesClassicMemberSessionTimeout
 - testOnLoadedWithShareGroup
 - testOnLoadedWithStreamsGroup
 - testOnMetadataUpdate
@@ -1184,6 +1185,15 @@ org.apache.kafka.coordinator.group.assignor.uniform2.IndexedGroupTest:
 - testTopicsAreNumberedInTopicIdOrder
 - testTopicsThatAreNotSubscribedAreIgnored
 - testTopicsThatDoNotExistAreIgnored
+org.apache.kafka.coordinator.group.assignor.uniform2.PartitionPlacementTest:
+- testAMemberOwningItsMinQuotaGetsItsExtraPartition
+- testMovingPartitionsGoCohortByCohort
+- testMovingPartitionsGoToTheMembersBelowTheirQuotaInMemberOrder
+- testMovingPartitionsWithAMinQuotaOfZeroGoInTheOrderOfTheExtraPartitions
+- testMovingPartitionsWithAMinQuotaOfZeroGoOnlyToTheMembersWithAnExtraPartition
+- testNothingCarriesOverFromOneTopicToTheNext
+- testNothingMovesWhenEveryOwnerOwnsItsQuota
+- testOwnersKeepTheirLowestPartitionsUpToTheirQuota
 org.apache.kafka.coordinator.group.assignor.uniform2.QuotasTest:
 - testGiveExtraPartition
 - testMinQuotaAndExtraPartitions
