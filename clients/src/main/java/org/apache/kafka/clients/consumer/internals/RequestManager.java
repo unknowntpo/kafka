@@ -84,4 +84,14 @@ public interface RequestManager {
      * Signals the request manager that the consumer is closing to prepare for the proper actions to be taken.
      */
     default void signalClose() { }
+
+    /**
+     * What this manager is waiting for after {@link #poll(long)} returned: a scheduler that runs managers on their
+     * inputs (rather than every iteration) runs it again only when its own timer expires, a command arrives, or the
+     * declared input arrives after the declaration. The default, {@link WaitCondition#ANY_INPUT}, keeps the
+     * "run me when anything happened" behaviour for managers whose dependencies are not declared.
+     */
+    default WaitCondition waitCondition() {
+        return WaitCondition.ANY_INPUT;
+    }
 }
