@@ -273,6 +273,21 @@ jobs:
           python .github/scripts/junit.py \
            --path build/junit-xml >> $GITHUB_STEP_SUMMARY
 
+      # Report where the time went. This runs even when tests failed or timed out, since a job
+      # that ran out of its three hour budget is exactly the one worth looking at. The output is
+      # written to the log as well as the job summary so that it can be read without downloading
+      # the JUnit XML artifact.
+      - name: Report slowest tests
+        if: always()
+        continue-on-error: true
+        run: |
+          echo "### Slowest test classes" >> $GITHUB_STEP_SUMMARY
+          python .github/scripts/slowest_tests.py --path build/junit-xml \
+            --group class --top 25 --format markdown | tee -a $GITHUB_STEP_SUMMARY
+          echo "### Slowest test methods" >> $GITHUB_STEP_SUMMARY
+          python .github/scripts/slowest_tests.py --path build/junit-xml \
+            --group method --top 25 --format markdown | tee -a $GITHUB_STEP_SUMMARY
+
   # This job downloads all the JUnit XML files and thread dumps from the JDK 25 test runs.
   # If any test job fails, we will not run this job. Also, if any thread dump artifacts
   # are present, this means there was a timeout in the tests and so we will not proceed
