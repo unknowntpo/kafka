@@ -54,7 +54,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
+@ExtendWith({MockitoExtension.class, ResourceLeakExtension.class})
 @MockitoSettings(strictness = Strictness.STRICT_STUBS)
 public class WorkerTaskTest {
 

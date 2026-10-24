@@ -58,6 +58,13 @@ public class MockConnectMetrics extends ConnectMetrics {
 
     public MockConnectMetrics(MockTime time) {
         super("mock", new WorkerConfig(WorkerConfig.baseConfigDef(), DEFAULT_WORKER_CONFIG), time, "cluster-1");
+        TestResourceTracker.track(this);
+    }
+
+    @Override
+    public void stop() {
+        super.stop();
+        TestResourceTracker.release(this);
     }
 
     @Override
