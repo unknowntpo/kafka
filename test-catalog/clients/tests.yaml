@@ -159,6 +159,11 @@ org.apache.kafka.clients.NodeApiVersionsTest:
 org.apache.kafka.clients.admin.AdminClientConfigTest:
 - testDefaultMetadataRecoveryStrategy
 - testInvalidMetadataRecoveryStrategy
+org.apache.kafka.clients.admin.AdminClientTestUtilsTest:
+- testCurrentLeader
+- testCurrentLeaderWithNoNodeLeader
+- testCurrentLeaderWithNullLeader
+- testCurrentLeaderWithUnknownPartition
 org.apache.kafka.clients.admin.ConsumerGroupDescriptionTest:
 - testGroupState
 org.apache.kafka.clients.admin.ConsumerGroupListingTest:
@@ -4104,7 +4109,9 @@ org.apache.kafka.common.message.RecordsSerdeTest:
 org.apache.kafka.common.message.SimpleArraysMessageTest:
 - testArrayBoundsChecking
 - testArrayBoundsCheckingOtherArray
+- testArrayLengthAboveDefaultMaxIsAcceptedWhenRaised
 - testArrayLengthAboveMaxIsRejected
+- testArrayLengthHonorsLoweredMax
 - testDeclaredLengthAboveInitialCapacityStillParses
 - testKeyedArrayLengthAboveMaxIsRejected
 - testKeyedDeclaredLengthAboveInitialCapacityStillParses
@@ -4458,6 +4465,7 @@ org.apache.kafka.common.protocol.ApiKeysTest:
 - testResponseThrottleTime
 org.apache.kafka.common.protocol.ByteBufferAccessorTest:
 - testReadArray
+- testReadByteBuffer
 - testReadString
 org.apache.kafka.common.protocol.DataOutputStreamWritableTest:
 - testWritingSlicedByteBuffer
@@ -4480,6 +4488,7 @@ org.apache.kafka.common.protocol.MessageUtilTest:
 - testInvalidBinaryNode
 - testJsonNodeToInt
 - testJsonNodeToLong
+- testMaxArrayLength
 org.apache.kafka.common.protocol.ProtoUtilsTest:
 - testDelayedAllocationSchemaDetection
 org.apache.kafka.common.protocol.ProtocolTest:
@@ -4494,6 +4503,7 @@ org.apache.kafka.common.protocol.types.ProtocolSerializationTest:
 - testNullableDefault
 - testNulls
 - testReadArrayLengthAboveMaxIsRejected
+- testReadArrayLengthHonorsConfiguredMax
 - testReadArraySizeTooLarge
 - testReadBytesBeyondItsSize
 - testReadBytesSizeTooLarge
@@ -5551,6 +5561,8 @@ org.apache.kafka.common.security.plain.internals.PlainSaslServerTest:
 - authorizationIdNotEqualsAuthenticationId
 - emptyTokens
 - noAuthorizationIdSpecified
+- passwordIsComparedForUnknownUser
+- unknownUserOrInvalidPassword
 org.apache.kafka.common.security.scram.internals.ScramCredentialUtilsTest:
 - scramCredentialCache
 org.apache.kafka.common.security.scram.internals.ScramFormatterTest:
@@ -5681,6 +5693,7 @@ org.apache.kafka.common.security.token.delegation.TokenInformationTest:
 org.apache.kafka.common.serialization.ListDeserializerTest:
 - shouldDeserializeListEndingInEmptyEntry
 - shouldPassHeadersToUnderlyingDeserializer
+- shouldThrowIfListSizeIsLargerThanRemainingBytesCanHold
 - shouldThrowOnEntryTruncatedMidStream
 - shouldThrowOnNegativeEntrySize
 - shouldThrowOnNegativeLength

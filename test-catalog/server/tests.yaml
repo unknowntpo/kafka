@@ -75,6 +75,13 @@ org.apache.kafka.security.authorizer.AuthorizerUtilsTest:
 - testCreateAuthorizer
 org.apache.kafka.security.minikdc.MiniKdcTest:
 - shouldNotStopImmediatelyWhenStarted
+org.apache.kafka.server.AllocateProducerIdsRequestTest:
+- testAllocateProducerIdsAfterBrokerRestart
+- testAllocateProducerIdsAfterControllerFailover
+- testAllocateProducerIdsSentToController
+- testAllocateProducerIdsSentToStandbyController
+- testAllocateProducerIdsWithInvalidBrokerEpoch
+- testAllocateProducerIdsWithUnknownBroker
 org.apache.kafka.server.ApiVersionsRequestTest:
 - testApiVersionsRequest
 - testApiVersionsRequestAfterSaslHandshakeRequest
@@ -361,6 +368,9 @@ org.apache.kafka.server.LogOffsetTest:
 - testGetOffsetsBeforeEarliestTime
 - testGetOffsetsBeforeLatestTime
 - testGetOffsetsForUnknownTopic
+org.apache.kafka.server.MessageMaxArrayLengthIntegrationTest:
+- testDefaultMaxArrayLength
+- testMaxArrayLengthFromServerProperties
 org.apache.kafka.server.MetadataRequestTest:
 - testAliveBrokersWithNoTopics
 - testAllTopicsRequest
