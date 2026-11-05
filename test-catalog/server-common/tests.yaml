@@ -278,6 +278,8 @@ org.apache.kafka.server.mirror.MirrorPartitionStateTest:
 - testAllStatesAreCoveredByTable
 - testFromValue
 - testFromValueInvalid
+- testNameOf
+- testNameOfUnrecognizedValue
 - testRoundTrip
 - testValue
 org.apache.kafka.server.mutable.BoundedListTest:
@@ -483,6 +485,19 @@ org.apache.kafka.server.util.JsonTest:
 - testJsonValueEquals
 - testJsonValueHashCode
 - testJsonValueToString
+org.apache.kafka.server.util.MirrorUtilsTest:
+- testCompilePatternListMatchesWildcard
+- testCompilePatternListSingleItem
+- testCompilePatternListWithBlankStrings
+- testCompilePatternListWithEmptyList
+- testCompilePatternListWithMultiplePatterns
+- testCompilePatternListWithRegexPatterns
+- testCompilePatternListWithWhitespace
+- testCompilePatternWithBlankString
+- testCompilePatternWithEmptyString
+- testCompilePatternWithNull
+- testCompilePatternWithValidPattern
+- testCompilePatternWithWhitespace
 org.apache.kafka.server.util.ShutdownableThreadTest:
 - testIsThreadStarted
 - testShutdownWhenCalledAfterThreadStart
