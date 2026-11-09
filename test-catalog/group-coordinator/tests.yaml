@@ -969,6 +969,7 @@ org.apache.kafka.coordinator.group.OffsetMetadataManagerTest:
 - testOffsetCommitsSensor
 - testOffsetDeletionsSensor
 - testOffsetsExpiredSensor
+- testOffsetsExpiredSensorWithNonEmptyRecords
 - testOnTopicsDeletedWithMatchingTopicId
 - testOnTopicsDeletedWithMismatchedTopicId
 - testOnTopicsDeletedWithMixedTopicIds
@@ -1128,6 +1129,8 @@ org.apache.kafka.coordinator.group.assignor.RangeSetTest:
 - testToArrayWithArrayParameter
 - testToString
 - testUnsupportedOperations
+org.apache.kafka.coordinator.group.assignor.ShareGroupSpecImplTest:
+- testIsPartitionAssignable
 org.apache.kafka.coordinator.group.assignor.SimpleAssignorTest:
 - testAssignWithCurrentAssignmentHeterogeneous
 - testAssignWithEmptyMembers
@@ -1135,10 +1138,10 @@ org.apache.kafka.coordinator.group.assignor.SimpleAssignorTest:
 - testAssignWithOneMemberNoAssignedTopicHeterogeneous
 - testAssignWithSubscribedToNonExistentTopic
 - testAssignWithThreeMembersThreeTopicsHeterogeneous
-- testAssignWithThreeMembersThreeTopicsHeterogeneousWithAllowedMap
+- testAssignWithThreeMembersThreeTopicsHeterogeneousWithNonAssignablePartitions
 - testAssignWithThreeMembersThreeTopicsHeterogeneousWithNonAssignableTopic
 - testAssignWithTwoMembersAndTwoTopicsHomogeneous
-- testAssignWithTwoMembersAndTwoTopicsHomogeneousWithAllowedMap
+- testAssignWithTwoMembersAndTwoTopicsHomogeneousWithNonAssignablePartition
 - testAssignWithTwoMembersAndTwoTopicsHomogeneousWithNonAssignableTopic
 - testAssignWithUnsubscribedTopicHeterogeneous
 - testAssignWithUnsubscribedTopicHomogeneous
@@ -1393,10 +1396,12 @@ org.apache.kafka.coordinator.group.modern.AssignmentTest:
 - testPartitionsCannotBeNull
 - testPartitionsImmutable
 org.apache.kafka.coordinator.group.modern.GroupSpecBuilderTest:
-- testAssignorOffload
+- testConsumerGroupSpecImmutable
 - testEmpty
 - testGroupSpec
 - testRegularExpressions
+- testShareGroupSpecImmutable
+- testShareGroupStatePartitionMetadata
 org.apache.kafka.coordinator.group.modern.MemberAssignmentImplTest:
 - testPartitionsMutable
 org.apache.kafka.coordinator.group.modern.SubscribedTopicMetadataTest:
@@ -1728,10 +1733,10 @@ org.apache.kafka.coordinator.group.streams.CurrentAssignmentBuilderTest:
 - testWarmupPromotedToActiveWhenActiveIsReleased
 - testWarmupPromotionHoldsWarmupWhileActiveOwnedByAnotherMember
 org.apache.kafka.coordinator.group.streams.GroupSpecBuilderTest:
-- testAssignorOffload
 - testCreateMemberMetadataAndState
 - testEmpty
 - testGroupSpec
+- testGroupSpecImmutable
 org.apache.kafka.coordinator.group.streams.MemberTaskOffsetsTest:
 - shouldConvertHeartbeatRequestTaskOffsets
 - shouldRejectDuplicateTaskEntries
@@ -1811,6 +1816,7 @@ org.apache.kafka.coordinator.group.streams.StreamsGroupTest:
 - testAsDescribedGroup
 - testAsDescribedGroupFallbackToStreamsTopologyWhenConfiguredTopologyEmpty
 - testAsDescribedGroupPrefersConfiguredTopologyOverStreamsTopology
+- testAsDescribedGroupUsesConfiguredTopologyWithoutStreamsTopology
 - testAsDescribedGroupWithStreamsTopologyHavingSubtopologies
 - testAsListedGroup
 - testCacheAndRetrieveRefinedAssignment
@@ -1994,12 +2000,9 @@ org.apache.kafka.coordinator.group.streams.assignor.MemberMetadataAndStateImplTe
 org.apache.kafka.coordinator.group.streams.assignor.ProcessStateTest:
 - shouldAddActiveTaskToMember
 - shouldAddStandbyTaskToMember
-- shouldIncreaseCapacity
-- shouldReturnAllAssignedTasks
+- shouldComputeLoadFromTaskCountAndCapacity
 - shouldReturnFalseIfTaskIsNotAssigned
-- shouldReturnFalseWhenCapacityIsFull
 - shouldReturnTrueIfTaskIsAssigned
-- shouldReturnTrueWhenCapacityIsAvailable
 org.apache.kafka.coordinator.group.streams.assignor.RackAwareStandbyPickerTest:
 - shouldGiveUpPriorityKeyOnceEveryValueIsUsed
 - shouldKeepLaterTagKeyAfterGivingUpAnEarlierOne

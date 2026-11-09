@@ -4258,8 +4258,10 @@ org.apache.kafka.common.network.SaslChannelBuilderTest:
 - testClientChannelBuilderWithBrokerConfigs
 - testCloseAfterConfigIsIdempotent
 - testCloseBeforeConfigureIsIdempotent
+- testConfiguredOAuthBearerValidatorDoesNotLogWarning
 - testLoginManagerReleasedIfConfigureThrowsException
 - testNativeGssapiCredentials
+- testUnsecuredOAuthBearerValidatorLogsWarning
 org.apache.kafka.common.network.SelectorTest:
 - registerFailure
 - testCantSendWithInProgress
@@ -5897,6 +5899,7 @@ org.apache.kafka.common.utils.BytesTest:
 - equalsReflectsContentIdentityAndType
 - getReturnsUnderlyingArray
 - hashCodeIsConsistentAndContentBased
+- toStringEscapesNonPrintableCharacters
 - wrapEmptyArrayProducesEmptyBytes
 - wrapReturnsBytesBackedBySameArray
 - wrapReturnsNullForNullInput
