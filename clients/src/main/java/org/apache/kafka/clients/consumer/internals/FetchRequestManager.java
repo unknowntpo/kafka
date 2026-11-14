@@ -152,14 +152,7 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * Creates the {@link PollResult poll result} that contains a list of zero or more
      * {@link FetchRequest.Builder fetch requests}.
      *
-     * @param fetchRequestPreparer {@link FetchRequestPreparer} to generate a {@link FetchRequestPreparationResult}
-     *                             mapping {@link Node nodes} to their {@link FetchSessionHandler.FetchRequestData}
-     * @param successHandler       {@link ResponseHandler Handler for successful responses}
-     * @param errorHandler         {@link ResponseHandler Handler for failure responses}
-     * @return {@link PollResult}
-     */
-    /**
-     * Prepares fetch requests on every pass of the network thread rather than only on the passes where the
+     * <p>Prepares fetch requests on every pass of the network thread rather than only on the passes where the
      * application asked for them. A fetch response is handled at the end of a pass, so the fetch that continues
      * from it goes out at the start of the next one, without waiting for the application to call {@code poll()}
      * again. How far this may run ahead of the application is bounded by the credit in {@link AbstractFetch}.
@@ -168,6 +161,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
      * application thread that a pass has run, which is what {@link CreateFetchRequestsEvent} waits for. Most
      * passes complete no future because the application did not ask for one. What still gates fetching entirely
      * is {@code fetchingStarted}: the application has to ask once, after which the responses keep it going.
+     *
+     * @param fetchRequestPreparer {@link FetchRequestPreparer} to generate a {@link FetchRequestPreparationResult}
+     *                             mapping {@link Node nodes} to their {@link FetchSessionHandler.FetchRequestData}
+     * @param successHandler       {@link ResponseHandler Handler for successful responses}
+     * @param errorHandler         {@link ResponseHandler Handler for failure responses}
+     * @return {@link PollResult}
      */
     private PollResult pollInternal(FetchRequestPreparer fetchRequestPreparer,
                                     ResponseHandler<ClientResponse> successHandler,
