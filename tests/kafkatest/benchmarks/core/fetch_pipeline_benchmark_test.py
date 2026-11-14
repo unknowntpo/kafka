@@ -49,7 +49,14 @@ class FetchPipelineBenchmark(Test):
         out = node.account.ssh_output("nproc; free -g | sed -n 2p; df -h /mnt | tail -1").decode()
         self.logger.info("machine: %s" % out.replace("\n", " | "))
 
+    def check_disk(self, total_bytes):
+        """All containers share one host disk. Fail early instead of filling a shared machine."""
+        node = self.kafka.nodes[0]
+        free_kb = int(node.account.ssh_output("df -k --output=avail /mnt | tail -1").decode().strip())
+        assert free_kb * 1024 > 3 * total_bytes, "not enough free disk: %d GB" % (free_kb // (1024 * 1024))
+
     def produce(self, record_size, total_bytes):
+        self.check_disk(total_bytes)
         per_producer = total_bytes // record_size // self.NUM_PRODUCERS
         self.kafka.create_topic({"topic": self.TOPIC, "partitions": self.PARTITIONS, "replication-factor": 1})
         producer = ProducerPerformanceService(
