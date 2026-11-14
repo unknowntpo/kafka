@@ -13,40 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from ducktape.mark import matrix
 from ducktape.mark.resource import cluster
 from ducktape.tests.test import Test
 
-from kafkatest.services.kafka import KafkaService
-from kafkatest.services.performance import ProducerPerformanceService, ConsumerPerformanceService
+from kafkatest.services.kafka import KafkaService, quorum
+from kafkatest.services.performance import ProducerPerformanceService
+from kafkatest.services.performance.group_per_node_consumer_performance import GroupPerNodeConsumerPerformanceService
 from kafkatest.version import DEV_BRANCH
 
 GB = 1024 * 1024 * 1024
-
-
-class GroupPerNodeConsumerPerformanceService(ConsumerPerformanceService):
-    """
-    Each node reads the whole topic in its own group, so N nodes put N times the read load
-    on the machine. Extra JVM options are passed to the tool, and the fetch-only rate is kept.
-    """
-
-    def __init__(self, context, num_nodes, kafka, topic, messages, group_prefix, jvm_opts="", settings={}):
-        super(GroupPerNodeConsumerPerformanceService, self).__init__(
-            context, num_nodes, kafka, topic=topic, messages=messages, settings=settings)
-        self.group_prefix = group_prefix
-        self.jvm_opts = jvm_opts
-        self.fetch_mbps = [None] * num_nodes
-
-    def start_cmd(self, node):
-        self.group = "%s-%d" % (self.group_prefix, self.idx(node))
-        cmd = super(GroupPerNodeConsumerPerformanceService, self).start_cmd(node)
-        script = self.path.script("kafka-consumer-perf-test.sh", node)
-        return cmd.replace(script, "KAFKA_OPTS=\"$KAFKA_OPTS %s\" %s" % (self.jvm_opts, script), 1)
-
-    def _worker(self, idx, node):
-        super(GroupPerNodeConsumerPerformanceService, self)._worker(idx, node)
-        last = node.account.ssh_output("tail -1 %s" % ConsumerPerformanceService.STDOUT_CAPTURE).decode()
-        # start, end, MB, MB/s, records, records/s, rebalance ms, fetch ms, fetch MB/s, fetch records/s
-        self.fetch_mbps[idx - 1] = float(last.split(',')[8])
 
 
 class FetchPipelineBenchmark(Test):
@@ -115,13 +91,15 @@ class FetchPipelineBenchmark(Test):
         self.logger.info("result: %s" % data)
         return data
 
-    @cluster(num_nodes=14)
-    def test_consumer_scaling(self):
+    @cluster(num_nodes=12)
+    @matrix(metadata_quorum=[quorum.isolated_kraft])
+    def test_consumer_scaling(self, metadata_quorum):
         """1, 2, 4 and 8 independent consumers. Runs on any revision."""
         return self.run_variants([("c%d" % n, n, "") for n in (1, 2, 4, 8)])
 
-    @cluster(num_nodes=14)
-    def test_decode_prototype(self):
+    @cluster(num_nodes=12)
+    @matrix(metadata_quorum=[quorum.isolated_kraft])
+    def test_decode_prototype(self, metadata_quorum):
         """
         Measurement-only switches from FETCH-PIPELINE-06-lean-decode-prototype.patch.
         They do nothing on a revision without that patch.
