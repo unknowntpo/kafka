@@ -102,6 +102,15 @@
 - 多 node 時命中率預期下降，還沒有量。
 - KIP 至少要寫出新舊記憶體上限的公式。trunk 是 partition 數 × `max.partition.fetch.bytes`。
 
+### B10. 邊界應該是流量控制，不是寫死的數字【想法，使用者 2026-11-14 提出的設計原則】
+
+- 原則：與其讓每個 config 各自設定 buffer 上限，不如做一個能適應各種場景的流量控制。使用者不需要調參數。
+- 靜態上限的例子：`max.partition.fetch.bytes`、`fetch.max.bytes`、`max.poll.records`、librdkafka 的 `queued.min.messages`。每個數字只對一種場景是對的。
+- 已量測的佐證：librdkafka 的固定上限加固定 backoff 讓它空等（A3）。`max.partition.fetch.bytes` 從 1 MB 到 50 MB 對吞吐量沒有影響（B5）。
+- 本分支還不合格：每個 node 固定一份 `fetch.max.bytes` 的 credit 仍然是寫死的數字。
+- 方向：credit 由 application 的消化速度決定，粒度到 partition。既有 config 只保留為安全上限。不新增 config。TCP receive window 自動調整是同類做法。
+- 還缺的證據：05 文件的實驗 E3（熱冷 partition 偏斜），對照固定 credit 與自適應 credit 的記憶體用量與冷 partition 延遲。
+
 ## C. 來自 OpenTelemetry Collector batch processor 棄用文章的 insight
 
 來源：https://ganhua.wang/batch-processor-opentelemetry-collector 。文章內容沒有對照 OpenTelemetry 原始碼驗證。
