@@ -70,6 +70,7 @@ public class FetchCollector<K, V> {
         this.subscriptions = subscriptions;
         this.fetchConfig = fetchConfig;
         this.deserializers = deserializers;
+        CompletedFetch.protoDeserializers = deserializers;
         this.metricsManager = metricsManager;
         this.time = time;
     }

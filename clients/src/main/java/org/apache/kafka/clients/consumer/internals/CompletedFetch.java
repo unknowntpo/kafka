@@ -84,6 +84,58 @@ public class CompletedFetch {
     private boolean exhausted = false;
     private boolean initialized = false;
 
+    // PROTOTYPE (measurement only, not for commit): decode a whole CompletedFetch on a worker thread.
+    static final int DECODE_THREADS = Integer.getInteger("fp.decode.threads", 0);
+    static final java.util.concurrent.ExecutorService DECODE_POOL = DECODE_THREADS > 0
+        ? java.util.concurrent.Executors.newFixedThreadPool(DECODE_THREADS, r -> {
+            Thread t = new Thread(r, "fp-decode"); t.setDaemon(true); return t; })
+        : null;
+    static volatile Deserializers<?, ?> protoDeserializers;
+    private static final ThreadLocal<BufferSupplier> TL_SUPPLIER = ThreadLocal.withInitial(BufferSupplier::create);
+    private boolean predecoding = false;
+    private java.util.concurrent.Future<?> pre;
+    private List<ConsumerRecord<Object, Object>> preRecords;
+    private int preIdx;
+    private long preFinalNext;
+    private Optional<Integer> preFinalEpoch;
+    private int preBytes;
+    private RuntimeException preError;
+
+    @SuppressWarnings("unchecked")
+    void predecode(FetchConfig fetchConfig) {
+        if (DECODE_POOL == null || protoDeserializers == null)
+            return;
+        predecoding = true;
+        pre = DECODE_POOL.submit(() -> {
+            long start = nextFetchOffset;
+            try {
+                preRecords = fetchRecordsDirect(fetchConfig, (Deserializers<Object, Object>) protoDeserializers, Integer.MAX_VALUE);
+            } catch (RuntimeException e) {
+                preError = e;
+                preRecords = Collections.emptyList();
+            }
+            maybeCloseRecordStream();
+            preFinalNext = nextFetchOffset;
+            preFinalEpoch = lastEpoch;
+            preBytes = bytesRead;
+            nextFetchOffset = start;
+            lastEpoch = Optional.empty();
+            exhausted = false;
+            recordsRead = 0;
+            bytesRead = 0;
+        });
+    }
+
+    private void awaitPredecode() {
+        if (pre != null) {
+            try {
+                pre.get();
+            } catch (Exception e) {
+                throw new KafkaException(e);
+            }
+        }
+    }
+
     CompletedFetch(Logger log,
                    SubscriptionState subscriptions,
                    BufferSupplier decompressionBufferSupplier,
@@ -111,10 +163,12 @@ public class CompletedFetch {
     }
 
     long nextFetchOffset() {
+        awaitPredecode();
         return nextFetchOffset;
     }
 
     Optional<Integer> lastEpoch() {
+        awaitPredecode();
         return lastEpoch;
     }
 
@@ -131,6 +185,7 @@ public class CompletedFetch {
     }
 
     boolean isExhausted() {
+        awaitPredecode();
         return exhausted;
     }
 
@@ -150,6 +205,7 @@ public class CompletedFetch {
      * returned instead.
      */
     void drain() {
+        awaitPredecode();
         if (!isConsumed) {
             maybeCloseRecordStream();
             cachedRecordException = null;
@@ -231,7 +287,7 @@ public class CompletedFetch {
                     }
                 }
 
-                records = currentBatch.streamingIterator(decompressionBufferSupplier);
+                records = currentBatch.streamingIterator(predecoding ? TL_SUPPLIER.get() : decompressionBufferSupplier);
             } else {
                 Record record = records.next();
                 // skip any records out of range
@@ -262,7 +318,36 @@ public class CompletedFetch {
      * @param maxRecords The number of records to return; the number returned may be {@code 0 <= maxRecords}
      * @return {@link ConsumerRecord Consumer records}
      */
+    @SuppressWarnings("unchecked")
     <K, V> List<ConsumerRecord<K, V>> fetchRecords(FetchConfig fetchConfig,
+                                                   Deserializers<K, V> deserializers,
+                                                   int maxRecords) {
+        if (pre == null)
+            return fetchRecordsDirect(fetchConfig, deserializers, maxRecords);
+        awaitPredecode();
+        if (preError != null)
+            throw preError;
+        if (isConsumed)
+            return Collections.emptyList();
+        int n = Math.min(maxRecords, preRecords.size() - preIdx);
+        List<ConsumerRecord<K, V>> out = (List<ConsumerRecord<K, V>>) (List<?>) (n == preRecords.size()
+            ? preRecords : new ArrayList<>(preRecords.subList(preIdx, preIdx + n)));
+        preIdx += n;
+        recordsRead += n;
+        if (preIdx == preRecords.size()) {
+            nextFetchOffset = preFinalNext;
+            lastEpoch = preFinalEpoch;
+            exhausted = true;
+            bytesRead = preBytes;
+        } else {
+            ConsumerRecord<K, V> last = out.get(n - 1);
+            nextFetchOffset = last.offset() + 1;
+            lastEpoch = last.leaderEpoch();
+        }
+        return out;
+    }
+
+    <K, V> List<ConsumerRecord<K, V>> fetchRecordsDirect(FetchConfig fetchConfig,
                                                    Deserializers<K, V> deserializers,
                                                    int maxRecords) {
         // Error when fetching the next record before deserialization.
@@ -274,7 +359,8 @@ public class CompletedFetch {
         if (isConsumed)
             return Collections.emptyList();
 
-        List<ConsumerRecord<K, V>> records = new ArrayList<>();
+        List<ConsumerRecord<K, V>> records = org.apache.kafka.common.record.internal.DefaultRecord.LEAN
+            ? new ArrayList<>(Math.min(maxRecords, 512)) : new ArrayList<>();
 
         try {
             for (int i = 0; i < maxRecords; i++) {
@@ -289,7 +375,8 @@ public class CompletedFetch {
                 if (lastRecord == null)
                     break;
 
-                Optional<Integer> leaderEpoch = maybeLeaderEpoch(currentBatch.partitionLeaderEpoch());
+                Optional<Integer> leaderEpoch = org.apache.kafka.common.record.internal.DefaultRecord.LEAN
+                    ? lastEpoch : maybeLeaderEpoch(currentBatch.partitionLeaderEpoch());
                 TimestampType timestampType = currentBatch.timestampType();
                 ConsumerRecord<K, V> record = parseRecord(deserializers, partition, leaderEpoch, timestampType, lastRecord);
                 records.add(record);
@@ -322,6 +409,19 @@ public class CompletedFetch {
                                             Optional<Integer> leaderEpoch,
                                             TimestampType timestampType,
                                             Record record) {
+        if (org.apache.kafka.common.record.internal.DefaultRecord.LEAN
+                && record instanceof org.apache.kafka.common.record.internal.DefaultRecord
+                && ((org.apache.kafka.common.record.internal.DefaultRecord) record).leanValue()
+                && !record.hasKey() && record.headers().length == 0
+                && deserializers.valueDeserializer().getClass() == org.apache.kafka.common.serialization.ByteArrayDeserializer.class) {
+            // PROTOTYPE (measurement only): copy the value straight out of the batch buffer.
+            org.apache.kafka.common.record.internal.DefaultRecord lean = (org.apache.kafka.common.record.internal.DefaultRecord) record;
+            @SuppressWarnings("unchecked")
+            V leanValue = (V) lean.leanValueArray();
+            return new ConsumerRecord<>(partition.topic(), partition.partition(), record.offset(),
+                    record.timestamp(), timestampType, ConsumerRecord.NULL_SIZE, lean.leanValueSize(),
+                    null, leanValue, new RecordHeaders(), leaderEpoch);
+        }
         ByteBuffer keyBytes = record.key();
         ByteBuffer valueBytes = record.value();
         Headers headers = new RecordHeaders(record.headers());

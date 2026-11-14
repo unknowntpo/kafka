@@ -82,6 +82,26 @@ public class DefaultRecord implements Record {
     private final ByteBuffer value;
     private final Header[] headers;
 
+    // PROTOTYPE (measurement only): keep the value as a position in the batch buffer instead of a slice.
+    public static final boolean LEAN = Boolean.getBoolean("fp.lean");
+    private ByteBuffer src;
+    private int valuePos;
+    private int valueLen;
+
+    public boolean leanValue() {
+        return src != null;
+    }
+
+    public int leanValueSize() {
+        return valueLen;
+    }
+
+    public byte[] leanValueArray() {
+        byte[] dest = new byte[valueLen];
+        System.arraycopy(src.array(), src.arrayOffset() + valuePos, dest, 0, valueLen);
+        return dest;
+    }
+
     DefaultRecord(int sizeInBytes,
                   byte attributes,
                   long offset,
@@ -134,7 +154,7 @@ public class DefaultRecord implements Record {
 
     @Override
     public int valueSize() {
-        return value == null ? -1 : value.remaining();
+        return src != null ? valueLen : value == null ? -1 : value.remaining();
     }
 
     @Override
@@ -149,11 +169,17 @@ public class DefaultRecord implements Record {
 
     @Override
     public boolean hasValue() {
-        return value != null;
+        return src != null || value != null;
     }
 
     @Override
     public ByteBuffer value() {
+        if (src != null) {
+            ByteBuffer b = src.duplicate();
+            b.position(valuePos);
+            b.limit(valuePos + valueLen);
+            return b.slice();
+        }
         return value == null ? null : value.duplicate();
     }
 
@@ -333,7 +359,14 @@ public class DefaultRecord implements Record {
 
             // read value
             int valueSize = ByteUtils.readVarint(buffer);
-            ByteBuffer value = Utils.readBytes(buffer, valueSize);
+            ByteBuffer value = null;
+            int leanPos = -1;
+            if (LEAN && valueSize >= 0 && buffer.hasArray()) {
+                leanPos = buffer.position();
+                buffer.position(leanPos + valueSize);
+            } else {
+                value = Utils.readBytes(buffer, valueSize);
+            }
 
             int numHeaders = ByteUtils.readVarint(buffer);
             if (numHeaders < 0)
@@ -353,7 +386,13 @@ public class DefaultRecord implements Record {
                         " bytes in record payload, but instead read " + (buffer.position() - recordStart));
 
             int totalSizeInBytes = ByteUtils.sizeOfVarint(sizeOfBodyInBytes) + sizeOfBodyInBytes;
-            return new DefaultRecord(totalSizeInBytes, attributes, offset, timestamp, sequence, key, value, headers);
+            DefaultRecord rec = new DefaultRecord(totalSizeInBytes, attributes, offset, timestamp, sequence, key, value, headers);
+            if (leanPos >= 0) {
+                rec.src = buffer;
+                rec.valuePos = leanPos;
+                rec.valueLen = valueSize;
+            }
+            return rec;
         } catch (BufferUnderflowException | IllegalArgumentException e) {
             throw new InvalidRecordException("Found invalid record structure", e);
         }
