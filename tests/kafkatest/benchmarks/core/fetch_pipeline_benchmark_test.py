@@ -43,6 +43,9 @@ class FetchPipelineBenchmark(Test):
         super(FetchPipelineBenchmark, self).__init__(test_context)
         self.kafka = KafkaService(test_context, 3, zk=None, controller_num_nodes_override=1)
         self.kafka.log_level = "INFO"
+        # ducktape collects every log entry when a test fails. Never collect the topic data:
+        # it is tens of GB and would end up in the uploaded results.
+        self.kafka.logs = {k: v for k, v in self.kafka.logs.items() if not k.startswith("kafka_data")}
 
     def log_machine(self):
         node = self.kafka.nodes[0]
