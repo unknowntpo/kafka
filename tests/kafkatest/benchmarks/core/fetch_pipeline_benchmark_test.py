@@ -41,7 +41,7 @@ class FetchPipelineBenchmark(Test):
 
     def __init__(self, test_context):
         super(FetchPipelineBenchmark, self).__init__(test_context)
-        self.kafka = KafkaService(test_context, 3, zk=None)
+        self.kafka = KafkaService(test_context, 3, zk=None, controller_num_nodes_override=1)
         self.kafka.log_level = "INFO"
 
     def log_machine(self):
