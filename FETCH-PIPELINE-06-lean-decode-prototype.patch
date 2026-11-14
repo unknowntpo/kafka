@@ -1,0 +1,134 @@
+diff --git a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java
+index 8d679a05955..5b0b1e20314 100644
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java
+@@ -274,7 +274,8 @@ public class CompletedFetch {
+         if (isConsumed)
+             return Collections.emptyList();
+ 
+-        List<ConsumerRecord<K, V>> records = new ArrayList<>();
++        List<ConsumerRecord<K, V>> records = org.apache.kafka.common.record.internal.DefaultRecord.LEAN
++            ? new ArrayList<>(Math.min(maxRecords, 512)) : new ArrayList<>();
+ 
+         try {
+             for (int i = 0; i < maxRecords; i++) {
+@@ -289,7 +290,8 @@ public class CompletedFetch {
+                 if (lastRecord == null)
+                     break;
+ 
+-                Optional<Integer> leaderEpoch = maybeLeaderEpoch(currentBatch.partitionLeaderEpoch());
++                Optional<Integer> leaderEpoch = org.apache.kafka.common.record.internal.DefaultRecord.LEAN
++                    ? lastEpoch : maybeLeaderEpoch(currentBatch.partitionLeaderEpoch());
+                 TimestampType timestampType = currentBatch.timestampType();
+                 ConsumerRecord<K, V> record = parseRecord(deserializers, partition, leaderEpoch, timestampType, lastRecord);
+                 records.add(record);
+@@ -322,6 +324,19 @@ public class CompletedFetch {
+                                             Optional<Integer> leaderEpoch,
+                                             TimestampType timestampType,
+                                             Record record) {
++        if (org.apache.kafka.common.record.internal.DefaultRecord.LEAN
++                && record instanceof org.apache.kafka.common.record.internal.DefaultRecord
++                && ((org.apache.kafka.common.record.internal.DefaultRecord) record).leanValue()
++                && !record.hasKey() && record.headers().length == 0
++                && deserializers.valueDeserializer().getClass() == org.apache.kafka.common.serialization.ByteArrayDeserializer.class) {
++            // PROTOTYPE (measurement only): copy the value straight out of the batch buffer.
++            org.apache.kafka.common.record.internal.DefaultRecord lean = (org.apache.kafka.common.record.internal.DefaultRecord) record;
++            @SuppressWarnings("unchecked")
++            V leanValue = (V) lean.leanValueArray();
++            return new ConsumerRecord<>(partition.topic(), partition.partition(), record.offset(),
++                    record.timestamp(), timestampType, ConsumerRecord.NULL_SIZE, lean.leanValueSize(),
++                    null, leanValue, new RecordHeaders(), leaderEpoch);
++        }
+         ByteBuffer keyBytes = record.key();
+         ByteBuffer valueBytes = record.value();
+         Headers headers = new RecordHeaders(record.headers());
+diff --git a/clients/src/main/java/org/apache/kafka/common/record/internal/DefaultRecord.java b/clients/src/main/java/org/apache/kafka/common/record/internal/DefaultRecord.java
+index e8241eb0b70..55c18a3c998 100644
+--- a/clients/src/main/java/org/apache/kafka/common/record/internal/DefaultRecord.java
++++ b/clients/src/main/java/org/apache/kafka/common/record/internal/DefaultRecord.java
+@@ -82,6 +82,26 @@ public class DefaultRecord implements Record {
+     private final ByteBuffer value;
+     private final Header[] headers;
+ 
++    // PROTOTYPE (measurement only): keep the value as a position in the batch buffer instead of a slice.
++    public static final boolean LEAN = Boolean.getBoolean("fp.lean");
++    private ByteBuffer src;
++    private int valuePos;
++    private int valueLen;
++
++    public boolean leanValue() {
++        return src != null;
++    }
++
++    public int leanValueSize() {
++        return valueLen;
++    }
++
++    public byte[] leanValueArray() {
++        byte[] dest = new byte[valueLen];
++        System.arraycopy(src.array(), src.arrayOffset() + valuePos, dest, 0, valueLen);
++        return dest;
++    }
++
+     DefaultRecord(int sizeInBytes,
+                   byte attributes,
+                   long offset,
+@@ -134,7 +154,7 @@ public class DefaultRecord implements Record {
+ 
+     @Override
+     public int valueSize() {
+-        return value == null ? -1 : value.remaining();
++        return src != null ? valueLen : value == null ? -1 : value.remaining();
+     }
+ 
+     @Override
+@@ -149,11 +169,17 @@ public class DefaultRecord implements Record {
+ 
+     @Override
+     public boolean hasValue() {
+-        return value != null;
++        return src != null || value != null;
+     }
+ 
+     @Override
+     public ByteBuffer value() {
++        if (src != null) {
++            ByteBuffer b = src.duplicate();
++            b.position(valuePos);
++            b.limit(valuePos + valueLen);
++            return b.slice();
++        }
+         return value == null ? null : value.duplicate();
+     }
+ 
+@@ -333,7 +359,14 @@ public class DefaultRecord implements Record {
+ 
+             // read value
+             int valueSize = ByteUtils.readVarint(buffer);
+-            ByteBuffer value = Utils.readBytes(buffer, valueSize);
++            ByteBuffer value = null;
++            int leanPos = -1;
++            if (LEAN && valueSize >= 0 && buffer.hasArray()) {
++                leanPos = buffer.position();
++                buffer.position(leanPos + valueSize);
++            } else {
++                value = Utils.readBytes(buffer, valueSize);
++            }
+ 
+             int numHeaders = ByteUtils.readVarint(buffer);
+             if (numHeaders < 0)
+@@ -353,7 +386,13 @@ public class DefaultRecord implements Record {
+                         " bytes in record payload, but instead read " + (buffer.position() - recordStart));
+ 
+             int totalSizeInBytes = ByteUtils.sizeOfVarint(sizeOfBodyInBytes) + sizeOfBodyInBytes;
+-            return new DefaultRecord(totalSizeInBytes, attributes, offset, timestamp, sequence, key, value, headers);
++            DefaultRecord rec = new DefaultRecord(totalSizeInBytes, attributes, offset, timestamp, sequence, key, value, headers);
++            if (leanPos >= 0) {
++                rec.src = buffer;
++                rec.valuePos = leanPos;
++                rec.valueLen = valueSize;
++            }
++            return rec;
+         } catch (BufferUnderflowException | IllegalArgumentException e) {
+             throw new InvalidRecordException("Found invalid record structure", e);
+         }

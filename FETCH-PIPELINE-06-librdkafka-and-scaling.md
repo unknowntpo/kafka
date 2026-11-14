@@ -53,8 +53,54 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 - **G6 librdkafka 的預設流量控制會讓它自己等待。** 預設設定下，100 B 時它的兩條 thread 只用了 53% 和 65%。這是 partition 層級背壓加上固定 backoff 的代價，是 05 文件 S1 的反面教材。
 - **G7 靠調 config 才快的系統不可靠。** librdkafka 在 6 partition × 1 KB 上，預設和最佳設定差 13%。使用者不會知道要調哪個。
 
+## 2a. 為什麼 decode 平行化沒有用（2026-11-14 追加）
+
+背景：100 B 小訊息時，application thread 的 CPU 是跑滿的。直覺是把 decode 搬到別的 thread 就會變快。實測只多 6%，3 個 worker 還變慢。
+
+查證過程，每一步都是【觀察】：
+
+1. **不是 GC 暫停。** young GC 每次 1 到 5 毫秒，4 秒內 11 次。
+2. **不是 fetch 回應太小。** 每個 partition 的 fetch 大小從 1 MB 改 8 MB，沒有變化。
+3. **不是 `poll()` 每次回太少筆。** `max.poll.records` 從 500 改 50000，沒有變化。
+4. **worker 在等工作。** wall-clock profile 顯示 3 個 worker 時，decode thread 有 72% 的時間閒著。1 個 worker 時它 88% 的時間在跑。
+5. **不變量是配置量。** 0 個和 3 個 worker 的 young GC 次數相同，吞吐量也相同。
+6. **配置量是 payload 的 4.1 倍。** allocation profile：讀 11.4 GB 的 payload，配置了 47.1 GB 的物件。
+
+   | 配置來源 | 佔比 | 是否必要 |
+   |---|---|---|
+   | value 的 `byte[]`（`Utils.toArray`） | 31% | 必要。使用者拿到的就是它 |
+   | `ConsumerRecord` | 18% | 必要 |
+   | `HeapByteBuffer`（`Utils.readBytes` 每筆切一個 slice） | 14% | 中間垃圾 |
+   | `DefaultRecord` | 14% | 中間垃圾 |
+   | `RecordHeaders` 與它內部的 `ArrayList` | 12% | 沒有 header 時是垃圾 |
+   | 每筆一個 `Optional`（leader epoch） | 4% | 垃圾。同一個 batch 的值都一樣 |
+   | `ArrayList` 擴容的 `Object[]` | 3.5% | 垃圾 |
+
+結論：這台機器受記憶體頻寬限制。每秒能寫進記憶體的位元組數是固定的。decode 由哪條 thread 做，要寫的位元組數都一樣，所以加 thread 沒有用。要變快，只能少寫。
+
+### 驗證：減少配置的原型
+
+原型做三件事：value 不切 slice，直接從 batch buffer 複製成 `byte[]`；leader epoch 的 `Optional` 每個 batch 只建一次；結果的 `ArrayList` 預先給容量。`DefaultRecord` 和 `RecordHeaders` 沒動。
+
+| 設定 | MB/s（穩態） | 整段的 young GC 次數 |
+|---|---|---|
+| 關 | 855 | 46 |
+| 開 | 985 | 38 |
+| 開，加 1 個 decode worker | 980 | 38 |
+| 開，加 2 個 decode worker | 978 | 38 |
+
+配置少 17%，吞吐量多 15%。吞吐量跟著配置量走，假設成立。加 worker 仍然沒有用。
+原型存成 `FETCH-PIPELINE-06-lean-decode-prototype.patch`，包含 decode worker 原型。它只處理沒有 key、沒有 header、value 用 `ByteArrayDeserializer` 的 record，不能直接 commit。
+
+### 這對方案的意義
+
+- 小訊息的下一步是「少配置」，不是「多 thread」。還沒動的 `DefaultRecord`（14%）和空的 `RecordHeaders`（12%）是下一批目標。
+- 這不需要改 public API。它是 `/Users/unknowntpo/repo/unknowntpo/kafka/KAFKA-21152-work/` 裡 `CompletedFetch` cursor 分層想法的具體理由。
+- 大機器上的結論可能不同。記憶體頻寬夠時，瓶頸才會回到 CPU，那時 thread 才有用。這仍然需要大機器驗證。
+
 ## 3. 這些 Force 對 05 文件的修正
 
+- 小訊息的吞吐量上限在 morefine 上由配置量決定，見 §2a。
 - 05 的 F16（多線程的價值取決於 decode 與處理的佔比）要加一個條件：機器要有記憶體頻寬的餘裕。morefine 沒有。
 - 05 的 M1（內部多線程 decode）不能預設開啟。在 morefine 上它是純成本。
 - 05 的 S1（partition 層級 credit）如果要做，不能用固定 backoff。credit 一歸還就要能立刻 fetch。
