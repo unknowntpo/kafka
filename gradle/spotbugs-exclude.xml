@@ -732,4 +732,10 @@ For a detailed description of spotbugs bug categories, see https://spotbugs.read
         <Bug pattern="AT_NONATOMIC_64BIT_PRIMITIVE"/>
     </Match>
 
+    <Match>
+        <!-- Measurement-only prototype switch. -->
+        <Class name="org.apache.kafka.clients.consumer.internals.FetchCollector"/>
+        <Bug pattern="ST_WRITE_TO_STATIC_FROM_INSTANCE_METHOD"/>
+    </Match>
+
 </FindBugsFilter>

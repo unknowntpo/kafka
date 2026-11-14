@@ -88,7 +88,10 @@ public class CompletedFetch {
     static final int DECODE_THREADS = Integer.getInteger("fp.decode.threads", 0);
     static final java.util.concurrent.ExecutorService DECODE_POOL = DECODE_THREADS > 0
         ? java.util.concurrent.Executors.newFixedThreadPool(DECODE_THREADS, r -> {
-            Thread t = new Thread(r, "fp-decode"); t.setDaemon(true); return t; })
+            Thread t = new Thread(r, "fp-decode");
+            t.setDaemon(true);
+            return t;
+        })
         : null;
     static volatile Deserializers<?, ?> protoDeserializers;
     private static final ThreadLocal<BufferSupplier> TL_SUPPLIER = ThreadLocal.withInitial(BufferSupplier::create);
