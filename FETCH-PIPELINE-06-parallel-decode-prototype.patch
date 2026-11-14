@@ -1,0 +1,165 @@
+diff --git a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractFetch.java b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractFetch.java
+index bea4debfa07..d9263435f05 100644
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractFetch.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractFetch.java
+@@ -245,6 +245,8 @@ public abstract class AbstractFetch implements Closeable {
+                         partitionData,
+                         metricAggregator,
+                         fetchOffset);
++                if (partitionError == Errors.NONE)
++                    completedFetch.predecode(fetchConfig);
+                 fetchBuffer.add(completedFetch);
+             }
+ 
+diff --git a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java
+index 8d679a05955..7b5e5ab4f39 100644
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CompletedFetch.java
+@@ -84,6 +84,58 @@ public class CompletedFetch {
+     private boolean exhausted = false;
+     private boolean initialized = false;
+ 
++    // PROTOTYPE (measurement only, not for commit): decode a whole CompletedFetch on a worker thread.
++    static final int DECODE_THREADS = Integer.getInteger("fp.decode.threads", 0);
++    static final java.util.concurrent.ExecutorService DECODE_POOL = DECODE_THREADS > 0
++        ? java.util.concurrent.Executors.newFixedThreadPool(DECODE_THREADS, r -> {
++            Thread t = new Thread(r, "fp-decode"); t.setDaemon(true); return t; })
++        : null;
++    static volatile Deserializers<?, ?> protoDeserializers;
++    private static final ThreadLocal<BufferSupplier> TL_SUPPLIER = ThreadLocal.withInitial(BufferSupplier::create);
++    private boolean predecoding = false;
++    private java.util.concurrent.Future<?> pre;
++    private List<ConsumerRecord<Object, Object>> preRecords;
++    private int preIdx;
++    private long preFinalNext;
++    private Optional<Integer> preFinalEpoch;
++    private int preBytes;
++    private RuntimeException preError;
++
++    @SuppressWarnings("unchecked")
++    void predecode(FetchConfig fetchConfig) {
++        if (DECODE_POOL == null || protoDeserializers == null)
++            return;
++        predecoding = true;
++        pre = DECODE_POOL.submit(() -> {
++            long start = nextFetchOffset;
++            try {
++                preRecords = fetchRecordsDirect(fetchConfig, (Deserializers<Object, Object>) protoDeserializers, Integer.MAX_VALUE);
++            } catch (RuntimeException e) {
++                preError = e;
++                preRecords = Collections.emptyList();
++            }
++            maybeCloseRecordStream();
++            preFinalNext = nextFetchOffset;
++            preFinalEpoch = lastEpoch;
++            preBytes = bytesRead;
++            nextFetchOffset = start;
++            lastEpoch = Optional.empty();
++            exhausted = false;
++            recordsRead = 0;
++            bytesRead = 0;
++        });
++    }
++
++    private void awaitPredecode() {
++        if (pre != null) {
++            try {
++                pre.get();
++            } catch (Exception e) {
++                throw new KafkaException(e);
++            }
++        }
++    }
++
+     CompletedFetch(Logger log,
+                    SubscriptionState subscriptions,
+                    BufferSupplier decompressionBufferSupplier,
+@@ -111,10 +163,12 @@ public class CompletedFetch {
+     }
+ 
+     long nextFetchOffset() {
++        awaitPredecode();
+         return nextFetchOffset;
+     }
+ 
+     Optional<Integer> lastEpoch() {
++        awaitPredecode();
+         return lastEpoch;
+     }
+ 
+@@ -131,6 +185,7 @@ public class CompletedFetch {
+     }
+ 
+     boolean isExhausted() {
++        awaitPredecode();
+         return exhausted;
+     }
+ 
+@@ -150,6 +205,7 @@ public class CompletedFetch {
+      * returned instead.
+      */
+     void drain() {
++        awaitPredecode();
+         if (!isConsumed) {
+             maybeCloseRecordStream();
+             cachedRecordException = null;
+@@ -231,7 +287,7 @@ public class CompletedFetch {
+                     }
+                 }
+ 
+-                records = currentBatch.streamingIterator(decompressionBufferSupplier);
++                records = currentBatch.streamingIterator(predecoding ? TL_SUPPLIER.get() : decompressionBufferSupplier);
+             } else {
+                 Record record = records.next();
+                 // skip any records out of range
+@@ -262,9 +318,38 @@ public class CompletedFetch {
+      * @param maxRecords The number of records to return; the number returned may be {@code 0 <= maxRecords}
+      * @return {@link ConsumerRecord Consumer records}
+      */
++    @SuppressWarnings("unchecked")
+     <K, V> List<ConsumerRecord<K, V>> fetchRecords(FetchConfig fetchConfig,
+                                                    Deserializers<K, V> deserializers,
+                                                    int maxRecords) {
++        if (pre == null)
++            return fetchRecordsDirect(fetchConfig, deserializers, maxRecords);
++        awaitPredecode();
++        if (preError != null)
++            throw preError;
++        if (isConsumed)
++            return Collections.emptyList();
++        int n = Math.min(maxRecords, preRecords.size() - preIdx);
++        List<ConsumerRecord<K, V>> out = (List<ConsumerRecord<K, V>>) (List<?>) (n == preRecords.size()
++            ? preRecords : new ArrayList<>(preRecords.subList(preIdx, preIdx + n)));
++        preIdx += n;
++        recordsRead += n;
++        if (preIdx == preRecords.size()) {
++            nextFetchOffset = preFinalNext;
++            lastEpoch = preFinalEpoch;
++            exhausted = true;
++            bytesRead = preBytes;
++        } else {
++            ConsumerRecord<K, V> last = out.get(n - 1);
++            nextFetchOffset = last.offset() + 1;
++            lastEpoch = last.leaderEpoch();
++        }
++        return out;
++    }
++
++    <K, V> List<ConsumerRecord<K, V>> fetchRecordsDirect(FetchConfig fetchConfig,
++                                                   Deserializers<K, V> deserializers,
++                                                   int maxRecords) {
+         // Error when fetching the next record before deserialization.
+         if (corruptLastRecord)
+             throw new KafkaException("Received exception when fetching the next record from " + partition
+diff --git a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchCollector.java b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchCollector.java
+index 17a02d4cfe9..3ab01342840 100644
+--- a/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchCollector.java
++++ b/clients/src/main/java/org/apache/kafka/clients/consumer/internals/FetchCollector.java
+@@ -70,6 +70,7 @@ public class FetchCollector<K, V> {
+         this.subscriptions = subscriptions;
+         this.fetchConfig = fetchConfig;
+         this.deserializers = deserializers;
++        CompletedFetch.protoDeserializers = deserializers;
+         this.metricsManager = metricsManager;
+         this.time = time;
+     }
