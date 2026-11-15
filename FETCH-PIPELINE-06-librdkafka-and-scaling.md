@@ -188,6 +188,52 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 - 修正：測試改成所有組合固定 `-Xms2g -Xmx2g`。修正後還沒有重跑。
 - 注意：512 MB 的 heap 讓 GC 成為被量測的一部分。上面所有數字都在這個條件下。morefine 的量測用的 heap 大小要另外核對，才能跨環境比較。
 
+## 5b. GCP：broker 與 consumer 分開（2026-11-15，階段一）
+
+腳本：`FETCH-PIPELINE-09-gcp.sh`、`FETCH-PIPELINE-09-run.sh`。原始結果：`FETCH-PIPELINE-09-results-gcp-run1/`。
+
+- client：`c4-standard-8`（8 vCPU、30 GB、Xeon Platinum 8581C）。broker：`n2-highmem-4`（4 vCPU、32 GB），單一 KRaft broker。zone `us-central1-a`。
+- 12 partition。100 B × 10 GB、1 KB × 20 GB，資料在 broker 的 page cache。consumer heap 2 GB。每個組合 3 次，60 次全部成功。
+- broker 到 client 的頻寬：`iperf3` 量到 9.3 Gbit/s，約 1160 MB/s。
+- MB/s 是 `kafka-consumer-perf-test` 的整體數字，包含加入 group 的時間，所以低於 broker 端看到的峰值。
+
+### 吞吐量（3 次的中位數，所有 consumer 加總，MB/s）
+
+| 組合 | 100 B | 1 KB | broker 峰值送出（100 B / 1 KB） |
+|---|---|---|---|
+| trunk，1 個 consumer | 396 | 626 | 489 / 722 |
+| 本分支，1 個 | 660 | 888 | 881 / 970 |
+| trunk，2 個 | 552 | 962 | 746 / 1057 |
+| 本分支，2 個 | 887 | 1013 | 1032 / 1092 |
+| trunk，4 個 | 837 | 1043 | 1033 / 1133 |
+| 本分支，4 個 | 958 | 1094 | 1143 / 1125 |
+
+原型（`fp-bench-proto`，1 個 consumer）：
+
+| 開關 | 100 B | 1 KB |
+|---|---|---|
+| base | 681 | 851 |
+| `-Dfp.lean=true` | 672 | 799 |
+| `-Dfp.decode.threads=2` | 704 | 814 |
+| lean 加 2 條 decode thread | 728 | 846 |
+
+### 觀察
+
+1. 【觀察】單一 consumer：本分支比 trunk 快 67%（100 B）與 42%（1 KB）。broker 的 CPU 峰值在 7% 到 11%，網路峰值低於上限。這兩個數字是 consumer 的差距。
+2. 【觀察】trunk 加 consumer 會擴展：100 B 是 396 → 552 → 837。這與 `kafka-e2e` 的平坦曲線相反，所以那個平坦是共置造成的。
+3. 【觀察】2 個與 4 個 consumer 的組合撞到網路上限。broker 送出的峰值是 1030 到 1143 MB/s，上限約 1160 MB/s。這些組合的數字不是 consumer 的上限。本分支「4 個只比 1 個多 45%」不能解讀成擴展性差。
+4. 【觀察】100 B 時 CPU 沒有在等記憶體。instructions per cycle 是 2.4 到 2.6，`topdown-be-bound` 約 28% 到 30%。「小訊息受記憶體頻寬限制」在這台機器上不成立。morefine 上是否成立，還沒有硬體計數器的證據。
+5. 【觀察】lean 原型在這裡沒有增益（672 對 681，在雜訊內）。morefine 是 +15%，`kafka-e2e`（512 MB heap）是 +26%。decode thread 也在雜訊內（+3%）。
+6. 【推論】第 4、5 點互相一致：這台機器記憶體快、heap 夠大，配置量不是瓶頸。減少配置的增益取決於機器與 heap 大小，不是普遍成立的。
+7. 1 KB 的 instructions per cycle 是 1.2 到 1.45，L1 cache miss 是 100 B 的 3 倍。1 KB 的成本是複製資料。
+
+### 限制
+
+- 一次執行、一對機器。3 次之間的差距最大 20%（每個組合的第 1 次常偏低）。
+- `perf stat` 包住整個 JVM process，含 JIT 與 GC thread，而且只量每個組合的第 1 次。
+- `mem_load_retired.l3_miss` 讀到 0，判定為這台 VM 不支援，沒有採用。
+- 多 consumer 的上限需要更高的頻寬才量得到。需要先把配額提高，broker 改用 8 vCPU 以上的機型。
+
 ## 6. 還沒回答的問題
 
 - 多 broker 時 Java 單一 background thread 對 librdkafka「每個 broker 一條 thread」的差距。morefine 無法量。

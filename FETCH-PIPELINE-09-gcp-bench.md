@@ -1,6 +1,6 @@
 # FETCH-PIPELINE-09：在 GCP 上把 broker 與 consumer 分開量測（草稿）
 
-狀態：草稿。還沒有建立任何 GCP 資源。腳本 `FETCH-PIPELINE-09-gcp.sh` 還沒有執行過。
+狀態：階段一已在 2026-11-15 執行（12 vCPU 配額內：client `c4-standard-8`、broker `n2-highmem-4`、`us-central1-a`、隨選）。結果在 `FETCH-PIPELINE-06-librdkafka-and-scaling.md` §5b。下面「配置」一節的機型是最初的草稿，已被腳本裡的實際設定取代：專案配額是全專案 12 vCPU、C4 每個 region 8 vCPU；只有 C4 支援硬體計數器；`asia-east1-b` 沒有 C3。階段二需要先提高配額。
 
 ## 為什麼需要這個實驗
 
