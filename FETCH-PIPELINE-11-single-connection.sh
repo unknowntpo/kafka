@@ -6,12 +6,27 @@
 #   FETCH-PIPELINE-11-single-connection.sh produce            create the topic and write the data
 #   FETCH-PIPELINE-11-single-connection.sh run <label>        run the combinations; <label> names the broker state
 #   FETCH-PIPELINE-11-single-connection.sh extra <label>      combinations that need a larger net.core.rmem_max
+#   FETCH-PIPELINE-11-single-connection.sh rcv <label>        client receive.buffer.bytes: 64 KB (the consumer default), 2 MB, -1
+#   FETCH-PIPELINE-11-single-connection.sh broker-buffer <v>  on the broker VM: restart with socket.send.buffer.bytes=<v>; "default" removes the line
 #
 # Expects control.tgz and branch.tgz in the current directory and a broker on fp-broker:9092.
 set -euo pipefail
 OUT="$PWD/fp11-results"; WORK="$PWD/fp-work"; B="${FP_BROKER:-fp-broker}:9092"
 TOPIC=single-connection; SIZE=1000; GB="${FP_GB:-20}"; REPS="${FP_REPS:-3}"
 mkdir -p "$OUT" "$WORK"
+if [ "${1:-}" = broker-buffer ]; then
+  K="$WORK/broker"; P="$WORK/server.properties"
+  "$K/bin/kafka-server-stop.sh" >/dev/null 2>&1 || true
+  for _ in $(seq 30); do pgrep -f kafka.Kafka >/dev/null || break; sleep 1; done
+  sed -i '/^socket.send.buffer.bytes=/d' "$P"
+  [ "$2" = default ] || echo "socket.send.buffer.bytes=$2" >> "$P"
+  KAFKA_HEAP_OPTS="-Xms4g -Xmx4g" nohup "$K/bin/kafka-server-start.sh" "$P" > "$WORK/broker.log" 2>&1 &
+  for _ in $(seq 60); do
+    "$K/bin/kafka-topics.sh" --bootstrap-server localhost:9092 --list >/dev/null 2>&1 && { grep -c '^socket.send' "$P" || true; echo ready; exit 0; }
+    sleep 2
+  done
+  echo "broker did not start"; exit 1
+fi
 unpack() { local d="$WORK/$1"; [ -d "$d" ] || { mkdir -p "$d"; tar -xzf "$1.tgz" -C "$d" --strip-components=1; }; echo "$d"; }
 KC=$(unpack control); KB=$(unpack branch)
 total=$((GB * 1024 * 1024 * 1024 / SIZE)); records=$((total * 99 / 100))
@@ -50,6 +65,17 @@ run)
   run "$L-branch-rcvauto" "$KB" --socket-buffer-size=-1
   run "$L-control-rcv2m" "$KC"
   run "$L-control-rcvauto" "$KC" --socket-buffer-size=-1
+  ;;
+rcv)
+  L=$2
+  # rcv64k: what an application gets when it does not set receive.buffer.bytes (the tool otherwise asks for 2 MB).
+  for v in branch control; do
+    k=$KB; [ "$v" = control ] && k=$KC
+    run "$L-$v-rcv64k" "$k" --socket-buffer-size 65536
+    run "$L-$v-rcv2m" "$k"
+    run "$L-$v-rcvauto" "$k" --socket-buffer-size=-1
+  done
+  touch "$OUT/rcv-$L.finished"
   ;;
 extra)
   L=$2

@@ -420,6 +420,48 @@ broker 的 `socket.send.buffer.bytes` 預設是 102400（100 KB）。`-1` 表示
 - 沒有分析這次的 broker CPU。
 - 沒有量 100 B，也沒有量多個 consumer。
 
+## 5f. GCP：consumer 的接收緩衝預設值是第二個上限（2026-11-15，階段四）
+
+問題：一般應用程式不會設定 `receive.buffer.bytes`，拿到的是 consumer 預設值 64 KB。§5e 的 client 都用 `kafka-consumer-perf-test` 的預設值 2 MB，所以沒有量到這個情況。
+
+設定與 §5e 相同（broker `n2-standard-16`、client `c4-standard-8`、同一個 zone、12 個 partition、1 KB record、20 GB、一個 consumer）。腳本：`FETCH-PIPELINE-11-single-connection.sh` 的 `rcv` 與 `broker-buffer` 子命令。
+
+### 吞吐量（MB/s，3 次的中位數）
+
+| broker `socket.send.buffer.bytes` | consumer `receive.buffer.bytes` | branch | trunk | branch 對 trunk |
+|---|---|---|---|---|
+| 102400（預設） | 65536（預設） | 531 | 457 | +16% |
+| 102400（預設） | 2 MB | 1035 | 734 | +41% |
+| 102400（預設） | `-1` | 1034 | 765 | +35% |
+| `-1` | 65536（預設） | 504 | 449 | +12% |
+| `-1` | 2 MB | 1959 | 1059 | +85% |
+| `-1` | `-1` | 2089 | 1163 | +80% |
+
+各次的範圍：`-1`/65536 的 branch 是 372 到 551；`-1`/2 MB 的 branch 是 1281 到 2118；其他組合的範圍在中位數的 ±10% 內。
+
+### 觀察
+
+1. **兩邊都用預設值時，一個 consumer 只有約 450 到 530 MB/s。** 這是沒有調整過的部署實際拿到的數字。
+2. **只改 broker 沒有用。** consumer 留在 64 KB 時，broker 改成 `-1` 的結果不變（531 對 504）。
+3. **只改 consumer 只拿到一半。** broker 留在預設值時，consumer 改成 2 MB 或 `-1` 會停在約 1000 MB/s（§5e 的上限）。
+4. **兩邊都改成 `-1`：trunk 457 → 1163（2.5 倍），branch 531 → 2089（3.9 倍）。**
+5. **64 KB 時 consumer 的 thread 沒有吃滿。** 第 8 秒的取樣：background thread 約 20% CPU，應用程式 thread 約 14%。`fetch-latency-avg` 是 22 ms（2 MB 時是 5 ms），每次 fetch 的大小相同（12.3 MB）。時間花在等資料從網路進來。
+6. **kernel 的數字吻合。** client 端的 `ss`：64 KB 時 `rb131072`（kernel 把要求的值加倍）、`rcv_ssthresh` 約 79 KB；`-1` 時 `rb33554432`、`rcv_ssthresh` 約 20 MB。
+7. **緩衝越小，branch 對 trunk 的差距越小。** 兩邊預設值時是 +16%，兩邊 `-1` 時是 +80%。連線被緩衝限制時，client 端的改進顯示不出來。
+
+### 含意
+
+- KAFKA-16496（把 client 的 `receive.buffer.bytes` 預設值改成 `-1`）單獨做，在這個環境只能從約 500 到約 1000 MB/s。broker 的 `socket.send.buffer.bytes` 要一起改。
+- 這支持把 broker 與 client 兩邊的預設值放進同一個 KIP。
+- FetchPipeline 的效益要在緩衝不是限制的環境才量得到。之前所有用 `kafka-consumer-perf-test` 的數字都是 2 MB 的接收緩衝，不是應用程式的預設值。
+
+### 限制
+
+- 來回延遲約 0.1 ms、31 Gbit/s 的連結。延遲較高的網路上，固定的小緩衝影響會更大，但沒有量。
+- 每個組合 3 次。一個 consumer、一個 broker、1 KB record、無壓縮。
+- 沒有量 producer 方向（broker 的 `socket.receive.buffer.bytes` 與 producer 的 `send.buffer.bytes`）。
+- 沒有量 follower 抓取（`replica.socket.receive.buffer.bytes`，預設 64 KB）。
+
 ## 6. 還沒回答的問題
 
 - 多 broker 時 Java 單一 background thread 對 librdkafka「每個 broker 一條 thread」的差距。morefine 無法量。
@@ -435,3 +477,5 @@ librdkafka 的原始碼與編譯結果留在 `~/kafka-bench/rdk/`（200 MB），
 本機 fetch 週期實驗（§5d）：`FETCH-PIPELINE-10-results-local/fetch-cycle-results.tgz`（三輪的原始輸出與 `summarize.py`）。
 
 GCP 階段三（§5e）：`FETCH-PIPELINE-11-results-gcp/`（client 與 broker 的原始輸出、`summarize.py`）。
+
+GCP 階段四（§5f）：`FETCH-PIPELINE-12-results-gcp/client-results.tgz`（`progress.log` 有每次的吞吐量；每次執行另有 `.out`、`.ss`、`.threads`）。
