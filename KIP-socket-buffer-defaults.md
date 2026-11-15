@@ -94,7 +94,7 @@ No new config, API, or protocol change. Only default values change.
 1. Change the defaults in the table above to `-1`.
 2. Remove `socket.send.buffer.bytes=102400` and `socket.receive.buffer.bytes=102400` from the sample config files:
    `config/server.properties`, `config/broker.properties`, `config/controller.properties`, and `docker/server.properties`.
-3. Add an entry to the upgrade notes in `docs/upgrade.md`.
+3. Add an entry to the upgrade notes in `docs/getting-started/upgrade.md`.
 
 No new code path is needed.
 With `-1`, Kafka already skips `setSendBufferSize` and `setReceiveBufferSize`.
