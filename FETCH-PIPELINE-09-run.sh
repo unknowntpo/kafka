@@ -110,8 +110,8 @@ client)
     echo "$(date +%H:%M:%S) produced $((total / 3 * 3)) records of ${size}B" | tee -a "$OUT/progress.log"
   }
 
-  consume() { # <key> <kafka dir> <consumers> <records> <jvm opts>
-    local key=$1 k=$2 n=$3 records=$4 opts=$5 rep i pids
+  consume() { # <key> <kafka dir> <consumers> <records> <jvm opts> [heap]
+    local key=$1 k=$2 n=$3 records=$4 opts=$5 heap=${6:-$HEAP} rep i pids
     for rep in $(seq "$REPS"); do
       local done_file="$OUT/$key.rep$rep.done"
       [ -f "$done_file" ] && continue
@@ -126,11 +126,17 @@ client)
         if [ "$USE_PERF" = 1 ] && [ "$rep" = 1 ] && [ "$i" = 1 ]; then
           cmd=(perf stat -o "$f.perf" -e cycles,instructions,L1-dcache-load-misses,mem_load_retired.l3_miss,slots,topdown-be-bound,topdown-retiring -- "${cmd[@]}")
         fi
-        KAFKA_HEAP_OPTS="$HEAP" KAFKA_OPTS="$opts" "${cmd[@]}" > "$f.out" 2> "$f.err" &
+        KAFKA_HEAP_OPTS="$heap" KAFKA_OPTS="$opts" "${cmd[@]}" > "$f.out" 2> "$f.err" &
         pids+=($!)
       done
+      # Per-thread CPU of every consumer JVM, once the consumers are past start-up (repetition 2 only,
+      # so that it never overlaps "perf stat"). Shows which thread is the limit.
+      if [ "$rep" = 2 ]; then
+        (sleep "${FP_THREADS_DELAY:-12}"; top -H -b -d 4 -n 2 -w 160 2>/dev/null | awk '/^top -/{n++} n==2' | head -32 > "$OUT/$key.rep$rep.threads") &
+      fi
       local ok=1
       for p in "${pids[@]}"; do wait "$p" || ok=0; done
+      wait
       # column 4 is MB/s, column 9 is fetch MB/s; sum over the consumers
       local sum
       sum=$(tail -qn 1 "$OUT/$key.rep$rep".c*.out | awk -F, '{a+=$4; b+=$9} END {printf "%.1f %.1f", a, b}')
@@ -144,6 +150,21 @@ client)
     total=$((gb * 1024 * 1024 * 1024 / size))
     records=$((total * 99 / 100))   # stop a little early so that no consumer waits for the poll timeout
     # Most important first: if time runs out, the less important combinations are the ones lost.
+    # FP_PLAN=phase2 measures only what phase one could not answer.
+    if [ "${FP_PLAN:-full}" = phase2 ]; then
+      for n in $SCALING; do
+        consume "${size}B-control-c$n" "$KC" "$n" "$records" ""
+        consume "${size}B-branch-c$n" "$KB" "$n" "$records" ""
+      done
+      if [ "$size" = 100 ]; then
+        consume "${size}B-proto-base" "$KP" 1 "$records" ""
+        consume "${size}B-proto-lean" "$KP" 1 "$records" "-Dfp.lean=true"
+        consume "${size}B-proto-base-heap512m" "$KP" 1 "$records" "" "-Xms512m -Xmx512m"
+        consume "${size}B-proto-lean-heap512m" "$KP" 1 "$records" "-Dfp.lean=true" "-Xms512m -Xmx512m"
+        consume "${size}B-proto-decode2" "$KP" 1 "$records" "-Dfp.decode.threads=2"
+      fi
+      continue
+    fi
     consume "${size}B-control-c1" "$KC" 1 "$records" ""
     consume "${size}B-branch-c1" "$KB" 1 "$records" ""
     consume "${size}B-proto-lean" "$KP" 1 "$records" "-Dfp.lean=true"

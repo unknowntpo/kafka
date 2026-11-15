@@ -234,6 +234,64 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 - `mem_load_retired.l3_miss` 讀到 0，判定為這台 VM 不支援，沒有採用。
 - 多 consumer 的上限需要更高的頻寬才量得到。需要先把配額提高，broker 改用 8 vCPU 以上的機型。
 
+## 5c. GCP：網路不再是上限（2026-11-15，階段二）
+
+環境：client `c4-standard-8`（8 vCPU，Xeon 8581C），broker `n2-standard-16`，`us-central1-a`。`iperf3` 量到 31.3 Gbit/s（約 3900 MB/s）。consumer heap 2 GB（另有標示的除外）。12 partition，單一 broker。63 次全部成功。VM 存在時間 03:28 到 04:08 UTC。
+
+「N 個 consumer」是 N 個獨立的 `kafka-consumer-perf-test` process，各自一個 group，各自讀完 12 個 partition。
+
+### 吞吐量（3 次的中位數，所有 consumer 加總，MB/s）
+
+| consumer 數 | 100 B trunk | 100 B 分支 | 1 KB trunk | 1 KB 分支 |
+|---|---|---|---|---|
+| 1 | 445 | 892（+100%） | 736 | 1021（+39%） |
+| 2 | 812 | 1585（+95%） | 1371 | 1932（+41%） |
+| 4 | 1355 | 2348（+73%） | 2447 | 3219（+32%） |
+| 8 | 2063 | 2591（+26%） | 3297 | 3455（+5%） |
+
+原型（`fp-bench-proto`，100 B，1 個 consumer）：
+
+| 組合 | MB/s |
+|---|---|
+| base，heap 2 GB | 890 |
+| lean（`-Dfp.lean=true`），heap 2 GB | 926 |
+| base，heap 512 MB | 892 |
+| lean，heap 512 MB | 920 |
+| `-Dfp.decode.threads=2`，heap 2 GB | 877 |
+
+### 每個 thread 的 CPU（第 2 次重複，4 秒的 `top -H` 取樣，單次）
+
+| 組合 | application thread | consumer network thread | 其他 |
+|---|---|---|---|
+| 100 B trunk，1 個 | 44% | 29% | |
+| 100 B 分支，1 個 | 100% | 41% | |
+| 100 B 原型 lean | 84% | 37% | |
+| 100 B 原型 decode2 | 55% | 36% | 兩個 decode thread 各 39% |
+| 1 KB trunk，1 個 | 19% | 30% | |
+| 1 KB 分支，1 個 | 28% | 28% | |
+
+### 觀察
+
+1. 網路不是上限時，獨立 consumer 的總吞吐量會隨數量增加。1 到 4 個：100 B 分支 2.6 倍，1 KB 分支 3.2 倍。這回答了 07 文件的缺口 B3，也表示 `kafka-e2e` 的平坦曲線來自共置與網路。
+2. 8 個 consumer 的數字不是 consumer 的上限。client 的 CPU 閒置只剩 0.1%。1 KB 的 broker 傳送量尖峰是 3866 MB/s，等於網路上限。
+3. 100 B、分支、1 個 consumer：application thread 是 100%。瓶頸是 application thread 上的 decode。
+4. 100 B、trunk、1 個 consumer：兩個 thread 都沒有滿（44% 與 29%）。這符合「application thread 的 `poll()` 才觸發下一個 fetch」造成兩個 thread 互相等待。分支的 +100% 主要來自拿掉這個等待。這是從數據推論，沒有用 profiler 驗證。
+5. 1 KB、1 個 consumer：兩個 thread 都只有約 30%，吞吐量卻停在約 1000 MB/s。client CPU、broker CPU（最低閒置 32%，而且那是 8 個 consumer 時）、網路都沒有滿。推論：上限是單一連線上「一次只有一個 fetch 在途」的來回週期。沒有驗證。
+6. decode 平行化沒有增益的原因符合第 5 點：`decode.threads=2` 把 application thread 降到 55%，吞吐量卻還是 877 MB/s，接近 1 KB 的單連線上限。瓶頸從 decode 移到了 fetch 的來回週期。
+7. lean 在這台機器上沒有可分辨的增益（+4%，在各次之間的變動範圍內），heap 512 MB 與 2 GB 都一樣。lean 的增益與 heap 大小無關這一點成立；增益本身在這台機器上不存在。
+
+### 對設計的含意
+
+- 單一 consumer 要超過約 1000 MB/s，需要多條連線或一條連線上多個在途 fetch。只把 decode 平行化不夠。
+- 分片（每個分片自己的連線加自己的 decode）同時解決第 3 點與第 5 點。獨立 consumer 的 2.6 到 3.2 倍是它的參考上限。
+
+### 限制
+
+- 單一 broker。多 broker 時每個 broker 各有一條連線，第 5 點的上限會不同。
+- thread CPU 是單次 4 秒取樣，不是整段平均。
+- client 只有 8 vCPU（4 個實體核心加 hyper-threading）。C4 配額無法提高。
+- 第 4、5、6 點的因果是推論。
+
 ## 6. 還沒回答的問題
 
 - 多 broker 時 Java 單一 background thread 對 librdkafka「每個 broker 一條 thread」的差距。morefine 無法量。
