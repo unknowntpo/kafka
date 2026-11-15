@@ -329,13 +329,73 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 
 - §5c 第 5 點要改寫：限制不是「一次一個 fetch」造成的來回等待，而是單一連線的位元組速率。把 fetch 做成管線化（一條連線多個在途 fetch）不會有幫助；多條連線才有機會。
 - GCP 上約 1000 MB/s 等於 8 Gbit/s。可能的原因有三個，還沒有分辨：GCP 對單一 TCP 連線的頻寬上限；`kafka-consumer-perf-test` 把 `receive.buffer.bytes` 固定成 2 MB；broker 對單一連線的傳送速度。
-- 要分辨，需要在 GCP 量單一連線的 `iperf3`（之前量的 31 Gbit/s 是 8 條連線的總和），以及改變 `--socket-buffer-size`。
+- 要分辨，需要在 GCP 量單一連線的 `iperf3`（之前量的 31 Gbit/s 是 8 條連線的總和），以及改變 `--socket-buffer-size`。結果在 §5e：原因是 broker 的 `socket.send.buffer.bytes` 預設值。
 
 ### 限制
 
 - 這台 Mac 同時有其他工作（load average 約 8，8 核），broker 與 consumer 搶同一組 CPU。絕對值不能和 GCP 比較。
 - 前兩輪的 `--fetch-size` 變化沒有生效：`kafka-consumer-perf-test` 會用 `--fetch-size` 蓋掉 `max.partition.fetch.bytes`。那兩輪的三個本分支組合都當成預設大小的重複。
 - thread CPU 是單次取樣；第 3 輪的 1 個 broker 跑得太快，取樣落在結束之後，沒有 `consumer_backgr` 的數字。
+
+## 5e. GCP：上限來自 broker 的傳送緩衝（2026-11-15，階段三）
+
+目的：找出 §5c 第 5 點與 §5d 留下的問題的原因。腳本：`FETCH-PIPELINE-11-single-connection.sh`。機器與階段二相同（client `c4-standard-8`，broker `n2-standard-16`，`us-central1-a`）。1 個 consumer、12 個 partition、1 KB、20 GB、每個組合 3 次。
+
+### 網路（`iperf3`，broker 傳給 client，8 秒）
+
+| 連線數 | Gbit/s |
+|---|---|
+| 1 | 29.4、31.6（兩次） |
+| 2 | 31.6 |
+| 4 | 31.5 |
+| 8 | 31.7 |
+| 1，視窗限制在 200 KB（`-w 200K`） | 11.3 |
+
+網路對單一 TCP 連線沒有上限。把視窗限制在 200 KB 時是 11.3 Gbit/s（約 1400 MB/s）。
+
+### 吞吐量（MB/s，3 次的中位數）
+
+broker 的 `socket.send.buffer.bytes` 預設是 102400（100 KB）。`-1` 表示交給 kernel 自動調整。
+
+| broker `socket.send.buffer.bytes` | client `receive.buffer.bytes` | trunk | 本分支 |
+|---|---|---|---|
+| 102400（預設） | 2 MB（工具預設） | 734 | 948 |
+| 102400（預設） | `-1` | 706 | 968 |
+| `-1` | 2 MB | 1228 | 1836 |
+| `-1` | `-1` | 1205 | 1681 |
+
+其他組合（本分支，broker `-1`）：`--fetch-size` 4 MB 是 1667；把 client 的 `net.core.rmem_max` 提高到 64 MB 之後，2 MB 是 2039，32 MB 是 2177。這些都在各次之間的變動範圍內（1541 到 2287）。
+
+### kernel 對 fetch 連線的統計（broker 端的 `ss -ti`）
+
+| broker 設定 | 傳送緩衝（`tb`） | `delivery_rate` | 限制 |
+|---|---|---|---|
+| 預設 | 204800 bytes | 10.2 Gbit/s | `sndbuf_limited` |
+| `-1` | 4194304 bytes | 26.7 Gbit/s | `rwnd_limited` 26.7% |
+
+`sndbuf_limited` 表示連線在等傳送緩衝有空間。`rwnd_limited` 表示連線在等接收端讀走資料。
+
+### 觀察
+
+1. 原因是 broker 的 `socket.send.buffer.bytes` 預設值。改成 `-1` 之後，本分支 +94%（948 到 1836），trunk +67%（734 到 1228）。
+2. client 的 `receive.buffer.bytes` 沒有可分辨的影響。這台 VM 的 `net.core.rmem_max` 是 4 MB，2 MB 的設定沒有被截斷。
+3. broker 改成 `-1` 之後，限制移到接收端：連線有 26.7% 的時間在等 client 讀取。這時 application thread 與 consumer network thread 各約 55% 到 65%（只有兩次取樣）。
+4. broker 改成 `-1` 之後，本分支比 trunk 快約 50%（1836 對 1228）。預設值之下是 +29%。broker 的限制拿掉之後，client 端的改進比較看得出來。
+5. §5c 的階段二數字都是在 broker 預設值之下量的。1 KB 的 1 個到 4 個 consumer 那幾列受這個限制影響。
+
+### 含意
+
+- 這是 broker 端的設定，不是 consumer 的程式碼。使用者今天就可以設定 `socket.send.buffer.bytes=-1`。
+- 改預設值需要 KIP。要先確認：延遲較高的網路上結果如何（視窗固定時，吞吐量與來回延遲成反比，所以 100 KB 在跨 zone 時影響更大）；每條連線多用的記憶體；producer 方向的 `socket.receive.buffer.bytes` 是否有同樣的問題。
+- consumer 端「多條連線」的設計仍然有用，但優先順序在這個設定之後。
+
+### 限制
+
+- 單一 broker、同一個 zone，來回延遲約 0.1 到 0.3 ms。
+- 每個組合只有 3 次，broker 改成 `-1` 之後各次之間的變動變大（1541 到 2287）。
+- thread CPU 的取樣在執行後第 8 秒。broker 改成 `-1` 之後每次只跑約 10 秒，多數取樣落在結束之後。
+- 沒有分析這次的 broker CPU。
+- 沒有量 100 B，也沒有量多個 consumer。
 
 ## 6. 還沒回答的問題
 
@@ -350,3 +410,5 @@ morefine 的 `~/kafka-bench/`：`lang-exp.log`、`matrix-exp.log`、`tuned-exp.l
 librdkafka 的原始碼與編譯結果留在 `~/kafka-bench/rdk/`（200 MB），供之後重跑。測試 topic 已全部刪除。
 
 本機 fetch 週期實驗（§5d）：`FETCH-PIPELINE-10-results-local/fetch-cycle-results.tgz`（三輪的原始輸出與 `summarize.py`）。
+
+GCP 階段三（§5e）：`FETCH-PIPELINE-11-results-gcp/`（client 與 broker 的原始輸出、`summarize.py`）。
