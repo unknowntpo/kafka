@@ -276,7 +276,7 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 2. 8 個 consumer 的數字不是 consumer 的上限。client 的 CPU 閒置只剩 0.1%。1 KB 的 broker 傳送量尖峰是 3866 MB/s，等於網路上限。
 3. 100 B、分支、1 個 consumer：application thread 是 100%。瓶頸是 application thread 上的 decode。
 4. 100 B、trunk、1 個 consumer：兩個 thread 都沒有滿（44% 與 29%）。這符合「application thread 的 `poll()` 才觸發下一個 fetch」造成兩個 thread 互相等待。分支的 +100% 主要來自拿掉這個等待。這是從數據推論，沒有用 profiler 驗證。
-5. 1 KB、1 個 consumer：兩個 thread 都只有約 30%，吞吐量卻停在約 1000 MB/s。client CPU、broker CPU（最低閒置 32%，而且那是 8 個 consumer 時）、網路都沒有滿。推論：上限是單一連線上「一次只有一個 fetch 在途」的來回週期。沒有驗證。
+5. 1 KB、1 個 consumer：兩個 thread 都只有約 30%，吞吐量卻停在約 1000 MB/s。client CPU、broker CPU（最低閒置 32%，而且那是 8 個 consumer 時）、網路都沒有滿。推論：上限是單一連線上「一次只有一個 fetch 在途」的來回週期。§5d 的本機實驗修正了這個推論：上限是單一連線的位元組速率，不是每次 fetch 的固定成本。
 6. decode 平行化沒有增益的原因符合第 5 點：`decode.threads=2` 把 application thread 降到 55%，吞吐量卻還是 877 MB/s，接近 1 KB 的單連線上限。瓶頸從 decode 移到了 fetch 的來回週期。
 7. lean 在這台機器上沒有可分辨的增益（+4%，在各次之間的變動範圍內），heap 512 MB 與 2 GB 都一樣。lean 的增益與 heap 大小無關這一點成立；增益本身在這台機器上不存在。
 
@@ -292,6 +292,51 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 - client 只有 8 vCPU（4 個實體核心加 hyper-threading）。C4 配額無法提高。
 - 第 4、5、6 點的因果是推論。
 
+## 5d. 本機：單一連線的上限是位元組速率（2026-11-15）
+
+目的：驗證 §5c 第 5 點的推論。免費，在 Mac 上用 Docker container 執行。腳本：`FETCH-PIPELINE-10-fetch-cycle.sh`。
+
+設定：1 個 consumer、12 個 partition、1 KB、6 GB。比較 1 個 broker 與 3 個 broker（每個 broker 是 4 個 partition 的 leader）。另外用 `kafka-consumer-perf-test` 的 `--fetch-size` 改變每次 fetch 的大小。
+
+「連線使用率」的算法：`fetch-total` × `fetch-latency-avg` ÷ 連線數 ÷ fetch 時間。1.0 表示連線上永遠有一個 fetch 在途。
+
+### 結果
+
+每次 fetch 的大小（本分支、1 個 broker、同一輪、3 次的中位數）：
+
+| `--fetch-size` | 回應大小 | `fetch-latency-avg` | 每秒 fetch 數 | fetch MB/s | 連線使用率 |
+|---|---|---|---|---|---|
+| 256 KB | 3.1 MB | 3.0 ms | 315 | 922 | 0.95 |
+| 1 MB（預設） | 12.4 MB | 11.7 ms | 82 | 957 | 0.96 |
+| 4 MB | 49.6 MB | 41.3 ms | 23 | 1086 | 0.96 |
+
+1 個 broker 對 3 個 broker（本分支、預設 fetch 大小、MB/s 的中位數）：
+
+| 輪 | 1 個 broker | 3 個 broker |
+|---|---|---|
+| 第 1 輪（各 9 次） | 643 | 893 |
+| 第 2 輪（9 次） | 648 | 沒有跑 |
+| 第 3 輪（各 3 次） | 906 | 806 |
+
+### 觀察
+
+1. 本分支的連線使用率是 0.94 到 0.97。連線上幾乎永遠有一個 fetch 在途。trunk 是 0.77 到 0.88。
+2. 回應大小變成 16 倍，`fetch-latency-avg` 也變成約 14 倍，吞吐量只多 18%。每次 fetch 的固定成本很小。上限是單一連線每秒能送多少位元組。
+3. 1 個 broker 對 3 個 broker 沒有結論。第 1 輪是 +39%，第 3 輪是 −11%。各次之間的差距（例如 782 到 1669）大於兩組的差距。
+4. consumer network thread 的 CPU：1 個 broker 是 65% 到 80%，3 個 broker 多數是 87% 到 98%。這和 GCP 不同（GCP 是 28%）。本機的瓶頸比較接近 network thread 本身。
+
+### 含意
+
+- §5c 第 5 點要改寫：限制不是「一次一個 fetch」造成的來回等待，而是單一連線的位元組速率。把 fetch 做成管線化（一條連線多個在途 fetch）不會有幫助；多條連線才有機會。
+- GCP 上約 1000 MB/s 等於 8 Gbit/s。可能的原因有三個，還沒有分辨：GCP 對單一 TCP 連線的頻寬上限；`kafka-consumer-perf-test` 把 `receive.buffer.bytes` 固定成 2 MB；broker 對單一連線的傳送速度。
+- 要分辨，需要在 GCP 量單一連線的 `iperf3`（之前量的 31 Gbit/s 是 8 條連線的總和），以及改變 `--socket-buffer-size`。
+
+### 限制
+
+- 這台 Mac 同時有其他工作（load average 約 8，8 核），broker 與 consumer 搶同一組 CPU。絕對值不能和 GCP 比較。
+- 前兩輪的 `--fetch-size` 變化沒有生效：`kafka-consumer-perf-test` 會用 `--fetch-size` 蓋掉 `max.partition.fetch.bytes`。那兩輪的三個本分支組合都當成預設大小的重複。
+- thread CPU 是單次取樣；第 3 輪的 1 個 broker 跑得太快，取樣落在結束之後，沒有 `consumer_backgr` 的數字。
+
 ## 6. 還沒回答的問題
 
 - 多 broker 時 Java 單一 background thread 對 librdkafka「每個 broker 一條 thread」的差距。morefine 無法量。
@@ -303,3 +348,5 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 
 morefine 的 `~/kafka-bench/`：`lang-exp.log`、`matrix-exp.log`、`tuned-exp.log`、`next-exp.log`、`sys-exp.log`、`dec-exp.log`。
 librdkafka 的原始碼與編譯結果留在 `~/kafka-bench/rdk/`（200 MB），供之後重跑。測試 topic 已全部刪除。
+
+本機 fetch 週期實驗（§5d）：`FETCH-PIPELINE-10-results-local/fetch-cycle-results.tgz`（三輪的原始輸出與 `summarize.py`）。
