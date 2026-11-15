@@ -389,6 +389,29 @@ broker 的 `socket.send.buffer.bytes` 預設是 102400（100 KB）。`-1` 表示
 - 改預設值需要 KIP。要先確認：延遲較高的網路上結果如何（視窗固定時，吞吐量與來回延遲成反比，所以 100 KB 在跨 zone 時影響更大）；每條連線多用的記憶體；producer 方向的 `socket.receive.buffer.bytes` 是否有同樣的問題。
 - consumer 端「多條連線」的設計仍然有用，但優先順序在這個設定之後。
 
+### 社群裡的先前討論（2026-11-15 查詢）
+
+查了 ASF Jira（專案 KAFKA）、apache/kafka 的 pull request、網頁搜尋。
+
+- 沒有找到提議修改 broker `socket.send.buffer.bytes` 或 `socket.receive.buffer.bytes` 預設值的 issue、KIP 或 pull request。
+- [KAFKA-16496](https://issues.apache.org/jira/browse/KAFKA-16496)（Open，2024-04-09，沒有 assignee，沒有 pull request）：提議把 client 的 `receive.buffer.bytes` 預設值從 64 KB 改成 `-1`。理由相同：固定的值讓 Linux 不能自動調整視窗。回報者來自 Netflix，並連到 Linux netdev 郵件列表的討論。最後一則留言是 2024-06-28。
+- [KAFKA-724](https://issues.apache.org/jira/browse/KAFKA-724)、[KAFKA-3840](https://issues.apache.org/jira/browse/KAFKA-3840)：讓 broker 與 client 接受 `-1`。只加了選項，沒有改預設值。
+- [KAFKA-3463](https://issues.apache.org/jira/browse/KAFKA-3463)（2016）：把 consumer 的接收緩衝預設值改成 64 KB。
+
+原始碼裡相關的預設值（trunk `e90d6f42c2`）：
+
+| 設定 | 預設值 |
+|---|---|
+| broker `socket.send.buffer.bytes`、`socket.receive.buffer.bytes` | 100 KB |
+| broker `replica.socket.receive.buffer.bytes` | 64 KB |
+| consumer `receive.buffer.bytes` | 64 KB |
+| producer `send.buffer.bytes` | 128 KB |
+
+兩個要注意的地方：
+
+- `config/server.properties`、`config/broker.properties`、`docker/server.properties` 這些範例檔明確寫了 `socket.send.buffer.bytes=102400`。只改程式碼裡的預設值，不會影響照範例檔部署的使用者。
+- 我們的量測用 `kafka-consumer-perf-test`，它把 consumer 的 `receive.buffer.bytes` 設成 2 MB。一般應用程式拿到的是 64 KB。64 KB 對吞吐量的影響沒有量。
+
 ### 限制
 
 - 單一 broker、同一個 zone，來回延遲約 0.1 到 0.3 ms。
