@@ -150,6 +150,44 @@ Java 用 `kafka-consumer-perf-test`，`group.protocol=consumer`。數字是暖�
 - 那邊沒有 librdkafka。對 librdkafka 的比較只能留在 morefine。
 - runner 是社群共用資源。每一次觸發都需要你明確授權。
 
+## 5a. `kafka-e2e` 的結果（2026-11-15）
+
+測試：`tests/kafkatest/benchmarks/core/fetch_pipeline_benchmark_test.py`。3 個 broker、12 partition、資料在 page cache。所有 container 在同一台主機。數字是 3 次的中位數，所有 consumer 加總（MB/s）。consumer 的 heap 是工具預設的 512 MB。
+
+### consumer 數量（`test_consumer_scaling`）
+
+| consumer 數 | 100 B 對照組 | 100 B 本分支 | 1 KB 對照組 | 1 KB 本分支 |
+|---|---|---|---|---|
+| 1 | 512 | 550 | 722 | 841 |
+| 2 | 441 | 442 | 728 | 769 |
+| 4 | 417 | 445 | 706 | 812 |
+| 8 | 417 | 412 | 723 | 707 |
+
+- 對照組：trunk `e90d6f42c2`，run 43658324808，`github-runner-2`（32 核、62 GB）。
+- 本分支：`92a7780ce5`，run 43660360495，`jenkins-worker-2`（48 核、157 GB）。
+- 兩欄跑在不同機器上，不能互相比較。`kafka-e2e` 不能指定 runner。
+- 同一設定 3 次之間的差距到 20%。
+
+【觀察】兩台機器、兩個 revision 上，加 consumer 總吞吐量都不增加。這與 morefine 的 G2 相同，但這裡有 32 與 48 核。
+
+【推論，未驗證】瓶頸是共用的東西：主機的記憶體頻寬、Docker bridge 網路，或 broker。這個環境量不出平行化的增益，也量不出 revision 之間的差距。下一步見 `FETCH-PIPELINE-09-gcp-bench.md`。
+
+### decode 原型（`test_decode_prototype`）
+
+`fp-bench-proto` `92b1f3e88e`，run 43662251844，`github-runner-2`。同一次 run、同一台機器、同一份資料，所以三個數字可以互相比較。只有 100 B、單一 consumer。
+
+| 開關 | 3 次（MB/s） | 中位數 | 對 base |
+|---|---|---|---|
+| base | 476、511、570 | 511 | |
+| `-Dfp.lean=true` | 636、663、645 | 645 | +26% |
+| `-Dfp.decode.threads=2` | 659、575、720 | 659 | +29% |
+
+- 【觀察】減少配置（lean）在這台機器上有 26% 增益，而且 3 次的最小值高於 base 的最大值。morefine 是 15%。
+- 【觀察】2 條 decode thread 的中位數高於 base，但 3 次的範圍（575 到 720）與 base（476 到 570）幾乎相接。需要更多次數才能下結論。morefine 上 decode thread 沒有增益。
+- 測試在 `-Dfp.decode.threads=4` 的第 2 次失敗：`java.lang.OutOfMemoryError: Java heap space`。原因是 512 MB 的 heap 放不下 4 條 thread 預先 decode 的資料。1 KB 的組合都沒有跑到。
+- 修正：測試改成所有組合固定 `-Xms2g -Xmx2g`。修正後還沒有重跑。
+- 注意：512 MB 的 heap 讓 GC 成為被量測的一部分。上面所有數字都在這個條件下。morefine 的量測用的 heap 大小要另外核對，才能跨環境比較。
+
 ## 6. 還沒回答的問題
 
 - 多 broker 時 Java 單一 background thread 對 librdkafka「每個 broker 一條 thread」的差距。morefine 無法量。

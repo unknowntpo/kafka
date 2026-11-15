@@ -22,6 +22,10 @@ class GroupPerNodeConsumerPerformanceService(ConsumerPerformanceService):
     on the machine. Extra JVM options are passed to the tool, and the fetch-only rate is kept.
     """
 
+    # The tool defaults to a 512 MB heap. That is too small when fetched data is decoded ahead
+    # of poll(), and it makes the garbage collector part of what is measured.
+    HEAP_OPTS = "-Xms2g -Xmx2g"
+
     def __init__(self, context, num_nodes, kafka, topic, messages, group_prefix, jvm_opts="", settings={}):
         super(GroupPerNodeConsumerPerformanceService, self).__init__(
             context, num_nodes, kafka, topic=topic, messages=messages, settings=settings)
@@ -33,7 +37,7 @@ class GroupPerNodeConsumerPerformanceService(ConsumerPerformanceService):
         self.group = "%s-%d" % (self.group_prefix, self.idx(node))
         cmd = super(GroupPerNodeConsumerPerformanceService, self).start_cmd(node)
         script = self.path.script("kafka-consumer-perf-test.sh", node)
-        return cmd.replace(script, "KAFKA_OPTS=\"$KAFKA_OPTS %s\" %s" % (self.jvm_opts, script), 1)
+        return cmd.replace(script, "KAFKA_HEAP_OPTS=\"%s\" KAFKA_OPTS=\"$KAFKA_OPTS %s\" %s" % (self.HEAP_OPTS, self.jvm_opts, script), 1)
 
     def _worker(self, idx, node):
         super(GroupPerNodeConsumerPerformanceService, self)._worker(idx, node)
