@@ -462,6 +462,69 @@ broker 的 `socket.send.buffer.bytes` 預設是 102400（100 KB）。`-1` 表示
 - 沒有量 producer 方向（broker 的 `socket.receive.buffer.bytes` 與 producer 的 `send.buffer.bytes`）。
 - 沒有量 follower 抓取（`replica.socket.receive.buffer.bytes`，預設 64 KB）。
 
+## 5g. GCP：緩衝放開之後的上限與多 consumer 擴展（2026-11-16，階段五）
+
+問題：§5e 與 §5f 之前的多 consumer 與 100 B 數字，都是在 socket 緩衝的限制下量的。緩衝放開之後，一個 consumer 被什麼限制？多個 consumer 能擴展到哪裡？
+
+設定：機器與 §5e 相同。broker `socket.send.buffer.bytes=-1`，consumer `--socket-buffer-size=-1`。1 KB 用 40 GB 資料，100 B 用 20 GB 資料，都放得進 broker 的 page cache。每個 consumer 是獨立的 process 與獨立的 group，各自讀完整個 topic。每種資料寫完後先讀一次不記錄。腳本：`FETCH-PIPELINE-09-run.sh` 的 `FP_PLAN=phase5`。
+
+### 吞吐量（MB/s，所有 consumer 的總和，3 次的中位數）
+
+| record | consumer 數 | trunk | 本分支 | 本分支對 trunk |
+|---|---|---|---|---|
+| 1 KB | 1 | 1077 | 1607 | +49% |
+| 1 KB | 2 | 1850 | 3082 | +67% |
+| 1 KB | 4 | 2996 | 3417 | +14% |
+| 100 B | 1 | 601 | 861 | +43% |
+| 100 B | 2 | 972 | 1775 | +83% |
+| 100 B | 4 | 1575 | 2561 | +63% |
+
+本分支 1 KB、一個 consumer 的三次是 1164、1607、1943，差距很大。第一次掛著 `perf stat`。其他組合的三次都在中位數的 ±10% 內。
+
+連結的上限約 3900 MB/s（`iperf3` 量到 31.6 Gbit/s）。本分支 1 KB 在 2 個 consumer 時已到 3082，4 個時是 3417，接近連結上限。
+
+### consumer 的 thread CPU（整個執行期間每 2 秒取樣，平均值）
+
+| 組合 | 應用程式 thread | background thread |
+|---|---|---|
+| 1 KB，trunk，1 個 consumer | 約 31% | 約 46% |
+| 1 KB，本分支，1 個 consumer（1943 MB/s 那次） | 57% | 53% |
+| 100 B，trunk，1 個 consumer | 約 59% | 約 40% |
+| 100 B，本分支，1 個 consumer | 80% 到 96% | 37% 到 52% |
+| 100 B，本分支，2 與 4 個 consumer | 87% 到 96% | 38% 到 46% |
+
+### broker 端 kernel 對 fetch 連線的統計（`ss -ti`，每 5 秒）
+
+`busy` 是連線有資料要送的累計時間。`sndbuf_limited` 與 `rwnd_limited` 是其中等傳送緩衝、等接收端的時間。
+
+| 組合 | `busy` 佔經過時間 | `sndbuf_limited` | `rwnd_limited` |
+|---|---|---|---|
+| 1 KB，trunk，1 個 consumer | 約 70% | 低於 2% | 0 |
+| 1 KB，本分支，1 個 consumer | 約 100% | 低於 1% | 0 |
+| 100 B，本分支，1 個 consumer | 約 60% | 低於 3% | 低於 1% |
+
+broker 沒有任何 thread 超過 15% CPU。
+
+### 觀察
+
+1. **100 B 時，本分支的上限是應用程式 thread。** 它在 80% 到 96%。record 的解碼在這條 thread 上（`poll()` 裡）。連線只有約 60% 的時間有資料要送，表示 broker 在等 consumer。
+2. **1 KB 時，本分支把一條連線用滿，但 consumer 的 thread 沒有吃滿。** 連線 100% 的時間有資料要送，而且不是在等緩衝或接收端。兩條 thread 都在 57% 以下。剩下的可能是單一 TCP 連線在 kernel 裡的處理（一條連線的接收由一個 CPU 處理），這次沒有量到。
+3. **trunk 讓連線閒置。** 1 KB 時連線只有約 70% 的時間有資料要送，兩條 thread 也都沒有吃滿。這和 §5c 的「連線使用率」一致。
+4. **多個 consumer 可以擴展，直到連結上限。** 1 KB 時本分支 2 個 consumer 就到 3082 MB/s。
+5. **100 B 時 2 個 consumer 幾乎是 2 倍**（861 → 1775），4 個是 3.0 倍。client 只有 8 個 vCPU，4 個 consumer 各有一條接近吃滿的 thread，再加上 background thread 與 JIT。
+
+### 含意
+
+- 小 record 的下一步在應用程式 thread：減少每筆 record 的解碼與配置成本，或把解碼分到別的 thread。§2a 的兩個原型（減少配置、解碼平行化）之前在 GCP 上沒有可分辨的增益，但那是在 socket 緩衝的限制下量的，需要重量。
+- 大 record 的下一步不在 consumer 的 thread。一條連線已經用滿，要更高的吞吐量只能用更多連線。這是 share-nothing consumer 那邊的題目。
+
+### 限制
+
+- 沒有記錄 client 整機的 CPU 與網路（`mpstat`、`sar`），腳本漏了這一步。所以第 2 點的 kernel 處理只是推測，第 5 點也不能確定 4 個 consumer 時 client 的 CPU 是否用完。
+- 每個組合 3 次。本分支 1 KB 單一 consumer 的變動原因不明。
+- 資料必須放得進 page cache，所以最快的組合每次只跑約 20 秒。
+- 一個 broker、同一個 zone、無壓縮。
+
 ## 6. 還沒回答的問題
 
 - 多 broker 時 Java 單一 background thread 對 librdkafka「每個 broker 一條 thread」的差距。morefine 無法量。
@@ -479,3 +542,5 @@ librdkafka 的原始碼與編譯結果留在 `~/kafka-bench/rdk/`（200 MB），
 GCP 階段三（§5e）：`FETCH-PIPELINE-11-results-gcp/`（client 與 broker 的原始輸出、`summarize.py`）。
 
 GCP 階段四（§5f）：`FETCH-PIPELINE-12-results-gcp/client-results.tgz`（`progress.log` 有每次的吞吐量；每次執行另有 `.out`、`.ss`、`.threads`）。
+
+GCP 階段五（§5g）：`FETCH-PIPELINE-13-results-gcp/`（`client/results.tgz`、`broker/results.tgz`、`summarize.py`）。
