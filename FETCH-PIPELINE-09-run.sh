@@ -6,6 +6,8 @@
 #   FETCH-PIPELINE-09-run.sh client <broker host> <dir>    run every combination; <dir> holds
 #                                                          control.tgz branch.tgz proto.tgz
 #   FETCH-PIPELINE-09-run.sh sample <label> <seconds>      record CPU and network (broker side)
+#   FETCH-PIPELINE-09-run.sh watch                         broker side, until killed: every 5 s the kernel's view
+#                                                          of the client connections and the busy broker threads
 #
 # Results go to $OUT (default ./fp-results), one file per combination and repetition.
 # A combination that already has a result file is skipped, so the script can be re-run
@@ -13,6 +15,10 @@
 #
 # Sizes come from the environment so that a rehearsal can use small data:
 #   FP_GB_100=10 FP_GB_1000=20 FP_REPS=3 FP_SCALING="1 2 4" FP_PARTITIONS=12 FP_HEAP="-Xms2g -Xmx2g"
+# Other settings:
+#   FP_BROKER_EXTRA="socket.send.buffer.bytes=-1"   one line added to server.properties
+#   FP_CONSUMER_ARGS="--socket-buffer-size=-1"      extra arguments of kafka-consumer-perf-test
+#   FP_PLAN=phase5 FP_SIZES="1000 100"              only trunk and the branch, with the consumer counts of FP_SCALING
 set -euo pipefail
 
 OUT="${OUT:-$PWD/fp-results}"
@@ -67,6 +73,7 @@ num.network.threads=8
 num.io.threads=8
 log.retention.hours=24
 EOF
+  [ -z "${FP_BROKER_EXTRA:-}" ] || echo "$FP_BROKER_EXTRA" >> "$WORK/server.properties"
   rm -rf "$WORK/data"
   "$K/bin/kafka-storage.sh" format -t "$("$K/bin/kafka-storage.sh" random-uuid)" -c "$WORK/server.properties" >/dev/null
   KAFKA_HEAP_OPTS="${FP_BROKER_HEAP:--Xms4g -Xmx4g}" nohup "$K/bin/kafka-server-start.sh" "$WORK/server.properties" > "$WORK/broker.log" 2>&1 &
@@ -84,6 +91,14 @@ sample)
   wait
   ;;
 
+watch)
+  while true; do
+    { date +%H:%M:%S; ss -tinm '( sport = :9092 )' 2>/dev/null || true; } >> "$OUT/broker-ss.txt"
+    { date +%H:%M:%S; top -H -b -d 3 -n 2 -w 160 2>/dev/null | awk '/^top -/{n++} n==2 && $9+0>=10 && $1 ~ /^[0-9]+$/ {print "  " $9, $12, $13, $14}'; } >> "$OUT/broker-threads.txt"
+    sleep 2
+  done
+  ;;
+
 client)
   B="$2:9092"; DIR="$3"
   machine_info
@@ -97,7 +112,11 @@ client)
     local size=$1 total=$2 i
     [ "$(cat "$OUT/dataset" 2>/dev/null)" = "$size" ] && return 0
     "$KC/bin/kafka-topics.sh" --bootstrap-server "$B" --delete --topic "$TOPIC" >/dev/null 2>&1 || true
-    sleep 5
+    for i in $(seq 60); do
+      "$KC/bin/kafka-topics.sh" --bootstrap-server "$B" --list 2>/dev/null | grep -qx "$TOPIC" || break
+      sleep 2
+    done
+    sleep 3
     "$KC/bin/kafka-topics.sh" --bootstrap-server "$B" --create --topic "$TOPIC" --partitions "$PARTITIONS" --replication-factor 1
     for i in 1 2 3; do
       KAFKA_HEAP_OPTS="-Xmx1g" "$KC/bin/kafka-producer-perf-test.sh" --topic "$TOPIC" --num-records $((total / 3)) \
@@ -108,6 +127,14 @@ client)
     wait
     echo "$size" > "$OUT/dataset"
     echo "$(date +%H:%M:%S) produced $((total / 3 * 3)) records of ${size}B" | tee -a "$OUT/progress.log"
+    if [ "${FP_PLAN:-full}" = phase5 ]; then
+      # One read that is not recorded: the first read after a produce was slow in earlier runs.
+      # shellcheck disable=SC2086
+      KAFKA_HEAP_OPTS="$HEAP" "$KC/bin/kafka-consumer-perf-test.sh" --bootstrap-server "$B" --topic "$TOPIC" \
+        --num-records $((total * 99 / 100)) --group "warmup-$size-$RANDOM" --timeout 120000 \
+        --command-property group.protocol=consumer ${FP_CONSUMER_ARGS:-} > "$OUT/warmup-$size.out" 2>&1 || true
+      echo "$(date +%H:%M:%S) warm-up read done" | tee -a "$OUT/progress.log"
+    fi
   }
 
   consume() { # <key> <kafka dir> <consumers> <records> <jvm opts> [heap]
@@ -121,7 +148,7 @@ client)
         local f="$OUT/$key.rep$rep.c$i"
         local cmd=("$k/bin/kafka-consumer-perf-test.sh" --bootstrap-server "$B" --topic "$TOPIC"
           --num-records "$records" --group "$key-$rep-$i-$RANDOM" --timeout 120000
-          --command-property group.protocol=consumer)
+          --command-property group.protocol=consumer ${FP_CONSUMER_ARGS:-})
         # Hardware counters only for the first consumer of the first repetition.
         if [ "$USE_PERF" = 1 ] && [ "$rep" = 1 ] && [ "$i" = 1 ]; then
           cmd=(perf stat -o "$f.perf" -e cycles,instructions,L1-dcache-load-misses,mem_load_retired.l3_miss,slots,topdown-be-bound,topdown-retiring -- "${cmd[@]}")
@@ -131,11 +158,19 @@ client)
       done
       # Per-thread CPU of every consumer JVM, once the consumers are past start-up (repetition 2 only,
       # so that it never overlaps "perf stat"). Shows which thread is the limit.
-      if [ "$rep" = 2 ]; then
+      if [ "${FP_PLAN:-full}" = phase5 ]; then
+        # Every repetition, for the whole run: threads above 10% CPU every 2 s, and the fetch connections 6 s in.
+        touch "$OUT/sampling"
+        (while [ -f "$OUT/sampling" ]; do
+           top -H -b -d 2 -n 2 -w 160 2>/dev/null | awk '/^top -/{n++; if (n==2) print $3} n==2 && $9+0>=10 && $1 ~ /^[0-9]+$/ {print "  " $9, $12, $13, $14}'
+         done > "$OUT/$key.rep$rep.threads") &
+        (sleep 6; ss -tinm '( dport = :9092 )' > "$OUT/$key.rep$rep.ss" 2>&1 || true) &
+      elif [ "$rep" = 2 ]; then
         (sleep "${FP_THREADS_DELAY:-12}"; top -H -b -d 4 -n 2 -w 160 2>/dev/null | awk '/^top -/{n++} n==2' | head -32 > "$OUT/$key.rep$rep.threads") &
       fi
       local ok=1
       for p in "${pids[@]}"; do wait "$p" || ok=0; done
+      rm -f "$OUT/sampling"
       wait
       # column 4 is MB/s, column 9 is fetch MB/s; sum over the consumers
       local sum
@@ -145,18 +180,18 @@ client)
     done
   }
 
-  for size in 100 1000; do
+  for size in ${FP_SIZES:-100 1000}; do
     gb=$GB_100; [ "$size" = 1000 ] && gb=$GB_1000
     total=$((gb * 1024 * 1024 * 1024 / size))
     records=$((total * 99 / 100))   # stop a little early so that no consumer waits for the poll timeout
     # Most important first: if time runs out, the less important combinations are the ones lost.
     # FP_PLAN=phase2 measures only what phase one could not answer.
-    if [ "${FP_PLAN:-full}" = phase2 ]; then
+    if [ "${FP_PLAN:-full}" = phase2 ] || [ "${FP_PLAN:-full}" = phase5 ]; then
       for n in $SCALING; do
         consume "${size}B-control-c$n" "$KC" "$n" "$records" ""
         consume "${size}B-branch-c$n" "$KB" "$n" "$records" ""
       done
-      if [ "$size" = 100 ]; then
+      if [ "$size" = 100 ] && [ "$FP_PLAN" = phase2 ]; then
         consume "${size}B-proto-base" "$KP" 1 "$records" ""
         consume "${size}B-proto-lean" "$KP" 1 "$records" "-Dfp.lean=true"
         consume "${size}B-proto-base-heap512m" "$KP" 1 "$records" "" "-Xms512m -Xmx512m"
