@@ -19,6 +19,11 @@
 #   FP_BROKER_EXTRA="socket.send.buffer.bytes=-1"   one line added to server.properties
 #   FP_CONSUMER_ARGS="--socket-buffer-size=-1"      extra arguments of kafka-consumer-perf-test
 #   FP_PLAN=phase5 FP_SIZES="1000 100"              only trunk and the branch, with the consumer counts of FP_SCALING
+#   FP_PLAN=phase6                                  one consumer: the prototypes at 100 B (by rounds), trunk, the branch
+#                                                   and librdkafka at both sizes. Needs FP_RDK=<rdkafka_performance>.
+#   FP_PLAN=phase6b FP_CAP_GB=15                    after "broker-restart" with default buffers: the branch and librdkafka
+#   FETCH-PIPELINE-09-run.sh broker-restart         restart the broker and keep its data; server.properties gets
+#                                                   socket.send.buffer.bytes from FP_BROKER_EXTRA, or loses it
 set -euo pipefail
 
 OUT="${OUT:-$PWD/fp-results}"
@@ -84,6 +89,20 @@ EOF
   echo "broker did not start"; tail -20 "$WORK/broker.log"; exit 1
   ;;
 
+broker-restart)
+  K="$WORK/broker"
+  sed -i '/^socket\.send\.buffer\.bytes/d' "$WORK/server.properties"
+  [ -z "${FP_BROKER_EXTRA:-}" ] || echo "$FP_BROKER_EXTRA" >> "$WORK/server.properties"
+  "$K/bin/kafka-server-stop.sh" >/dev/null 2>&1 || true
+  for _ in $(seq 60); do pgrep -f 'kafka\.Kafka' >/dev/null || break; sleep 1; done
+  KAFKA_HEAP_OPTS="${FP_BROKER_HEAP:--Xms4g -Xmx4g}" nohup "$K/bin/kafka-server-start.sh" "$WORK/server.properties" > "$WORK/broker-restart.log" 2>&1 &
+  for _ in $(seq 60); do
+    "$K/bin/kafka-topics.sh" --bootstrap-server localhost:9092 --list >/dev/null 2>&1 && { echo "broker restarted: $(grep -c '^socket.send.buffer.bytes' "$WORK/server.properties") buffer line(s)"; exit 0; }
+    sleep 2
+  done
+  echo "broker did not restart"; tail -20 "$WORK/broker-restart.log"; exit 1
+  ;;
+
 sample)
   # CPU per second and network per second, to tell whether the broker or the network is the limit.
   (command -v mpstat >/dev/null && mpstat 1 "$3" > "$OUT/broker-cpu-$2.txt" 2>&1) &
@@ -106,6 +125,17 @@ client)
   KB=$(unpack "$DIR/branch.tgz" branch)
   KP=$(unpack "$DIR/proto.tgz" proto)
   USE_PERF=0; perf_ok && USE_PERF=1
+  PLAN="${FP_PLAN:-full}"
+  WHOLE=0; case "$PLAN" in phase5|phase6|phase6b) WHOLE=1 ;; esac
+  if [ "$WHOLE" = 1 ] && [ "$PLAN" != phase5 ]; then
+    # The whole client machine, for the whole run: CPU per core and network.
+    # "disown": the bare "wait" calls below must not wait for these two.
+    SAMPLERS=""
+    if command -v mpstat >/dev/null; then mpstat -P ALL 5 >> "$OUT/client-cpu-$PLAN.txt" 2>&1 & SAMPLERS="$!"; disown; fi
+    if command -v sar >/dev/null; then sar -n DEV 5 >> "$OUT/client-net-$PLAN.txt" 2>&1 & SAMPLERS="$SAMPLERS $!"; disown; fi
+    # shellcheck disable=SC2086
+    trap '[ -z "$SAMPLERS" ] || kill $SAMPLERS 2>/dev/null; true' EXIT
+  fi
   echo "perf hardware counters: $USE_PERF" | tee "$OUT/perf-available.txt"
 
   ensure_data() { # <record size> <total records>; the topic holds one record size at a time
@@ -127,7 +157,7 @@ client)
     wait
     echo "$size" > "$OUT/dataset"
     echo "$(date +%H:%M:%S) produced $((total / 3 * 3)) records of ${size}B" | tee -a "$OUT/progress.log"
-    if [ "${FP_PLAN:-full}" = phase5 ]; then
+    if [ "$WHOLE" = 1 ]; then
       # One read that is not recorded: the first read after a produce was slow in earlier runs.
       # shellcheck disable=SC2086
       KAFKA_HEAP_OPTS="$HEAP" "$KC/bin/kafka-consumer-perf-test.sh" --bootstrap-server "$B" --topic "$TOPIC" \
@@ -158,7 +188,7 @@ client)
       done
       # Per-thread CPU of every consumer JVM, once the consumers are past start-up (repetition 2 only,
       # so that it never overlaps "perf stat"). Shows which thread is the limit.
-      if [ "${FP_PLAN:-full}" = phase5 ]; then
+      if [ "$WHOLE" = 1 ]; then
         # Every repetition, for the whole run: threads above 10% CPU every 2 s, and the fetch connections 6 s in.
         touch "$OUT/sampling"
         (while [ -f "$OUT/sampling" ]; do
@@ -180,12 +210,70 @@ client)
     done
   }
 
+  rdk() { # <key> <records> [-X name=value ...]; librdkafka, same result files as consume()
+    local key=$1 records=$2 rep; shift 2
+    for rep in $(seq "$REPS"); do
+      local done_file="$OUT/$key.rep$rep.done" f="$OUT/$key.rep$rep.c1"
+      [ -f "$done_file" ] && continue
+      ensure_data "$size" "$total"
+      touch "$OUT/sampling"
+      (while [ -f "$OUT/sampling" ]; do
+         top -H -b -d 2 -n 2 -w 160 2>/dev/null | awk '/^top -/{n++; if (n==2) print $3} n==2 && $9+0>=10 && $1 ~ /^[0-9]+$/ {print "  " $9, $12, $13, $14}'
+       done > "$OUT/$key.rep$rep.threads") &
+      (sleep 6; ss -tinm '( dport = :9092 )' > "$OUT/$key.rep$rep.ss" 2>&1 || true) &
+      local ok=1
+      timeout 300 "$FP_RDK" -G "$key-$rep-$RANDOM" -t "$TOPIC" -b "$B" -c "$records" -X auto.offset.reset=earliest "$@" > "$f.out" 2> "$f.err" || ok=0
+      rm -f "$OUT/sampling"
+      wait
+      # Last line: "% N messages (B bytes) consumed in Tms: ...". MB here is 1024 * 1024 bytes, as in the Java tool.
+      local sum
+      sum=$(grep -a 'consumed in' "$f.out" | tail -1 | sed -E 's/.*\(([0-9]+) bytes\) consumed in ([0-9]+)ms.*/\1 \2/' | awk '{v=$1/1048576/($2/1000); printf "%.1f %.1f", v, v}')
+      if [ "$ok" = 1 ] && [ -n "$sum" ]; then echo "$sum" > "$done_file"; fi
+      echo "$(date +%H:%M:%S) $key rep$rep ok=$ok MB/s=$sum" | tee -a "$OUT/progress.log"
+    done
+  }
+  RDK_BEST=(-X queued.min.messages=10000000 -X fetch.queue.backoff.ms=0)
+
   for size in ${FP_SIZES:-100 1000}; do
     gb=$GB_100; [ "$size" = 1000 ] && gb=$GB_1000
     total=$((gb * 1024 * 1024 * 1024 / size))
     records=$((total * 99 / 100))   # stop a little early so that no consumer waits for the poll timeout
     # Most important first: if time runs out, the less important combinations are the ones lost.
     # FP_PLAN=phase2 measures only what phase one could not answer.
+    if [ "$PLAN" = phase6 ]; then
+      max=$REPS
+      if [ "$size" = 100 ]; then
+        # By rounds, so that a drift over time touches every variant equally. The branch is the anchor:
+        # proto-base is the same code and must give the same number.
+        for REPS in $(seq "${FP_PROTO_REPS:-4}"); do
+          consume "${size}B-branch-c1" "$KB" 1 "$records" ""
+          consume "${size}B-proto-base" "$KP" 1 "$records" ""
+          consume "${size}B-proto-lean" "$KP" 1 "$records" "-Dfp.lean=true"
+          consume "${size}B-proto-decode2" "$KP" 1 "$records" "-Dfp.decode.threads=2"
+          consume "${size}B-proto-lean-decode2" "$KP" 1 "$records" "-Dfp.lean=true -Dfp.decode.threads=2"
+        done
+        REPS=$max
+        rdkrecords=$((${FP_RDK_GB_100:-6} * 1024 * 1024 * 1024 / size))   # librdkafka is slow here: fewer records
+        [ "$rdkrecords" -gt "$records" ] && rdkrecords=$records
+        REPS=2 consume "${size}B-control-c1" "$KC" 1 "$records" ""
+      else
+        rdkrecords=$records
+        consume "${size}B-control-c1" "$KC" 1 "$records" ""
+        consume "${size}B-branch-c1" "$KB" 1 "$records" ""
+      fi
+      rdk "${size}B-rdk-best" "$rdkrecords" "${RDK_BEST[@]}"
+      rdk "${size}B-rdk-default" "$rdkrecords"
+      continue
+    fi
+    if [ "$PLAN" = phase6b ]; then
+      # Broker and clients with their default socket buffers. FP_CONSUMER_ARGS must hold "--socket-buffer-size 65536":
+      # the Java tool otherwise asks for 2 MB, which is not the consumer default.
+      cap=$((${FP_CAP_GB:-15} * 1024 * 1024 * 1024 / size)); [ "$cap" -gt "$records" ] && cap=$records
+      rdk "${size}B-rdk-default-defaults" "$cap"
+      REPS=2 consume "${size}B-branch-c1-defaults" "$KB" 1 "$cap" ""
+      REPS=2 consume "${size}B-control-c1-defaults" "$KC" 1 "$cap" ""
+      continue
+    fi
     if [ "${FP_PLAN:-full}" = phase2 ] || [ "${FP_PLAN:-full}" = phase5 ]; then
       for n in $SCALING; do
         consume "${size}B-control-c$n" "$KC" "$n" "$records" ""
@@ -212,6 +300,8 @@ client)
     consume "${size}B-proto-decode2" "$KP" 1 "$records" "-Dfp.decode.threads=2"
     consume "${size}B-proto-lean-decode2" "$KP" 1 "$records" "-Dfp.lean=true -Dfp.decode.threads=2"
   done
+  # shellcheck disable=SC2086
+  [ -z "${SAMPLERS:-}" ] || kill $SAMPLERS 2>/dev/null || true
   echo "all combinations finished" | tee -a "$OUT/progress.log"
   ;;
 
