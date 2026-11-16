@@ -542,6 +542,62 @@ broker 沒有任何 thread 超過 15% CPU。
 - 資料必須放得進 page cache，所以最快的組合每次只跑約 20 秒。
 - 一個 broker、同一個 zone、無壓縮。
 
+## 5h. GCP：緩衝放開後的兩個原型，以及 librdkafka（2026-11-16，階段六）
+
+問題一：§5c 的兩個原型（lean、`decode.threads=2`）當時沒有可分辨的增益。那是因為碰到 socket 緩衝的上限嗎？
+問題二：在真實網路上，trunk、本分支與 librdkafka 各是多少？
+
+設定：機器與 §5g 相同，都是一個 consumer、12 個 partition。librdkafka 是 v2.6.1，在 client VM 上從原始碼編譯，用 `rdkafka_performance -G`（一次取一筆 record）。腳本：`FETCH-PIPELINE-14-gcp-phase6.sh` 與 `FETCH-PIPELINE-09-run.sh` 的 `FP_PLAN=phase6`、`phase6b`。
+
+- 第一段：broker `socket.send.buffer.bytes=-1`，Java `--socket-buffer-size=-1`，librdkafka 不加設定（它的 `socket.receive.buffer.bytes` 預設是 0，交給作業系統）。
+- 第二段：broker 重啟（保留資料），傳送緩衝回到預設值 102400。Java 用 `--socket-buffer-size 65536`（consumer 的預設值），librdkafka 仍不加設定。
+
+### 兩個原型（100 B，緩衝 `-1`，MB/s）
+
+五個變體輪流跑 4 輪，同一輪內的順序固定。
+
+| 變體 | 第 1 到 4 輪 | 4 輪的中位數 | 第 2 到 4 輪的中位數 | 對 proto-base（第 2 到 4 輪） |
+|---|---|---|---|---|
+| 本分支 | 508、959、1002、923 | 941 | 959 | −1% |
+| proto-base（原型分支，不開任何開關） | 525、972、1009、931 | 952 | 972 | 基準 |
+| `decode.threads=2` | 532、1064、1078、959 | 1012 | 1064 | +9% |
+| lean | 918、1126、1116、1041 | 1079 | 1116 | +15% |
+| lean 加 `decode.threads=2` | 405、1287、1096、1233 | 1164 | 1233 | +27% |
+
+- 本分支與 proto-base 相同（959 對 972），所以原型分支的基準沒有偏差。
+- 第 1 輪有 4 個變體明顯較慢。每個變體的第 1 輪都掛著 `perf stat`，但 §5g 同樣掛著 `perf stat` 的第 1 次並不慢。原因不明，所以兩種中位數都列出。
+- 應用程式 thread 的 CPU：本分支與 lean 是 90% 到 96%；開 `decode.threads=2` 後降到 61% 到 70%，兩條 `fp-decode` thread 各 41% 到 50%。
+
+### 對 librdkafka（MB/s）
+
+這張表用「從第一筆 record 開始計時」的數字：Java 是 `kafka-consumer-perf-test` 的 `fetch.MB.sec`，librdkafka 是它自己印出的位元組數除以時間。兩邊的 MB 都是 1024 × 1024 位元組。librdkafka 的「最佳設定」是 `queued.min.messages=10000000` 與 `fetch.queue.backoff.ms=0`（§1）。
+
+| 設定 | trunk | 本分支 | librdkafka 預設 | librdkafka 最佳設定 |
+|---|---|---|---|---|
+| 1 KB，緩衝 `-1` | 1206 | 2375 | 985 | 944 |
+| 100 B，緩衝 `-1` | 634 | 958 | 78 | 72 |
+| 1 KB，broker 與 client 都用預設緩衝 | 592 | 775 | 826 | 沒有量 |
+
+- 次數：trunk 100 B 與第二段的 Java 是 2 次，本分支 100 B 是上表的 4 輪，其他是 3 次。
+- 本分支 1 KB 的三次是 668、2390、2375。第 1 次同樣很慢。
+- librdkafka 在 1 KB 時兩條 thread 都在約 70%，沒有吃滿。在 100 B、最佳設定時是 91% 與 84%，每秒約 75 萬筆。
+- 第二段裡，kernel 回報的接收緩衝：Java 是 131072（要求 64 KB 的兩倍，固定），librdkafka 是約 12.8 MB（自動調整）。
+
+### 觀察
+
+1. **兩個原型在緩衝放開後有增益。** lean +15%，`decode.threads=2` +9%，兩個一起 +27%。§5c 的「沒有增益」來自約 950 到 1000 MB/s 的緩衝上限。+9% 接近各輪之間的變動（約 ±8%），+27% 明顯超過。
+2. **緩衝放開後，本分支在這個環境比 librdkafka 快。** 1 KB 是 2.4 倍，100 B 是約 12 倍。trunk 在 1 KB 也比 librdkafka 快 22%，這和 morefine 上 trunk 輸 librdkafka 的結果（§1）相反。
+3. **都用預設值時，librdkafka 比 Java 快。** librdkafka 826，本分支 775，trunk 592。差別在接收緩衝：librdkafka 交給作業系統，Java 固定在 64 KB。這支持 socket 緩衝預設值那份 KIP 的動機。
+4. **librdkafka 的 100 B 比 morefine 上還慢**（每秒 75 萬筆對 110 萬到 150 萬筆）。這次是 12 個 partition、經過網路；morefine 是 6 個 partition、同機。原因沒有量。
+
+### 限制
+
+- 第二段的 Java 數字（592、775）比 §5f 同樣設定的數字（457、531）高。這次只有 2 次，每次只讀 15 GB。兩組都是實測，差異的原因不明。
+- 本分支 1 KB 這次是 2375，§5g 的中位數是 1607，§5f 是 2089。不同天之間的差異大於同一天內的差異。
+- librdkafka 用的是一次取一筆的 API。它的批次取出 API 沒有量。
+- librdkafka 沒有編 zstd 與 zlib。這次沒有量壓縮。
+- 一個 broker、一個 consumer、同一個 zone。多 broker 是 librdkafka 最可能領先的情境，沒有量。
+
 ## 6. 還沒回答的問題
 
 - 多 broker 時 Java 單一 background thread 對 librdkafka「每個 broker 一條 thread」的差距。morefine 無法量。
@@ -561,3 +617,5 @@ GCP 階段三（§5e）：`FETCH-PIPELINE-11-results-gcp/`（client 與 broker �
 GCP 階段四（§5f）：`FETCH-PIPELINE-12-results-gcp/client-results.tgz`（`progress.log` 有每次的吞吐量；每次執行另有 `.out`、`.ss`、`.threads`）。
 
 GCP 階段五（§5g）：`FETCH-PIPELINE-13-results-gcp/`（`client/results.tgz`、`broker/results.tgz`、`summarize.py`）。
+
+GCP 階段六（§5h）：`FETCH-PIPELINE-15-results-gcp/`（`client/results.tgz`、`broker/results.tgz`）。
