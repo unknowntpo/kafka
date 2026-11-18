@@ -1951,6 +1951,7 @@ org.apache.kafka.streams.processor.internals.DefaultStateUpdaterTest:
 - shouldUpdateSingleStandbyTask
 - shouldUpdateStandbyTaskAfterAllActiveStatefulTasksFailed
 - shouldUpdateStandbyTaskAfterAllActiveStatefulTasksRemoved
+- shouldWaitForStateUpdaterThreadToStopWhenTheCallingThreadIsInterrupted
 org.apache.kafka.streams.processor.internals.DefaultStreamPartitionerTest:
 - shouldPropagateHeadersToSerializer
 - shouldReturnEmptyOptionalWhenSerializedKeyIsNull
@@ -2018,6 +2019,7 @@ org.apache.kafka.streams.processor.internals.GlobalStateManagerImplTest:
 - shouldReportLargestStoreUncommittedBytes
 - shouldReportZeroApproximateNumUncommittedBytesBeforeStoresAreRegistered
 - shouldReportZeroMaxStoreUncommittedBytesBeforeStoresAreRegistered
+- shouldRestoreFromBeginningWhenStoreReportsUnknownCommittedOffset
 - shouldRestoreRecordsFromCheckpointToHighWatermark
 - shouldRestoreRecordsUpToHighwatermark
 - shouldRetryAtLeastOnceWhenEndOffsetsThrowsTimeoutException
@@ -2299,6 +2301,7 @@ org.apache.kafka.streams.processor.internals.PartitionGroupTest:
 - shouldEmptyPartitionsOnClear
 - shouldIdleAsSpecifiedWhenLagIsZero
 - shouldNeverWaitIfIdlingIsDisabled
+- shouldNotBuildTraceLogArgumentsInNextRecordWhenTraceIsDisabled
 - shouldNotFormatNotReadyLogMessageUntilRequested
 - shouldSetPartitionTimestampAndStreamTime
 - shouldThrowIllegalStateExceptionUponAddRecordsIfPartitionUnknown
@@ -2824,6 +2827,10 @@ org.apache.kafka.streams.processor.internals.StoreChangelogReaderCaughtUpOffsetT
 - shouldNotAdvanceStandbyOffsetWhenPositionTimesOut
 - shouldNotAdvanceStandbySourceChangelogOffsetWhenPositionTimesOut
 - shouldNotAdvertiseBufferedSourceChangelogRecordsBeyondCommittedLimit
+- shouldNotReportEndOffsetOfStandbyRegisteredWhileActiveRestores
+- shouldReportEndOffsetOfStandbyCheckpointedAtChangelogEnd
+- shouldReportEndOffsetOfStandbyOnEmptyChangelog
+- shouldReportEndOffsetOfStandbyWithNothingToRestore
 - shouldReportZeroTaskLagAfterEmptyHighEndOffsetRestore
 - shouldResumeAtLogEndOffsetAfterCheckpointingEmptyHighEndOffsetRestore
 org.apache.kafka.streams.processor.internals.StoreChangelogReaderTest:
@@ -2924,6 +2931,7 @@ org.apache.kafka.streams.processor.internals.StreamTaskTest:
 - shouldIncludeProcessingDelayInTerminalNodeE2ELatency
 - shouldIncludePunctuatorDelayInTerminalNodeE2ELatency
 - shouldInitTaskTimeoutAndEventuallyThrow
+- shouldLogNormalIdlingAtDebugOnly
 - shouldLogNotReadyWhenStaleAfterThreshold
 - shouldMaybeReturnOffsetsForRepartitionTopicsForPurging
 - shouldNeedCommitWhenInitializationWritesUncommittedBytes
@@ -3008,6 +3016,9 @@ org.apache.kafka.streams.processor.internals.StreamThreadTest:
 - shouldChangeStateInRebalanceListener
 - shouldCheckStateUpdater
 - shouldCheckStateUpdaterInBetweenProcessCalls
+- shouldClearInterruptStatusBeforeInvokingUncaughtExceptionHandler
+- shouldClearInterruptStatusDuringShutdownAndRestoreItAfterwards
+- shouldClearInterruptStatusSetByUncaughtExceptionHandlerDuringShutdown
 - shouldCommitAfterCommitInterval
 - shouldCommitWhenUncommittedBytesExceedLimit
 - shouldConstructAdminMetrics
@@ -3069,6 +3080,7 @@ org.apache.kafka.streams.processor.internals.StreamThreadTest:
 - shouldResizeMaxUncommittedBytes
 - shouldRespectNumIterationsInMainLoopWithoutProcessingThreads
 - shouldRespectPollTimeInPartitionsAssignedStateWithStateUpdater
+- shouldRestoreInterruptStatusWhenShutdownThrows
 - shouldResumePollingForPartitionsWithAvailableSpaceBeforePolling
 - shouldResumeProcessingOnceUncommittedBytesAreCommitted
 - shouldReturnActiveTaskMetadataWhileRunningState
@@ -3296,6 +3308,7 @@ org.apache.kafka.streams.processor.internals.TaskAndActionTest:
 - shouldThrowIfRemoveTaskActionIsCreatedWithNullFuture
 - shouldThrowIfRemoveTaskActionIsCreatedWithNullTaskId
 org.apache.kafka.streams.processor.internals.TaskExecutionMetadataTest:
+- shouldNotFormatLogMessageUntilItIsLogged
 - testCanProcessWithoutNamedTopologies
 - testNamedTopologiesCanBackoff
 - testNamedTopologiesCanBePausedIndependently
@@ -3321,6 +3334,8 @@ org.apache.kafka.streams.processor.internals.TaskManagerTest:
 - shouldAssignMultipleTasksInTasksRegistry
 - shouldAttachSuppressedExceptionWhenPrepareCommitAndSuspendBothFailDuringRevocation
 - shouldCleanAndReviveCorruptedStandbyTasksBeforeCommittingNonCorruptedTasks
+- shouldClearInterruptWhileClosingRemainingResourcesAndRestoreItAfterShutdown
+- shouldClearInterruptWhileShuttingDownProcessingThreadsAndLockingTasks
 - shouldCloseActiveTasksAndIgnoreExceptionsOnUncleanShutdown
 - shouldCloseActiveTasksAndPropagateExceptionsOnCleanShutdownWithAlos
 - shouldCloseActiveTasksAndPropagateExceptionsOnCleanShutdownWithExactlyOnceV2
@@ -3338,6 +3353,7 @@ org.apache.kafka.streams.processor.internals.TaskManagerTest:
 - shouldClosePendingTasksToInitDuringShutdown
 - shouldCloseStandbyTasksOnShutdown
 - shouldCloseStandbyUnassignedTasksWhenCreatingNewTasks
+- shouldCloseTasksAndReleaseResourcesOnUncleanShutdownWhenThreadIsInterrupted
 - shouldCloseTasksIfStateUpdaterFailsRemoval
 - shouldCloseTasksWhenRemoveFailedActiveTasksFromStateUpdaterOnPartitionLost
 - shouldCollectFailedTaskFromStateUpdaterAndRethrow
@@ -3426,6 +3442,7 @@ org.apache.kafka.streams.processor.internals.TaskManagerTest:
 - shouldPunctuateActiveTasks
 - shouldReAddRevivedTasksToStateUpdater
 - shouldReInitializeStreamsProducerOnHandleLostAllIfEosV2Enabled
+- shouldRecoverTasksWhoseRemovalCompletedAfterTheInterruptedWait
 - shouldRecycleActiveTaskInStateUpdater
 - shouldRecycleStandbyTaskInStateUpdater
 - shouldReleaseLockForUnassignedTasksAfterRebalance
@@ -3433,6 +3450,7 @@ org.apache.kafka.streams.processor.internals.TaskManagerTest:
 - shouldRemoveUnusedFailedActiveTaskFromStateUpdaterAndCloseDirty
 - shouldRemoveUnusedFailedStandbyTaskFromStateUpdaterAndCloseDirty
 - shouldRemoveUnusedStandbyTaskFromStateUpdaterAndCloseCleanly
+- shouldRestoreInterruptStatusWhenShutdownThrowsAfterClearingIt
 - shouldResumeActiveRunningTaskInTasksRegistry
 - shouldResumeActiveSuspendedTaskInTasksRegistryAndAddToStateUpdater
 - shouldResumePollingForPartitionsWithAvailableSpaceForAllActiveTasks
@@ -5266,6 +5284,7 @@ org.apache.kafka.streams.state.internals.KeyValueSegmentsTest:
 - shouldNotCreateSegmentThatIsAlreadyExpired
 - shouldNotRetainFailedSegmentSoRecoveryStaysRecoverable
 - shouldOpenExistingSegments
+- shouldReportUnknownCommittedOffsetWithoutSegments
 - shouldRollSegments
 - shouldThrowTaskCorruptedExceptionIfSegmentIsInInvalidState
 - shouldUpdateSegmentFileNameFromOldColonFormatToNewFormat
@@ -5809,8 +5828,13 @@ org.apache.kafka.streams.state.internals.NamedCacheTest:
 - shouldPutGet
 - shouldPutIfAbsent
 - shouldRemoveDeletedValuesOnFlush
+- shouldReplaceDirtyKeysBelowQuarterOfPeakAndKeepFlushOrder
+- shouldReplaceDirtyKeysOnClearAfterPeak
+- shouldReplaceDirtyKeysOnIdleFlushAfterPeak
+- shouldRetainDirtyKeysAtQuarterOfPeak
 - shouldReturnNullIfKeyIsNull
 - shouldThrowIllegalStateExceptionWhenTryingToOverwriteDirtyEntryWithCleanEntry
+- shouldTrackDirtyKeysPeakAcrossDeletes
 org.apache.kafka.streams.state.internals.OffsetCheckpointTest:
 - shouldDeleteExistingCheckpointWhenNoOffsets
 - shouldNotWriteCheckpointWhenNoOffsets
@@ -7227,6 +7251,9 @@ org.apache.kafka.streams.state.internals.SegmentedCacheFunctionTest:
 - compareSegmentedKeys
 - testKey
 - testRoundTripping
+org.apache.kafka.streams.state.internals.SegmentedStoreWithoutSegmentsTest:
+- shouldInitializeTaskWhoseStoreHasNoSegments
+- shouldTreatTaskAsCorruptedWhenSegmentHasNoOffset
 org.apache.kafka.streams.state.internals.SessionKeySchemaTest:
 - shouldConvertToBinaryAndBack
 - shouldDeSerializeEmptyByteArrayToNull

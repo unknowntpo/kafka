@@ -2441,12 +2441,11 @@ org.apache.kafka.clients.consumer.internals.ShareCompletedFetchTest:
 - testSoftMaxPollRecordLimit
 - testUnaligned
 org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManagerTest:
-- testAcknowledgeErrorMessagePropagatedFromFetchResponse
+- testAcknowledgeErrorMessagePropagatedFromShareFetchResponse
 - testAcknowledgeOnClose
 - testAcknowledgeOnCloseWithPendingCommitAsync
 - testAcknowledgeOnCloseWithPendingCommitSync
 - testAcknowledgeRequestFailedWhenNodeDisappearsBeforeSend
-- testAcknowledgeResponseWithUnknownTopicIdRefreshesTopicIdOnRecreation
 - testAcknowledgementCommitCallbackMultiplePartitionCommitAsync
 - testBatchingAcknowledgeRequestStates
 - testCallbackHandlerConfig
@@ -2462,21 +2461,17 @@ org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManagerTest:
 - testCommitSyncWithSubscriptionChange
 - testCommitWithRenewAcknowledgements
 - testCorruptMessageError
+- testDisconnectFollowsMetadataLeaderChangeWithUnchangedEpoch
+- testDisconnectWithoutLeadershipChangeRetriesSameNode
 - testDoesNotCloseSessionWhileAcknowledgementsPending
 - testDoesNotCloseSessionWhileRecordsBuffered
 - testEmptyResponseThenDataResponseBeforeCollectClearsInflightRecords
 - testFatalErrorsAcknowledgementResponse
-- testFetchDisconnected
-- testFetchError
-- testFetchNormal
 - testFetchOneNodeAtATimeForRecordLimitMode
-- testFetchRecoversWhenCachedLeaderNodeDisappearsFromMetadata
-- testFetchResponseWithUnknownTopicIdRefreshesTopicIdOnRecreation
-- testFetchWithAcquiredRecords
-- testFetchWithLastRecordMissingFromBatch
-- testHandleFetchResponseError
+- testHandleShareFetchResponseError
 - testHeaders
 - testInvalidDefaultRecordBatch
+- testLeaderChangeWithUnchangedEpochUpdatesShareSessionLeader
 - testLeadershipChangeAfterFetchBeforeCloseMove
 - testLeadershipChangeAfterFetchBeforeCommitAsync
 - testLeadershipChangeAfterFetchBeforeCommitSync
@@ -2491,6 +2486,7 @@ org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManagerTest:
 - testPiggybackAcknowledgementsOnInitialShareSessionError
 - testPiggybackAcknowledgementsOnInitialShareSessionErrorTopicRemovedFromMetadata
 - testPiggybackAcknowledgementsOnInitialShareSession_ShareSessionNotFound
+- testPiggybackAcksQueuedAfterNodeDisappearsAreFailed
 - testRecordLatencyOnFetchResponseLevelError
 - testResultHandlerCompleteIfEmpty
 - testResultHandlerOnCommitAsync
@@ -2503,9 +2499,22 @@ org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManagerTest:
 - testServerDisconnectedOnShareAcknowledge
 - testSessionHandlerRemovedAndPiggybackAcksFailedWhenNodeDisappears
 - testShareAcknowledgeInvalidResponse
+- testShareAcknowledgePartitionErrorWithoutLeaderInfoRequestsMetadataUpdate
+- testShareAcknowledgeResponseWithUnknownTopicIdRefreshesTopicIdOnRecreation
 - testShareFetchAndCloseMultipleNodes
+- testShareFetchDisconnected
+- testShareFetchError
+- testShareFetchFollowsNewerLeaderEpochInMetadata
+- testShareFetchIgnoresMetadataLeaderChangeWithUnchangedEpoch
 - testShareFetchInvalidResponse
+- testShareFetchNormal
+- testShareFetchPartitionErrorWithoutLeaderInfoRequestsMetadataUpdate
+- testShareFetchRecoversWhenCachedLeaderNodeDisappearsFromMetadata
+- testShareFetchRedirectRefusedByMetadataRequestsMetadataUpdate
 - testShareFetchRemovesUnassignedPartitionFromSession
+- testShareFetchResponseWithUnknownTopicIdRefreshesTopicIdOnRecreation
+- testShareFetchWithAcquiredRecords
+- testShareFetchWithLastRecordMissingFromBatch
 - testShareFetchWithRenewAcknowledgement
 - testShareFetchWithSubscriptionChange
 - testShareFetchWithSubscriptionChangeMultipleNodes
@@ -2513,7 +2522,6 @@ org.apache.kafka.clients.consumer.internals.ShareConsumeRequestManagerTest:
 - testStaleLeaderEpochDoesNotDowngradeShareSessionLeader
 - testStaleMetadataLeadershipChangeDoesNotFailAcknowledgements
 - testUnauthorizedTopic
-- testUnknownTopicIdError
 - testWhenLeadershipChangeBetweenShareFetchRequests
 - testWhenLeadershipChangedAfterDisconnected
 - testWhenShareFetchResponseReturnsALeadershipChangeErrorButNoNewLeaderInformation
@@ -2812,6 +2820,11 @@ org.apache.kafka.clients.consumer.internals.StreamsMembershipManagerTest:
 - testActiveTaskOfUnknownSubtopologyInHeartbeatResponseFailsMember
 - testActiveTasksAreNullInHeartbeatResponse
 - testAssignedPartitionCountMetricRegistered
+- testAssignmentDelayedKeepsReadyGroupReady
+- testAssignmentDelayedWhileReconcilingKeepsTargetNotReady
+- testAssignmentDelayedWhileReconcilingKeepsTargetReady
+- testAssignmentDelayedWithMissingTopicsMakesReadyGroupNotReady
+- testAssignmentDelayedWithUnchangedAssignmentKeepsStableMemberReady
 - testConsumerPollWhenNotJoining
 - testConsumerPollWhenSubscriptionNotUpdated
 - testForDuplicateRegistrationOfSameStateListener
@@ -5110,6 +5123,8 @@ org.apache.kafka.common.security.authenticator.ClientAuthenticationFailureTest:
 - testConsumerWithInvalidCredentials
 - testProducerWithInvalidCredentials
 - testTransactionalProducerWithInvalidCredentials
+org.apache.kafka.common.security.authenticator.CredentialCacheTest:
+- testScramCredentialCache
 org.apache.kafka.common.security.authenticator.LoginManagerTest:
 - testClientLoginManager
 - testLoginManagerWithDifferentConfigs
@@ -5346,6 +5361,7 @@ org.apache.kafka.common.security.oauthbearer.OAuthBearerValidatorCallbackHandler
 - testFailsFastWhenJwksUrlAbsent
 - testFailsToStartWhenExpectedAudienceMissingWithJwksUrl
 - testFailsToStartWhenExpectedIssuerMissingWithJwksUrl
+- testFailsToStartWithClientJwtValidator
 - testHandlerCloseDoesNotThrowException
 - testHandlerConfigureThrowsException
 - testInvalidAccessToken
@@ -5571,8 +5587,6 @@ org.apache.kafka.common.security.plain.internals.PlainSaslServerTest:
 - noAuthorizationIdSpecified
 - passwordIsComparedForUnknownUser
 - unknownUserOrInvalidPassword
-org.apache.kafka.common.security.scram.internals.ScramCredentialUtilsTest:
-- scramCredentialCache
 org.apache.kafka.common.security.scram.internals.ScramFormatterTest:
 - rfc7677Example
 - saslName
@@ -5702,6 +5716,13 @@ org.apache.kafka.common.security.token.delegation.TokenInformationTest:
 - testEqualsAndHashCode
 - testHashCodeIgnoresExpiryTimestampLikeEquals
 - testHashCodeIsStableAcrossRenewal
+org.apache.kafka.common.security.token.delegation.internals.DelegationTokenCacheTest:
+- testAddTokenDropsReplacedHmacMapping
+- testCredentialsOnlyCachedForEnabledMechanisms
+- testRemoveCache
+- testRemoveTokenDropsHmacMapping
+- testUpdateCache
+- testUpdateCacheWithRenewedToken
 org.apache.kafka.common.serialization.ListDeserializerTest:
 - shouldDeserializeListEndingInEmptyEntry
 - shouldPassHeadersToUnderlyingDeserializer
