@@ -294,7 +294,7 @@ class Benchmark(Test):
         wait_until(lambda: self.kafka.set_share_group_offset_reset_strategy(group=share_group, strategy="earliest", command_config=COMMAND_CONFIG_FILE),
                    timeout_sec=20, backoff_sec=2, err_msg="share.auto.offset.reset not set to earliest")
 
-        self.wait_for_share_group_ready(share_group, COMMAND_CONFIG_FILE, seed_record=True)
+        self.wait_for_share_group_ready(COMMAND_CONFIG_FILE)
 
         self.share_consumer = ShareConsumerPerformanceService(
             self.test_context, 1, self.kafka, topic=TOPIC_REP_THREE, messages=num_records, group=share_group, timeout=20000)
@@ -403,7 +403,7 @@ class Benchmark(Test):
         wait_until(lambda: self.kafka.set_share_group_offset_reset_strategy(group=share_group, strategy="earliest", command_config=COMMAND_CONFIG_FILE),
                    timeout_sec=20, backoff_sec=2, err_msg="share.auto.offset.reset not set to earliest")
 
-        self.wait_for_share_group_ready(share_group, COMMAND_CONFIG_FILE)
+        self.wait_for_share_group_ready(COMMAND_CONFIG_FILE)
 
         # consume
         self.share_consumer = ShareConsumerPerformanceService(
@@ -413,25 +413,25 @@ class Benchmark(Test):
         self.check_share_consumer_records(num_records)
         return compute_aggregate_throughput(self.share_consumer)
 
-    def wait_for_share_group_ready(self, group, command_config, seed_record=False):
+    def wait_for_share_group_ready(self, command_config):
         """
-        Wait until the share group can read one record from the topic.
+        Read one record with a separate share group and topic before the measured run.
 
         The first share group in a cluster creates the __share_group_state topic. This can take
-        longer than the timeout of the perf tool, so it must be done before the measured run.
-        The record is released, so the measured run can still read it. Only one record is acquired,
-        so a crashed warm-up does not leave other records locked.
+        longer than the timeout of the perf tool. The measured topic and group are not used here.
         """
+        topic = "share-warmup"
+        group = "share-warmup-group"
         node = self.kafka.nodes[0]
+        self.kafka.create_topic({"topic": topic, "partitions": 1, "replication-factor": 1})
         common_args = "--bootstrap-server %s --topic %s --command-config %s" % \
-                      (self.kafka.bootstrap_servers(self.kafka.security_protocol), TOPIC_REP_THREE, command_config)
+                      (self.kafka.bootstrap_servers(self.kafka.security_protocol), topic, command_config)
+        node.account.ssh("echo warmup | %s %s" % (self.kafka.path.script("kafka-console-producer.sh", node), common_args),
+                         allow_fail=False)
+        wait_until(lambda: self.kafka.set_share_group_offset_reset_strategy(group=group, strategy="earliest", command_config=command_config),
+                   timeout_sec=20, backoff_sec=2, err_msg="share.auto.offset.reset not set to earliest")
 
-        if seed_record:
-            node.account.ssh("echo warmup | %s %s" % (self.kafka.path.script("kafka-console-producer.sh", node), common_args),
-                             allow_fail=False)
-
-        cmd = "%s %s --group %s --max-messages 1 --release --timeout-ms 30000 " \
-              "--command-property max.poll.records=1 --command-property share.acquire.mode=record_limit 2>&1" % \
+        cmd = "%s %s --group %s --max-messages 1 --timeout-ms 30000 2>&1" % \
               (self.kafka.path.script("kafka-console-share-consumer.sh", node), common_args, group)
         wait_until(lambda: "Processed a total of 1 messages" in self.kafka.run_cli_tool(node, cmd),
                    timeout_sec=120, backoff_sec=1, retry_on_exc=True,
