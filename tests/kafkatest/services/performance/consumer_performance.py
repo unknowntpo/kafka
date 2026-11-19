@@ -147,8 +147,14 @@ class ConsumerPerformanceService(PerformanceService):
         # Parse and save the last line's information
         if last is not None:
             parts = last.split(',')
+            # The last four values are the time to join the group and the rates without that time.
             self.results[idx-1] = {
                 'total_mb': float(parts[2]),
                 'mbps': float(parts[3]),
+                'records': int(parts[4]),
                 'records_per_sec': float(parts[5]),
+                'rebalance_time_ms': int(parts[6]),
+                'fetch_time_ms': int(parts[7]),
+                'fetch_mbps': float(parts[8]),
+                'fetch_records_per_sec': float(parts[9]),
             }

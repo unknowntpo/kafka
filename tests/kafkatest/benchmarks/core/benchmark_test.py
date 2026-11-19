@@ -353,7 +353,17 @@ class Benchmark(Test):
             settings=consumer_group.maybe_set_group_protocol(group_protocol))
         self.consumer.group = "test-consumer-group"
         self.consumer.run()
-        return compute_aggregate_throughput(self.consumer)
+
+        # The tool exits when its timeout expires, so check that it read all the records.
+        records = sum(r['records'] for r in self.consumer.results)
+        assert records >= num_records, "Consumers read %d records, expected at least %d" % (records, num_records)
+
+        # records_per_sec and mb_per_sec include the time to join the group. The fetch rates do not.
+        data = compute_aggregate_throughput(self.consumer)
+        data["fetch_records_per_sec"] = sum(r['fetch_records_per_sec'] for r in self.consumer.results)
+        data["fetch_mb_per_sec"] = sum(r['fetch_mbps'] for r in self.consumer.results)
+        data["rebalance_time_ms"] = max(r['rebalance_time_ms'] for r in self.consumer.results)
+        return data
     
     @cluster(num_nodes=8)
     @matrix(security_protocol=['SSL'], interbroker_security_protocol=['PLAINTEXT'], tls_version=['TLSv1.2', 'TLSv1.3'],
