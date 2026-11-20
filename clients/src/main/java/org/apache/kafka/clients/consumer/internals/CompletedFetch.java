@@ -318,11 +318,13 @@ public class CompletedFetch {
         ByteBuffer keyBytes = record.key();
         ByteBuffer valueBytes = record.value();
         Headers headers = new RecordHeaders(record.headers());
-        // Header keys and values are decoded lazily from the receive buffer; read them now so that the record
-        // never references the buffer, which may be reused once this fetch is drained.
-        for (Header header : headers) {
-            header.key();
-            header.value();
+        // Header keys and values are decoded lazily from the receive buffer. When the buffer may be reused once
+        // this fetch is drained, read them now so that the record never references the buffer.
+        if (record.headers().length > 0 && ConsumerUtils.copiesInput(deserializers)) {
+            for (Header header : headers) {
+                header.key();
+                header.value();
+            }
         }
         K key;
         V value;

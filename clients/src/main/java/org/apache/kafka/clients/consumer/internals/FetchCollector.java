@@ -227,12 +227,15 @@ public class FetchCollector<K, V> {
     protected CompletedFetch initialize(final CompletedFetch completedFetch) {
         final TopicPartition tp = completedFetch.partition;
         final Errors error = Errors.forCode(completedFetch.partitionData.errorCode());
-        boolean recordMetrics = true;
+        // The metrics are recorded here only when the fetch is dropped. When this method throws, the caller
+        // decides whether the fetch leaves the queue, and records the metrics if it does.
+        boolean recordMetrics = false;
 
         try {
             if (!subscriptions.hasValidPosition(tp)) {
                 // this can happen when a rebalance happened while fetch is still in-flight
                 log.debug("Ignoring fetched records for partition {} since it no longer has valid position", tp);
+                recordMetrics = true;
                 return null;
             } else if (error == Errors.NONE) {
                 final CompletedFetch ret = handleInitializeSuccess(completedFetch);
@@ -240,12 +243,9 @@ public class FetchCollector<K, V> {
                 return ret;
             } else {
                 handleInitializeErrors(completedFetch, error);
+                recordMetrics = true;
                 return null;
             }
-        } catch (RuntimeException e) {
-            // The caller decides whether the fetch leaves the queue, and records the metrics if it does.
-            recordMetrics = false;
-            throw e;
         } finally {
             if (recordMetrics) {
                 completedFetch.recordAggregatedMetrics(0, 0);

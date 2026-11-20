@@ -22,8 +22,8 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * A {@link MemoryPool} that keeps released large buffers for reuse instead of allocating a fresh one for every
- * receive. Reuse skips the zeroing of a new buffer, which is a large share of the network thread's CPU when
- * responses are big and frequent, as with fetch responses.
+ * receive. Reuse skips the allocation and the zeroing of a new buffer, whose cost grows with the size of the
+ * response. This matters when responses are big and frequent, as with fetch responses.
  * <p>
  * Small allocations (below {@link #LARGE_BUFFER_BYTES}) are plain heap buffers that are never cached, matching
  * {@link MemoryPool#NONE}. Only large buffers go through the cache, which is bounded by {@code maxCachedBytes}.

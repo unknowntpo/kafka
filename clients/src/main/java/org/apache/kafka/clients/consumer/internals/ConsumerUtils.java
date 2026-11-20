@@ -107,13 +107,21 @@ public final class ConsumerUtils {
             UUIDDeserializer.class, VoidDeserializer.class);
 
     /**
+     * Whether both deserializers copy their input, so that a record never references the receive buffer through
+     * its key or value.
+     */
+    static boolean copiesInput(Deserializers<?, ?> deserializers) {
+        return COPYING_DESERIALIZERS.contains(deserializers.keyDeserializer().getClass())
+                && COPYING_DESERIALIZERS.contains(deserializers.valueDeserializer().getClass());
+    }
+
+    /**
      * The pool fetch responses are received into: a reusing pool when no view of a receive buffer can reach the
      * application, otherwise {@link MemoryPool#NONE}. The reusing pool keeps up to twice
-     * {@code fetch.max.bytes}, which covers one buffered and one in-flight response per node.
+     * {@code fetch.max.bytes} for the whole consumer, whatever the number of nodes.
      */
     public static MemoryPool receiveMemoryPool(ConsumerConfig config, Deserializers<?, ?> deserializers) {
-        if (COPYING_DESERIALIZERS.contains(deserializers.keyDeserializer().getClass())
-                && COPYING_DESERIALIZERS.contains(deserializers.valueDeserializer().getClass()))
+        if (copiesInput(deserializers))
             return new CachingMemoryPool(2L * config.getInt(ConsumerConfig.FETCH_MAX_BYTES_CONFIG));
         return MemoryPool.NONE;
     }
