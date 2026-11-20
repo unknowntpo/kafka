@@ -112,8 +112,13 @@ public class FetchCollector<K, V> {
                             // The first condition ensures that the completedFetches is not stuck with the same completedFetch
                             // in cases such as the TopicAuthorizationException, and the second condition ensures that no
                             // potential data loss due to an exception in a following record.
-                            if (fetch.isEmpty() && FetchResponse.recordsOrFail(completedFetch.partitionData).sizeInBytes() == 0)
+                            // A completedFetch that stays in the queue will be read again, so it is reported to the
+                            // metric aggregator only when it is removed. The aggregator treats the fetch response as
+                            // complete once every partition has reported.
+                            if (fetch.isEmpty() && FetchResponse.recordsOrFail(completedFetch.partitionData).sizeInBytes() == 0) {
                                 fetchBuffer.poll();
+                                completedFetch.recordAggregatedMetrics(0, 0);
+                            }
 
                             throw e;
                         }
@@ -237,6 +242,10 @@ public class FetchCollector<K, V> {
                 handleInitializeErrors(completedFetch, error);
                 return null;
             }
+        } catch (RuntimeException e) {
+            // The caller decides whether the fetch leaves the queue, and records the metrics if it does.
+            recordMetrics = false;
+            throw e;
         } finally {
             if (recordMetrics) {
                 completedFetch.recordAggregatedMetrics(0, 0);
