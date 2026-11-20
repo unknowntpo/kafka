@@ -40,7 +40,7 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 修正：`initialize()` 只在回傳 null（丟掉這個 `CompletedFetch`）的路徑回報；丟出任何例外或 `Error` 時都不回報。`collectFetch` 在把那個 `CompletedFetch` 從 `FetchBuffer` 移除的同一處回報。留在 `FetchBuffer` 裡的 `CompletedFetch` 之後會經由 `initialize()` 回傳 null、或 `drain()`（`retainAll`、`close`）回報。
 
-測試：`FetchCollectorTest.testFetchResponseIsNotCompleteWhileAFailedFetchIsStillBuffered`。修正前失敗（`expected: <0> but was: <1>`），修正後通過。`FetchCollectorTest.testFetchResponseIsCompleteWhenAFailedFetchIsRemoved` 在修正前就通過，它保護的是「移除時要回報」：拿掉 `collectFetch` 裡的回報，它會失敗（`expected: <1> but was: <0>`，已實際執行）。
+測試：`FetchCollectorTest.testFetchResponseIsNotCompleteWhileAFailedFetchIsStillBuffered`。修正前失敗（`expected: <0> but was: <1>`），修正後通過。既有的 `FetchCollectorTest.testErrorInInitialize` 多了一個檢查，保護「移除時要回報」：拿掉 `collectFetch` 裡的回報，它在 `recordCount=0` 的兩個案例失敗（`expected: <1> but was: <0>`，已實際執行）。
 
 附帶的行為改變：
 
@@ -49,7 +49,7 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 ## 4. 測試
 
-最後一次完整執行（commit `f60c958471` 加上未 commit 的測試）：32 個測試類別、1199 個測試、0 失敗。補上 `Error` 的測試後重跑其中 13 個類別（682 個測試，0 失敗）；`checkstyleMain`、`checkstyleTest`、`checkstyleTestFixtures`、`spotlessCheck` 通過。包含：`CachingMemoryPoolTest`、`NetworkClientTest`、`FetchCollectorTest`、`CompletedFetchTest`、`FetcherTest`、`FetchRequestManagerTest`、`ConsumerUtilsTest`、`FetchMetricsAggregatorTest`、`KafkaConsumerTest`、`AsyncKafkaConsumerTest`。
+最後一次完整執行（commit `f60c958471` 加上未 commit 的測試）：32 個測試類別、1199 個測試、0 失敗。第四次 review 的修改之後重跑其中 13 個類別（680 個測試，0 失敗）；`checkstyleMain`、`checkstyleTest`、`checkstyleTestFixtures`、`spotlessCheck` 通過。包含：`CachingMemoryPoolTest`、`NetworkClientTest`、`FetchCollectorTest`、`CompletedFetchTest`、`FetcherTest`、`FetchRequestManagerTest`、`ConsumerUtilsTest`、`FetchMetricsAggregatorTest`、`KafkaConsumerTest`、`AsyncKafkaConsumerTest`。
 
 沒有跑：整個 `clients:test`、其他模組的測試、integration test、system test。
 
@@ -71,7 +71,7 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 做了兩次獨立 review（兩個不同的 agent，都只讀程式碼）。兩次都沒有在一般路徑找到「buffer 被重用時仍有人讀」或不安全的重複釋放。
 
-依第一次的意見已修：四處和程式不符的註解；補上 `AbstractFetch` 接線的測試（`FetchRequestManagerTest.testResponseBufferIsReleasedOnceTheFetchIsDrained`；拿掉 `resp::releaseBuffer` 它會失敗，已實際執行）。
+依第一次的意見已修：四處和程式不符的註解；補上 `AbstractFetch` 接線的檢查（加在既有的 `FetchRequestManagerTest.testFetchMaxPollRecords`；拿掉 `resp::releaseBuffer` 它會失敗，已實際執行）。
 
 依第二次的意見已修（commit `f60c958471`）：
 
@@ -84,7 +84,18 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 - `initialize()` 丟出 `Error` 的路徑沒有測試。已補 `FetchCollectorTest.testFetchResponseIsNotCompleteWhenInitializeThrowsAnError`；把 `recordMetrics` 的初值改回 `true`，它會失敗（`expected: <0> but was: <1>`，已實際執行）。
 - `ConsumerUtils.copiesInput` 對每筆有 header 的 record 都算一次，結果其實整個 consumer 都一樣。沒有改：只影響有 header 的 record，量測裡看不到。
 
-補測試之後沒有再做一次獨立 review，因為 production 程式碼沒有變。
+第四次 review 只看未 commit 的測試。它沒有找到錯的測試，也沒有找到因為別的原因而通過的測試。依它的意見已改：
+
+- 兩個新測試併進既有測試：buffer 釋放的檢查併進 `FetchRequestManagerTest.testFetchMaxPollRecords`；「移除時要回報」併進 `FetchCollectorTest.testErrorInInitialize`。合併後重跑兩個 mutation，都會失敗。
+- 刪掉 `CachingMemoryPoolTest` 裡一個不可能失敗的 assertion；修一處註解用詞。
+
+沒有照做的意見：
+
+- 把 `CompletedFetchTest.testDeserializationExceptionDoesNotReferenceTheReceiveBuffer` 併進 `testCorruptedMessage`。那個測試的兩段共用同一份 records，清掉 buffer 需要調動既有 assertion 的順序。
+- 用 spy 簡化 `NetworkClientTest.testResponseReleasesReceiveBufferToThePool`。spy 只能檢查 `close()` 被呼叫，現在的寫法檢查 buffer 真的回到 `MemoryPool`。
+- `FetchMetricsAggregatorTest.testNoCompletionHookIsFine` 沒有 assertion，留給使用者決定要不要保留。
+
+這次修改之後沒有再做獨立 review：改動只有搬移 assertion，並以 mutation 驗證。
 
 沒有修、需要決定的事：
 
@@ -97,4 +108,4 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 ## 7. 還沒做
 
 - 共用機器（morefine、GCP）上的量測。需要 PM 排程與使用者同意。
-- 第 6 節的三件事。
+- 第 6 節列出的五件事。
