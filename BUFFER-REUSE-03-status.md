@@ -44,7 +44,7 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 附帶的行為改變：
 
-- trunk 上，這種 `CompletedFetch` 每次 `poll()` 失敗都會再回報一次。所有 partition 都回報過之後，`FetchMetricsAggregator` 會把整個 response 的 `bytes-fetched`、`records-fetched` 再記一次。修正後不會。
+- trunk 上，這種 `CompletedFetch` 每次 `poll()` 失敗都會再回報一次。如果同一個 response 的其他 partition 都已經回報過，`FetchMetricsAggregator` 每次都會把整個 response 的 `bytes-fetched`、`records-fetched` 再記一次。修正後不會。這一點是讀程式碼得到的，沒有用測試驗證。
 - 同一個 response 其他 partition 的 metrics，現在等到失敗的 `CompletedFetch` 離開 `FetchBuffer` 才記錄。
 
 ## 4. 測試
@@ -61,7 +61,9 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 |---|---|---|---|
 | 1 KB、`consumer` protocol、5 輪 | 2.38 → 1.20 | 1.97 → 1.86 | 272.5 → 298.8 |
 | 1 KB、`classic` protocol、3 輪 | 2.37 → 1.34 | 2.09 → 1.92 | 224.0 → 262.7 |
-| 100 B、`consumer` protocol、3 輪 | 5.20 → 3.76 | 5.44 → 4.29 | 各輪差太多（48 到 161），不比較 |
+| 100 B、`consumer` protocol、3 輪 | 5.20 → 3.76 | 5.44 → 4.29（不可靠，見下） | 各輪差太多（48 到 161），不比較 |
+
+單位：MB 是 1024 × 1024 bytes（工具輸出與 GC log 都是）。100 B 那三輪的吞吐量差太多，所以同一批的 CPU 數字也不可靠；只有配置量可信。
 
 這些數字不能和 GCP 上整個 `kip-fetch-pipeline` 的 1.6–1.7 倍相比：機器、broker 數、網路都不同。
 

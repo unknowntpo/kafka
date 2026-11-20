@@ -14,7 +14,7 @@ The consumer reads every response into a new heap `ByteBuffer`. `NetworkReceive`
 
 For fetch responses this buffer is large. A response can be as large as `fetch.max.bytes` (50 MiB by default). The JVM must fill a new array with zeros, so the cost of each allocation grows with the size of the response. With G1, an array of at least half a region is a humongous object, which is allocated directly in the old generation.
 
-In a local test with 1 KB records, this one allocation is 43% of all bytes that the consumer allocates (JFR, `HeapByteBuffer.<init>`).
+In a local test with 1 KB records, this allocation site (`HeapByteBuffer.<init>`) is 43% of the allocation pressure that JFR samples in the consumer process.
 
 ## Proposal
 
@@ -46,7 +46,7 @@ A buffer can be used again only if nothing still points into it.
 
 With buffer reuse this would release the buffer while a fetch in the queue still reads from it. The change reports such a fetch only when it is removed from the queue.
 
-This also fixes a small problem that exists on trunk today: the fetch is reported again on every `poll()` that fails, and `FetchMetricsAggregator` then records the `bytes-fetched` and `records-fetched` values of the whole response again.
+This also removes a problem that exists on trunk today. It is found by reading the code, not by a test: the fetch is reported again on every `poll()` that fails. If every other partition of the response was reported before, `FetchMetricsAggregator` records the `bytes-fetched` and `records-fetched` values of the whole response again each time.
 
 One visible change: the metrics of the other partitions in that response are now recorded when the failed fetch leaves the queue, not at the first failure.
 
@@ -58,6 +58,7 @@ Local machine only. The numbers show the direction, not the size of the effect o
 - Baseline: trunk `5b648ca9cb`. Change: branch `consumer-receive-buffer-reuse`.
 - Machine: Apple M1 Pro, 8 cores, macOS 26.3, JDK 21.0.1, G1, heap fixed at 2 GB. One broker and the client on the same machine, over loopback.
 - Data: 12 partitions, 6,000,000 records of 1 KB (5859 MB), no compression, no key. Default consumer configuration.
+- Units: MB is 1024 * 1024 bytes, in the tool output and in the GC log.
 - Each run reads the whole topic (about 20 to 27 seconds). Runs alternate between baseline and change. The value is the median, with the range in brackets.
 
 | | Runs | MB/s | CPU seconds per GB (user + sys) | MB allocated per MB consumed |
@@ -72,7 +73,7 @@ Local machine only. The numbers show the direction, not the size of the effect o
 - Throughput is 10% (consumer protocol) and 17% (classic protocol) higher. The ranges of the consumer protocol runs overlap a little, so this number is less certain than the other two.
 - JFR (`settings=profile`, one run each): on trunk `HeapByteBuffer.<init>` is 42.9% of the allocation pressure. With the change it is not in the first seven entries.
 
-Small records (30,000,000 records of 100 bytes, 2861 MB, `group.protocol=consumer`, 3 runs each): allocation per MB consumed goes from 5.20 (5.06 – 5.22) to 3.76 (3.59 – 3.84), and CPU seconds per GB from 5.44 (4.56 – 5.47) to 4.29 (4.02 – 4.30). The throughput of these runs changed too much between runs (48 to 161 MB/s) to compare the two sides.
+Small records (30,000,000 records of 100 bytes, 2861 MB, `group.protocol=consumer`, 3 runs each): allocation per MB consumed goes from 5.20 (5.06 – 5.22) to 3.76 (3.59 – 3.84), and CPU seconds per GB from 5.44 (4.56 – 5.47) to 4.29 (4.02 – 4.30). The throughput of these runs changed too much between runs (48 to 161 MB/s) to compare the two sides, so the CPU number of these runs is also uncertain. Only the allocation number is reliable here.
 
 Not measured: more than one broker, a client on a separate machine, compression, a larger heap, memory use over time, and a workload where the size of the responses changes a lot.
 
