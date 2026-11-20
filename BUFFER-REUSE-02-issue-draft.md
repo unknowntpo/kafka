@@ -72,7 +72,9 @@ Local machine only. The numbers show the direction, not the size of the effect o
 - Throughput is 10% (consumer protocol) and 17% (classic protocol) higher. The ranges of the consumer protocol runs overlap a little, so this number is less certain than the other two.
 - JFR (`settings=profile`, one run each): on trunk `HeapByteBuffer.<init>` is 42.9% of the allocation pressure. With the change it is not in the first seven entries.
 
-Not measured: more than one broker, a client on a separate machine, small records (100 bytes), compression, a larger heap, memory use over time, and a workload where the size of the responses changes a lot.
+Small records (30,000,000 records of 100 bytes, 2861 MB, `group.protocol=consumer`, 3 runs each): allocation per MB consumed goes from 5.20 (5.06 – 5.22) to 3.76 (3.59 – 3.84), and CPU seconds per GB from 5.44 (4.56 – 5.47) to 4.29 (4.02 – 4.30). The throughput of these runs changed too much between runs (48 to 161 MB/s) to compare the two sides.
+
+Not measured: more than one broker, a client on a separate machine, compression, a larger heap, memory use over time, and a workload where the size of the responses changes a lot.
 
 ## Open questions
 

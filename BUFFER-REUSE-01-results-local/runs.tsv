@@ -14,3 +14,9 @@ classic-base-2	base	MB=5859	MB/s=216.0	fetchMB/s=219.2	cpu_s=11.98	cpu_s/GB=2.09
 classic-branch-2	branch	MB=5859	MB/s=279.5	fetchMB/s=289.2	cpu_s=11.07	cpu_s/GB=1.935	youngGCs=17	alloc_MB/MB=1.33
 classic-base-3	base	MB=5859	MB/s=238.5	fetchMB/s=245.2	cpu_s=12.06	cpu_s/GB=2.108	youngGCs=19	alloc_MB/MB=2.37
 classic-branch-3	branch	MB=5859	MB/s=249.8	fetchMB/s=256.2	cpu_s=10.99	cpu_s/GB=1.921	youngGCs=17	alloc_MB/MB=1.34
+a100-base-1	base	MB=2861	MB/s=72.2	fetchMB/s=75.9	cpu_s=12.73	cpu_s/GB=4.556	youngGCs=34	alloc_MB/MB=5.22
+a100-branch-1	branch	MB=2861	MB/s=62.9	fetchMB/s=67.2	cpu_s=11.99	cpu_s/GB=4.291	youngGCs=33	alloc_MB/MB=3.76
+a100-base-2	base	MB=2861	MB/s=48.5	fetchMB/s=50.9	cpu_s=15.28	cpu_s/GB=5.469	youngGCs=40	alloc_MB/MB=5.06
+a100-branch-2	branch	MB=2861	MB/s=160.7	fetchMB/s=174.7	cpu_s=11.23	cpu_s/GB=4.019	youngGCs=20	alloc_MB/MB=3.84
+a100-base-3	base	MB=2861	MB/s=92.7	fetchMB/s=101.4	cpu_s=15.21	cpu_s/GB=5.444	youngGCs=21	alloc_MB/MB=5.20
+a100-branch-3	branch	MB=2861	MB/s=111.4	fetchMB/s=120.5	cpu_s=12.01	cpu_s/GB=4.299	youngGCs=24	alloc_MB/MB=3.59
