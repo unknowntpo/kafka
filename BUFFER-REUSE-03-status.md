@@ -49,7 +49,7 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 ## 4. 測試
 
-最後一次執行（commit `f60c958471` 加上未 commit 的測試）：32 個測試類別、1199 個測試、0 失敗；`checkstyleMain`、`checkstyleTest`、`checkstyleTestFixtures`、`spotlessCheck` 通過。包含：`CachingMemoryPoolTest`、`NetworkClientTest`、`FetchCollectorTest`、`CompletedFetchTest`、`FetcherTest`、`FetchRequestManagerTest`、`ConsumerUtilsTest`、`FetchMetricsAggregatorTest`、`KafkaConsumerTest`、`AsyncKafkaConsumerTest`。
+最後一次完整執行（commit `f60c958471` 加上未 commit 的測試）：32 個測試類別、1199 個測試、0 失敗。補上 `Error` 的測試後重跑其中 13 個類別（682 個測試，0 失敗）；`checkstyleMain`、`checkstyleTest`、`checkstyleTestFixtures`、`spotlessCheck` 通過。包含：`CachingMemoryPoolTest`、`NetworkClientTest`、`FetchCollectorTest`、`CompletedFetchTest`、`FetcherTest`、`FetchRequestManagerTest`、`ConsumerUtilsTest`、`FetchMetricsAggregatorTest`、`KafkaConsumerTest`、`AsyncKafkaConsumerTest`。
 
 沒有跑：整個 `clients:test`、其他模組的測試、integration test、system test。
 
@@ -79,7 +79,12 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 - 提前讀出 header 的 key 與 value 原本對所有 consumer 都做。現在只在會重用 buffer 時做（`ConsumerUtils.copiesInput`），其他 consumer 維持延遲解碼。
 - `receiveMemoryPool` 的 javadoc 寫「每個 node」是錯的，上限是整個 consumer 的。
 
-這次修正之後又做了第三次 review，只看 commit `f60c958471`。
+第三次 review 只看 commit `f60c958471`，沒有找到正確性的問題。它指出兩點：
+
+- `initialize()` 丟出 `Error` 的路徑沒有測試。已補 `FetchCollectorTest.testFetchResponseIsNotCompleteWhenInitializeThrowsAnError`；把 `recordMetrics` 的初值改回 `true`，它會失敗（`expected: <0> but was: <1>`，已實際執行）。
+- `ConsumerUtils.copiesInput` 對每筆有 header 的 record 都算一次，結果其實整個 consumer 都一樣。沒有改：只影響有 header 的 record，量測裡看不到。
+
+補測試之後沒有再做一次獨立 review，因為 production 程式碼沒有變。
 
 沒有修、需要決定的事：
 
