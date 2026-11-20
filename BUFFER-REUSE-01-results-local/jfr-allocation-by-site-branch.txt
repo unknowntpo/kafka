@@ -1,0 +1,30 @@
+
+                                                                       Allocation by Site
+
+Method                                                                                                                                      Allocation Pressure
+------------------------------------------------------------------------------------------------------------------------------------------- -------------------
+org.apache.kafka.common.utils.Utils.toArray(ByteBuffer, int, int)                                                                                        51.45%
+org.apache.kafka.clients.consumer.internals.CompletedFetch.parseRecord(Deserializers, TopicPartition, Optional, TimestampType, Record)                   36.36%
+org.apache.kafka.common.record.internal.DefaultRecord.readFrom(ByteBuffer, int, long, long, int, Long)                                                    2.26%
+java.nio.HeapByteBuffer.slice()                                                                                                                           2.25%
+org.apache.kafka.common.header.internals.RecordHeaders.<init>(Header[])                                                                                   1.51%
+java.util.Arrays.copyOf(Object[], int)                                                                                                                    1.08%
+java.util.Optional.of(Object)                                                                                                                             0.87%
+java.util.Arrays.copyOf(Object[], int, Class)                                                                                                             0.45%
+java.util.Arrays.copyOf(byte[], int)                                                                                                                      0.39%
+java.util.ArrayList.iterator()                                                                                                                            0.35%
+java.nio.HeapByteBuffer.<init>(int, int, MemorySegment)                                                                                                   0.17%
+java.util.HashMap.newNode(int, Object, Object, HashMap$Node)                                                                                              0.15%
+java.util.zip.InflaterInputStream.<init>(InputStream, Inflater, int)                                                                                      0.12%
+java.util.stream.StreamSupport.stream(Spliterator, boolean)                                                                                               0.12%
+java.util.HashMap.resize()                                                                                                                                0.11%
+java.lang.StringConcatHelper.newString(byte[], long)                                                                                                      0.11%
+java.util.Optional.ofNullable(Object)                                                                                                                     0.11%
+java.lang.invoke.DirectMethodHandle.allocateInstance(Object)                                                                                              0.10%
+org.apache.kafka.clients.consumer.internals.OffsetsRequestManager.poll(long)                                                                              0.10%
+java.util.stream.ReferencePipeline.filter(Predicate)                                                                                                      0.10%
+java.lang.Long.valueOf(long)                                                                                                                              0.09%
+jdk.internal.misc.Unsafe.allocateUninitializedArray(Class, int)                                                                                           0.09%
+java.util.jar.JarFile.getVersionedEntry(String, JarEntry)                                                                                                 0.08%
+org.apache.kafka.clients.NetworkClient.poll(long, long)                                                                                                   0.07%
+java.util.LinkedHashMap$LinkedValues.iterator()                                                                                                           0.07%
