@@ -51,6 +51,8 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 最後一次完整執行（commit `f60c958471` 加上未 commit 的測試）：32 個測試類別、1199 個測試、0 失敗。第四次 review 的修改之後重跑其中 13 個類別（680 個測試，0 失敗）；`checkstyleMain`、`checkstyleTest`、`checkstyleTestFixtures`、`spotlessCheck` 通過。包含：`CachingMemoryPoolTest`、`NetworkClientTest`、`FetchCollectorTest`、`CompletedFetchTest`、`FetcherTest`、`FetchRequestManagerTest`、`ConsumerUtilsTest`、`FetchMetricsAggregatorTest`、`KafkaConsumerTest`、`AsyncKafkaConsumerTest`。
 
+測試在使用者看過之後 commit：`62c17ed95b`（2026-11-20）。
+
 沒有跑：整個 `clients:test`、其他模組的測試、integration test、system test。
 
 ## 5. 量測
