@@ -1367,6 +1367,8 @@ public class FetchRequestManagerTest {
         assertEquals(3L, subscriptions.position(tp0).offset);
         assertEquals(1, recordsToTest.get(0).offset());
         assertEquals(2, recordsToTest.get(1).offset());
+        // The last record of the response is not read yet, so the response keeps its buffer.
+        assertEquals(0, client.releasedResponseBuffers());
 
         assertEquals(0, sendFetches());
         networkClientDelegate.poll(time.timer(0));
@@ -1375,6 +1377,8 @@ public class FetchRequestManagerTest {
         assertEquals(1, recordsToTest.size());
         assertEquals(4L, subscriptions.position(tp0).offset);
         assertEquals(3, recordsToTest.get(0).offset());
+        // The call that returns the last record also drains the fetch, which releases the buffer.
+        assertEquals(1, client.releasedResponseBuffers());
 
         assertTrue(sendFetches() > 0);
         networkClientDelegate.poll(time.timer(0));

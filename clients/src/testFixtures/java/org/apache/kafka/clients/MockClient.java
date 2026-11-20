@@ -40,6 +40,7 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -83,6 +84,7 @@ public class MockClient implements KafkaClient {
     private final Queue<ClientRequest> requests = new ConcurrentLinkedDeque<>();
     // Use concurrent queue for responses so that responses may be updated during poll() from a different thread.
     private final Queue<ClientResponse> responses = new ConcurrentLinkedDeque<>();
+    private final AtomicInteger releasedResponseBuffers = new AtomicInteger();
     private final Queue<FutureResponse> futureResponses = new ConcurrentLinkedDeque<>();
     private final Queue<MetadataUpdate> metadataUpdates = new ConcurrentLinkedDeque<>();
     private volatile NodeApiVersions nodeApiVersions = NodeApiVersions.create();
@@ -199,6 +201,13 @@ public class MockClient implements KafkaClient {
         disconnect(node, false);
     }
 
+    /**
+     * How many times {@link ClientResponse#releaseBuffer()} was called on the prepared responses this client delivered.
+     */
+    public int releasedResponseBuffers() {
+        return releasedResponseBuffers.get();
+    }
+
     public void disconnect(String node, boolean allowLateResponses) {
         long now = time.milliseconds();
         Iterator<ClientRequest> iter = requests.iterator();
@@ -269,8 +278,8 @@ public class MockClient implements KafkaClient {
                 }
 
                 ClientResponse resp = new ClientResponse(request.makeHeader(version), request.callback(), request.destination(),
-                        request.createdTimeMs(), time.milliseconds(), futureResp.disconnected,
-                        unsupportedVersionException, null, futureResp.responseBody);
+                        request.createdTimeMs(), time.milliseconds(), futureResp.disconnected, false,
+                        unsupportedVersionException, null, futureResp.responseBody, releasedResponseBuffers::incrementAndGet);
                 responses.add(resp);
             } catch (UnsupportedVersionException unsupportedVersionException) {
                 ClientResponse resp = new ClientResponse(request.makeHeader(builder.latestAllowedVersion()), request.callback(), request.destination(),
