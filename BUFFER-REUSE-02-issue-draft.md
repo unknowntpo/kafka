@@ -36,7 +36,7 @@ There is no new configuration.
 A buffer can be used again only if nothing still points into it.
 
 - The pool is used only when both deserializers are known to copy their input: `ByteArrayDeserializer`, `BytesDeserializer`, `StringDeserializer`, `UUIDDeserializer`, `VoidDeserializer` and the number deserializers. The check uses the exact class. A subclass, a wrapper, `ByteBufferDeserializer` or any custom deserializer gets `MemoryPool.NONE`, which is the behaviour of today.
-- Record headers are decoded lazily from the buffer. `CompletedFetch.parseRecord` now reads the header key and value before it returns the record.
+- Record headers are decoded lazily from the buffer. When the pool is used, `CompletedFetch.parseRecord` reads the header key and value before it returns the record. Without the pool, headers stay lazy as today.
 - `RecordDeserializationException` gets a copy of the key and value buffers.
 - Compressed batches are decompressed into other buffers, so their records never point into the receive buffer.
 
@@ -44,7 +44,7 @@ A buffer can be used again only if nothing still points into it.
 
 `FetchCollector.initialize()` reports a partition to `FetchMetricsAggregator` in a `finally` block, also when it throws. But a fetch that throws and still has data stays in the fetch buffer and is read again by the next `poll()`. One example is the error "Failed to make progress reading messages ... no complete records were found".
 
-With buffer reuse this would release the buffer while a fetch in the queue still reads from it. The change reports such a fetch only when it is removed from the queue.
+With buffer reuse this would release the buffer while a fetch in the queue still reads from it. The change reports a fetch from `initialize()` only on the paths that drop it. When `initialize()` throws, the caller reports the fetch only if it removes the fetch from the queue.
 
 This also removes a problem that exists on trunk today. It is found by reading the code, not by a test: the fetch is reported again on every `poll()` that fails. If every other partition of the response was reported before, `FetchMetricsAggregator` records the `bytes-fetched` and `records-fetched` values of the whole response again each time.
 
@@ -83,6 +83,7 @@ Not measured: more than one broker, a client on a separate machine, compression,
 2. **Buffers of different sizes.** A new buffer has exactly the size of the response. When a cached buffer is too small for the next response, the pool drops it. If the size of the responses changes a lot, many allocations miss the cache. Rounding the size up would raise the hit rate and use more memory. This is not measured yet.
 3. **Deserializers.** The list of copying deserializers is fixed in the code. A custom deserializer that copies its input does not get the pool. Is a marker on `Deserializer` worth a KIP later?
 4. **Scope.** The share consumer does not use the pool in this change.
+5. **Tests.** No test receives two responses of at least 1 MiB through a real `CachingMemoryPool` and then checks the records. The unit tests use `MockClient`, and the integration tests that were checked use small fetches. Should this change add one integration test for it?
 
 ## Not in this change
 

@@ -38,9 +38,9 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 問題：`FetchCollector.initialize()` 丟出例外時，`finally` 仍然向 `FetchMetricsAggregator` 回報這個 partition。如果那個 `CompletedFetch` 有資料，它留在 `FetchBuffer` 裡，下一次 `poll()` 會再讀它。同一個 response 的其他 partition 拿完後，buffer 就被釋放並可能被重用。
 
-修正：`initialize()` 丟出例外時不回報。`collectFetch` 在把那個 `CompletedFetch` 從 `FetchBuffer` 移除的同一處回報。留在 `FetchBuffer` 裡的 `CompletedFetch` 之後會經由 `initialize()` 回傳 null、或 `drain()`（`retainAll`、`close`）回報。
+修正：`initialize()` 只在回傳 null（丟掉這個 `CompletedFetch`）的路徑回報；丟出任何例外或 `Error` 時都不回報。`collectFetch` 在把那個 `CompletedFetch` 從 `FetchBuffer` 移除的同一處回報。留在 `FetchBuffer` 裡的 `CompletedFetch` 之後會經由 `initialize()` 回傳 null、或 `drain()`（`retainAll`、`close`）回報。
 
-測試：`FetchCollectorTest.testFetchResponseIsNotCompleteWhileAFailedFetchIsStillBuffered`。修正前失敗（`expected: <0> but was: <1>`），修正後通過。
+測試：`FetchCollectorTest.testFetchResponseIsNotCompleteWhileAFailedFetchIsStillBuffered`。修正前失敗（`expected: <0> but was: <1>`），修正後通過。`FetchCollectorTest.testFetchResponseIsCompleteWhenAFailedFetchIsRemoved` 在修正前就通過，它保護的是「移除時要回報」：拿掉 `collectFetch` 裡的回報，它會失敗（`expected: <1> but was: <0>`，已實際執行）。
 
 附帶的行為改變：
 
@@ -49,7 +49,7 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 ## 4. 測試
 
-`./gradlew clients:test`，34 個測試類別、1233 個測試、0 失敗；`checkstyleMain`、`checkstyleTest`、`checkstyleTestFixtures`、`spotlessCheck` 通過。包含：`CachingMemoryPoolTest`、`NetworkClientTest`、`FetchCollectorTest`、`CompletedFetchTest`、`FetcherTest`、`FetchRequestManagerTest`、`ConsumerUtilsTest`、`FetchMetricsAggregatorTest`、`KafkaConsumerTest`、`AsyncKafkaConsumerTest`。
+最後一次執行（commit `f60c958471` 加上未 commit 的測試）：32 個測試類別、1199 個測試、0 失敗；`checkstyleMain`、`checkstyleTest`、`checkstyleTestFixtures`、`spotlessCheck` 通過。包含：`CachingMemoryPoolTest`、`NetworkClientTest`、`FetchCollectorTest`、`CompletedFetchTest`、`FetcherTest`、`FetchRequestManagerTest`、`ConsumerUtilsTest`、`FetchMetricsAggregatorTest`、`KafkaConsumerTest`、`AsyncKafkaConsumerTest`。
 
 沒有跑：整個 `clients:test`、其他模組的測試、integration test、system test。
 
@@ -69,13 +69,25 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 
 ## 6. 獨立 review 的結果
 
-一個獨立的 agent 讀過未 commit 的 diff。它沒有找到「buffer 被重用時仍有人讀」或不安全的重複釋放。依它的意見已修：四處和程式不符的註解；補上 `AbstractFetch` 接線的測試。
+做了兩次獨立 review（兩個不同的 agent，都只讀程式碼）。兩次都沒有在一般路徑找到「buffer 被重用時仍有人讀」或不安全的重複釋放。
+
+依第一次的意見已修：四處和程式不符的註解；補上 `AbstractFetch` 接線的測試（`FetchRequestManagerTest.testResponseBufferIsReleasedOnceTheFetchIsDrained`；拿掉 `resp::releaseBuffer` 它會失敗，已實際執行）。
+
+依第二次的意見已修（commit `f60c958471`）：
+
+- `initialize()` 丟出 `Error` 時仍會回報，buffer 可能過早釋放。現在只有回傳 null 的路徑回報。
+- 提前讀出 header 的 key 與 value 原本對所有 consumer 都做。現在只在會重用 buffer 時做（`ConsumerUtils.copiesInput`），其他 consumer 維持延遲解碼。
+- `receiveMemoryPool` 的 javadoc 寫「每個 node」是錯的，上限是整個 consumer 的。
+
+這次修正之後又做了第三次 review，只看 commit `f60c958471`。
 
 沒有修、需要決定的事：
 
 1. **快取不會縮小。** consumer 收過大的 response 之後，最多保留 `2 × fetch.max.bytes`（預設 100 MiB）直到關閉。trunk 上這些記憶體由 GC 回收。Kafka Streams、Connect、MirrorMaker 都用 `ByteArrayDeserializer`，所以每個 consumer 都會啟用。
 2. **response 大小變動時命中率下降。** 新 buffer 的大小剛好等於 response；快取裡太小的 buffer 直接丟掉。命中率沒有量過。
-3. **`ClientUtils` 把 pool 傳進 `Selector` 的那一行沒有單元測試。** 把它換成 `MemoryPool.NONE` 不會讓任何測試失敗。量測的 JFR 結果間接證明它有作用。
+3. **重用的路徑沒有端到端的測試。** 單元測試用 `MockClient`，不會從 `CachingMemoryPool` 配置 buffer。把 consumer 傳給 `Selector` 的 pool 換成 `MemoryPool.NONE`，不會有任何測試失敗。沒有測試在重用發生後檢查 record 的內容；量測只證明有重用（JFR），沒有檢查資料。要不要在這份交付裡加一個 integration test，需要決定。
+4. **非 fetch 的 response 會拿走快取裡的 buffer。** 例如 1 MiB 以上的 Metadata response 會拿到快取的大 buffer，而且不會歸還。後果是少一次重用。
+5. **暫停的 partition 會讓整塊 buffer 不歸還**，直到 resume、revoke 或 seek。後果是少一次重用；heap 佔用和 trunk 相同。出處：`/Users/unknowntpo/repo/unknowntpo/kafka/consumer-resilience/RESILIENCE-03-fetch-buffer-release-point.md`。
 
 ## 7. 還沒做
 
