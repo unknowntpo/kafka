@@ -95,7 +95,7 @@ trunk 在 `e90d6f42c2` 之後多了兩個測試輔助類別，它們呼叫被改
 - 用 spy 簡化 `NetworkClientTest.testResponseReleasesReceiveBufferToThePool`。spy 只能檢查 `close()` 被呼叫，現在的寫法檢查 buffer 真的回到 `MemoryPool`。
 - `FetchMetricsAggregatorTest.testNoCompletionHookIsFine` 沒有 assertion，留給使用者決定要不要保留。
 
-這次修改之後沒有再做獨立 review：改動只有搬移 assertion，並以 mutation 驗證。
+第五次 review 只看合併後的 `FetchCollectorTest` 與 `FetchRequestManagerTest`，沒有找到錯誤。它指出 `CompletedFetchBuilder.build()` 會把預設的 `FetchMetricsAggregator` 存進欄位，讓同一個 builder 之後的 `build()` 共用它。已改成區域變數，維持原本「每次 `build()` 一個新的」的行為。這一行修改之後沒有再做 review。
 
 沒有修、需要決定的事：
 
