@@ -131,6 +131,23 @@ The following checks are performed on our PRs:
 With the merge queue, our PR title and body will become the commit subject and message.
 This linting step will help to ensure that we have nice looking commits.
 
+The linter preserves the PR body above the trailing Git trailer block as written
+(leaving Markdown tables, lists, code fences, and prose untouched) and only wraps
+lines in the trailing trailer block at 72 columns using RFC 822 leading-space
+continuation lines. PR descriptions are only updated when the trailer block changes.
+
+Run the formatter unit tests locally without installing extra Python packages:
+
+```shell
+python3 -B -S -m unittest discover -s .github/scripts -p 'test_pr_format.py' -v
+```
+
+You can also dry-run the linter read-only against any existing PR (leaving `GITHUB_ACTIONS` unset):
+
+```shell
+GH_REPO=apache/kafka PR_NUMBER=24053 python3 -B -S .github/scripts/pr-format.py
+```
+
 ### Stale PRs
 
 This one is straightforward. Using the "actions/stale" GitHub Action, we automatically

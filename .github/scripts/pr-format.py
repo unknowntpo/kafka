@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
 from io import BytesIO
 import json
 import logging
@@ -22,8 +21,9 @@ import subprocess
 import shlex
 import sys
 import tempfile
-import textwrap
-from typing import Dict, Optional, TextIO
+from typing import Optional
+
+from pr_trailers import format_trailers, parse_trailers, write_commit
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -55,54 +55,6 @@ def has_approval(reviews) -> bool:
     return approved
 
 
-def write_commit(io: TextIO, title: str, body: str):
-    io.write(title.encode())
-    io.write(b"\n\n")
-    io.write(body.encode())
-    io.flush()
-
-
-def parse_trailers(title, body) -> Dict:
-    trailers = defaultdict(list)
-
-    with tempfile.NamedTemporaryFile() as fp:
-        write_commit(fp, title, body)
-        cmd = f"git interpret-trailers --trim-empty --parse {fp.name}"
-        p = subprocess.run(shlex.split(cmd), capture_output=True)
-        fp.close()
-
-    for line in p.stdout.decode().splitlines():
-        key, value = line.split(":", 1)
-        trailers[key].append(value.strip())
-
-    return trailers
-
-
-def split_paragraphs(text: str):
-    """
-    Split the given text into a generator of paragraph lines and a boolean "markdown" flag.
-
-    If any line of a paragraph starts with a markdown character, we will assume the whole paragraph
-    contains markdown.
-    """
-    lines = text.splitlines(keepends=True)
-    paragraph = []
-    markdown = False
-    for line in lines:
-        if line.strip() == "":
-            if len(paragraph) > 0:
-                yield paragraph, markdown
-                paragraph.clear()
-                markdown = False
-        else:
-            if line[0] in ("#", "*", "-", "=") or line[0].isdigit():
-                markdown = True
-            if "```" in line:
-                markdown = True
-            paragraph.append(line)
-    yield paragraph, markdown
-
-
 if __name__ == "__main__":
     """
     This script performs some basic linting of our PR titles and body. The PR number is read from the PR_NUMBER
@@ -127,7 +79,7 @@ if __name__ == "__main__":
     p = subprocess.run(shlex.split(cmd), capture_output=True)
     if p.returncode != 0:
         logger.error(f"GitHub CLI failed with exit code {p.returncode}.\nSTDOUT: {p.stdout.decode()}\nSTDERR:{p.stderr.decode()}")
-        exit(1)
+        sys.exit(1)
 
     gh_json = json.loads(p.stdout)
     title = gh_json["title"]
@@ -154,24 +106,12 @@ if __name__ == "__main__":
     check("Delete this text and replace" not in body, "PR template text not present", "PR template text should be removed")
     check("Committer Checklist" not in body, "Old PR template text not present", "Old PR template text should be removed")
 
-    paragraph_iter = split_paragraphs(body)
-    new_paragraphs = []
-    for p, markdown in paragraph_iter:
-        if markdown:
-            # If a paragraph looks like it has markdown in it, wrap each line separately.
-            new_lines = []
-            for line in p:
-                new_lines.append(textwrap.fill(line, width=72, break_long_words=False, break_on_hyphens=False, replace_whitespace=False))
-            rewrapped_p = "\n".join(new_lines)
-        else:
-            indent = ""
-            if len(p) > 0 and p[0].startswith("Reviewers:"):
-                indent = " "
-            rewrapped_p = textwrap.fill("".join(p), subsequent_indent=indent, width=72, break_long_words=False, break_on_hyphens=False, replace_whitespace=True)
-        new_paragraphs.append(rewrapped_p + "\n")
-    body = "\n".join(new_paragraphs)
+    original_body = body
+    body = format_trailers(body)
 
-    if get_env("GITHUB_ACTIONS"):
+    if body == original_body:
+        logger.info(f"PR {pr_number} trailers are already formatted; skipping update.")
+    elif get_env("GITHUB_ACTIONS"):
         with tempfile.NamedTemporaryFile() as fp:
             fp.write(body.encode())
             fp.flush()
@@ -211,8 +151,8 @@ if __name__ == "__main__":
         # Just output the first error for the status message. STDOUT becomes the status check message
         if err:
             print(msg)
-            exit(1)
+            sys.exit(1)
 
     logger.debug("No validation errors, PR format looks good!")
     print("PR format looks good!")
-    exit(0)
+    sys.exit(0)
