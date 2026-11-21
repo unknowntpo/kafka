@@ -22,7 +22,6 @@ import subprocess
 import shlex
 import sys
 import tempfile
-import textwrap
 from typing import Dict, Optional, TextIO
 
 logger = logging.getLogger()
@@ -78,31 +77,6 @@ def parse_trailers(title, body) -> Dict:
     return trailers
 
 
-def split_paragraphs(text: str):
-    """
-    Split the given text into a generator of paragraph lines and a boolean "markdown" flag.
-
-    If any line of a paragraph starts with a markdown character, we will assume the whole paragraph
-    contains markdown.
-    """
-    lines = text.splitlines(keepends=True)
-    paragraph = []
-    markdown = False
-    for line in lines:
-        if line.strip() == "":
-            if len(paragraph) > 0:
-                yield paragraph, markdown
-                paragraph.clear()
-                markdown = False
-        else:
-            if line[0] in ("#", "*", "-", "=") or line[0].isdigit():
-                markdown = True
-            if "```" in line:
-                markdown = True
-            paragraph.append(line)
-    yield paragraph, markdown
-
-
 if __name__ == "__main__":
     """
     This script performs some basic linting of our PR titles and body. The PR number is read from the PR_NUMBER
@@ -120,6 +94,9 @@ if __name__ == "__main__":
     Body checks:
     * Is not empty
     * Has "Reviewers:" trailer if the PR is approved
+    * Every "Reviewers:" line is in the last paragraph, where git reads it as a trailer
+
+    This script only reads the PR. It never edits the title or the body.
     """
 
     pr_number = get_env("PR_NUMBER")
@@ -154,40 +131,16 @@ if __name__ == "__main__":
     check("Delete this text and replace" not in body, "PR template text not present", "PR template text should be removed")
     check("Committer Checklist" not in body, "Old PR template text not present", "Old PR template text should be removed")
 
-    paragraph_iter = split_paragraphs(body)
-    new_paragraphs = []
-    for p, markdown in paragraph_iter:
-        if markdown:
-            # If a paragraph looks like it has markdown in it, wrap each line separately.
-            new_lines = []
-            for line in p:
-                new_lines.append(textwrap.fill(line, width=72, break_long_words=False, break_on_hyphens=False, replace_whitespace=False))
-            rewrapped_p = "\n".join(new_lines)
-        else:
-            indent = ""
-            if len(p) > 0 and p[0].startswith("Reviewers:"):
-                indent = " "
-            rewrapped_p = textwrap.fill("".join(p), subsequent_indent=indent, width=72, break_long_words=False, break_on_hyphens=False, replace_whitespace=True)
-        new_paragraphs.append(rewrapped_p + "\n")
-    body = "\n".join(new_paragraphs)
-
-    if get_env("GITHUB_ACTIONS"):
-        with tempfile.NamedTemporaryFile() as fp:
-            fp.write(body.encode())
-            fp.flush()
-            cmd = f"gh pr edit {pr_number} --body-file {fp.name}"
-            p = subprocess.run(shlex.split(cmd), capture_output=True)
-            fp.close()
-            if p.returncode != 0:
-                logger.error(f"Could not update PR {pr_number}. STDOUT: {p.stdout.decode()}")
-    else:
-        logger.info(f"Not reformatting {pr_number} since this is not running on GitHub Actions.")
-
     # Check for Reviewers
+    # git reads trailers only from the last paragraph. A "Reviewers:" line
+    # anywhere else is plain text, and the people on it get no credit.
+    reviewers_in_body = parse_trailers(title, body).get("Reviewers", [])
+    reviewers_lines = [line for line in body.splitlines() if line.startswith("Reviewers:")]
+    check(len(reviewers_lines) <= len(reviewers_in_body), "Every 'Reviewers:' line is a trailer",
+          "'Reviewers:' must be in the last paragraph. Move the text below it above it.")
+
     approved = has_approval(reviews)
     if approved:
-        trailers = parse_trailers(title, body)
-        reviewers_in_body = trailers.get("Reviewers", [])
         check(len(reviewers_in_body) > 0, "Found 'Reviewers' in commit body", "Pull Request is approved, but no 'Reviewers' found in commit body")
         if len(reviewers_in_body) > 0:
             for reviewer_in_body in reviewers_in_body:
