@@ -6,6 +6,7 @@ org.apache.kafka.network.ProcessorTest:
 - testParseRequestHeaderWithDisabledApiVersion
 - testParseRequestHeaderWithUnsupportedApi
 - testParseRequestHeaderWithUnsupportedApiVersion
+- testParseRequestHeaderWithUnsupportedApiVersionsVersion
 org.apache.kafka.network.RequestConvertToJsonTest:
 - testAllApiVersionsResponseHandled
 - testAllRequestTypesHandled
@@ -261,9 +262,9 @@ org.apache.kafka.server.EnvelopeUtilsTest:
 - testNonForwardableApiIsRejected
 - testPrincipalDeserializationFailureIsRejected
 org.apache.kafka.server.ExpiringErrorCacheTest:
+- testBothPutMethodsWriteToSameCache
 - testCapacityEnforcement
 - testCapacityWithDifferentTTLs
-- testClearOperation
 - testConcurrentPutAndGet
 - testConcurrentPutOperations
 - testConcurrentUpdates
@@ -275,6 +276,7 @@ org.apache.kafka.server.ExpiringErrorCacheTest:
 - testGetNonExistentTopic
 - testMixedExpiredAndValidEntries
 - testPutAndGet
+- testPutCreatableTopicResultsUsesDefaultErrorMessageWhenMissing
 - testSingleEntryCache
 - testStaleEntriesInQueueHandledCorrectly
 - testUpdateDoesNotLeaveStaleEntries
