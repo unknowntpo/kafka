@@ -48,7 +48,7 @@ public class ClientInstanceIdCapture {
     public static void assertGenerated(Supplier<? extends AutoCloseable> clientFactory) {
         assertGenerated(ClientUtils.class,
             captor -> () -> ClientUtils.createNetworkClient(any(), any(), any(), captor.capture(), any(), any(),
-                any(), any(), any(), anyInt(), anyInt(), any(), any(), any(), any(), any()),
+                any(), any(), any(), anyInt(), anyInt(), any(), any(), any(), any(), any(), any()),
             clientFactory);
     }
 

@@ -175,7 +175,10 @@ public abstract class AbstractFetch implements Closeable {
 
             final Map<TopicPartition, FetchResponseData.PartitionData> responseData = response.responseData(handler.sessionTopicNames(), requestVersion);
             final Set<TopicPartition> partitions = new HashSet<>(responseData.keySet());
-            final FetchMetricsAggregator metricAggregator = new FetchMetricsAggregator(metricsManager, partitions);
+            // Once every partition of this response is drained, nothing can reference its receive buffer any more:
+            // records are copied out before a partition is drained. Only one thread drains at a time: the
+            // application thread, or the thread that closes the fetcher while the application thread waits.
+            final FetchMetricsAggregator metricAggregator = new FetchMetricsAggregator(metricsManager, partitions, resp::releaseBuffer);
 
             Map<TopicPartition, Metadata.LeaderIdAndEpoch> partitionsWithUpdatedLeaderInfo = new HashMap<>();
             for (Map.Entry<TopicPartition, FetchResponseData.PartitionData> entry : responseData.entrySet()) {
