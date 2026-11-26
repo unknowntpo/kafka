@@ -345,6 +345,8 @@ public class ReceiveBufferPoolTest {
         List<ConsumerRecord<byte[], byte[]>> records = fetch.fetchRecords(fetchConfig(), deserializers, 2);
         assertEquals(2, records.size());
         fetch.drain();   // what seek, pause, a lost partition, retainAll() and close() do
+        // a drained fetch returns no records and does not touch the batch or the record it was reading
+        assertEquals(List.of(), fetch.fetchRecords(fetchConfig(), deserializers, 2));
 
         assertTrue(pool.handedOut(response.array()));
         assertNotSame(response.array(), overwrite(pool.tryAllocate(SIZE)).array());

@@ -233,6 +233,10 @@ public class CompletedFetch {
             if (!responseReusable)
                 lease.taint();
             lease.release();
+            // The buffer may now hold another response. A read of these fields by mistake fails here instead of
+            // reading the bytes of that response. A drained fetch returns no records, so nothing reads them.
+            currentBatch = null;
+            lastRecord = null;
         }
     }
 
