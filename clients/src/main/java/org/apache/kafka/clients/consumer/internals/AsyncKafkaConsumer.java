@@ -384,6 +384,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
      * two threads and is thus designed to be thread-safe.
      */
     private final FetchBuffer fetchBuffer;
+    // Decodes received fetches on its own threads. Null if the records are decoded on the application thread.
+    private final FetchPredecoder<K, V> fetchPredecoder;
     private final FetchCollector<K, V> fetchCollector;
     private final ConsumerInterceptors<K, V> interceptors;
     private final IsolationLevel isolationLevel;
@@ -517,6 +519,9 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
             // This FetchBuffer is shared between the application and network threads.
             this.fetchBuffer = new FetchBuffer(logContext);
+            this.fetchPredecoder = FetchPredecoder.maybeCreate(fetchConfig, deserializers);
+            if (fetchPredecoder != null)
+                fetchBuffer.setAddListener(fetchPredecoder::submit);
             this.positionsValidator = new PositionsValidator(logContext, time, subscriptions, metadata);
             final Supplier<NetworkClientDelegate> networkClientDelegateSupplier = NetworkClientDelegate.supplier(time,
                     logContext,
@@ -633,6 +638,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.subscriptions = subscriptions;
         this.clientId = clientId;
         this.fetchBuffer = fetchBuffer;
+        this.fetchPredecoder = null;
         this.fetchCollector = fetchCollector;
         this.fetchMetricsManager = fetchMetricsManager;
         this.rebalanceCallbackMetricsManager = rebalanceCallbackMetricsManager;
@@ -678,6 +684,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
         this.autoCommitEnabled = config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
         this.fetchBuffer = new FetchBuffer(logContext);
+        this.fetchPredecoder = null;
         this.isolationLevel = IsolationLevel.READ_UNCOMMITTED;
         this.time = time;
         this.metrics = new Metrics(time);
@@ -1678,6 +1685,8 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         closeQuietly(fetchMetricsManager, "consumer fetch metrics", firstException);
         closeQuietly(rebalanceCallbackMetricsManager, "consumer rebalance callback metrics");
         closeQuietly(metrics, "consumer metrics", firstException);
+        // after the network thread, which drains the buffered fetches and so waits for running decodes
+        closeQuietly(fetchPredecoder, "consumer fetch decoder", firstException);
         closeQuietly(deserializers, "consumer deserializers", firstException);
         clientTelemetryReporter.ifPresent(reporter -> closeQuietly(reporter, "async consumer telemetry reporter", firstException));
 
