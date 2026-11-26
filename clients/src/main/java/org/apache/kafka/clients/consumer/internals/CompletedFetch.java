@@ -45,6 +45,7 @@ import org.slf4j.Logger;
 import java.io.Closeable;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
@@ -53,11 +54,20 @@ import java.util.List;
 import java.util.Optional;
 import java.util.PriorityQueue;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 /**
  * {@link CompletedFetch} represents a {@link RecordBatch batch} of {@link Record records} that was returned from the
  * broker via a {@link FetchRequest}. It contains logic to maintain state between calls to
  * {@link #fetchRecords(FetchConfig, Deserializers, int)}.
+ *
+ * <p>The records may be decoded ahead of the application thread by a {@link FetchPredecoder} thread, see
+ * {@link #predecode(FetchConfig, Deserializers, BufferSupplier)}. The decode state (the iterators, the current
+ * batch and record, the offsets of the decode, the kept error and the decoded records) is used by one thread at a
+ * time, the owner. The owner changes only through {@code owner}, which also makes the writes of the old owner
+ * visible to the new one. The application thread reads its own copy of the position ({@code appNextFetchOffset},
+ * {@code appLastEpoch} and {@code appExhausted}), so it never reads the decode state while a decoder writes it.
  */
 public class CompletedFetch {
 
@@ -85,9 +95,33 @@ public class CompletedFetch {
     private boolean corruptLastRecord = false;
     private long nextFetchOffset;
     private Optional<Integer> lastEpoch;
+    // Set by the thread that drains this fetch. A running decode stops at the next record when it sees it.
     private volatile boolean isConsumed = false;
     private boolean exhausted = false;
     private boolean initialized = false;
+
+    // The owner of the decode state: nobody yet (IDLE), a decoder thread (DECODING), the application thread
+    // after a decoder has finished (DONE), or the application thread (APP).
+    private static final int IDLE = 0;
+    private static final int DECODING = 1;
+    private static final int DONE = 2;
+    private static final int APP = 3;
+    private final AtomicInteger owner = new AtomicInteger(IDLE);
+    // Records decoded by a decoder thread and not yet handed out. Null when there are none.
+    private List<ConsumerRecord<?, ?>> predecoded;
+    // predecodedBytes[i] is the value of bytesRead after the decoder decoded predecoded.get(i)
+    private int[] predecodedBytes;
+    // The number of predecoded records already handed out. Only the application thread uses it.
+    private int predecodedPos;
+    // An error that is not a KafkaException, such as an Error, found by a decoder thread. It is a RuntimeException
+    // or an Error. The application thread throws it when it reaches that record, as it would have if it had decoded
+    // the records itself.
+    private Throwable deferredException;
+    // The position as the application thread sees it. These lag behind the decode state while predecoded
+    // records wait. Only the application thread uses them, after the constructor.
+    private long appNextFetchOffset;
+    private Optional<Integer> appLastEpoch = Optional.empty();
+    private boolean appExhausted;
 
     // The buffer of the response may go back to the pool only if no object that outlives this fetch points into
     // it: no record, header or exception that was handed out. Records decoded by the reusing iterator keep
@@ -97,8 +131,9 @@ public class CompletedFetch {
     // True once something that was handed out may point into the bytes of the response. Only the thread that
     // reads the records uses it.
     private boolean responseMayBeReferenced;
-    // True once all records were read and nothing that was handed out points into the response. It is set by
-    // the thread that reads the records and read by the thread that drains this fetch.
+    // True once the application thread has taken all records and nothing that was handed out points into the
+    // response. It is set by the application thread and read by the thread that drains this fetch, which at close
+    // is the network thread, so it is volatile.
     private volatile boolean responseReusable;
     // Gives the buffer of the response back to the pool. Null if the response is not from a pool.
     private ReceiveBufferPool.Lease receiveLease;
@@ -125,6 +160,7 @@ public class CompletedFetch {
         this.metricAggregator = metricAggregator;
         this.batches = FetchResponse.recordsOrFail(partitionData).batches().iterator();
         this.nextFetchOffset = fetchOffset;
+        this.appNextFetchOffset = fetchOffset;
         this.lastEpoch = Optional.empty();
         this.abortedProducerIds = new HashSet<>();
         this.abortedTransactions = abortedTransactions(partitionData);
@@ -150,11 +186,11 @@ public class CompletedFetch {
     }
 
     long nextFetchOffset() {
-        return nextFetchOffset;
+        return appNextFetchOffset;
     }
 
     Optional<Integer> lastEpoch() {
-        return lastEpoch;
+        return appLastEpoch;
     }
 
     boolean isInitialized() {
@@ -170,7 +206,7 @@ public class CompletedFetch {
     }
 
     boolean isExhausted() {
-        return exhausted;
+        return appExhausted;
     }
 
     /**
@@ -203,10 +239,21 @@ public class CompletedFetch {
      */
     void drain() {
         if (!isConsumed) {
+            // Set first, so that a running decode stops at the next record.
+            this.isConsumed = true;
+            // Wait for a running decode. The response must not go back to the pool while a decoder reads it.
+            takeOwnership();
             maybeCloseRecordStream();
             cachedRecordException = null;
-            this.isConsumed = true;
+            deferredException = null;
             releaseResponse();
+            if (predecoded != null) {
+                // Count only the records that were handed out, as if the application thread had decoded them.
+                recordsRead = predecodedPos;
+                bytesRead = predecodedPos == 0 ? 0 : predecodedBytes[predecodedPos - 1];
+                predecoded = null;
+                predecodedBytes = null;
+            }
             recordAggregatedMetrics(bytesRead, recordsRead);
 
             // we move the partition to the end if we received some bytes. This way, it's more likely that partitions
@@ -214,6 +261,58 @@ public class CompletedFetch {
             if (bytesRead > 0)
                 subscriptions.movePartitionToEnd(partition);
         }
+    }
+
+    /**
+     * Makes the calling thread the owner of the decode state. If a decoder thread is decoding this fetch, this
+     * waits until it is done. Called by the application thread, and by the thread that drains this fetch.
+     */
+    private void takeOwnership() {
+        if (owner.get() == IDLE && owner.compareAndSet(IDLE, APP))
+            return;
+        if (owner.get() != DECODING)
+            return;
+        // An interrupt would make parkNanos return at once, so it is cleared while waiting and set again after.
+        boolean interrupted = Thread.interrupted();
+        while (owner.get() == DECODING) {
+            LockSupport.parkNanos(this, 100_000L);
+            interrupted |= Thread.interrupted();
+        }
+        if (interrupted)
+            Thread.currentThread().interrupt();
+    }
+
+    /**
+     * Decodes all records of this fetch on the calling decoder thread, unless another thread has already started
+     * on it. An error is not raised here. It is kept, and the application thread raises it when it reaches that
+     * record, as if it had decoded the records itself. The decode stops early when this fetch is drained.
+     *
+     * @param bufferSupplier the decompression buffers to use; several decoder threads may use it at once
+     */
+    <K, V> void predecode(FetchConfig fetchConfig, Deserializers<K, V> deserializers, BufferSupplier bufferSupplier) {
+        if (!owner.compareAndSet(IDLE, DECODING))
+            return;
+        List<ConsumerRecord<K, V>> decoded = new ArrayList<>();
+        try {
+            decode(fetchConfig, deserializers, bufferSupplier, Integer.MAX_VALUE, true, decoded);
+        } finally {
+            if (!decoded.isEmpty()) {
+                @SuppressWarnings({"unchecked", "rawtypes"})
+                List<ConsumerRecord<?, ?>> list = (List) decoded;
+                predecoded = list;
+            }
+            // hands the decode state to the application thread
+            owner.set(DONE);
+        }
+    }
+
+    // Called by the application thread when it owns the decode state.
+    private void syncAppView() {
+        appNextFetchOffset = nextFetchOffset;
+        appLastEpoch = lastEpoch;
+        appExhausted = exhausted;
+        if (exhausted)
+            responseReusable = !responseMayBeReferenced;
     }
 
     /**
@@ -279,7 +378,7 @@ public class CompletedFetch {
         }
     }
 
-    private Record nextFetchedRecord(FetchConfig fetchConfig) {
+    private Record nextFetchedRecord(FetchConfig fetchConfig, BufferSupplier bufferSupplier) {
         while (true) {
             if (records == null || !records.hasNext()) {
                 maybeCloseRecordStream();
@@ -293,7 +392,6 @@ public class CompletedFetch {
                     if (currentBatch != null)
                         nextFetchOffset = currentBatch.nextOffset();
                     exhausted = true;
-                    responseReusable = !responseMayBeReferenced;
                     return null;
                 }
 
@@ -321,13 +419,13 @@ public class CompletedFetch {
 
                 // For magic v2 data batches, read the records without creating any object for each record
                 if (reuseRecords && currentBatch instanceof DefaultRecordBatch && !currentBatch.isControlBatch()) {
-                    records = ((DefaultRecordBatch) currentBatch).reusingIterator(decompressionBufferSupplier, decompressionArray);
+                    records = ((DefaultRecordBatch) currentBatch).reusingIterator(bufferSupplier, decompressionArray);
                     // the iterator owns the array until it is closed
                     decompressionArray = null;
                 } else {
                     // The records of this iterator, and their headers, may point into the response.
                     responseMayBeReferenced = true;
-                    records = currentBatch.streamingIterator(decompressionBufferSupplier);
+                    records = currentBatch.streamingIterator(bufferSupplier);
                 }
             } else {
                 Record record = records.next();
@@ -362,27 +460,65 @@ public class CompletedFetch {
     <K, V> List<ConsumerRecord<K, V>> fetchRecords(FetchConfig fetchConfig,
                                                    Deserializers<K, V> deserializers,
                                                    int maxRecords) {
-        // Error when fetching the next record before deserialization.
-        if (corruptLastRecord)
-            throw new KafkaException("Received exception when fetching the next record from " + partition
-                    + ". If needed, please seek past the record to "
-                    + "continue consumption.", cachedRecordException);
+        takeOwnership();
+        if (predecoded != null && !isConsumed) {
+            if (maxRecords <= 0)
+                return Collections.emptyList();
+            int end = (int) Math.min((long) predecodedPos + maxRecords, predecoded.size());
+            // A view, not a copy: copying the references would cost about as much as decoding did.
+            @SuppressWarnings({"unchecked", "rawtypes"})
+            List<ConsumerRecord<K, V>> all = (List) predecoded;
+            List<ConsumerRecord<K, V>> records = predecodedPos == 0 && end == all.size() ? all : all.subList(predecodedPos, end);
+            predecodedPos = end;
+            if (end < all.size()) {
+                ConsumerRecord<K, V> last = records.get(records.size() - 1);
+                appNextFetchOffset = last.offset() + 1;
+                appLastEpoch = last.leaderEpoch();
+            } else {
+                predecoded = null;
+                predecodedBytes = null;
+                syncAppView();
+            }
+            return records;
+        }
+        try {
+            return decode(fetchConfig, deserializers, decompressionBufferSupplier, maxRecords, false, new ArrayList<>());
+        } finally {
+            // A drained fetch keeps the position the application thread had, not where a decoder stopped.
+            if (!isConsumed)
+                syncAppView();
+        }
+    }
+
+    /**
+     * Decodes up to {@code maxRecords} records into {@code records}.
+     *
+     * @param bufferSupplier the decompression buffers to use
+     * @param quiet true on a decoder thread: the decode stops when this fetch is drained, and an error is kept
+     *              for the application thread instead of raised
+     */
+    private <K, V> List<ConsumerRecord<K, V>> decode(FetchConfig fetchConfig,
+                                                     Deserializers<K, V> deserializers,
+                                                     BufferSupplier bufferSupplier,
+                                                     int maxRecords,
+                                                     boolean quiet,
+                                                     List<ConsumerRecord<K, V>> records) {
+        throwKeptError();
 
         if (isConsumed)
             return Collections.emptyList();
 
-        List<ConsumerRecord<K, V>> records = new ArrayList<>();
         // The reused Record gives out buffers that are valid only until the next record. Only deserializers that
         // do not keep these buffers can use it.
         reuseRecords = deserializers.simple();
 
         try {
-            for (int i = 0; i < maxRecords; i++) {
+            for (int i = 0; i < maxRecords && !(quiet && isConsumed); i++) {
                 // Only move to next record if there was no exception in the last fetch. Otherwise, we should
                 // use the last record to do deserialization again.
                 if (cachedRecordException == null) {
                     corruptLastRecord = true;
-                    lastRecord = nextFetchedRecord(fetchConfig);
+                    lastRecord = nextFetchedRecord(fetchConfig, bufferSupplier);
                     corruptLastRecord = false;
                 }
 
@@ -396,26 +532,67 @@ public class CompletedFetch {
                 recordsRead++;
                 bytesRead += lastRecord.sizeInBytes();
                 nextFetchOffset = lastRecord.offset() + 1;
+                keepDecodedBytes(quiet, records.size() - 1);
                 // In some cases, the deserialization may have thrown an exception and the retry may succeed,
                 // we allow user to move forward in this case.
                 cachedRecordException = null;
             }
         } catch (SerializationException se) {
             cachedRecordException = se;
-            if (records.isEmpty())
+            if (raise(records, quiet))
                 throw se;
         } catch (KafkaException e) {
             cachedRecordException = e;
-            if (records.isEmpty())
+            if (raise(records, quiet))
                 throw new KafkaException("Received exception when fetching the next record from " + partition
                         + ". If needed, please seek past the record to "
                         + "continue consumption.", e);
+        } catch (RuntimeException | Error e) {
+            if (!quiet)
+                throw e;
+            deferredException = e;
         } finally {
             // An error may hold parts of the record, so the response is not reused after one.
             if (cachedRecordException != null || corruptLastRecord)
                 responseMayBeReferenced = true;
         }
         return records;
+    }
+
+    /**
+     * Throws the error that stopped the previous decode at the current record, if there is one.
+     */
+    private void throwKeptError() {
+        // An error found by a decoder thread that is not a KafkaException, thrown as it was found.
+        if (deferredException != null) {
+            Throwable e = deferredException;
+            deferredException = null;
+            if (e instanceof Error)
+                throw (Error) e;
+            throw (RuntimeException) e;
+        }
+
+        // Error when fetching the next record before deserialization.
+        if (corruptLastRecord)
+            throw new KafkaException("Received exception when fetching the next record from " + partition
+                    + ". If needed, please seek past the record to "
+                    + "continue consumption.", cachedRecordException);
+    }
+
+    // An error is raised only on the application thread, and only if no record can be returned before it.
+    private static boolean raise(List<?> records, boolean quiet) {
+        return records.isEmpty() && !quiet;
+    }
+
+    // On a decoder thread, keeps the bytes read so far for the record at the given index of the decoded records.
+    private void keepDecodedBytes(boolean quiet, int index) {
+        if (!quiet)
+            return;
+        if (predecodedBytes == null)
+            predecodedBytes = new int[64];
+        else if (index == predecodedBytes.length)
+            predecodedBytes = Arrays.copyOf(predecodedBytes, index * 2);
+        predecodedBytes[index] = bytesRead;
     }
 
     /**

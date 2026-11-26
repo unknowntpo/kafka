@@ -38,6 +38,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
@@ -153,8 +154,23 @@ public class FetchBuffer implements AutoCloseable {
         }
     }
 
+    // Told about each fetch that add() buffers, after it is buffered. Null if nobody listens.
+    private volatile Consumer<CompletedFetch> addListener;
+
     void add(CompletedFetch completedFetch) {
         addAll(List.of(completedFetch));
+        Consumer<CompletedFetch> listener = addListener;
+        if (listener != null)
+            listener.accept(completedFetch);
+    }
+
+    /**
+     * Sets the listener that is told about each newly received fetch that {@link #add(CompletedFetch)} buffers. It
+     * is called on the thread that adds the fetch, without a lock. Fetches that {@link #addAll(Collection)} puts
+     * back, such as those of paused partitions, are not new and the listener is not told about them.
+     */
+    void setAddListener(Consumer<CompletedFetch> listener) {
+        this.addListener = listener;
     }
 
     void addAll(Collection<CompletedFetch> completedFetches) {

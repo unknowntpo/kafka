@@ -44,8 +44,9 @@ public class Deserializers<K, V> implements AutoCloseable {
     private final Plugin<Deserializer<K>> keyDeserializerPlugin;
     private final Plugin<Deserializer<V>> valueDeserializerPlugin;
 
-    // Deserializers of this project that do not keep the buffer they are given and do not read the headers.
-    // A subclass is not in this list, because it may change that.
+    // Deserializers of this project that do not keep the buffer they are given, do not read the headers and keep
+    // no state between calls, so several threads may use them at once. A subclass is not in this list, because it
+    // may change that.
     private static final Set<Class<?>> SIMPLE = Set.of(
             ByteArrayDeserializer.class,
             BytesDeserializer.class,
@@ -91,8 +92,8 @@ public class Deserializers<K, V> implements AutoCloseable {
     }
 
     /**
-     * @return true if neither deserializer keeps the buffer it is given or reads the headers, so records can be
-     *         decoded for them into buffers that are reused
+     * @return true if neither deserializer keeps the buffer it is given, reads the headers or keeps state between
+     *         calls, so records can be decoded for them into buffers that are reused, and on several threads
      */
     public boolean simple() {
         return SIMPLE.contains(keyDeserializer().getClass()) && SIMPLE.contains(valueDeserializer().getClass());
