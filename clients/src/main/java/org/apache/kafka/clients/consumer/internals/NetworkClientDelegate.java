@@ -20,6 +20,7 @@ import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.ClientRequest;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.ClientUtils;
+import org.apache.kafka.clients.DefaultHostResolver;
 import org.apache.kafka.clients.KafkaClient;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.NetworkClientUtils;
@@ -33,6 +34,7 @@ import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.errors.BootstrapResolutionException;
 import org.apache.kafka.common.errors.DisconnectException;
 import org.apache.kafka.common.errors.TimeoutException;
+import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.protocol.Errors;
@@ -76,6 +78,8 @@ public class NetworkClientDelegate implements AutoCloseable {
     private final boolean notifyMetadataErrorsViaErrorQueue;
     private boolean bootstrapErrorPropagated = false;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
+    // The pool that the client reads responses into, or null if the client allocates a new buffer for each one
+    private final ReceiveBufferPool receiveBufferPool;
 
     public NetworkClientDelegate(
             final Time time,
@@ -86,6 +90,25 @@ public class NetworkClientDelegate implements AutoCloseable {
             final BackgroundEventHandler backgroundEventHandler,
             final boolean notifyMetadataErrorsViaErrorQueue,
             final AsyncConsumerMetrics asyncConsumerMetrics) {
+        this(time, config, logContext, client, metadata, backgroundEventHandler, notifyMetadataErrorsViaErrorQueue,
+                asyncConsumerMetrics, null);
+    }
+
+    /**
+     * @param receiveBufferPool the pool that {@code client} reads responses into, or null if there is none.
+     *                          This object closes it.
+     */
+    NetworkClientDelegate(
+            final Time time,
+            final ConsumerConfig config,
+            final LogContext logContext,
+            final KafkaClient client,
+            final Metadata metadata,
+            final BackgroundEventHandler backgroundEventHandler,
+            final boolean notifyMetadataErrorsViaErrorQueue,
+            final AsyncConsumerMetrics asyncConsumerMetrics,
+            final ReceiveBufferPool receiveBufferPool) {
+        this.receiveBufferPool = receiveBufferPool;
         this.time = time;
         this.client = client;
         this.metadata = metadata;
@@ -301,8 +324,20 @@ public class NetworkClientDelegate implements AutoCloseable {
         return client.connectionFailed(node) && client.connectionDelay(node, time.milliseconds()) > 0;
     }
 
+    /**
+     * @return the pool that the client reads responses into, or null if there is none
+     */
+    ReceiveBufferPool receiveBufferPool() {
+        return receiveBufferPool;
+    }
+
     public void close() throws IOException {
-        this.client.close();
+        try {
+            this.client.close();
+        } finally {
+            if (receiveBufferPool != null)
+                receiveBufferPool.close();
+        }
     }
 
     public long addAll(PollResult pollResult) {
@@ -485,21 +520,52 @@ public class NetworkClientDelegate implements AutoCloseable {
                                                            final BackgroundEventHandler backgroundEventHandler,
                                                            final boolean notifyMetadataErrorsViaErrorQueue,
                                                            final AsyncConsumerMetrics asyncConsumerMetrics) {
+        return supplier(time, logContext, metadata, config, apiVersions, metrics, throttleTimeSensor,
+                clientTelemetrySender, backgroundEventHandler, notifyMetadataErrorsViaErrorQueue, asyncConsumerMetrics,
+                false);
+    }
+
+    /**
+     * Creates a {@link Supplier} for deferred creation during invocation by
+     * {@link ConsumerNetworkThread}.
+     *
+     * @param reuseReceiveBuffers true if the client reads responses into a {@link ReceiveBufferPool}, so that
+     *                            the fetch code can give the buffers of fetch responses back for reuse
+     */
+    public static Supplier<NetworkClientDelegate> supplier(final Time time,
+                                                           final LogContext logContext,
+                                                           final Metadata metadata,
+                                                           final ConsumerConfig config,
+                                                           final ApiVersions apiVersions,
+                                                           final Metrics metrics,
+                                                           final Sensor throttleTimeSensor,
+                                                           final ClientTelemetrySender clientTelemetrySender,
+                                                           final BackgroundEventHandler backgroundEventHandler,
+                                                           final boolean notifyMetadataErrorsViaErrorQueue,
+                                                           final AsyncConsumerMetrics asyncConsumerMetrics,
+                                                           final boolean reuseReceiveBuffers) {
         return new CachedSupplier<>() {
             @Override
             protected NetworkClientDelegate create() {
+                ReceiveBufferPool receiveBufferPool = reuseReceiveBuffers ? ReceiveBufferPool.forConsumer() : null;
                 KafkaClient client = ClientUtils.createNetworkClient(config,
                         config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG),
+                        config.getString(ConsumerConfig.CLIENT_ID_CONFIG),
                         metrics,
                         CONSUMER_METRIC_GROUP_PREFIX,
                         logContext,
                         apiVersions,
                         time,
                         CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION,
+                        config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
                         metadata,
+                        null,
+                        new DefaultHostResolver(),
                         throttleTimeSensor,
-                        clientTelemetrySender);
-                return new NetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler, notifyMetadataErrorsViaErrorQueue, asyncConsumerMetrics);
+                        clientTelemetrySender,
+                        receiveBufferPool != null ? receiveBufferPool : MemoryPool.NONE);
+                return new NetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler,
+                        notifyMetadataErrorsViaErrorQueue, asyncConsumerMetrics, receiveBufferPool);
             }
         };
     }

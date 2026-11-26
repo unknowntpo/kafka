@@ -97,6 +97,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -144,12 +145,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -280,6 +283,214 @@ public class FetchRequestManagerTest {
             assertEquals(offset, record.offset());
             offset += 1;
         }
+    }
+
+    /**
+     * The buffer of a response goes back to the pool only after every partition of the response was read.
+     */
+    @Test
+    public void testReceiveBufferIsReusedAfterEveryFetchOfTheResponseIsRead() {
+        buildFetcher(4);
+        ReceiveBufferPool pool = new ReceiveBufferPool(64 * 1024 * 1024);
+        try {
+            doReturn(pool).when(networkClientDelegate).receiveBufferPool();
+            assignFromUser(Set.of(tp0, tp1));
+            subscriptions.seek(tp0, 1);
+            subscriptions.seek(tp1, 1);
+            assertEquals(1, sendFetches());
+
+            ByteBuffer response = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            client.prepareResponse(pooledFetchResponse(response));
+            networkClientDelegate.poll(time.timer(0));
+
+            List<ConsumerRecord<byte[], byte[]>> consumed = new ArrayList<>();
+            // the first partition and one record of the second
+            fetchRecordsInto(consumed);
+            assertEquals(4, consumed.size());
+            assertTrue(pool.handedOut(response.array()));
+
+            fetchRecordsInto(consumed);
+            assertEquals(6, consumed.size());
+            assertFalse(pool.handedOut(response.array()));
+
+            ByteBuffer next = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            assertSame(response.array(), next.array());
+            Arrays.fill(next.array(), (byte) 0x7F);
+            for (ConsumerRecord<byte[], byte[]> record : consumed) {
+                assertArrayEquals("key".getBytes(), record.key());
+                assertArrayEquals(("value-" + record.offset()).getBytes(), record.value());
+            }
+        } finally {
+            pool.close();
+        }
+    }
+
+    /**
+     * A partition whose data is thrown away without being read keeps the buffer of the whole response out of the
+     * pool.
+     */
+    @Test
+    public void testReceiveBufferIsNotReusedWhenAFetchIsDiscarded() {
+        buildFetcher(4);
+        ReceiveBufferPool pool = new ReceiveBufferPool(64 * 1024 * 1024);
+        try {
+            doReturn(pool).when(networkClientDelegate).receiveBufferPool();
+            assignFromUser(Set.of(tp0, tp1));
+            subscriptions.seek(tp0, 1);
+            subscriptions.seek(tp1, 1);
+            assertEquals(1, sendFetches());
+
+            ByteBuffer response = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            client.prepareResponse(pooledFetchResponse(response));
+            networkClientDelegate.poll(time.timer(0));
+
+            // the data of tp1 no longer starts at the position, so it is thrown away
+            subscriptions.seek(tp1, 0);
+            List<ConsumerRecord<byte[], byte[]>> consumed = new ArrayList<>();
+            fetchRecordsInto(consumed);
+            fetchRecordsInto(consumed);
+            assertEquals(3, consumed.size());
+            assertFalse(fetcher.hasCompletedFetches());
+            assertTrue(pool.handedOut(response.array()));
+        } finally {
+            pool.close();
+        }
+    }
+
+    /**
+     * A fetch that {@link FetchCollector#initialize(CompletedFetch)} throws away, here because its partition waits
+     * for an offset reset, is removed from the buffer without {@link CompletedFetch#drain()}. Its part of the lease
+     * is never released, so the buffer of the whole response never goes back to the pool and is collected as
+     * without the pool.
+     */
+    @Test
+    public void testReceiveBufferIsNotReusedWhenAFetchIsThrownAwayBeforeItIsRead() {
+        buildFetcher(4);
+        ReceiveBufferPool pool = new ReceiveBufferPool(64 * 1024 * 1024);
+        try {
+            doReturn(pool).when(networkClientDelegate).receiveBufferPool();
+            assignFromUser(Set.of(tp0, tp1));
+            subscriptions.seek(tp0, 1);
+            subscriptions.seek(tp1, 1);
+            assertEquals(1, sendFetches());
+
+            ByteBuffer response = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            client.prepareResponse(pooledFetchResponse(response));
+            networkClientDelegate.poll(time.timer(0));
+
+            CompletedFetch tp0Fetch = fetcher.fetchBuffer.peek();
+            assertEquals(tp0, tp0Fetch.partition);
+            // tp0 no longer has a valid position, so the data of tp0 is thrown away before it is read
+            subscriptions.requestOffsetReset(tp0);
+            List<ConsumerRecord<byte[], byte[]>> consumed = new ArrayList<>();
+            fetchRecordsInto(consumed);
+            fetchRecordsInto(consumed);
+            assertEquals(3, consumed.size());
+            assertFalse(fetcher.hasCompletedFetches());
+
+            assertFalse(tp0Fetch.isConsumed());
+            assertTrue(pool.handedOut(response.array()));
+            assertEquals(0, pool.retainedBytes());
+        } finally {
+            pool.close();
+        }
+    }
+
+    /**
+     * Records of a control batch (a transaction marker) are read by the streaming iterator, which may point into
+     * the response. A response with a marker is therefore never reused, even though control records are not
+     * returned. Without markers, the same response with a skipped aborted batch goes back to the pool.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    public void testReceiveBufferIsNotReusedAfterATransactionMarker(boolean withMarkers) {
+        buildFetcher(AutoOffsetResetStrategy.EARLIEST, new ByteArrayDeserializer(),
+                new ByteArrayDeserializer(), Integer.MAX_VALUE, IsolationLevel.READ_COMMITTED);
+        ReceiveBufferPool pool = new ReceiveBufferPool(64 * 1024 * 1024);
+        try {
+            doReturn(pool).when(networkClientDelegate).receiveBufferPool();
+            // a committed transaction of producer 1, then an aborted transaction of producer 2
+            ByteBuffer buffer = ByteBuffer.allocate(1024);
+            int currentOffset = 0;
+            currentOffset += appendTransactionalRecords(buffer, 1L, currentOffset,
+                    new SimpleRecord(time.milliseconds(), "key".getBytes(), "value-0".getBytes()),
+                    new SimpleRecord(time.milliseconds(), "key".getBytes(), "value-1".getBytes()));
+            if (withMarkers) {
+                commitTransaction(buffer, 1L, currentOffset);
+                currentOffset++;
+            }
+            int abortedOffset = currentOffset;
+            currentOffset += appendTransactionalRecords(buffer, 2L, currentOffset,
+                    new SimpleRecord(time.milliseconds(), "key".getBytes(), "aborted".getBytes()),
+                    new SimpleRecord(time.milliseconds(), "key".getBytes(), "aborted".getBytes()));
+            if (withMarkers)
+                currentOffset += abortTransaction(buffer, 2L, currentOffset);
+            buffer.flip();
+            List<FetchResponseData.AbortedTransaction> abortedTransactions = List.of(
+                    new FetchResponseData.AbortedTransaction().setProducerId(2L).setFirstOffset(abortedOffset));
+
+            assignFromUser(Set.of(tp0));
+            subscriptions.seek(tp0, 0);
+            assertEquals(1, sendFetches());
+            ByteBuffer response = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            client.prepareResponse(pooledFetchResponse(response, MemoryRecords.readableRecords(buffer),
+                    abortedTransactions, tidp0));
+            networkClientDelegate.poll(time.timer(0));
+
+            List<ConsumerRecord<byte[], byte[]>> consumed = new ArrayList<>();
+            fetchRecordsInto(consumed);
+            assertEquals(2, consumed.size());
+            // the fetch was read to its end and drained
+            assertEquals(currentOffset, subscriptions.position(tp0).offset);
+            assertFalse(fetcher.hasCompletedFetches());
+
+            assertEquals(withMarkers, pool.handedOut(response.array()));
+            if (!withMarkers)
+                assertSame(response.array(), overwrite(pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES)).array());
+            for (int i = 0; i < consumed.size(); i++)
+                assertArrayEquals(("value-" + i).getBytes(), consumed.get(i).value());
+        } finally {
+            pool.close();
+        }
+    }
+
+    private static ByteBuffer overwrite(ByteBuffer buffer) {
+        Arrays.fill(buffer.array(), (byte) 0x7F);
+        return buffer;
+    }
+
+    /**
+     * A response for tp0 and tp1 whose records are in the given buffer, as the network layer would have read them.
+     */
+    private FetchResponse pooledFetchResponse(ByteBuffer response) {
+        return pooledFetchResponse(response, records, List.of(), tidp0, tidp1);
+    }
+
+    /**
+     * A response with a copy of the given records for each of the given partitions. The records are in the given
+     * buffer, as the network layer would have read them.
+     */
+    private FetchResponse pooledFetchResponse(ByteBuffer response,
+                                              MemoryRecords partitionRecords,
+                                              List<FetchResponseData.AbortedTransaction> abortedTransactions,
+                                              TopicIdPartition... tps) {
+        Map<TopicIdPartition, FetchResponseData.PartitionData> partitions = new LinkedHashMap<>();
+        int position = 0;
+        for (TopicIdPartition tp : tps) {
+            ByteBuffer slice = response.duplicate();
+            slice.position(position);
+            slice.put(partitionRecords.buffer().duplicate());
+            slice.limit(slice.position()).position(position);
+            position = slice.limit();
+            partitions.put(tp, new FetchResponseData.PartitionData()
+                    .setPartitionIndex(tp.partition())
+                    .setHighWatermark(100)
+                    .setLastStableOffset(100)
+                    .setLogStartOffset(0)
+                    .setAbortedTransactions(abortedTransactions)
+                    .setRecords(MemoryRecords.readableRecords(slice.slice())));
+        }
+        return FetchResponse.of(Errors.NONE, 0, INVALID_SESSION_ID, new LinkedHashMap<>(partitions), List.of());
     }
 
     /**

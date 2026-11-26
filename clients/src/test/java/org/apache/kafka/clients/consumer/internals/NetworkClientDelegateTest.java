@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.clients.consumer.internals;
 
+import org.apache.kafka.clients.ApiVersions;
 import org.apache.kafka.clients.ClientResponse;
 import org.apache.kafka.clients.Metadata;
 import org.apache.kafka.clients.MockClient;
@@ -46,8 +47,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Properties;
@@ -373,6 +376,49 @@ public class NetworkClientDelegateTest {
             assertTrue(unsentRequest.future().isDone());
             TestUtils.assertFutureThrows(NetworkException.class, unsentRequest.future());
         }
+    }
+
+    @Test
+    public void testSupplierCreatesReceiveBufferPoolOnlyWhenAsked() throws Exception {
+        try (Metrics metrics = new Metrics(time)) {
+            for (boolean reuseReceiveBuffers : List.of(true, false)) {
+                NetworkClientDelegate delegate = NetworkClientDelegate.supplier(time, new LogContext(), metadata,
+                        consumerConfig(), new ApiVersions(), metrics, metrics.sensor("throttle-" + reuseReceiveBuffers),
+                        null, backgroundEventHandler, false, mock(AsyncConsumerMetrics.class), reuseReceiveBuffers).get();
+                try {
+                    assertEquals(reuseReceiveBuffers, delegate.receiveBufferPool() != null);
+                } finally {
+                    delegate.close();
+                }
+            }
+        }
+    }
+
+    @Test
+    public void testCloseClosesReceiveBufferPool() throws Exception {
+        ReceiveBufferPool pool = new ReceiveBufferPool(64 * 1024 * 1024);
+        NetworkClientDelegate delegate = new NetworkClientDelegate(time, consumerConfig(), new LogContext(), client,
+                metadata, backgroundEventHandler, false, mock(AsyncConsumerMetrics.class), pool);
+        ByteBuffer kept = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+        ByteBuffer later = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+        pool.recycle(kept.array());
+        assertEquals(kept.capacity(), pool.retainedBytes());
+
+        delegate.close();
+        assertEquals(0, pool.retainedBytes());
+        // a fetch that is drained after close does not fill the pool again
+        pool.recycle(later.array());
+        assertEquals(0, pool.retainedBytes());
+    }
+
+    private static ConsumerConfig consumerConfig() {
+        Properties properties = new Properties();
+        properties.put(KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        properties.put(VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
+        properties.put(GROUP_ID_CONFIG, GROUP_ID);
+        properties.put(REQUEST_TIMEOUT_MS_CONFIG, REQUEST_TIMEOUT_MS);
+        properties.put(BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        return new ConsumerConfig(properties);
     }
 
     public NetworkClientDelegate newNetworkClientDelegate(boolean notifyMetadataErrorsViaErrorQueue) {

@@ -63,6 +63,11 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     }
 
     @Override
+    protected ReceiveBufferPool receiveBufferPool() {
+        return networkClientDelegate.receiveBufferPool();
+    }
+
+    @Override
     protected boolean isUnavailable(Node node) {
         return networkClientDelegate.isUnavailable(node);
     }

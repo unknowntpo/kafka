@@ -32,6 +32,7 @@ import org.apache.kafka.common.internals.IdempotentCloser;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.Errors;
+import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.FetchResponse;
 import org.apache.kafka.common.utils.Time;
@@ -179,6 +180,10 @@ public abstract class AbstractFetch implements Closeable {
 
             Map<TopicPartition, Metadata.LeaderIdAndEpoch> partitionsWithUpdatedLeaderInfo = new HashMap<>();
             long responseBytes = 0;
+            // Lets the buffer of this response go back to the pool once every fetch made from it is done with it.
+            // If this method fails before the end, the lease keeps its hold and the buffer is never reused.
+            ReceiveBufferPool receiveBufferPool = receiveBufferPool();
+            ReceiveBufferPool.Lease receiveLease = receiveBufferPool != null ? new ReceiveBufferPool.Lease(receiveBufferPool) : null;
 
             for (Map.Entry<TopicPartition, FetchResponseData.PartitionData> entry : responseData.entrySet()) {
                 TopicPartition partition = entry.getKey();
@@ -224,9 +229,19 @@ public abstract class AbstractFetch implements Closeable {
                         partitionData,
                         metricAggregator,
                         fetchOffset);
+                if (receiveLease != null) {
+                    // before the fetch is added to the buffer, where another thread may drain it
+                    if (partitionData.records() instanceof MemoryRecords)
+                        completedFetch.receiveLease(receiveLease, ((MemoryRecords) partitionData.records()).buffer());
+                    else
+                        receiveLease.taint();
+                }
                 fetchBuffer.add(completedFetch);
                 responseBytes += completedFetch.sizeInBytes;
             }
+
+            if (receiveLease != null)
+                receiveLease.release();
 
             lastResponseBytes.put(fetchTarget.id(), responseBytes);
 
@@ -507,6 +522,16 @@ public abstract class AbstractFetch implements Closeable {
      */
     protected boolean prefetch() {
         return true;
+    }
+
+    /**
+     * The pool that the network client reads fetch responses into. The buffer of a response goes back to it once
+     * every {@link CompletedFetch} of the response was read to its end and no record handed out points into it.
+     *
+     * @return the pool, or null if the network client allocates a new buffer for every response
+     */
+    protected ReceiveBufferPool receiveBufferPool() {
+        return null;
     }
 
     /**
