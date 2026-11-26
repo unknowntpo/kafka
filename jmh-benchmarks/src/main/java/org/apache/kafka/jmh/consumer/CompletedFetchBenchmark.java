@@ -157,6 +157,7 @@ public class CompletedFetchBenchmark {
     private Deserializers<byte[], byte[]> deserializers;
     private Headers sharedEmptyHeaders;
     private byte[] floorScratch = new byte[4 * BATCH_BYTES];
+    private byte[] reusingScratch;
 
     @Setup(Level.Trial)
     public void setup() throws Throwable {
@@ -318,9 +319,11 @@ public class CompletedFetchBenchmark {
     public void iterateReusing(Blackhole bh) {
         MemoryRecords records = MemoryRecords.readableRecords(responseBuffer.duplicate());
         for (RecordBatch batch : records.batches()) {
-            try (CloseableIterator<Record> it = ((DefaultRecordBatch) batch).reusingIterator(decompressionBufferSupplier)) {
+            try (DefaultRecordBatch.ReusingRecordIterator it =
+                     ((DefaultRecordBatch) batch).reusingIterator(decompressionBufferSupplier, reusingScratch)) {
                 while (it.hasNext())
                     bh.consume(it.next());
+                reusingScratch = it.decompressionArray();
             }
         }
     }

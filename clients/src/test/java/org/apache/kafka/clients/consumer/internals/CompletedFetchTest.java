@@ -39,6 +39,8 @@ import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.record.internal.Records;
 import org.apache.kafka.common.record.internal.SimpleRecord;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.ByteBufferDeserializer;
+import org.apache.kafka.common.serialization.IntegerDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.UUIDDeserializer;
 import org.apache.kafka.common.serialization.UUIDSerializer;
@@ -62,6 +64,8 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mockConstruction;
 
@@ -257,6 +261,73 @@ public class CompletedFetchTest {
                     all.addAll(completedFetch.fetchRecords(fetchConfig, deserializers, 3));
                 assertBatchRecords(all, 0, 20, withHeaders);
             }
+        }
+    }
+
+    /**
+     * A deserializer that is not known to copy its input, such as ByteBufferDeserializer, reads each record from
+     * its own buffer, so the values handed out do not change when the next batch is read.
+     */
+    @Test
+    public void testValuesOfOtherDeserializersKeepTheirBytesWhenTheNextBatchIsRead() {
+        FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+        CompletedFetch completedFetch = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                .setRecords(newBatches(CompressionType.LZ4, 0, 2, 5, false)));
+
+        try (Deserializers<ByteBuffer, ByteBuffer> deserializers =
+                     new Deserializers<>(new ByteBufferDeserializer(), new ByteBufferDeserializer(), null)) {
+            List<ConsumerRecord<ByteBuffer, ByteBuffer>> first = completedFetch.fetchRecords(fetchConfig, deserializers, 5);
+            List<ConsumerRecord<ByteBuffer, ByteBuffer>> second = completedFetch.fetchRecords(fetchConfig, deserializers, 5);
+            assertEquals(5, first.size());
+            assertEquals(5, second.size());
+            for (int i = 0; i < 5; i++) {
+                assertEquals(ByteBuffer.wrap(("value-" + i).getBytes()), first.get(i).value());
+                assertEquals(ByteBuffer.wrap(("value-" + (i + 5)).getBytes()), second.get(i).value());
+            }
+        }
+    }
+
+    /**
+     * The key and value kept in a RecordDeserializationException are copies, so they do not change when the
+     * same reused Record reads other records.
+     */
+    @Test
+    public void testDeserializationExceptionKeepsCopiesOfKeyAndValue() {
+        FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+        ByteBuffer buffer = ByteBuffer.allocate(8192);
+        try (MemoryRecordsBuilder builder = MemoryRecords.builder(buffer, Compression.lz4().build(), TimestampType.CREATE_TIME, 0)) {
+            builder.append(0L, "key-0".getBytes(), new byte[] {0, 0, 0, 1});
+            // IntegerDeserializer fails: the value is not 4 bytes long
+            builder.append(1L, "key-1".getBytes(), "bad".getBytes());
+            builder.build();
+        }
+        try (MemoryRecordsBuilder builder = MemoryRecords.builder(buffer, Compression.lz4().build(), TimestampType.CREATE_TIME, 2)) {
+            builder.append(2L, "key-2".getBytes(), new byte[] {0, 0, 0, 3});
+            builder.build();
+        }
+        buffer.flip();
+        CompletedFetch completedFetch = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                .setRecords(MemoryRecords.readableRecords(buffer)));
+
+        try (Deserializers<byte[], Integer> deserializers =
+                     new Deserializers<>(new ByteArrayDeserializer(), new IntegerDeserializer(), null)) {
+            assertEquals(1, completedFetch.fetchRecords(fetchConfig, deserializers, 10).size());
+            RecordDeserializationException thrown = assertThrows(RecordDeserializationException.class,
+                    () -> completedFetch.fetchRecords(fetchConfig, deserializers, 10));
+            assertEquals(1, thrown.offset());
+            ByteBuffer key = thrown.keyBuffer();
+            ByteBuffer value = thrown.valueBuffer();
+            assertNotSame(key, value);
+
+            // try the failed record again, as the application does if it does not seek past it
+            assertThrows(RecordDeserializationException.class, () -> completedFetch.fetchRecords(fetchConfig, deserializers, 10));
+
+            assertSame(key, thrown.keyBuffer());
+            assertEquals(ByteBuffer.wrap("key-1".getBytes()), key);
+            assertEquals(ByteBuffer.wrap("bad".getBytes()), value);
+            // a copy holds only its own bytes
+            assertEquals(key.remaining(), key.capacity());
+            assertEquals(value.remaining(), value.capacity());
         }
     }
 
