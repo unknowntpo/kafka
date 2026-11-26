@@ -47,14 +47,12 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Predicate;
 
 import static org.apache.kafka.clients.consumer.internals.FetchUtils.requestMetadataUpdate;
 
@@ -77,6 +75,8 @@ public abstract class AbstractFetch implements Closeable {
     protected final FetchBuffer fetchBuffer;
     protected final BufferSupplier decompressionBufferSupplier;
     protected final Set<Integer> nodesWithPendingFetchRequests;
+    // The size of the records in the last fetch response of each node. It is the prefetch limit of that node.
+    private final Map<Integer, Long> lastResponseBytes = new HashMap<>();
 
     private final Map<Integer, FetchSessionHandler> sessionHandlers;
 
@@ -178,6 +178,8 @@ public abstract class AbstractFetch implements Closeable {
             final FetchMetricsAggregator metricAggregator = new FetchMetricsAggregator(metricsManager, partitions);
 
             Map<TopicPartition, Metadata.LeaderIdAndEpoch> partitionsWithUpdatedLeaderInfo = new HashMap<>();
+            long responseBytes = 0;
+
             for (Map.Entry<TopicPartition, FetchResponseData.PartitionData> entry : responseData.entrySet()) {
                 TopicPartition partition = entry.getKey();
                 FetchRequest.PartitionData requestData = data.sessionPartitions().get(partition);
@@ -223,7 +225,10 @@ public abstract class AbstractFetch implements Closeable {
                         metricAggregator,
                         fetchOffset);
                 fetchBuffer.add(completedFetch);
+                responseBytes += completedFetch.sizeInBytes;
             }
+
+            lastResponseBytes.put(fetchTarget.id(), responseBytes);
 
             if (!partitionsWithUpdatedLeaderInfo.isEmpty()) {
                 List<Node> leaderNodes = new ArrayList<>();
@@ -332,24 +337,6 @@ public abstract class AbstractFetch implements Closeable {
     }
 
     /**
-     * Return the list of <em>fetchable</em> partitions, which are the list of partitions to which we are subscribed,
-     * but <em>excluding</em> any partitions for which we still have buffered data. The idea is that since the user
-     * has yet to process the data for the partition that has already been fetched, we should not go send for more data
-     * until the previously-fetched data has been processed.
-     *
-     * @param buffered The set of partitions we have in our buffer
-     * @return {@link List} of {@link TopicPartition topic partitions} for which we should fetch data
-     */
-    private List<TopicPartition> fetchablePartitions(Set<TopicPartition> buffered) {
-        // This is the test that returns true if the partition is *not* buffered
-        Predicate<TopicPartition> isNotBuffered = tp -> !buffered.contains(tp);
-
-        // Return all partitions that are in an otherwise fetchable state *and* for which we don't already have some
-        // messages sitting in our buffer.
-        return subscriptions.fetchablePartitions(isNotBuffered);
-    }
-
-    /**
      * Determine from which replica to read: the <i>preferred</i> or the <i>leader</i>. The preferred replica is used
      * iff:
      *
@@ -425,26 +412,26 @@ public abstract class AbstractFetch implements Closeable {
         long currentTimeMs = time.milliseconds();
         Map<String, Uuid> topicIds = metadata.topicIds();
 
-        // This is the set of partitions that have buffered data
-        Set<TopicPartition> buffered = Collections.unmodifiableSet(fetchBuffer.bufferedPartitions());
+        // This is the data that is buffered and not yet consumed, for each partition that has such data
+        Map<TopicPartition, FetchBuffer.BufferedState> buffered = fetchBuffer.bufferedStates();
 
-        // This is the list of partitions that are fetchable and have no buffered data
-        List<TopicPartition> unbuffered = fetchablePartitions(buffered);
+        // With prefetch, a partition that has buffered data is a candidate too. Without it, only the partitions
+        // that have no buffered data are candidates.
+        List<TopicPartition> fetchablePartitions = prefetch()
+                ? subscriptions.fetchablePartitions(tp -> true)
+                : subscriptions.fetchablePartitions(tp -> !buffered.containsKey(tp));
 
-        if (unbuffered.isEmpty()) {
-            // If every currently fetchable partition already has buffered data, there is no need to issue
-            // additional fetch requests. This is a safe point to wake the buffer immediately because progress
-            // can be made by consuming the buffered data. If no partitions are fetchable at all (for example,
-            // no assignment yet, invalid positions, or paused), the state will not change until some external
-            // event occurs, so an immediate wakeup would only busy-loop the caller rather than allowing it
-            // to remain parked until bounded by other mechanisms (such as heartbeat interval or poll timeout).
-            boolean canWakeBufferIfNoFetchRequestsToSend = subscriptions.hasFetchablePartitions(tp -> true);
-            return new FetchRequestPreparationResult(Map.of(), canWakeBufferIfNoFetchRequestsToSend);
+        if (fetchablePartitions.isEmpty()) {
+            // If no partitions are fetchable at all (for example, no assignment yet, invalid positions, or
+            // paused), the state will not change until some external event occurs, so an immediate wakeup
+            // would only busy-loop the caller rather than allowing it to remain parked until bounded by other
+            // mechanisms (such as heartbeat interval or poll timeout).
+            return new FetchRequestPreparationResult(Map.of(), false);
         }
 
-        Set<Integer> bufferedNodes = bufferedNodes(buffered, currentTimeMs);
+        Set<Integer> blockedNodes = prefetchBlockedNodes(buffered, currentTimeMs);
 
-        for (TopicPartition partition : unbuffered) {
+        for (TopicPartition partition : fetchablePartitions) {
             SubscriptionState.FetchPosition position = positionForPartition(partition);
             Optional<Node> nodeOpt = maybeNodeForPosition(partition, position, currentTimeMs);
 
@@ -462,11 +449,11 @@ public abstract class AbstractFetch implements Closeable {
             } else if (nodesWithPendingFetchRequests.contains(node.id())) {
                 // If there's already an inflight request for this node, don't issue another request.
                 log.trace("Skipping fetch for partition {} because previous request to {} has not been processed", partition, node);
-            } else if (bufferedNodes.contains(node.id())) {
-                // While a node has buffered data, don't fetch other partition data from it. Because the buffered
-                // partitions are not included in the fetch request, those partitions will be inadvertently dropped
-                // from the broker fetch session cache. In some cases, that could lead to the entire fetch session
-                // being evicted.
+            } else if (blockedNodes.contains(node.id())) {
+                // Every request to a node includes all of its fetchable partitions. A partition that is left
+                // out is dropped from the broker fetch session cache, and in some cases that could lead to the
+                // entire fetch session being evicted. So a node gets no request while one of its buffered
+                // partitions cannot be prefetched, or while its buffered data is over the prefetch limit.
                 log.trace("Skipping fetch for partition {} because its leader node {} hosts buffered partitions", partition, node);
             } else {
                 // if there is a leader and no in-flight requests, issue a new fetch
@@ -475,25 +462,51 @@ public abstract class AbstractFetch implements Closeable {
                     return fetchSessionHandler.newBuilder();
                 });
                 Uuid topicId = topicIds.getOrDefault(partition.topic(), Uuid.ZERO_UUID);
+                // A prefetch continues after the buffered data. Otherwise the fetch starts at the consumed
+                // position, and buffered data that arrives later continues from it again.
+                FetchBuffer.BufferedState bufferedState = buffered.get(partition);
+                long fetchOffset = bufferedState != null ? bufferedState.prefetchOffset : position.offset;
+                if (bufferedState == null)
+                    fetchBuffer.clearPrefetchInvalidated(partition);
                 FetchRequest.PartitionData partitionData = new FetchRequest.PartitionData(topicId,
-                        position.offset,
+                        fetchOffset,
                         FetchRequest.INVALID_LOG_START_OFFSET,
                         fetchConfig.fetchSize,
                         position.currentLeader.epoch,
                         Optional.empty());
                 builder.add(partition, partitionData);
 
-                log.debug("Added {} fetch request for partition {} at position {} to node {}", fetchConfig.isolationLevel,
-                        partition, position, node);
+                log.debug("Added {} fetch request for partition {} at offset {} and position {} to node {}",
+                        fetchConfig.isolationLevel, partition, fetchOffset, position, node);
             }
         }
 
-        // If every fetchable-but-unbuffered partition was skipped (for example, due to reconnect backoff,
-        // an in-flight request, or its node already hosting buffered partitions), the state will only
-        // change over time. An immediate wakeup would therefore just busy-loop the caller instead of
-        // respecting its normal backoff. This case is only relevant when fetchable partitions exist but
-        // the resulting request map is empty; otherwise the caller ignores this flag.
-        return new FetchRequestPreparationResult(convert(fetchable), false);
+        // If no request can be sent but a fetchable partition has buffered data, this is a safe point to wake
+        // the buffer immediately because progress can be made by consuming the buffered data. If nothing is
+        // buffered and every partition was skipped (for example, due to reconnect backoff or an in-flight
+        // request), the state will only change over time. An immediate wakeup would therefore just busy-loop
+        // the caller instead of respecting its normal backoff.
+        boolean hasConsumableBufferedData = false;
+        for (TopicPartition partition : buffered.keySet()) {
+            if (subscriptions.isFetchable(partition)) {
+                hasConsumableBufferedData = true;
+                break;
+            }
+        }
+        return new FetchRequestPreparationResult(convert(fetchable), fetchable.isEmpty() && hasConsumableBufferedData);
+    }
+
+    /**
+     * Whether the next fetch for a partition may be sent while earlier data of the partition is still buffered.
+     * Without it, a node gets no fetch request while any of its partitions has buffered data.
+     *
+     * <p>
+     *
+     * This is not the same as {@code AsyncKafkaConsumer#sendPrefetches}. That method sends fetch requests before
+     * {@code poll()} returns records, and those requests follow the rules of this class too.
+     */
+    protected boolean prefetch() {
+        return true;
     }
 
     /**
@@ -633,21 +646,37 @@ public abstract class AbstractFetch implements Closeable {
      * Otherwise, its node would end up in the set of nodes with buffered data and no fetch would be requested.
      * </p>
      *
-     * @param partitions Buffered partitions
+     * <p>
+     * A node is skipped while one of its buffered partitions cannot be prefetched. It is also skipped while the
+     * buffered data of its partitions is larger than its last fetch response. So the amount of data that waits
+     * for the application follows the size of the responses, and it is about two responses per node.
+     * </p>
+     *
+     * @param buffered Buffered data for each partition
      * @param currentTimeMs Current timestamp
      *
-     * @return Set of zero or more IDs for leader nodes of buffered partitions
+     * @return Set of zero or more IDs for nodes that are skipped
      */
-    private Set<Integer> bufferedNodes(Set<TopicPartition> partitions, long currentTimeMs) {
+    private Set<Integer> prefetchBlockedNodes(Map<TopicPartition, FetchBuffer.BufferedState> buffered, long currentTimeMs) {
         Set<Integer> ids = new HashSet<>();
+        Map<Integer, Long> bufferedBytes = new HashMap<>();
 
-        for (TopicPartition partition : partitions) {
+        for (Map.Entry<TopicPartition, FetchBuffer.BufferedState> entry : buffered.entrySet()) {
+            TopicPartition partition = entry.getKey();
             if (!subscriptions.isFetchable(partition))
                 continue;
 
             SubscriptionState.FetchPosition position = positionForPartition(partition);
             Optional<Node> nodeOpt = maybeNodeForPosition(partition, position, currentTimeMs);
-            nodeOpt.ifPresent(node -> ids.add(node.id()));
+            if (nodeOpt.isEmpty())
+                continue;
+
+            int nodeId = nodeOpt.get().id();
+            FetchBuffer.BufferedState state = entry.getValue();
+            if (!prefetch() || !state.eligible)
+                ids.add(nodeId);
+            else if (bufferedBytes.merge(nodeId, state.bytes, Long::sum) > lastResponseBytes.getOrDefault(nodeId, 0L))
+                ids.add(nodeId);
         }
 
         return ids;

@@ -18,8 +18,11 @@ package org.apache.kafka.clients.consumer.internals;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.record.internal.MemoryRecords;
+import org.apache.kafka.common.record.internal.SimpleRecord;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
@@ -32,6 +35,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
@@ -173,6 +177,36 @@ public class FetchBufferTest {
     }
 
     @Test
+    public void testBufferedStates() {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            CompletedFetch first = completedFetch(topicAPartition0);
+            fetchBuffer.add(first);
+            fetchBuffer.add(completedFetch(topicAPartition0));
+            fetchBuffer.add(completedFetch(topicAPartition1));
+
+            // The collector sets a fetch as the next in line before it removes the fetch from the queue.
+            // The fetch must be counted once.
+            fetchBuffer.setNextInLineFetch(first);
+            Map<TopicPartition, FetchBuffer.BufferedState> states = fetchBuffer.bufferedStates();
+            assertEquals(partitions(topicAPartition0, topicAPartition1), states.keySet());
+            assertEquals(2L * first.sizeInBytes, states.get(topicAPartition0).bytes);
+            assertEquals(first.sizeInBytes, states.get(topicAPartition1).bytes);
+            assertEquals(first.prefetchOffset, states.get(topicAPartition0).prefetchOffset);
+            assertTrue(states.get(topicAPartition0).eligible);
+
+            fetchBuffer.invalidatePrefetch(topicAPartition0);
+            states = fetchBuffer.bufferedStates();
+            assertFalse(states.get(topicAPartition0).eligible);
+            assertTrue(states.get(topicAPartition1).eligible);
+
+            // Data of a partition that is not retained is removed, and so is the mark on the partition
+            fetchBuffer.retainAll(partitions(topicAPartition1));
+            fetchBuffer.add(completedFetch(topicAPartition0));
+            assertTrue(fetchBuffer.bufferedStates().get(topicAPartition0).eligible);
+        }
+    }
+
+    @Test
     public void testWakeup() throws Exception {
         try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
             final Thread waitingThread = new Thread(() -> {
@@ -187,7 +221,8 @@ public class FetchBufferTest {
     }
 
     private CompletedFetch completedFetch(TopicPartition tp) {
-        FetchResponseData.PartitionData partitionData = new FetchResponseData.PartitionData();
+        MemoryRecords records = MemoryRecords.withRecords(Compression.NONE, new SimpleRecord("value".getBytes()));
+        FetchResponseData.PartitionData partitionData = new FetchResponseData.PartitionData().setRecords(records);
         FetchMetricsAggregator metricsAggregator = new FetchMetricsAggregator(metricsManager, allPartitions);
         return new CompletedFetch(
                 logContext.logger(CompletedFetch.class),

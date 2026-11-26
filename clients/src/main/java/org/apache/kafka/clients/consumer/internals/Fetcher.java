@@ -93,6 +93,12 @@ public class Fetcher<K, V> extends AbstractFetch {
         client.maybeThrowAuthFailure(node);
     }
 
+    // The classic consumer keeps its rule: no fetch to a node while one of its partitions has buffered data.
+    @Override
+    protected boolean prefetch() {
+        return false;
+    }
+
     public void clearBufferedDataForUnassignedPartitions(Collection<TopicPartition> assignedPartitions) {
         fetchBuffer.retainAll(new HashSet<>(assignedPartitions));
     }

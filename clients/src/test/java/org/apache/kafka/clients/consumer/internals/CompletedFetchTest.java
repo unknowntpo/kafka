@@ -28,6 +28,7 @@ import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.CompressionType;
 import org.apache.kafka.common.record.internal.ControlRecordType;
@@ -63,10 +64,12 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mockConstruction;
 
 public class CompletedFetchTest {
@@ -154,6 +157,26 @@ public class CompletedFetchTest {
             List<ConsumerRecord<String, String>> records = completedFetch.fetchRecords(fetchConfig, deserializers, -10);
             assertEquals(0, records.size());
         }
+    }
+
+    @Test
+    public void testPrefetchOffsetAndEligibility() {
+        // Records for 10-20: a prefetch continues at offset 21
+        Records records = newRecords(10, 11, 5);
+        CompletedFetch withRecords = newCompletedFetch(5, new FetchResponseData.PartitionData().setRecords(records));
+        assertEquals(21, withRecords.prefetchOffset);
+        assertEquals(records.sizeInBytes(), withRecords.sizeInBytes);
+        assertTrue(withRecords.prefetchEligible);
+
+        // No fetch may continue after a response that has no records or that has an error
+        CompletedFetch withoutRecords = newCompletedFetch(5, new FetchResponseData.PartitionData());
+        assertEquals(5, withoutRecords.prefetchOffset);
+        assertFalse(withoutRecords.prefetchEligible);
+
+        CompletedFetch withError = newCompletedFetch(5, new FetchResponseData.PartitionData()
+                .setRecords(records)
+                .setErrorCode(Errors.OFFSET_OUT_OF_RANGE.code()));
+        assertFalse(withError.prefetchEligible);
     }
 
     @Test
