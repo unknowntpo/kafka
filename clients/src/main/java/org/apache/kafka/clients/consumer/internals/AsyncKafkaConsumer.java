@@ -518,7 +518,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             );
 
             // This FetchBuffer is shared between the application and network threads.
-            this.fetchBuffer = new FetchBuffer(logContext);
+            this.fetchBuffer = new FetchBuffer(logContext, time);
             this.fetchPredecoder = FetchPredecoder.maybeCreate(fetchConfig, deserializers);
             if (fetchPredecoder != null)
                 fetchBuffer.setAddListener(fetchPredecoder::submit);
@@ -683,7 +683,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
         this.subscriptions = subscriptions;
         this.clientId = config.getString(ConsumerConfig.CLIENT_ID_CONFIG);
         this.autoCommitEnabled = config.getBoolean(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG);
-        this.fetchBuffer = new FetchBuffer(logContext);
+        this.fetchBuffer = new FetchBuffer(logContext, time);
         this.fetchPredecoder = null;
         this.isolationLevel = IsolationLevel.READ_UNCOMMITTED;
         this.time = time;

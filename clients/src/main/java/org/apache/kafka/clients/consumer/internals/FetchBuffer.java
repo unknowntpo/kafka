@@ -19,6 +19,7 @@ package org.apache.kafka.clients.consumer.internals;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.internals.IdempotentCloser;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Timer;
 import org.apache.kafka.common.utils.internals.LogContext;
 
@@ -35,6 +36,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -118,8 +120,23 @@ public class FetchBuffer implements AutoCloseable {
         prefetchInvalidated.remove(partition);
     }
 
+    // Marks that the application thread is not waiting for data
+    private static final long NOT_WAITING = Long.MIN_VALUE;
+
+    private final Time time;
+    // The time the application thread spent without data, up to the last time it took data out of this buffer
+    private final LongAdder waitedNanos = new LongAdder();
+    // When the application thread last found nothing to consume, or NOT_WAITING while it has data.
+    // Written by the application thread only.
+    private volatile long waitingSinceNanos = NOT_WAITING;
+
     public FetchBuffer(final LogContext logContext) {
+        this(logContext, Time.SYSTEM);
+    }
+
+    public FetchBuffer(final LogContext logContext, final Time time) {
         this.log = logContext.logger(FetchBuffer.class);
+        this.time = time;
         this.completedFetches = new ConcurrentLinkedQueue<>();
         this.lock = new ReentrantLock();
         this.blockingCondition = lock.newCondition();
@@ -217,10 +234,27 @@ public class FetchBuffer implements AutoCloseable {
     CompletedFetch poll() {
         try {
             lock.lock();
-            return completedFetches.poll();
+            CompletedFetch fetch = completedFetches.poll();
+            long since = waitingSinceNanos;
+            if (fetch != null && since != NOT_WAITING) {
+                // the application thread has data again
+                waitedNanos.add(time.nanoseconds() - since);
+                waitingSinceNanos = NOT_WAITING;
+            }
+            return fetch;
         } finally {
             lock.unlock();
         }
+    }
+
+    /**
+     * The total time the application thread has been without data: from a poll that found nothing to consume
+     * until the next time it took data out of this buffer. A poll with a zero timeout counts as well, because it
+     * also found nothing. The fetch code reads it to decide how many connections to use to a broker.
+     */
+    long waitedNanos() {
+        long since = waitingSinceNanos;
+        return waitedNanos.sum() + (since == NOT_WAITING ? 0 : time.nanoseconds() - since);
     }
 
     /**
@@ -237,6 +271,9 @@ public class FetchBuffer implements AutoCloseable {
      * @param timer Timer that provides time to wait
      */
     void awaitWakeup(Timer timer) {
+        // the caller found nothing to consume
+        if (waitingSinceNanos == NOT_WAITING)
+            waitingSinceNanos = time.nanoseconds();
         try {
             lock.lock();
 
