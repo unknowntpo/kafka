@@ -61,10 +61,14 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 import org.slf4j.Logger;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.Random;
@@ -95,7 +99,8 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@code iterateReusing}: only {@link DefaultRecordBatch#reusingIterator(BufferSupplier)}, the iterator
  *       {@link CompletedFetch} uses, which reuses one {@link Record} object for all records of a batch.</li>
  *   <li>{@code floor}: a hand-written single pass that builds each {@link ConsumerRecord} with one
- *       value copy; a lower bound for the current public API. Only meaningful for {@code NONE}.</li>
+ *       value copy; a lower bound for the current public API. A compressed batch is first decompressed
+ *       into one array that is reused for all batches.</li>
  * </ul>
  */
 @State(Scope.Benchmark)
@@ -151,6 +156,7 @@ public class CompletedFetchBenchmark {
     private FetchConfig fetchConfigNoCrc;
     private Deserializers<byte[], byte[]> deserializers;
     private Headers sharedEmptyHeaders;
+    private byte[] floorScratch = new byte[4 * BATCH_BYTES];
 
     @Setup(Level.Trial)
     public void setup() throws Throwable {
@@ -221,13 +227,11 @@ public class CompletedFetchBenchmark {
         drain(completedFetch);
         if (n != recordCount)
             throw new IllegalStateException("fetchRecords returned " + n + " records, expected " + recordCount);
-        if ("NONE".equals(compression)) {
-            CountingConsumer counter = new CountingConsumer();
-            int floorCount = floorPass(responseBuffer.duplicate(), counter);
-            if (floorCount != recordCount || counter.matched != recordCount)
-                throw new IllegalStateException("floor parsed " + floorCount + " records (" + counter.matched
-                    + " matched), expected " + recordCount);
-        }
+        CountingConsumer counter = new CountingConsumer();
+        int floorCount = floorPass(responseBuffer.duplicate(), counter);
+        if (floorCount != recordCount || counter.matched != recordCount)
+            throw new IllegalStateException("floor parsed " + floorCount + " records (" + counter.matched
+                + " matched), expected " + recordCount);
     }
 
     @TearDown(Level.Trial)
@@ -323,8 +327,6 @@ public class CompletedFetchBenchmark {
 
     @Benchmark
     public int floor(Blackhole bh) {
-        if (!"NONE".equals(compression))
-            return 0;
         return floorPass(responseBuffer.duplicate(), bh::consume);
     }
 
@@ -359,8 +361,9 @@ public class CompletedFetchBenchmark {
     private static final int CONTROL_MASK = 0x20;
 
     /**
-     * One pass over uncompressed magic v2 batches, without CRC check. Builds one ConsumerRecord per
-     * record with one value copy, one shared empty Headers object and one leader-epoch Optional per batch.
+     * One pass over magic v2 batches, without CRC check. Builds one ConsumerRecord per record with one
+     * value copy, one shared empty Headers object and one leader-epoch Optional per batch. A compressed
+     * batch is decompressed into {@link #floorScratch} first.
      */
     private int floorPass(ByteBuffer buf, RecordSink sink) {
         int n = 0;
@@ -370,16 +373,42 @@ public class CompletedFetchBenchmark {
             if (buf.get(batchStart + MAGIC_OFFSET) != RecordBatch.MAGIC_VALUE_V2)
                 throw new IllegalStateException("only magic v2 is supported");
             short attributes = buf.getShort(batchStart + ATTRIBUTES_OFFSET);
-            if ((attributes & COMPRESSION_MASK) != 0)
-                throw new IllegalStateException("only uncompressed batches are supported");
-            if ((attributes & CONTROL_MASK) == 0)
-                n += floorBatch(buf, batchStart, attributes, sink);
+            if ((attributes & CONTROL_MASK) == 0) {
+                ByteBuffer records;
+                if ((attributes & COMPRESSION_MASK) == 0) {
+                    records = buf.duplicate();
+                    records.position(batchStart + RECORDS_OFFSET);
+                } else {
+                    ByteBuffer batchBuffer = buf.duplicate();
+                    batchBuffer.position(batchStart).limit(batchStart + batchSize);
+                    records = decompress(batchBuffer.slice());
+                }
+                n += floorBatch(buf, batchStart, attributes, records, sink);
+            }
             buf.position(batchStart + batchSize);
         }
         return n;
     }
 
-    private int floorBatch(ByteBuffer buf, int batchStart, short attributes, RecordSink sink) {
+    private ByteBuffer decompress(ByteBuffer batchBuffer) {
+        DefaultRecordBatch batch = (DefaultRecordBatch) MemoryRecords.readableRecords(batchBuffer).batches().iterator().next();
+        int size = 0;
+        try (InputStream in = batch.recordInputStream(decompressionBufferSupplier)) {
+            while (true) {
+                if (size == floorScratch.length)
+                    floorScratch = Arrays.copyOf(floorScratch, 2 * floorScratch.length);
+                int read = in.read(floorScratch, size, floorScratch.length - size);
+                if (read < 0)
+                    break;
+                size += read;
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return ByteBuffer.wrap(floorScratch, 0, size);
+    }
+
+    private int floorBatch(ByteBuffer buf, int batchStart, short attributes, ByteBuffer records, RecordSink sink) {
         long baseOffset = buf.getLong(batchStart);
         int epoch = buf.getInt(batchStart + PARTITION_LEADER_EPOCH_OFFSET);
         Optional<Integer> leaderEpoch = epoch == RecordBatch.NO_PARTITION_LEADER_EPOCH ? Optional.empty() : Optional.of(epoch);
@@ -388,23 +417,22 @@ public class CompletedFetchBenchmark {
         long baseTimestamp = buf.getLong(batchStart + BASE_TIMESTAMP_OFFSET);
         long maxTimestamp = buf.getLong(batchStart + MAX_TIMESTAMP_OFFSET);
         int count = buf.getInt(batchStart + RECORDS_COUNT_OFFSET);
-        buf.position(batchStart + RECORDS_OFFSET);
         for (int i = 0; i < count; i++) {
             // Record layout, see DefaultRecord.readFrom: length varint, attributes int8,
             // timestampDelta varlong, offsetDelta varint, keyLength varint, key,
             // valueLength varint, value, headerCount varint, headers.
-            int bodySize = ByteUtils.readVarint(buf);
-            int recordEnd = buf.position() + bodySize;
-            buf.get(); // record attributes, unused
-            long timestampDelta = ByteUtils.readVarlong(buf);
-            int offsetDelta = ByteUtils.readVarint(buf);
-            int keySize = ByteUtils.readVarint(buf);
-            byte[] key = copyBytes(buf, keySize);
-            int valueSize = ByteUtils.readVarint(buf);
-            byte[] value = copyBytes(buf, valueSize);
-            if (ByteUtils.readVarint(buf) != 0)
+            int bodySize = ByteUtils.readVarint(records);
+            int recordEnd = records.position() + bodySize;
+            records.get(); // record attributes, unused
+            long timestampDelta = ByteUtils.readVarlong(records);
+            int offsetDelta = ByteUtils.readVarint(records);
+            int keySize = ByteUtils.readVarint(records);
+            byte[] key = copyBytes(records, keySize);
+            int valueSize = ByteUtils.readVarint(records);
+            byte[] value = copyBytes(records, valueSize);
+            if (ByteUtils.readVarint(records) != 0)
                 throw new IllegalStateException("headers are not supported by the floor pass");
-            if (buf.position() != recordEnd)
+            if (records.position() != recordEnd)
                 throw new IllegalStateException("record size mismatch");
             sink.accept(new ConsumerRecord<>(TOPIC, TP.partition(), baseOffset + offsetDelta,
                 logAppendTime ? maxTimestamp : baseTimestamp + timestampDelta, timestampType,
