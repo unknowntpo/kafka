@@ -93,6 +93,11 @@ public class Fetcher<K, V> extends AbstractFetch {
         client.maybeThrowAuthFailure(node);
     }
 
+    @Override
+    protected boolean fetchAhead() {
+        return false;
+    }
+
     public void clearBufferedDataForUnassignedPartitions(Collection<TopicPartition> assignedPartitions) {
         fetchBuffer.retainAll(new HashSet<>(assignedPartitions));
     }

@@ -100,7 +100,9 @@ public class NetworkReceive implements Receive {
             }
         }
         if (buffer == null && requestedBufferSize != -1) { // we know the size we want but haven't been able to allocate it yet
-            buffer = memoryPool.tryAllocate(requestedBufferSize);
+            buffer = ReceiveBufferExperiment.allocate(requestedBufferSize);
+            if (buffer == null)
+                buffer = memoryPool.tryAllocate(requestedBufferSize);
             if (buffer == null)
                 log.trace("Broker low on memory - could not allocate buffer of size {} for source {}", requestedBufferSize, source);
         }

@@ -28,16 +28,21 @@ import java.util.Objects;
 
 public class RecordHeaders implements Headers {
 
-    private final List<Header> headers;
+    private static final List<Header> NO_HEADERS = List.of();
+
+    // NO_HEADERS until the first header is added: most records have no headers
+    private List<Header> headers;
     private volatile boolean isReadOnly;
 
     public RecordHeaders() {
-        this((Iterable<Header>) null);
+        this.headers = NO_HEADERS;
     }
 
     public RecordHeaders(Header[] headers) {
-        this.headers = new ArrayList<>();
-        if (headers != null) {
+        if (headers == null || headers.length == 0) {
+            this.headers = NO_HEADERS;
+        } else {
+            this.headers = new ArrayList<>(headers.length);
             for (Header header : headers) {
                 Objects.requireNonNull(header, "Header cannot be null.");
                 this.headers.add(header);
@@ -48,7 +53,7 @@ public class RecordHeaders implements Headers {
     public RecordHeaders(Iterable<Header> headers) {
         //Use efficient copy constructor if possible, fallback to iteration otherwise
         if (headers == null) {
-            this.headers = new ArrayList<>();
+            this.headers = NO_HEADERS;
         } else if (headers instanceof RecordHeaders) {
             this.headers = new ArrayList<>(((RecordHeaders) headers).headers);
         } else {
@@ -64,6 +69,8 @@ public class RecordHeaders implements Headers {
     public Headers add(Header header) throws IllegalStateException {
         Objects.requireNonNull(header, "Header cannot be null.");
         canWrite();
+        if (headers == NO_HEADERS)
+            headers = new ArrayList<>();
         headers.add(header);
         return this;
     }

@@ -26,15 +26,19 @@ import org.slf4j.Logger;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 /**
@@ -57,7 +61,80 @@ public class FetchBuffer implements AutoCloseable {
 
     private final AtomicBoolean wokenup = new AtomicBoolean(false);
 
+    // CONSUMER-3X D-65. The gate lets a stopped connection start again when the application thread has made
+    // room. "freed" is set whenever buffered data stops counting (a fetch was consumed, or left the buffer
+    // without being read) and is read by the application thread once per poll, outside every lock.
+    private final FetchLaneGate laneGate = new FetchLaneGate();
+    private volatile boolean freed;
+
+    FetchLaneGate laneGate() {
+        return laneGate;
+    }
+
+    /** Whether data has left the buffer that {@link #signalRoom()} has not looked at yet. For diagnostics. */
+    boolean roomSignalPending() {
+        return freed;
+    }
+
+    /** Called on the application thread at the end of collecting records for a poll. */
+    void signalRoom() {
+        if (freed) {
+            // cleared before looking: data that is freed while we look is seen by the next poll
+            freed = false;
+            laneGate.roomMayHaveAppeared();
+        }
+    }
+
+    private final Runnable onDrained = () -> freed = true;
+
     private CompletedFetch nextInLineFetch;
+
+    // Partitions whose buffered data was found stale by the application thread. No fetch-ahead is allowed
+    // for them until a fetch has been sent from the consumed position again.
+    private final Set<TopicPartition> fetchAheadInvalidated = ConcurrentHashMap.newKeySet();
+
+    /** Per-partition summary of the buffered data, used to decide whether and where to fetch ahead. */
+    static final class BufferedState {
+        long fetchAheadOffset;
+        long bytes;
+        int fetches;
+        boolean eligible = true;
+    }
+
+    Map<TopicPartition, BufferedState> bufferedStates() {
+        try {
+            lock.lock();
+            final Map<TopicPartition, BufferedState> states = new HashMap<>();
+            if (nextInLineFetch != null && !nextInLineFetch.isConsumed())
+                addBufferedState(states, nextInLineFetch);
+            // For a moment the collector has a fetch both as the next in line and at the head of the queue;
+            // it must be counted once.
+            final CompletedFetch next = nextInLineFetch;
+            completedFetches.forEach(cf -> {
+                if (cf != next)
+                    addBufferedState(states, cf);
+            });
+            return states;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void addBufferedState(Map<TopicPartition, BufferedState> states, CompletedFetch cf) {
+        BufferedState state = states.computeIfAbsent(cf.partition, tp -> new BufferedState());
+        state.fetchAheadOffset = Math.max(state.fetchAheadOffset, cf.fetchAheadOffset);
+        state.bytes += cf.sizeInBytes;
+        state.fetches++;
+        state.eligible &= cf.fetchAheadEligible && !fetchAheadInvalidated.contains(cf.partition);
+    }
+
+    void invalidateFetchAhead(TopicPartition partition) {
+        fetchAheadInvalidated.add(partition);
+    }
+
+    void clearFetchAheadInvalidated(TopicPartition partition) {
+        fetchAheadInvalidated.remove(partition);
+    }
 
     public FetchBuffer(final LogContext logContext) {
         this.log = logContext.logger(FetchBuffer.class);
@@ -95,8 +172,18 @@ public class FetchBuffer implements AutoCloseable {
         }
     }
 
+    private volatile Consumer<CompletedFetch> addListener;
+
     void add(CompletedFetch completedFetch) {
         addAll(List.of(completedFetch));
+        Consumer<CompletedFetch> listener = addListener;
+        if (listener != null)
+            listener.accept(completedFetch);
+    }
+
+    /** The listener is told about every newly buffered fetch; it is called on the thread that adds the fetch. */
+    void setAddListener(Consumer<CompletedFetch> listener) {
+        this.addListener = listener;
     }
 
     void addAll(Collection<CompletedFetch> completedFetches) {
@@ -105,6 +192,8 @@ public class FetchBuffer implements AutoCloseable {
 
         try {
             lock.lock();
+            for (CompletedFetch completedFetch : completedFetches)
+                completedFetch.onDrained(onDrained);
             this.completedFetches.addAll(completedFetches);
             wokenup.set(true);
             blockingCondition.signalAll();
@@ -143,11 +232,35 @@ public class FetchBuffer implements AutoCloseable {
     CompletedFetch poll() {
         try {
             lock.lock();
-            return completedFetches.poll();
+            CompletedFetch fetch = completedFetches.poll();
+            if (fetch != null && fetch != nextInLineFetch)
+                freed = true;   // dropped without becoming the next in line: its data no longer counts
+            long since = starvedSinceNanos;
+            if (fetch != null && since != 0) {
+                // the application has data again
+                waitedNanos.add(System.nanoTime() - since);
+                starvedSinceNanos = 0;
+            }
+            return fetch;
         } finally {
             lock.unlock();
         }
     }
+
+    /**
+     * The total time the application thread has been without data: from a poll that found nothing to consume
+     * until the next time it took data out of this buffer. A poll with a zero timeout counts as well, because it
+     * also found nothing. A consumer whose application is the limit is hardly ever without data; one whose
+     * connections are the limit often is.
+     */
+    long waitedNanos() {
+        long since = starvedSinceNanos;
+        return waitedNanos.sum() + (since == 0 ? 0 : System.nanoTime() - since);
+    }
+
+    private final java.util.concurrent.atomic.LongAdder waitedNanos = new java.util.concurrent.atomic.LongAdder();
+    /** When the application thread last found nothing to consume; 0 while it has data. Written by that thread only. */
+    private volatile long starvedSinceNanos;
 
     /**
      * Allows the caller to await a response from the broker for requested data. The method will block, returning only
@@ -163,6 +276,9 @@ public class FetchBuffer implements AutoCloseable {
      * @param timer Timer that provides time to wait
      */
     void awaitWakeup(Timer timer) {
+        // the caller found nothing to consume
+        if (starvedSinceNanos == 0)
+            starvedSinceNanos = System.nanoTime();
         try {
             lock.lock();
 

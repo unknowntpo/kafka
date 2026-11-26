@@ -33,6 +33,27 @@ public class Deserializers<K, V> implements AutoCloseable {
     private final Plugin<Deserializer<K>> keyDeserializerPlugin;
     private final Plugin<Deserializer<V>> valueDeserializerPlugin;
 
+    // Deserializers of this project that keep no state between calls, do not keep the buffer they are given and
+    // do not read the headers. Records can be decoded for them on any thread, from a buffer view that is reused.
+    private static final java.util.Set<Class<?>> SIMPLE = java.util.Set.of(
+            org.apache.kafka.common.serialization.ByteArrayDeserializer.class,
+            org.apache.kafka.common.serialization.BytesDeserializer.class,
+            org.apache.kafka.common.serialization.StringDeserializer.class,
+            org.apache.kafka.common.serialization.LongDeserializer.class,
+            org.apache.kafka.common.serialization.IntegerDeserializer.class,
+            org.apache.kafka.common.serialization.ShortDeserializer.class,
+            org.apache.kafka.common.serialization.DoubleDeserializer.class,
+            org.apache.kafka.common.serialization.FloatDeserializer.class,
+            org.apache.kafka.common.serialization.UUIDDeserializer.class,
+            org.apache.kafka.common.serialization.VoidDeserializer.class);
+
+    /**
+     * @return true if both deserializers keep no state, do not keep their input buffer and do not read headers
+     */
+    public boolean simple() {
+        return SIMPLE.contains(keyDeserializer().getClass()) && SIMPLE.contains(valueDeserializer().getClass());
+    }
+
     public Deserializers(Deserializer<K> keyDeserializer, Deserializer<V> valueDeserializer, Metrics metrics) {
         this.keyDeserializerPlugin = Plugin.wrapInstance(
                 Objects.requireNonNull(keyDeserializer, "Key deserializer provided to Deserializers should not be null"),

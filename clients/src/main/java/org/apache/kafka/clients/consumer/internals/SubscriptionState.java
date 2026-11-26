@@ -662,6 +662,11 @@ public class SubscriptionState {
         return assignedState(tp).position;
     }
 
+    /** The position of the partition if it can be fetched right now, else null. Safe to call from any thread. */
+    synchronized FetchPosition fetchablePositionOrNull(TopicPartition tp) {
+        return isFetchable(tp) ? positionOrNull(tp) : null;
+    }
+
     public synchronized FetchPosition positionOrNull(TopicPartition tp) {
         final TopicPartitionState state = assignedStateOrNull(tp);
         if (state == null) {

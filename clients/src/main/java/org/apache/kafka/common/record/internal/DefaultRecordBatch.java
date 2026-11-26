@@ -270,6 +270,41 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
         return buffer.getInt(PARTITION_LEADER_EPOCH_OFFSET);
     }
 
+    /**
+     * The records of this batch as one uncompressed buffer, positioned at the first record. For an uncompressed
+     * batch this is a view of the batch; for a compressed batch the whole batch is decompressed into a new buffer.
+     */
+    public ByteBuffer uncompressedRecords(BufferSupplier bufferSupplier) {
+        return uncompressedRecords(bufferSupplier, null);
+    }
+
+    /**
+     * @param scratch an array the caller no longer reads, to decompress into; null to allocate one. The result
+     *                wraps this array, or a larger new one if the records do not fit.
+     */
+    public ByteBuffer uncompressedRecords(BufferSupplier bufferSupplier, byte[] scratch) {
+        if (!isCompressed()) {
+            ByteBuffer records = this.buffer.duplicate();
+            records.position(RECORDS_OFFSET);
+            return records;
+        }
+        byte[] out = scratch != null ? scratch : new byte[Math.max(1024, 4 * sizeInBytes())];
+        int size = 0;
+        try (InputStream in = recordInputStream(bufferSupplier)) {
+            while (true) {
+                if (size == out.length)
+                    out = java.util.Arrays.copyOf(out, 2 * out.length);
+                int read = in.read(out, size, out.length - size);
+                if (read < 0)
+                    break;
+                size += read;
+            }
+        } catch (IOException e) {
+            throw new KafkaException(e);
+        }
+        return ByteBuffer.wrap(out, 0, size);
+    }
+
     public InputStream recordInputStream(BufferSupplier bufferSupplier) {
         final ByteBuffer buffer = this.buffer.duplicate();
         buffer.position(RECORDS_OFFSET);

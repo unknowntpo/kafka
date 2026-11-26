@@ -58,6 +58,8 @@ public class FetchCollector<K, V> {
     private final FetchMetricsManager metricsManager;
     private final Time time;
 
+    private FetchBuffer currentBuffer;
+
     public FetchCollector(final LogContext logContext,
                           final ConsumerMetadata metadata,
                           final SubscriptionState subscriptions,
@@ -89,6 +91,7 @@ public class FetchCollector<K, V> {
      * @throws TopicAuthorizationException If there is TopicAuthorization error in fetchResponse.
      */
     public Fetch<K, V> collectFetch(final FetchBuffer fetchBuffer) {
+        this.currentBuffer = fetchBuffer;
         final Fetch<K, V> fetch = Fetch.empty();
         final Queue<CompletedFetch> pausedCompletedFetches = new ArrayDeque<>();
         int recordsRemaining = fetchConfig.maxPollRecords;
@@ -105,7 +108,10 @@ public class FetchCollector<K, V> {
 
                     if (!completedFetch.isInitialized()) {
                         try {
-                            fetchBuffer.setNextInLineFetch(initialize(completedFetch));
+                            CompletedFetch initialized = initialize(completedFetch);
+                            if (initialized == null)
+                                fetchBuffer.invalidateFetchAhead(completedFetch.partition);
+                            fetchBuffer.setNextInLineFetch(initialized);
                         } catch (Exception e) {
                             // Remove a completedFetch upon a parse with exception if (1) it contains no completedFetch, and
                             // (2) there are no fetched completedFetch with actual content preceding this exception.
@@ -142,6 +148,10 @@ public class FetchCollector<K, V> {
             // re-evaluated in the next poll
             fetchBuffer.addAll(pausedCompletedFetches);
         }
+
+        // Last, outside every lock and outside the finally above: connections that waited for room may start
+        // again. If collecting threw, the next poll does this.
+        fetchBuffer.signalRoom();
 
         return fetch;
     }
@@ -207,6 +217,8 @@ public class FetchCollector<K, V> {
                 // they must be from an obsolete request
                 log.debug("Ignoring fetched records for {} at offset {} since the current position is {}",
                         tp, nextInLineFetch.nextFetchOffset(), position);
+                if (currentBuffer != null)
+                    currentBuffer.invalidateFetchAhead(tp);
             }
         }
 

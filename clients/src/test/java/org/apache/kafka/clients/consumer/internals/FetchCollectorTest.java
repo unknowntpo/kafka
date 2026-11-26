@@ -104,6 +104,40 @@ public class FetchCollectorTest {
     private FetchCollector<String, String> fetchCollector;
     private CompletedFetchBuilder completedFetchBuilder;
 
+    /**
+     * A connection that waits for room is started by the poll in which the application thread finishes a
+     * buffered fetch, and not earlier.
+     */
+    @Test
+    public void testCollectFetchStartsAWaitingConnectionWhenItHasConsumedAFetch() {
+        buildDependencies();
+        assignAndSeek(topicAPartition0);
+        CompletedFetch completedFetch = completedFetchBuilder.recordCount(DEFAULT_MAX_POLL_RECORDS).build();
+        fetchBuffer.add(completedFetch);
+
+        java.util.concurrent.atomic.AtomicInteger restarts = new java.util.concurrent.atomic.AtomicInteger();
+        fetchBuffer.laneGate().waitForRoom(1, new FetchLaneGate.Waiter() {
+            @Override
+            public boolean hasRoom() {
+                return completedFetch.isConsumed();
+            }
+
+            @Override
+            public void lookAgain() {
+                restarts.incrementAndGet();
+            }
+        });
+
+        // all records are handed out, but the fetch still counts as buffered until the next poll finishes it
+        assertFalse(fetchCollector.collectFetch(fetchBuffer).isEmpty());
+        assertFalse(completedFetch.isConsumed());
+        assertEquals(0, restarts.get());
+
+        assertTrue(fetchCollector.collectFetch(fetchBuffer).isEmpty());
+        assertTrue(completedFetch.isConsumed());
+        assertEquals(1, restarts.get());
+    }
+
     @Test
     public void testFetchNormal() {
         int recordCount = DEFAULT_MAX_POLL_RECORDS;

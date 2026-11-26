@@ -37,6 +37,9 @@ import org.apache.kafka.common.record.internal.SimpleRecord;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.UUIDDeserializer;
 import org.apache.kafka.common.serialization.UUIDSerializer;
+import org.apache.kafka.common.header.Header;
+import org.apache.kafka.common.header.internals.RecordHeader;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
@@ -209,6 +212,84 @@ public class CompletedFetchTest {
                 assertEquals(headers, valueThrown.headers());
             }
         }
+    }
+
+    /**
+     * The array used to decompress a batch is used again for the next batch and, on a decoder thread, for the
+     * next fetch. A record that was already handed out must not change when that happens.
+     */
+    @Test
+    public void testRecordsKeepTheirBytesWhenTheNextCompressedBatchIsDecoded() {
+        for (boolean withHeaders : new boolean[] {false, true}) {
+            FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+            Deserializers<byte[], byte[]> deserializers =
+                    new Deserializers<>(new ByteArrayDeserializer(), new ByteArrayDeserializer(), null);
+            CompletedFetch completedFetch = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                    .setRecords(newCompressedBatches(0, 4, 5, withHeaders)));
+
+            List<ConsumerRecord<byte[], byte[]>> all = new java.util.ArrayList<>();
+            // 3 records a call: a call ends in the middle of a batch and the next one crosses into a new batch
+            for (int i = 0; i < 7; i++)
+                all.addAll(completedFetch.fetchRecords(fetchConfig, deserializers, 3));
+            assertCompressedBatchRecords(all, 0, 20, withHeaders);
+        }
+    }
+
+    @Test
+    public void testPredecodedRecordsKeepTheirBytesWhenTheSameThreadDecodesTheNextFetch() {
+        for (boolean withHeaders : new boolean[] {false, true}) {
+            FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+            Deserializers<byte[], byte[]> deserializers =
+                    new Deserializers<>(new ByteArrayDeserializer(), new ByteArrayDeserializer(), null);
+            CompletedFetch first = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                    .setRecords(newCompressedBatches(0, 3, 5, withHeaders)));
+            CompletedFetch second = newCompletedFetch(1000, new FetchResponseData.PartitionData()
+                    .setRecords(newCompressedBatches(1000, 3, 5, withHeaders)));
+
+            // one thread decodes both fetches, as a decoder thread does
+            first.predecode(fetchConfig, deserializers, BufferSupplier.create());
+            second.predecode(fetchConfig, deserializers, BufferSupplier.create());
+
+            assertCompressedBatchRecords(first.fetchRecords(fetchConfig, deserializers, 100), 0, 15, withHeaders);
+            assertCompressedBatchRecords(second.fetchRecords(fetchConfig, deserializers, 100), 1000, 15, withHeaders);
+        }
+    }
+
+    private static void assertCompressedBatchRecords(List<ConsumerRecord<byte[], byte[]>> records,
+                                                     long baseOffset,
+                                                     int count,
+                                                     boolean withHeaders) {
+        assertEquals(count, records.size());
+        for (int i = 0; i < count; i++) {
+            ConsumerRecord<byte[], byte[]> record = records.get(i);
+            long offset = baseOffset + i;
+            assertEquals(offset, record.offset());
+            assertArrayEquals(("key-" + offset).getBytes(), record.key());
+            assertArrayEquals(("value-" + offset).getBytes(), record.value());
+            if (withHeaders)
+                assertArrayEquals(("header-" + offset).getBytes(), record.headers().lastHeader("h").value());
+            else
+                assertEquals(0, record.headers().toArray().length);
+        }
+    }
+
+    private Records newCompressedBatches(long baseOffset, int batches, int recordsPerBatch, boolean withHeaders) {
+        ByteBuffer buffer = ByteBuffer.allocate(8192);
+        long offset = baseOffset;
+        for (int b = 0; b < batches; b++) {
+            try (MemoryRecordsBuilder builder = MemoryRecords.builder(buffer, Compression.lz4().build(),
+                    TimestampType.CREATE_TIME, offset)) {
+                for (int i = 0; i < recordsPerBatch; i++, offset++) {
+                    Header[] headers = withHeaders
+                            ? new Header[] {new RecordHeader("h", ("header-" + offset).getBytes())}
+                            : new Header[0];
+                    builder.append(0L, ("key-" + offset).getBytes(), ("value-" + offset).getBytes(), headers);
+                }
+                builder.build();
+            }
+        }
+        buffer.flip();
+        return MemoryRecords.readableRecords(buffer);
     }
 
     private CompletedFetch newCompletedFetch(long fetchOffset,
