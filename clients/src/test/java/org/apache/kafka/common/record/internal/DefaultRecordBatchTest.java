@@ -52,6 +52,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -421,7 +423,7 @@ public class DefaultRecordBatchTest {
         batch.iterator().forEachRemaining(expected::add);
         assertEquals(simpleRecords.length, expected.size());
 
-        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create())) {
+        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create(), null)) {
             for (Record expectedRecord : expected) {
                 assertTrue(iterator.hasNext());
                 Record record = iterator.next();
@@ -448,26 +450,54 @@ public class DefaultRecordBatchTest {
     }
 
     @Test
-    public void testReusingIteratorKeepsTheBuffersOfEarlierRecords() {
+    public void testReusingIteratorReusesKeyAndValueBuffers() {
         MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V2, 0L,
                 Compression.lz4().build(), TimestampType.CREATE_TIME,
                 new SimpleRecord(1L, "a".getBytes(), "1".getBytes(), new Header[] {new RecordHeader("h", "x".getBytes())}),
                 new SimpleRecord(2L, "b".getBytes(), "2".getBytes(), new Header[] {new RecordHeader("h", "y".getBytes())}));
         DefaultRecordBatch batch = new DefaultRecordBatch(records.buffer());
 
-        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create())) {
+        try (DefaultRecordBatch.ReusingRecordIterator iterator = batch.reusingIterator(BufferSupplier.create(), null)) {
             Record first = iterator.next();
             ByteBuffer key = first.key();
             ByteBuffer value = first.value();
             Header[] headers = first.headers();
-            Record second = iterator.next();
-
-            // the iterator returns one object, but the buffers it gave out for the first record stay the same
-            assertSame(first, second);
-            assertEquals(1L, second.offset());
+            assertNotSame(key, value);
             assertEquals(ByteBuffer.wrap("a".getBytes()), key);
             assertEquals(ByteBuffer.wrap("1".getBytes()), value);
+
+            // one record object and one view each for key and value are used for all records
+            Record second = iterator.next();
+            assertSame(first, second);
+            assertEquals(1L, second.offset());
+            assertSame(key, second.key());
+            assertSame(value, second.value());
+            assertEquals(ByteBuffer.wrap("b".getBytes()), key);
+            assertEquals(ByteBuffer.wrap("2".getBytes()), value);
+            // headers are not reused
             assertArrayEquals("x".getBytes(), headers[0].value());
+            assertTrue(iterator.readHeaders());
+        }
+    }
+
+    @Test
+    public void testReusingIteratorDecompressesIntoTheGivenArray() {
+        MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V2, 0L,
+                Compression.lz4().build(), TimestampType.CREATE_TIME,
+                new SimpleRecord(1L, "a".getBytes(), "1".getBytes()));
+        DefaultRecordBatch batch = new DefaultRecordBatch(records.buffer());
+        byte[] array = new byte[4096];
+
+        try (DefaultRecordBatch.ReusingRecordIterator iterator = batch.reusingIterator(BufferSupplier.create(), array)) {
+            assertSame(array, iterator.decompressionArray());
+            assertEquals(ByteBuffer.wrap("1".getBytes()), iterator.next().value());
+            assertFalse(iterator.readHeaders());
+        }
+
+        DefaultRecordBatch uncompressed = new DefaultRecordBatch(MemoryRecords.withRecords(Compression.NONE,
+                new SimpleRecord(1L, "a".getBytes(), "1".getBytes())).buffer());
+        try (DefaultRecordBatch.ReusingRecordIterator iterator = uncompressed.reusingIterator(BufferSupplier.create(), array)) {
+            assertNull(iterator.decompressionArray());
         }
     }
 
@@ -476,7 +506,7 @@ public class DefaultRecordBatchTest {
     public void testReusingIteratorWithInvalidRecordCount(CompressionType compressionType, int invalidCount) {
         DefaultRecordBatch batch = recordsWithInvalidRecordCount(RecordBatch.MAGIC_VALUE_V2,
                 System.currentTimeMillis(), compressionType, invalidCount);
-        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create())) {
+        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create(), null)) {
             assertThrows(InvalidRecordException.class, () -> iterator.forEachRemaining(Record::ensureValid));
         }
     }

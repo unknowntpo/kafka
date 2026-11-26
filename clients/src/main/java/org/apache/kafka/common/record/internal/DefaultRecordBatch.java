@@ -365,26 +365,30 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
     }
 
     /**
-     * Returns an iterator over the records of this batch that does not create a new {@link Record} for each record.
-     * {@code next()} always returns the same object, updated to describe the next record, so a caller must not use
-     * a record after the next call to {@code next()}. The buffers returned by {@link Record#key()},
-     * {@link Record#value()} and {@link Record#headers()} stay valid after that call.
+     * Returns an iterator over the records of this batch that does not create any object for each record.
+     * {@code next()} always returns the same {@link Record}, updated to describe the next record. The buffers
+     * returned by {@link Record#key()} and {@link Record#value()} are also reused: they are valid only until the
+     * next call to {@code next()} or {@code close()}, so a caller that keeps them must copy them. The headers
+     * returned by {@link Record#headers()} point into the bytes of the batch, or into the decompression array.
      *
-     * <p>A compressed batch is decompressed in full when this method is called.
+     * <p>A compressed batch is decompressed in full when this method is called, into {@code decompressionArray}
+     * if it is large enough. See {@link ReusingRecordIterator#decompressionArray()} for how to use it again.
+     *
+     * @param decompressionArray an array that nothing points into any more, or null to allocate a new one
      */
-    public CloseableIterator<Record> reusingIterator(BufferSupplier bufferSupplier) {
+    public ReusingRecordIterator reusingIterator(BufferSupplier bufferSupplier, byte[] decompressionArray) {
         final ByteBuffer records;
         if (isCompressed()) {
-            records = decompressedRecords(bufferSupplier);
+            records = decompressedRecords(bufferSupplier, decompressionArray);
         } else {
             records = this.buffer.duplicate();
             records.position(RECORDS_OFFSET);
         }
-        return new ReusingRecordIterator(records);
+        return new ReusingRecordIterator(records, isCompressed() ? records.array() : null);
     }
 
-    private ByteBuffer decompressedRecords(BufferSupplier bufferSupplier) {
-        byte[] out = new byte[Math.max(1024, 4 * sizeInBytes())];
+    private ByteBuffer decompressedRecords(BufferSupplier bufferSupplier, byte[] decompressionArray) {
+        byte[] out = decompressionArray != null ? decompressionArray : new byte[Math.max(1024, 4 * sizeInBytes())];
         int size = 0;
         try (InputStream in = recordInputStream(bufferSupplier)) {
             while (true) {
@@ -659,20 +663,45 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
 
     }
 
-    private final class ReusingRecordIterator extends RecordIterator {
+    /**
+     * The iterator returned by {@link #reusingIterator(BufferSupplier, byte[])}.
+     */
+    public final class ReusingRecordIterator extends RecordIterator {
         private final ByteBuffer buffer;
+        private final byte[] decompressionArray;
         private final ReusableRecord record;
+        private boolean readHeaders;
 
-        ReusingRecordIterator(ByteBuffer buffer) {
+        private ReusingRecordIterator(ByteBuffer buffer, byte[] decompressionArray) {
             super();
             this.buffer = buffer;
+            this.decompressionArray = decompressionArray;
             this.record = new ReusableRecord(buffer);
+        }
+
+        /**
+         * The array the batch was decompressed into, or null if the batch is not compressed. After the caller has
+         * read all records it needs and copied every key and value it keeps, it may pass the array to the next
+         * call of {@link #reusingIterator(BufferSupplier, byte[])}, unless {@link #readHeaders()} is true.
+         */
+        public byte[] decompressionArray() {
+            return decompressionArray;
+        }
+
+        /**
+         * True if a record read so far has headers. Headers point into the records, so the decompression array
+         * must not be used again once a record with headers was read from it.
+         */
+        public boolean readHeaders() {
+            return readHeaders;
         }
 
         @Override
         protected Record readNext(long baseOffset, long baseTimestamp, int baseSequence, Long logAppendTime) {
             try {
                 record.readFrom(baseOffset, baseTimestamp, baseSequence, logAppendTime);
+                if (record.headers().length > 0)
+                    readHeaders = true;
                 return record;
             } catch (BufferUnderflowException e) {
                 throw new InvalidRecordException("Incorrect declared batch size, premature EOF reached");
@@ -691,10 +720,13 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
     /**
      * A record that is read from a buffer of uncompressed records without copying the key, the value or the
      * headers. It follows the record format that {@link DefaultRecord#readFrom(ByteBuffer, long, long, int, Long)}
-     * reads, and does the same checks.
+     * reads, and does the same checks. {@link #key()} and {@link #value()} return two views of the buffer that
+     * are reused for every record.
      */
     private static final class ReusableRecord implements Record {
         private final ByteBuffer buffer;
+        private final ByteBuffer keyView;
+        private final ByteBuffer valueView;
         private int sizeInBytes;
         private long offset;
         private long timestamp;
@@ -707,6 +739,8 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
 
         ReusableRecord(ByteBuffer buffer) {
             this.buffer = buffer;
+            this.keyView = buffer.duplicate();
+            this.valueView = buffer.duplicate();
         }
 
         /**
@@ -767,13 +801,13 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
             return position;
         }
 
-        private ByteBuffer slice(int position, int size) {
+        private static ByteBuffer view(ByteBuffer view, int position, int size) {
             if (size < 0)
                 return null;
-            ByteBuffer slice = buffer.duplicate();
-            slice.limit(position + size);
-            slice.position(position);
-            return slice.slice();
+            view.clear();
+            view.position(position);
+            view.limit(position + size);
+            return view;
         }
 
         @Override
@@ -811,7 +845,7 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
 
         @Override
         public ByteBuffer key() {
-            return slice(keyPosition, keySize);
+            return view(keyView, keyPosition, keySize);
         }
 
         @Override
@@ -826,7 +860,7 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
 
         @Override
         public ByteBuffer value() {
-            return slice(valuePosition, valueSize);
+            return view(valueView, valuePosition, valueSize);
         }
 
         @Override
