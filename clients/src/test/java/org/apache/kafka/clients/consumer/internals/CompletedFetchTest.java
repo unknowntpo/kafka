@@ -22,18 +22,25 @@ import org.apache.kafka.common.IsolationLevel;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.errors.RecordDeserializationException;
+import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
+import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.common.record.internal.CompressionType;
 import org.apache.kafka.common.record.internal.ControlRecordType;
+import org.apache.kafka.common.record.internal.DefaultRecord;
 import org.apache.kafka.common.record.internal.EndTransactionMarker;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.record.internal.Records;
 import org.apache.kafka.common.record.internal.SimpleRecord;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.ByteBufferDeserializer;
+import org.apache.kafka.common.serialization.IntegerDeserializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.UUIDDeserializer;
 import org.apache.kafka.common.serialization.UUIDSerializer;
@@ -44,8 +51,12 @@ import org.apache.kafka.common.utils.internals.BufferSupplier;
 import org.apache.kafka.common.utils.internals.LogContext;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
+import org.mockito.MockedConstruction;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
@@ -53,7 +64,10 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mockConstruction;
 
 public class CompletedFetchTest {
 
@@ -211,6 +225,150 @@ public class CompletedFetchTest {
         }
     }
 
+    /**
+     * Records of magic v2 batches are read straight from the batch bytes, without a DefaultRecord for each record.
+     */
+    @ParameterizedTest
+    @EnumSource(value = CompressionType.class, names = {"NONE", "LZ4"})
+    public void testFetchRecordsDoesNotCreateDefaultRecords(CompressionType compressionType) {
+        FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+        CompletedFetch completedFetch = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                .setRecords(newBatches(compressionType, 0, 2, 5, true)));
+
+        try (Deserializers<byte[], byte[]> deserializers = newByteArrayDeserializers();
+             MockedConstruction<DefaultRecord> defaultRecords = mockConstruction(DefaultRecord.class)) {
+            List<ConsumerRecord<byte[], byte[]>> records = completedFetch.fetchRecords(fetchConfig, deserializers, 100);
+            assertEquals(0, defaultRecords.constructed().size());
+            assertBatchRecords(records, 0, 10, true);
+        }
+    }
+
+    /**
+     * Records that were already returned keep their key, value and headers while the next batches are read.
+     */
+    @ParameterizedTest
+    @EnumSource(value = CompressionType.class, names = {"NONE", "LZ4"})
+    public void testRecordsKeepTheirBytesWhenTheNextBatchIsRead(CompressionType compressionType) {
+        for (boolean withHeaders : new boolean[] {false, true}) {
+            FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+            CompletedFetch completedFetch = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                    .setRecords(newBatches(compressionType, 0, 4, 5, withHeaders)));
+
+            try (Deserializers<byte[], byte[]> deserializers = newByteArrayDeserializers()) {
+                List<ConsumerRecord<byte[], byte[]>> all = new ArrayList<>();
+                // 3 records a call: a call ends in the middle of a batch and the next one crosses into a new batch
+                for (int i = 0; i < 7; i++)
+                    all.addAll(completedFetch.fetchRecords(fetchConfig, deserializers, 3));
+                assertBatchRecords(all, 0, 20, withHeaders);
+            }
+        }
+    }
+
+    /**
+     * A deserializer that is not known to copy its input, such as ByteBufferDeserializer, reads each record from
+     * its own buffer, so the values handed out do not change when the next batch is read.
+     */
+    @Test
+    public void testValuesOfOtherDeserializersKeepTheirBytesWhenTheNextBatchIsRead() {
+        FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+        CompletedFetch completedFetch = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                .setRecords(newBatches(CompressionType.LZ4, 0, 2, 5, false)));
+
+        try (Deserializers<ByteBuffer, ByteBuffer> deserializers =
+                     new Deserializers<>(new ByteBufferDeserializer(), new ByteBufferDeserializer(), null)) {
+            List<ConsumerRecord<ByteBuffer, ByteBuffer>> first = completedFetch.fetchRecords(fetchConfig, deserializers, 5);
+            List<ConsumerRecord<ByteBuffer, ByteBuffer>> second = completedFetch.fetchRecords(fetchConfig, deserializers, 5);
+            assertEquals(5, first.size());
+            assertEquals(5, second.size());
+            for (int i = 0; i < 5; i++) {
+                assertEquals(ByteBuffer.wrap(("value-" + i).getBytes()), first.get(i).value());
+                assertEquals(ByteBuffer.wrap(("value-" + (i + 5)).getBytes()), second.get(i).value());
+            }
+        }
+    }
+
+    /**
+     * The key and value kept in a RecordDeserializationException are copies, so they do not change when the
+     * same reused Record reads other records.
+     */
+    @Test
+    public void testDeserializationExceptionKeepsCopiesOfKeyAndValue() {
+        FetchConfig fetchConfig = newFetchConfig(IsolationLevel.READ_UNCOMMITTED, true);
+        ByteBuffer buffer = ByteBuffer.allocate(8192);
+        try (MemoryRecordsBuilder builder = MemoryRecords.builder(buffer, Compression.lz4().build(), TimestampType.CREATE_TIME, 0)) {
+            builder.append(0L, "key-0".getBytes(), new byte[] {0, 0, 0, 1});
+            // IntegerDeserializer fails: the value is not 4 bytes long
+            builder.append(1L, "key-1".getBytes(), "bad".getBytes());
+            builder.build();
+        }
+        try (MemoryRecordsBuilder builder = MemoryRecords.builder(buffer, Compression.lz4().build(), TimestampType.CREATE_TIME, 2)) {
+            builder.append(2L, "key-2".getBytes(), new byte[] {0, 0, 0, 3});
+            builder.build();
+        }
+        buffer.flip();
+        CompletedFetch completedFetch = newCompletedFetch(0, new FetchResponseData.PartitionData()
+                .setRecords(MemoryRecords.readableRecords(buffer)));
+
+        try (Deserializers<byte[], Integer> deserializers =
+                     new Deserializers<>(new ByteArrayDeserializer(), new IntegerDeserializer(), null)) {
+            assertEquals(1, completedFetch.fetchRecords(fetchConfig, deserializers, 10).size());
+            RecordDeserializationException thrown = assertThrows(RecordDeserializationException.class,
+                    () -> completedFetch.fetchRecords(fetchConfig, deserializers, 10));
+            assertEquals(1, thrown.offset());
+            ByteBuffer key = thrown.keyBuffer();
+            ByteBuffer value = thrown.valueBuffer();
+            assertNotSame(key, value);
+
+            // try the failed record again, as the application does if it does not seek past it
+            assertThrows(RecordDeserializationException.class, () -> completedFetch.fetchRecords(fetchConfig, deserializers, 10));
+
+            assertSame(key, thrown.keyBuffer());
+            assertEquals(ByteBuffer.wrap("key-1".getBytes()), key);
+            assertEquals(ByteBuffer.wrap("bad".getBytes()), value);
+            // a copy holds only its own bytes
+            assertEquals(key.remaining(), key.capacity());
+            assertEquals(value.remaining(), value.capacity());
+        }
+    }
+
+    private static void assertBatchRecords(List<ConsumerRecord<byte[], byte[]>> records,
+                                           long baseOffset,
+                                           int count,
+                                           boolean withHeaders) {
+        assertEquals(count, records.size());
+        for (int i = 0; i < count; i++) {
+            ConsumerRecord<byte[], byte[]> record = records.get(i);
+            long offset = baseOffset + i;
+            assertEquals(offset, record.offset());
+            assertEquals(offset, record.timestamp());
+            assertArrayEquals(("key-" + offset).getBytes(), record.key());
+            assertArrayEquals(("value-" + offset).getBytes(), record.value());
+            if (withHeaders)
+                assertArrayEquals(("header-" + offset).getBytes(), record.headers().lastHeader("h").value());
+            else
+                assertEquals(0, record.headers().toArray().length);
+        }
+    }
+
+    private Records newBatches(CompressionType compressionType, long baseOffset, int batches, int recordsPerBatch, boolean withHeaders) {
+        ByteBuffer buffer = ByteBuffer.allocate(8192);
+        long offset = baseOffset;
+        for (int b = 0; b < batches; b++) {
+            try (MemoryRecordsBuilder builder = MemoryRecords.builder(buffer, Compression.of(compressionType).build(),
+                    TimestampType.CREATE_TIME, offset)) {
+                for (int i = 0; i < recordsPerBatch; i++, offset++) {
+                    Header[] headers = withHeaders
+                            ? new Header[] {new RecordHeader("h", ("header-" + offset).getBytes())}
+                            : new Header[0];
+                    builder.append(offset, ("key-" + offset).getBytes(), ("value-" + offset).getBytes(), headers);
+                }
+                builder.build();
+            }
+        }
+        buffer.flip();
+        return MemoryRecords.readableRecords(buffer);
+    }
+
     private CompletedFetch newCompletedFetch(long fetchOffset,
                                              FetchResponseData.PartitionData partitionData) {
         LogContext logContext = new LogContext();
@@ -231,6 +389,10 @@ public class CompletedFetchTest {
 
     private static Deserializers<UUID, UUID> newUuidDeserializers() {
         return new Deserializers<>(new UUIDDeserializer(), new UUIDDeserializer(), null);
+    }
+
+    private static Deserializers<byte[], byte[]> newByteArrayDeserializers() {
+        return new Deserializers<>(new ByteArrayDeserializer(), new ByteArrayDeserializer(), null);
     }
 
     private static Deserializers<String, String> newStringDeserializers() {

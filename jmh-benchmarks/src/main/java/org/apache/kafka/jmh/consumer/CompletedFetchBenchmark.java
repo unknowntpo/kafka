@@ -94,8 +94,10 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@code fetchRecords}: the real consumer path, {@code CompletedFetch.fetchRecords} with
  *       {@code max.poll.records = 500} and {@code check.crcs = true} (the default).</li>
  *   <li>{@code fetchRecordsNoCrc}: the same path with {@code check.crcs = false}.</li>
- *   <li>{@code iterateOnly}: only {@link RecordBatch#streamingIterator(BufferSupplier)}, the iterator
- *       {@link CompletedFetch} uses; isolates the {@link Record} materialisation.</li>
+ *   <li>{@code iterateOnly}: only {@link RecordBatch#streamingIterator(BufferSupplier)}, which creates one
+ *       {@link Record} object for each record.</li>
+ *   <li>{@code iterateReusing}: only {@link DefaultRecordBatch#reusingIterator(BufferSupplier)}, the iterator
+ *       {@link CompletedFetch} uses, which reuses one {@link Record} object for all records of a batch.</li>
  *   <li>{@code floor}: a hand-written single pass that builds each {@link ConsumerRecord} with one
  *       value copy; a lower bound for the current public API. A compressed batch is first decompressed
  *       into one array that is reused for all batches.</li>
@@ -155,6 +157,7 @@ public class CompletedFetchBenchmark {
     private Deserializers<byte[], byte[]> deserializers;
     private Headers sharedEmptyHeaders;
     private byte[] floorScratch = new byte[4 * BATCH_BYTES];
+    private byte[] reusingScratch;
 
     @Setup(Level.Trial)
     public void setup() throws Throwable {
@@ -308,6 +311,19 @@ public class CompletedFetchBenchmark {
             try (CloseableIterator<Record> it = batch.streamingIterator(decompressionBufferSupplier)) {
                 while (it.hasNext())
                     bh.consume(it.next());
+            }
+        }
+    }
+
+    @Benchmark
+    public void iterateReusing(Blackhole bh) {
+        MemoryRecords records = MemoryRecords.readableRecords(responseBuffer.duplicate());
+        for (RecordBatch batch : records.batches()) {
+            try (DefaultRecordBatch.ReusingRecordIterator it =
+                     ((DefaultRecordBatch) batch).reusingIterator(decompressionBufferSupplier, reusingScratch)) {
+                while (it.hasNext())
+                    bh.consume(it.next());
+                reusingScratch = it.decompressionArray();
             }
         }
     }

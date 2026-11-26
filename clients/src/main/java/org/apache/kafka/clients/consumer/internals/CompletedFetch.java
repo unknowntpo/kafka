@@ -29,6 +29,7 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.ControlRecordType;
+import org.apache.kafka.common.record.internal.DefaultRecordBatch;
 import org.apache.kafka.common.record.internal.Record;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.requests.FetchRequest;
@@ -74,6 +75,10 @@ public class CompletedFetch {
     private RecordBatch currentBatch;
     private Record lastRecord;
     private CloseableIterator<Record> records;
+    // True if the records of magic v2 batches may be read into one reused Record, see fetchRecords
+    private boolean reuseRecords;
+    // The array that compressed batches of this fetch are decompressed into, when nothing points into it any more
+    private byte[] decompressionArray;
     private Exception cachedRecordException = null;
     private boolean corruptLastRecord = false;
     private long nextFetchOffset;
@@ -179,6 +184,13 @@ public class CompletedFetch {
 
     private void maybeCloseRecordStream() {
         if (records != null) {
+            if (records instanceof DefaultRecordBatch.ReusingRecordIterator) {
+                // The records handed out keep only copies of their key and value, but their headers point into
+                // the decompression array, so it is used again only if no record had headers.
+                DefaultRecordBatch.ReusingRecordIterator iterator = (DefaultRecordBatch.ReusingRecordIterator) records;
+                if (iterator.decompressionArray() != null)
+                    decompressionArray = iterator.readHeaders() ? null : iterator.decompressionArray();
+            }
             records.close();
             records = null;
         }
@@ -223,7 +235,13 @@ public class CompletedFetch {
                     }
                 }
 
-                records = currentBatch.streamingIterator(decompressionBufferSupplier);
+                // For magic v2 data batches, read the records without creating any object for each record
+                if (reuseRecords && currentBatch instanceof DefaultRecordBatch && !currentBatch.isControlBatch()) {
+                    records = ((DefaultRecordBatch) currentBatch).reusingIterator(decompressionBufferSupplier, decompressionArray);
+                    // the iterator owns the array until it is closed
+                    decompressionArray = null;
+                } else
+                    records = currentBatch.streamingIterator(decompressionBufferSupplier);
             } else {
                 Record record = records.next();
                 // skip any records out of range
@@ -267,6 +285,9 @@ public class CompletedFetch {
             return Collections.emptyList();
 
         List<ConsumerRecord<K, V>> records = new ArrayList<>();
+        // The reused Record gives out buffers that are valid only until the next record. Only deserializers that
+        // do not keep these buffers can use it.
+        reuseRecords = deserializers.simple();
 
         try {
             for (int i = 0; i < maxRecords; i++) {
@@ -281,9 +302,9 @@ public class CompletedFetch {
                 if (lastRecord == null)
                     break;
 
-                Optional<Integer> leaderEpoch = maybeLeaderEpoch(currentBatch.partitionLeaderEpoch());
+                // lastEpoch is the leader epoch of the current batch, so all its records can share it
                 TimestampType timestampType = currentBatch.timestampType();
-                ConsumerRecord<K, V> record = parseRecord(deserializers, partition, leaderEpoch, timestampType, lastRecord);
+                ConsumerRecord<K, V> record = parseRecord(deserializers, partition, lastEpoch, timestampType, lastRecord);
                 records.add(record);
                 recordsRead++;
                 bytesRead += lastRecord.sizeInBytes();
@@ -344,9 +365,20 @@ public class CompletedFetch {
                                                                                     Record record,
                                                                                     RuntimeException e,
                                                                                     Headers headers) {
-        return new RecordDeserializationException(origin, partition, record.offset(), record.timestamp(), timestampType, record.key(), record.value(), headers,
+        // copies, because the buffers of a reused Record change with the next record
+        return new RecordDeserializationException(origin, partition, record.offset(), record.timestamp(), timestampType,
+                copyOf(record.key()), copyOf(record.value()), headers,
                 "Error deserializing " + origin.name() + " for partition " + partition + " at offset " + record.offset()
                         + ". If needed, please seek past the record to continue consumption.", e);
+    }
+
+    private static ByteBuffer copyOf(ByteBuffer buffer) {
+        if (buffer == null)
+            return null;
+        ByteBuffer copy = ByteBuffer.allocate(buffer.remaining());
+        copy.put(buffer.duplicate());
+        copy.flip();
+        return copy;
     }
 
     private Optional<Integer> maybeLeaderEpoch(int leaderEpoch) {

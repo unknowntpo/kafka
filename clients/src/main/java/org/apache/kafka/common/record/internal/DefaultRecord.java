@@ -455,7 +455,7 @@ public class DefaultRecord implements Record {
         }
     }
 
-    private static Header[] readHeaders(ByteBuffer buffer, int numHeaders) {
+    static Header[] readHeaders(ByteBuffer buffer, int numHeaders) {
         Header[] headers = new Header[numHeaders];
         for (int i = 0; i < numHeaders; i++) {
             int headerKeySize = ByteUtils.readVarint(buffer);
