@@ -415,8 +415,11 @@ public abstract class AbstractFetch implements Closeable {
         // This is the data that is buffered and not yet consumed, for each partition that has such data
         Map<TopicPartition, FetchBuffer.BufferedState> buffered = fetchBuffer.bufferedStates();
 
-        // A partition that has buffered data is a candidate too: its next fetch can be a prefetch
-        List<TopicPartition> fetchablePartitions = subscriptions.fetchablePartitions(tp -> true);
+        // With prefetch, a partition that has buffered data is a candidate too. Without it, only the partitions
+        // that have no buffered data are candidates.
+        List<TopicPartition> fetchablePartitions = prefetch()
+                ? subscriptions.fetchablePartitions(tp -> true)
+                : subscriptions.fetchablePartitions(tp -> !buffered.containsKey(tp));
 
         if (fetchablePartitions.isEmpty()) {
             // If no partitions are fetchable at all (for example, no assignment yet, invalid positions, or
@@ -496,6 +499,11 @@ public abstract class AbstractFetch implements Closeable {
     /**
      * Whether the next fetch for a partition may be sent while earlier data of the partition is still buffered.
      * Without it, a node gets no fetch request while any of its partitions has buffered data.
+     *
+     * <p>
+     *
+     * This is not the same as {@code AsyncKafkaConsumer#sendPrefetches}. That method sends fetch requests before
+     * {@code poll()} returns records, and those requests follow the rules of this class too.
      */
     protected boolean prefetch() {
         return true;

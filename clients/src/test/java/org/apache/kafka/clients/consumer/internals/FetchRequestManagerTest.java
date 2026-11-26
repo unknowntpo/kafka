@@ -3774,6 +3774,47 @@ public class FetchRequestManagerTest {
     }
 
     @Test
+    public void testPauseWithPrefetchedData() {
+        buildFetcher();
+
+        assignFromUser(singleton(tp0));
+        subscriptions.seek(tp0, 1);
+
+        // Buffer the records at offsets 1 to 3, and the prefetched records at offsets 4 and 5.
+        client.prepareResponse(matchesOffset(tidp0, 1), fullFetchResponse(tidp0, records, Errors.NONE, 100L, 0));
+        assertEquals(1, sendFetches());
+        networkClientDelegate.poll(time.timer(0));
+        client.prepareResponse(matchesOffset(tidp0, 4), fullFetchResponse(tidp0, nextRecords, Errors.NONE, 100L, 0));
+        assertEquals(1, sendFetches());
+        networkClientDelegate.poll(time.timer(0));
+
+        subscriptions.pause(tp0);
+        assertEmptyFetch("Should not return records for a paused partition");
+        assertEquals(0, sendFetches());
+
+        // After the resume, every record is returned once and in order. The prefetched records were thrown away
+        // during the pause, so they are fetched again.
+        subscriptions.resume(tp0);
+        assertEquals(0, sendFetches());
+        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> recordsByPartition = fetchRecords();
+        List<ConsumerRecord<byte[], byte[]>> recordsToTest = recordsByPartition.get(tp0);
+        assertEquals(3, recordsToTest.size());
+        assertEquals(1, recordsToTest.get(0).offset());
+        assertEquals(3, recordsToTest.get(2).offset());
+        assertEquals(4L, subscriptions.position(tp0).offset);
+
+        client.prepareResponse(matchesOffset(tidp0, 4), fullFetchResponse(tidp0, nextRecords, Errors.NONE, 100L, 0));
+        assertEquals(1, sendFetches());
+        networkClientDelegate.poll(time.timer(0));
+        recordsByPartition = fetchRecords();
+        recordsToTest = recordsByPartition.get(tp0);
+        assertEquals(2, recordsToTest.size());
+        assertEquals(4, recordsToTest.get(0).offset());
+        assertEquals(5, recordsToTest.get(1).offset());
+        assertEquals(6L, subscriptions.position(tp0).offset);
+    }
+
+    @Test
     public void testPrefetchStopsAfterSeek() {
         buildFetcher();
 

@@ -211,11 +211,11 @@ public class FetchCollector<K, V> {
                 // they must be from an obsolete request
                 log.debug("Ignoring fetched records for {} at offset {} since the current position is {}",
                         tp, nextInLineFetch.nextFetchOffset(), position);
-                // data that was fetched after them is not next in line either
-                fetchBuffer.invalidatePrefetch(tp);
             }
         }
 
+        // These records are thrown away, so data that was fetched after them is not next in line either
+        fetchBuffer.invalidatePrefetch(tp);
         log.trace("Draining fetched records for partition {}", tp);
         nextInLineFetch.drain();
 
