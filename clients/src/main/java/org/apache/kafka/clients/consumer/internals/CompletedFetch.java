@@ -113,9 +113,10 @@ public class CompletedFetch {
     private int[] predecodedBytes;
     // The number of predecoded records already handed out. Only the application thread uses it.
     private int predecodedPos;
-    // An error that is not a KafkaException, found by a decoder thread. The application thread throws it when it
-    // reaches that record, as it would have if it had decoded the records itself.
-    private RuntimeException deferredException;
+    // An error that is not a KafkaException, such as an Error, found by a decoder thread. It is a RuntimeException
+    // or an Error. The application thread throws it when it reaches that record, as it would have if it had decoded
+    // the records itself.
+    private Throwable deferredException;
     // The position as the application thread sees it. These lag behind the decode state while predecoded
     // records wait. Only the application thread uses them, after the constructor.
     private long appNextFetchOffset;
@@ -546,7 +547,7 @@ public class CompletedFetch {
                 throw new KafkaException("Received exception when fetching the next record from " + partition
                         + ". If needed, please seek past the record to "
                         + "continue consumption.", e);
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | Error e) {
             if (!quiet)
                 throw e;
             deferredException = e;
@@ -564,9 +565,11 @@ public class CompletedFetch {
     private void throwKeptError() {
         // An error found by a decoder thread that is not a KafkaException, thrown as it was found.
         if (deferredException != null) {
-            RuntimeException e = deferredException;
+            Throwable e = deferredException;
             deferredException = null;
-            throw e;
+            if (e instanceof Error)
+                throw (Error) e;
+            throw (RuntimeException) e;
         }
 
         // Error when fetching the next record before deserialization.

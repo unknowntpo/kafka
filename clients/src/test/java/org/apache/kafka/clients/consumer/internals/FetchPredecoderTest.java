@@ -28,6 +28,7 @@ import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.IntegerDeserializer;
 import org.apache.kafka.common.utils.internals.BufferSupplier;
 import org.apache.kafka.common.utils.internals.LogContext;
@@ -42,9 +43,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntFunction;
 import java.util.stream.Collectors;
 
@@ -52,6 +55,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -232,46 +236,152 @@ public class FetchPredecoderTest {
         assertArrayEquals(expected, partialConsumeMetrics(values, true));
     }
 
+    /**
+     * Before close, a submitted fetch is decoded on a decoder thread. After close, submit() discards the fetch and
+     * the application thread decodes it.
+     */
     @Test
-    public void testSubmitAfterCloseIsDiscarded() throws Exception {
-        FetchPredecoder<byte[], byte[]> predecoder = new FetchPredecoder<>(CONFIG, bytes, 1);
-        predecoder.close();
-        CompletedFetch fetch = newFetch(i -> ("value-" + i).getBytes(), 2, Compression.lz4().build());
+    public void testSubmitDecodesOnDecoderThreadUntilClosed() throws Exception {
+        ThreadRecordingDeserializer values = new ThreadRecordingDeserializer(2 * RECORDS_PER_BATCH);
+        try (Deserializers<byte[], byte[]> deserializers = new Deserializers<>(new ByteArrayDeserializer(), values, null)) {
+            FetchPredecoder<byte[], byte[]> predecoder = new FetchPredecoder<>(CONFIG, deserializers, 1);
+            CompletedFetch before = newFetch(i -> ("value-" + i).getBytes(), 2, Compression.lz4().build());
+            predecoder.submit(before);
+            // all values are deserialized before the application thread asks for them
+            assertTrue(values.calls.await(WAIT_MS, TimeUnit.MILLISECONDS));
+            assertEquals(2 * RECORDS_PER_BATCH, before.fetchRecords(CONFIG, deserializers, 100).size());
+            assertDecodedOnDecoderThreads(values.threads);
 
-        predecoder.submit(fetch);
+            predecoder.close();
+            values.threads.clear();
+            CompletedFetch after = newFetch(i -> ("value-" + i).getBytes(), 2, Compression.lz4().build());
+            predecoder.submit(after);
 
-        // the application thread decodes the fetch itself
-        List<ConsumerRecord<byte[], byte[]>> records = fetch.fetchRecords(CONFIG, bytes, 100);
-        assertEquals(2 * RECORDS_PER_BATCH, records.size());
-        assertTrue(fetch.isExhausted());
+            assertEquals(2 * RECORDS_PER_BATCH, after.fetchRecords(CONFIG, deserializers, 100).size());
+            assertTrue(after.isExhausted());
+            assertEquals(Set.of(Thread.currentThread().getName()), values.threads);
+        }
     }
 
     @Test
     public void testDecoderThreadsDecodeBufferedFetches() throws Exception {
-        FetchPredecoder<byte[], byte[]> predecoder = new FetchPredecoder<>(CONFIG, bytes, 2);
-        try {
-            FetchBuffer buffer = new FetchBuffer(new LogContext());
-            List<CompletedFetch> submitted = new ArrayList<>();
-            buffer.setAddListener(fetch -> {
-                submitted.add(fetch);
-                predecoder.submit(fetch);
-            });
-            CompletedFetch fetch = newFetch(i -> ("value-" + i).getBytes(), 3, Compression.lz4().build());
-            buffer.add(fetch);
-            // a fetch that is put back is not new, so the listener is not told
-            buffer.addAll(List.of(newFetch(i -> new byte[0], 1, Compression.NONE)));
-            assertEquals(List.of(fetch), submitted);
+        ThreadRecordingDeserializer values = new ThreadRecordingDeserializer(3 * RECORDS_PER_BATCH);
+        try (Deserializers<byte[], byte[]> deserializers = new Deserializers<>(new ByteArrayDeserializer(), values, null)) {
+            FetchPredecoder<byte[], byte[]> predecoder = new FetchPredecoder<>(CONFIG, deserializers, 2);
+            try {
+                FetchBuffer buffer = new FetchBuffer(new LogContext());
+                List<CompletedFetch> submitted = new ArrayList<>();
+                buffer.setAddListener(fetch -> {
+                    submitted.add(fetch);
+                    predecoder.submit(fetch);
+                });
+                CompletedFetch fetch = newFetch(i -> ("value-" + i).getBytes(), 3, Compression.lz4().build());
+                buffer.add(fetch);
+                // a fetch that is put back is not new, so the listener is not told
+                buffer.addAll(List.of(newFetch(i -> new byte[0], 1, Compression.NONE)));
+                assertEquals(List.of(fetch), submitted);
 
-            List<ConsumerRecord<byte[], byte[]>> records = new ArrayList<>();
-            while (!fetch.isExhausted())
-                records.addAll(fetch.fetchRecords(CONFIG, bytes, 4));
-            assertEquals(3 * RECORDS_PER_BATCH, records.size());
-            for (int i = 0; i < records.size(); i++)
-                assertArrayEquals(("value-" + i).getBytes(), records.get(i).value());
-            buffer.close();
-        } finally {
-            predecoder.close();
+                // the application thread starts only after a decoder thread has deserialized every value
+                assertTrue(values.calls.await(WAIT_MS, TimeUnit.MILLISECONDS));
+                List<ConsumerRecord<byte[], byte[]>> records = new ArrayList<>();
+                while (!fetch.isExhausted())
+                    records.addAll(fetch.fetchRecords(CONFIG, deserializers, 4));
+                assertEquals(3 * RECORDS_PER_BATCH, records.size());
+                for (int i = 0; i < records.size(); i++)
+                    assertArrayEquals(("value-" + i).getBytes(), records.get(i).value());
+                assertDecodedOnDecoderThreads(values.threads);
+                buffer.close();
+            } finally {
+                predecoder.close();
+            }
         }
+    }
+
+    /**
+     * An Error thrown on a decoder thread is thrown by fetchRecords() on the application thread, after the records
+     * before it. Without a decoder, the same Error ends the call that reaches it.
+     */
+    @Test
+    public void testErrorFoundByDecoderIsThrownByTheApplicationThread() throws Exception {
+        IntFunction<byte[]> values = i -> i == 3 ? "boom".getBytes() : ("value-" + i).getBytes();
+        try (Deserializers<byte[], byte[]> deserializers =
+                     new Deserializers<>(new ByteArrayDeserializer(), new ErrorDeserializer(), null)) {
+            assertEquals(List.of("records [0, 1] next 2", "TestError: boom", "records [4] next 5"),
+                    outcomes(newFetch(values, 1, Compression.lz4().build()), deserializers));
+
+            CompletedFetch fetch = newFetch(values, 1, Compression.lz4().build());
+            predecodeOnOtherThread(fetch, deserializers);
+            assertEquals(List.of("records [0, 1] next 2", "records [2] next 3", "TestError: boom", "records [4] next 5"),
+                    outcomes(fetch, deserializers));
+        }
+    }
+
+    /**
+     * An exception that is not a KafkaException, found by a decoder, is thrown by fetchRecords() after the records
+     * before it, and it is the same exception. The calls after it fail as they do without a decoder.
+     */
+    @Test
+    public void testOtherExceptionFoundByDecoderIsThrownAfterTheRecordsBeforeIt() throws Exception {
+        IntFunction<byte[]> values = i -> ("value-" + i).getBytes();
+        List<String> expected = outcomes(newFetch(values, 2, Compression.lz4().build(), new FailingReleaseBufferSupplier()), bytes);
+        assertEquals("records [0, 1] next 2", expected.get(0));
+        assertEquals("records [2, 3] next 4", expected.get(1));
+        // without a decoder, the call that reads offset 4 fails, so offset 4 is not returned
+        assertEquals("IllegalStateException: release failed", expected.get(2));
+        assertTrue(expected.get(3).startsWith("KafkaException: Received exception when fetching the next record"), expected.get(3));
+
+        FailingReleaseBufferSupplier supplier = new FailingReleaseBufferSupplier();
+        CompletedFetch fetch = newFetch(values, 2, Compression.lz4().build());
+        join(start(() -> fetch.predecode(CONFIG, bytes, supplier)));
+        assertEquals(List.of(0L, 1L), offsets(fetch.fetchRecords(CONFIG, bytes, 2)));
+        assertEquals(List.of(2L, 3L), offsets(fetch.fetchRecords(CONFIG, bytes, 2)));
+        assertEquals(List.of(4L), offsets(fetch.fetchRecords(CONFIG, bytes, 2)));
+        IllegalStateException thrown = assertThrows(IllegalStateException.class, () -> fetch.fetchRecords(CONFIG, bytes, 2));
+        assertSame(supplier.thrown, thrown);
+        // then it fails at the same record, with the same error, as without a decoder
+        List<String> after = outcomes(fetch, bytes);
+        assertFalse(after.isEmpty());
+        for (String outcome : after)
+            assertEquals(expected.get(3), outcome);
+    }
+
+    /**
+     * fetchRecords() on a fetch that a decoder is decoding waits for the decoder, then returns the same records as
+     * without a decoder.
+     */
+    @Test
+    public void testFetchRecordsWaitsForRunningDecode() throws Exception {
+        IntFunction<byte[]> values = i -> ("value-" + i).getBytes();
+        List<ConsumerRecord<byte[], byte[]>> expected = newFetch(values, 2, Compression.lz4().build()).fetchRecords(CONFIG, bytes, 100);
+        assertEquals(2 * RECORDS_PER_BATCH, expected.size());
+
+        CompletedFetch fetch = newFetch(values, 2, Compression.lz4().build());
+        BlockingBufferSupplier supplier = new BlockingBufferSupplier();
+        Thread decoder = start(() -> fetch.predecode(CONFIG, bytes, supplier));
+        assertTrue(supplier.entered.await(WAIT_MS, TimeUnit.MILLISECONDS));
+        AtomicReference<List<ConsumerRecord<byte[], byte[]>>> result = new AtomicReference<>();
+        Thread application = start(() -> result.set(fetch.fetchRecords(CONFIG, bytes, 100)));
+        TestUtils.waitForCondition(() -> application.getState() == Thread.State.TIMED_WAITING, WAIT_MS,
+                "fetchRecords() should wait for the running decode");
+
+        supplier.proceed.countDown();
+        join(decoder);
+        join(application);
+        List<ConsumerRecord<byte[], byte[]>> records = result.get();
+        assertEquals(offsets(expected), offsets(records));
+        for (int i = 0; i < records.size(); i++)
+            assertArrayEquals(expected.get(i).value(), records.get(i).value());
+        assertTrue(fetch.isExhausted());
+    }
+
+    private static void assertDecodedOnDecoderThreads(Set<String> threads) {
+        assertFalse(threads.isEmpty());
+        for (String thread : threads)
+            assertTrue(thread.startsWith("consumer-fetch-decoder-"), thread);
+    }
+
+    private static List<Long> offsets(List<? extends ConsumerRecord<?, ?>> records) {
+        return records.stream().map(ConsumerRecord::offset).collect(Collectors.toList());
     }
 
     private int[] partialConsumeMetrics(IntFunction<byte[]> values, boolean predecode) throws Exception {
@@ -304,6 +414,8 @@ public class FetchPredecoderTest {
             } catch (KafkaException e) {
                 outcomes.add(e.getClass().getSimpleName() + ": " + e.getMessage() + " / cause: "
                         + (e.getCause() == null ? null : e.getCause().getMessage()));
+            } catch (RuntimeException | Error e) {
+                outcomes.add(e.getClass().getSimpleName() + ": " + e.getMessage());
             }
         }
         return outcomes;
@@ -341,9 +453,14 @@ public class FetchPredecoderTest {
     }
 
     private CompletedFetch newFetch(IntFunction<byte[]> values, int batches, Compression compression) {
+        return newFetch(values, batches, compression, BufferSupplier.create());
+    }
+
+    /** A fetch whose application thread decompresses with the given supplier. */
+    private CompletedFetch newFetch(IntFunction<byte[]> values, int batches, Compression compression, BufferSupplier supplier) {
         ByteBuffer buffer = ByteBuffer.allocate(SIZE);
         writeBatches(buffer, compression, batches, values);
-        return newFetch(buffer, mock(FetchMetricsAggregator.class), null);
+        return newFetch(buffer, mock(FetchMetricsAggregator.class), null, supplier);
     }
 
     /** Two batches without compression; the second one fails its CRC check. */
@@ -360,6 +477,11 @@ public class FetchPredecoderTest {
      * the creator of the lease is already done.
      */
     private CompletedFetch newFetch(ByteBuffer buffer, FetchMetricsAggregator aggregator, ReceiveBufferPool.Lease lease) {
+        return newFetch(buffer, aggregator, lease, BufferSupplier.create());
+    }
+
+    private CompletedFetch newFetch(ByteBuffer buffer, FetchMetricsAggregator aggregator, ReceiveBufferPool.Lease lease,
+                                    BufferSupplier supplier) {
         MemoryRecords records = MemoryRecords.readableRecords(buffer.duplicate());
         LogContext logContext = new LogContext();
         SubscriptionState subscriptions = new SubscriptionState(logContext, AutoOffsetResetStrategy.NONE);
@@ -367,7 +489,7 @@ public class FetchPredecoderTest {
         CompletedFetch fetch = new CompletedFetch(
                 logContext.logger(CompletedFetch.class),
                 subscriptions,
-                BufferSupplier.create(),
+                supplier,
                 TP,
                 new FetchResponseData.PartitionData().setPartitionIndex(0).setRecords(records),
                 aggregator,
@@ -407,6 +529,73 @@ public class FetchPredecoderTest {
         @Override
         public void release(ByteBuffer buffer) {
             released.set(true);
+            delegate.release(buffer);
+        }
+
+        @Override
+        public void close() {
+            delegate.close();
+        }
+    }
+
+    /** Records the threads it runs on, and counts its calls down. */
+    private static final class ThreadRecordingDeserializer implements Deserializer<byte[]> {
+        final Set<String> threads = ConcurrentHashMap.newKeySet();
+        final CountDownLatch calls;
+
+        ThreadRecordingDeserializer(int calls) {
+            this.calls = new CountDownLatch(calls);
+        }
+
+        @Override
+        public byte[] deserialize(String topic, byte[] data) {
+            threads.add(Thread.currentThread().getName());
+            calls.countDown();
+            return data;
+        }
+    }
+
+    private static final class TestError extends Error {
+        TestError(String message) {
+            super(message);
+        }
+    }
+
+    /** Throws a {@link TestError} for the value "boom". */
+    private static final class ErrorDeserializer implements Deserializer<byte[]> {
+        @Override
+        public byte[] deserialize(String topic, byte[] data) {
+            if (Arrays.equals(data, "boom".getBytes()))
+                throw new TestError("boom");
+            return data;
+        }
+    }
+
+    /**
+     * Fails the first time a buffer is given back after the second decompression has started, that is when the
+     * second batch is done. LZ4 gives buffers back when its stream is closed, outside the code that wraps errors
+     * into a KafkaException, so the exception reaches CompletedFetch as it is.
+     */
+    private static final class FailingReleaseBufferSupplier extends BufferSupplier {
+        private final BufferSupplier delegate = BufferSupplier.create();
+        private boolean released;
+        private boolean secondStream;
+        volatile IllegalStateException thrown;
+
+        @Override
+        public ByteBuffer get(int capacity) {
+            if (released)
+                secondStream = true;
+            return delegate.get(capacity);
+        }
+
+        @Override
+        public void release(ByteBuffer buffer) {
+            released = true;
+            if (secondStream && thrown == null) {
+                thrown = new IllegalStateException("release failed");
+                throw thrown;
+            }
             delegate.release(buffer);
         }
 
