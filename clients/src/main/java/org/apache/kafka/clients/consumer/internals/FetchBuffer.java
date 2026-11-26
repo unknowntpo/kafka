@@ -26,9 +26,12 @@ import org.slf4j.Logger;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -58,6 +61,61 @@ public class FetchBuffer implements AutoCloseable {
     private final AtomicBoolean wokenup = new AtomicBoolean(false);
 
     private CompletedFetch nextInLineFetch;
+
+    // Partitions whose buffered data was found stale by the application thread. No prefetch is sent for them
+    // until a fetch has been sent from the consumed position again.
+    private final Set<TopicPartition> prefetchInvalidated = ConcurrentHashMap.newKeySet();
+
+    /** A summary of the buffered data of one partition. It decides whether and where a prefetch is sent. */
+    static final class BufferedState {
+        long prefetchOffset;
+        long bytes;
+        boolean eligible = true;
+    }
+
+    /**
+     * Returns a summary of the data that is buffered and not yet consumed, for each partition that has such data.
+     */
+    Map<TopicPartition, BufferedState> bufferedStates() {
+        try {
+            lock.lock();
+            final Map<TopicPartition, BufferedState> states = new HashMap<>();
+            final CompletedFetch next = nextInLineFetch;
+            if (next != null && !next.isConsumed())
+                addBufferedState(states, next);
+            // For a moment the collector has a fetch both as the next in line and at the head of the queue.
+            // It must be counted once.
+            completedFetches.forEach(cf -> {
+                if (cf != next)
+                    addBufferedState(states, cf);
+            });
+            return states;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void addBufferedState(Map<TopicPartition, BufferedState> states, CompletedFetch cf) {
+        BufferedState state = states.computeIfAbsent(cf.partition, tp -> new BufferedState());
+        state.prefetchOffset = Math.max(state.prefetchOffset, cf.prefetchOffset);
+        state.bytes += cf.sizeInBytes;
+        if (!cf.prefetchEligible || prefetchInvalidated.contains(cf.partition))
+            state.eligible = false;
+    }
+
+    /**
+     * Stops prefetches for the partition, because its buffered data does not continue from the consumed position.
+     */
+    void invalidatePrefetch(TopicPartition partition) {
+        prefetchInvalidated.add(partition);
+    }
+
+    /**
+     * Allows prefetches for the partition again. It is called when a fetch is sent from the consumed position.
+     */
+    void clearPrefetchInvalidated(TopicPartition partition) {
+        prefetchInvalidated.remove(partition);
+    }
 
     public FetchBuffer(final LogContext logContext) {
         this.log = logContext.logger(FetchBuffer.class);
@@ -217,6 +275,8 @@ public class FetchBuffer implements AutoCloseable {
 
             if (maybeDrain(partitions, nextInLineFetch))
                 nextInLineFetch = null;
+
+            prefetchInvalidated.retainAll(partitions);
         } finally {
             lock.unlock();
         }

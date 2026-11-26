@@ -105,7 +105,11 @@ public class FetchCollector<K, V> {
 
                     if (!completedFetch.isInitialized()) {
                         try {
-                            fetchBuffer.setNextInLineFetch(initialize(completedFetch));
+                            CompletedFetch initialized = initialize(completedFetch);
+                            // A response that is thrown away leaves a gap, so data fetched after it is stale too
+                            if (initialized == null)
+                                fetchBuffer.invalidatePrefetch(completedFetch.partition);
+                            fetchBuffer.setNextInLineFetch(initialized);
                         } catch (Exception e) {
                             // Remove a completedFetch upon a parse with exception if (1) it contains no completedFetch, and
                             // (2) there are no fetched completedFetch with actual content preceding this exception.
@@ -129,7 +133,7 @@ public class FetchCollector<K, V> {
                     pausedCompletedFetches.add(nextInLineFetch);
                     fetchBuffer.setNextInLineFetch(null);
                 } else {
-                    final Fetch<K, V> nextFetch = fetchRecords(nextInLineFetch, recordsRemaining);
+                    final Fetch<K, V> nextFetch = fetchRecords(fetchBuffer, nextInLineFetch, recordsRemaining);
                     recordsRemaining -= nextFetch.numRecords();
                     fetch.add(nextFetch);
                 }
@@ -146,7 +150,7 @@ public class FetchCollector<K, V> {
         return fetch;
     }
 
-    private Fetch<K, V> fetchRecords(final CompletedFetch nextInLineFetch, int maxRecords) {
+    private Fetch<K, V> fetchRecords(final FetchBuffer fetchBuffer, final CompletedFetch nextInLineFetch, int maxRecords) {
         final TopicPartition tp = nextInLineFetch.partition;
 
         if (!subscriptions.isAssigned(tp)) {
@@ -207,6 +211,8 @@ public class FetchCollector<K, V> {
                 // they must be from an obsolete request
                 log.debug("Ignoring fetched records for {} at offset {} since the current position is {}",
                         tp, nextInLineFetch.nextFetchOffset(), position);
+                // data that was fetched after them is not next in line either
+                fetchBuffer.invalidatePrefetch(tp);
             }
         }
 

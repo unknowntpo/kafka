@@ -27,11 +27,13 @@ import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.FetchResponseData;
+import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.ControlRecordType;
 import org.apache.kafka.common.record.internal.DefaultRecordBatch;
 import org.apache.kafka.common.record.internal.Record;
 import org.apache.kafka.common.record.internal.RecordBatch;
+import org.apache.kafka.common.record.internal.Records;
 import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.requests.FetchResponse;
 import org.apache.kafka.common.serialization.Deserializer;
@@ -83,6 +85,13 @@ public class CompletedFetch {
     private boolean exhausted = false;
     private boolean initialized = false;
 
+    /** The offset right after the last batch of this response. A prefetch for this partition continues here. */
+    final long prefetchOffset;
+    /** The size of the records of this response. It counts against the prefetch limit while they are buffered. */
+    final int sizeInBytes;
+    /** True if the next fetch for this partition may be sent before this response has been consumed. */
+    final boolean prefetchEligible;
+
     CompletedFetch(Logger log,
                    SubscriptionState subscriptions,
                    BufferSupplier decompressionBufferSupplier,
@@ -101,6 +110,25 @@ public class CompletedFetch {
         this.lastEpoch = Optional.empty();
         this.abortedProducerIds = new HashSet<>();
         this.abortedTransactions = abortedTransactions(partitionData);
+
+        Records fetchedRecords = FetchResponse.recordsOrFail(partitionData);
+        long endOffset = fetchOffset;
+        boolean scanned = true;
+        try {
+            for (RecordBatch batch : fetchedRecords.batches())
+                endOffset = batch.nextOffset();
+        } catch (RuntimeException e) {
+            // Invalid data must be reported to the application when it is consumed, so it is not raised here.
+            // No prefetch is sent past data that cannot be scanned.
+            scanned = false;
+        }
+        this.prefetchOffset = endOffset;
+        this.sizeInBytes = fetchedRecords.sizeInBytes();
+        this.prefetchEligible = scanned
+                && partitionData.errorCode() == Errors.NONE.code()
+                && endOffset > fetchOffset
+                && !FetchResponse.isPreferredReplica(partitionData)
+                && !FetchResponse.isDivergingEpoch(partitionData);
     }
 
     long nextFetchOffset() {
