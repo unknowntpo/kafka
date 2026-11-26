@@ -63,6 +63,43 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
     }
 
     @Override
+    protected ReceiveBufferPool receiveBufferPool() {
+        return networkClientDelegate.receivePool();
+    }
+
+    @Override
+    protected boolean hasLaneThreads() {
+        return networkClientDelegate.hasLaneThreads();
+    }
+
+    @Override
+    protected void checkLane(Node laneNode) {
+        Throwable failure = networkClientDelegate.laneTransport(laneNode).failure();
+        if (failure != null)
+            throw new org.apache.kafka.common.KafkaException("The fetch receiver thread of " + laneNode + " stopped", failure);
+    }
+
+    @Override
+    protected void runOnLane(Node laneNode, Runnable task) {
+        networkClientDelegate.laneTransport(laneNode).execute(task);
+    }
+
+    @Override
+    protected java.util.concurrent.Executor laneExecutor(Node laneNode) {
+        return networkClientDelegate.laneTransport(laneNode)::execute;
+    }
+
+    @Override
+    protected void sendOnLane(Node laneNode, FetchRequest.Builder request, BiConsumer<ClientResponse, Throwable> handler) {
+        networkClientDelegate.laneTransport(laneNode).sendLocal(request, laneNode, handler);
+    }
+
+    @Override
+    protected void runOnNetworkThread(Runnable task) {
+        networkClientDelegate.runOnOwnerThread(task);
+    }
+
+    @Override
     protected boolean isUnavailable(Node node) {
         return networkClientDelegate.isUnavailable(node);
     }

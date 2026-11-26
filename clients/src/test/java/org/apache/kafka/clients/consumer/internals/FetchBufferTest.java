@@ -186,6 +186,80 @@ public class FetchBufferTest {
         }
     }
 
+    /** While the collector takes a fetch as the next in line, the fetch is also still in the queue. */
+    @Test
+    public void testBufferedStatesCountsTheNextInLineFetchOnce() {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            fetchBuffer.add(completedFetch(topicAPartition0));
+            fetchBuffer.setNextInLineFetch(fetchBuffer.peek());
+            assertEquals(1, fetchBuffer.bufferedStates().get(topicAPartition0).fetches);
+            fetchBuffer.poll();
+            assertEquals(1, fetchBuffer.bufferedStates().get(topicAPartition0).fetches);
+        }
+    }
+
+    private int restartsWhenRoomIsSignalled(FetchBuffer fetchBuffer) {
+        java.util.concurrent.atomic.AtomicInteger restarts = new java.util.concurrent.atomic.AtomicInteger();
+        boolean[] room = new boolean[1];
+        fetchBuffer.laneGate().waitForRoom(1, new FetchLaneGate.Waiter() {
+            @Override
+            public boolean hasRoom() {
+                return room[0];
+            }
+
+            @Override
+            public void lookAgain() {
+                restarts.incrementAndGet();
+            }
+        });
+        room[0] = true;
+        fetchBuffer.signalRoom();
+        return restarts.get();
+    }
+
+    /** A waiting connection is looked at again only after buffered data stopped counting. */
+    @Test
+    public void testSignalRoomDoesNothingWhileNoDataLeftTheBuffer() {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            fetchBuffer.add(completedFetch(topicAPartition0));
+            // taking the fetch as the next in line does not free anything: its data still counts
+            fetchBuffer.setNextInLineFetch(fetchBuffer.peek());
+            fetchBuffer.poll();
+            assertEquals(0, restartsWhenRoomIsSignalled(fetchBuffer));
+        }
+    }
+
+    @Test
+    public void testDrainedFetchMakesSignalRoomLookAtWaitingConnections() {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            CompletedFetch completedFetch = completedFetch(topicAPartition0);
+            fetchBuffer.add(completedFetch);
+            fetchBuffer.setNextInLineFetch(fetchBuffer.peek());
+            fetchBuffer.poll();
+            completedFetch.drain();
+            assertEquals(1, restartsWhenRoomIsSignalled(fetchBuffer));
+        }
+    }
+
+    @Test
+    public void testFetchDroppedWithoutBeingReadMakesSignalRoomLookAtWaitingConnections() {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            fetchBuffer.add(completedFetch(topicAPartition0));
+            // removed without becoming the next in line, as the collector does for a fetch with an error
+            fetchBuffer.poll();
+            assertEquals(1, restartsWhenRoomIsSignalled(fetchBuffer));
+        }
+    }
+
+    @Test
+    public void testFetchOfARevokedPartitionMakesSignalRoomLookAtWaitingConnections() {
+        try (FetchBuffer fetchBuffer = new FetchBuffer(logContext)) {
+            fetchBuffer.add(completedFetch(topicAPartition0));
+            fetchBuffer.retainAll(partitions());
+            assertEquals(1, restartsWhenRoomIsSignalled(fetchBuffer));
+        }
+    }
+
     private CompletedFetch completedFetch(TopicPartition tp) {
         FetchResponseData.PartitionData partitionData = new FetchResponseData.PartitionData();
         FetchMetricsAggregator metricsAggregator = new FetchMetricsAggregator(metricsManager, allPartitions);

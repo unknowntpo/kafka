@@ -77,6 +77,14 @@ public class NetworkClientDelegate implements AutoCloseable {
     private boolean bootstrapErrorPropagated = false;
     private final AsyncConsumerMetrics asyncConsumerMetrics;
 
+    // CONSUMER-3X-08: the extra fetch connections are served by a second thread. 0 switches it off.
+    private static final int FETCH_RECEIVER_THREADS = Integer.getInteger("c3x.receiverThreads", Math.max(1, AbstractFetch.MAX_FETCH_LANES - 1));
+    private final LogContext logContext;
+    private volatile ReceiveBufferPool receivePool;
+    private final Queue<Runnable> laneCompletions = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private Supplier<NetworkClientDelegate> laneClientSupplier;
+    private final FetchLaneTransport[] laneTransports = new FetchLaneTransport[Math.max(1, FETCH_RECEIVER_THREADS)];
+
     public NetworkClientDelegate(
             final Time time,
             final ConsumerConfig config,
@@ -97,6 +105,24 @@ public class NetworkClientDelegate implements AutoCloseable {
         this.metadataError = Optional.empty();
         this.notifyMetadataErrorsViaErrorQueue = notifyMetadataErrorsViaErrorQueue;
         this.asyncConsumerMetrics = asyncConsumerMetrics;
+        this.logContext = logContext;
+    }
+
+    /** Sets how the network client of the second receiver thread is created. Without it there is no such thread. */
+    /** The pool that this consumer's network clients read responses into, or null if there is none. */
+    ReceiveBufferPool receivePool() {
+        return receivePool;
+    }
+
+    void setLaneClientSupplier(Supplier<NetworkClientDelegate> laneClientSupplier) {
+        this.laneClientSupplier = laneClientSupplier;
+    }
+
+    /** Runs the requests that the receiver thread finished. They complete here, on the thread that owns this object. */
+    private void runLaneCompletions() {
+        Runnable task;
+        while ((task = laneCompletions.poll()) != null)
+            task.run();
     }
 
     // Visible for testing
@@ -159,13 +185,17 @@ public class NetworkClientDelegate implements AutoCloseable {
      * @param onClose       True when the network thread is closing.
      */
     public void poll(final long timeoutMs, final long currentTimeMs, boolean onClose) {
+        runLaneCompletions();
         trySend(currentTimeMs);
 
         long pollTimeoutMs = timeoutMs;
         if (!unsentRequests.isEmpty()) {
             pollTimeoutMs = Math.min(retryBackoffMs, pollTimeoutMs);
         }
+        if (!laneCompletions.isEmpty())
+            pollTimeoutMs = 0;
         this.client.poll(pollTimeoutMs, currentTimeMs);
+        runLaneCompletions();
         maybePropagateMetadataError();
         checkDisconnects(currentTimeMs, onClose);
         asyncConsumerMetrics.recordUnsentRequestsQueueSize(unsentRequests.size(), currentTimeMs);
@@ -229,7 +259,9 @@ public class NetworkClientDelegate implements AutoCloseable {
     }
 
     boolean doSend(final UnsentRequest r, final long currentTimeMs) {
-        Node node = r.node.orElse(client.leastLoadedNode(currentTimeMs).node());
+        Node node = r.node.isPresent() ? r.node.get() : client.leastLoadedNode(currentTimeMs).node();
+        if (PIPELINE && node != null && AbstractFetch.isExtraLane(node.id()))
+            node = new Node(AbstractFetch.brokerIdOf(node.id()), node.host(), node.port(), node.rack());
         if (node == null || nodeUnavailable(node)) {
             log.debug("No broker available to send the request: {}. Retrying.", r);
             return false;
@@ -302,7 +334,17 @@ public class NetworkClientDelegate implements AutoCloseable {
     }
 
     public void close() throws IOException {
-        this.client.close();
+        for (FetchLaneTransport transport : laneTransports) {
+            if (transport != null)
+                transport.close();
+        }
+        try {
+            this.client.close();
+        } finally {
+            ReceiveBufferPool pool = receivePool;
+            if (pool != null)
+                pool.close();
+        }
     }
 
     public long addAll(PollResult pollResult) {
@@ -318,8 +360,37 @@ public class NetworkClientDelegate implements AutoCloseable {
         }
     }
 
+    // Experiment switch for CONSUMER-3X D-45: the fetch requests of the extra lanes go to the broker's own
+    // connection, so one connection has several fetch requests in flight (each with its own fetch session).
+    private static final boolean PIPELINE = Boolean.getBoolean("c3x.pipeline");
+
+    /**
+     * The receiver thread of an extra connection. Lanes are spread over the receiver threads; one lane always
+     * uses the same thread. The first call for a thread must come from the thread that owns this object.
+     */
+    FetchLaneTransport laneTransport(Node laneNode) {
+        int index = (AbstractFetch.laneOf(laneNode.id()) - 1) % laneTransports.length;
+        if (laneTransports[index] == null)
+            laneTransports[index] = new FetchLaneTransport(logContext, time, index, laneClientSupplier, this::runOnOwnerThread);
+        return laneTransports[index];
+    }
+
+    /** Makes the thread that owns this object run the task. Safe to call from any thread. */
+    void runOnOwnerThread(Runnable task) {
+        laneCompletions.add(task);
+        client.wakeup();
+    }
+
+    boolean hasLaneThreads() {
+        return !PIPELINE && laneClientSupplier != null;
+    }
+
     public void add(final UnsentRequest r) {
         Objects.requireNonNull(r);
+        if (!PIPELINE && laneClientSupplier != null && r.node().isPresent() && AbstractFetch.isExtraLane(r.node().get().id())) {
+            laneTransport(r.node().get()).send(r);
+            return;
+        }
         r.setTimer(this.time, this.requestTimeoutMs);
         r.setEnqueueTimeMs(time.milliseconds());
         unsentRequests.add(r);
@@ -488,18 +559,53 @@ public class NetworkClientDelegate implements AutoCloseable {
         return new CachedSupplier<>() {
             @Override
             protected NetworkClientDelegate create() {
+                // One pool for this consumer: its main client and its fetch connections all read into it.
+                ReceiveBufferPool consumerPool = ReceiveBufferPool.ENABLED ? ReceiveBufferPool.forConsumer() : null;
+                org.apache.kafka.common.memory.MemoryPool receivePool = consumerPool != null
+                        ? consumerPool : org.apache.kafka.common.memory.MemoryPool.NONE;
                 KafkaClient client = ClientUtils.createNetworkClient(config,
                         config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG),
+                        config.getString(ConsumerConfig.CLIENT_ID_CONFIG),
                         metrics,
                         CONSUMER_METRIC_GROUP_PREFIX,
                         logContext,
                         apiVersions,
                         time,
                         CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION,
+                        config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
                         metadata,
+                        null,
+                        new org.apache.kafka.clients.DefaultHostResolver(),
                         throttleTimeSensor,
-                        clientTelemetrySender);
-                return new NetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler, notifyMetadataErrorsViaErrorQueue, asyncConsumerMetrics);
+                        clientTelemetrySender,
+                        receivePool);
+                NetworkClientDelegate delegate = new NetworkClientDelegate(time, config, logContext, client, metadata, backgroundEventHandler, notifyMetadataErrorsViaErrorQueue, asyncConsumerMetrics);
+                delegate.receivePool = consumerPool;
+                if (FETCH_RECEIVER_THREADS > 0) {
+                    // The receiver thread connects only to nodes it is given, so it never asks for metadata itself.
+                    java.util.concurrent.atomic.AtomicInteger receivers = new java.util.concurrent.atomic.AtomicInteger();
+                    delegate.setLaneClientSupplier(() -> {
+                        int receiver = receivers.getAndIncrement();
+                        KafkaClient laneClient = ClientUtils.createNetworkClient(config,
+                                config.getList(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG),
+                                config.getString(ConsumerConfig.CLIENT_ID_CONFIG),
+                                metrics,
+                                CONSUMER_METRIC_GROUP_PREFIX + "-fetch-receiver" + (receiver == 0 ? "" : "-" + receiver),
+                                logContext,
+                                apiVersions,
+                                time,
+                                CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION,
+                                config.getInt(ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG),
+                                null,
+                                new org.apache.kafka.clients.ManualMetadataUpdater(),
+                                new org.apache.kafka.clients.DefaultHostResolver(),
+                                throttleTimeSensor,
+                                null,
+                                receivePool);
+                        return new NetworkClientDelegate(time, config, logContext, laneClient, metadata, backgroundEventHandler, notifyMetadataErrorsViaErrorQueue, asyncConsumerMetrics);
+                    });
+                }
+                return delegate;
             }
         };
     }
