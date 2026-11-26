@@ -38,6 +38,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -45,11 +46,13 @@ import java.util.stream.Stream;
 
 import static org.apache.kafka.common.record.internal.DefaultRecordBatch.RECORDS_COUNT_OFFSET;
 import static org.apache.kafka.common.record.internal.DefaultRecordBatch.RECORDS_OFFSET;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -395,6 +398,95 @@ public class DefaultRecordBatchTest {
         try (CloseableIterator<Record> streamingIterator = batch.streamingIterator(BufferSupplier.create())) {
             TestUtils.checkEquals(streamingIterator, batch.iterator());
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    public void testReusingIteratorReadsTheSameRecordsAsIterator(CompressionType compressionType, TimestampType timestampType) {
+        Header[] headers = {new RecordHeader("k1", "v1".getBytes()), new RecordHeader("k2", null)};
+        SimpleRecord[] simpleRecords = {
+            new SimpleRecord(1L, "a".getBytes(), "1".getBytes()),
+            new SimpleRecord(2L, null, "2".getBytes()),
+            new SimpleRecord(3L, "c".getBytes(), null),
+            new SimpleRecord(4L, new byte[0], new byte[0], headers),
+            new SimpleRecord(5L, "e".getBytes(), "5".getBytes(), headers)
+        };
+        MemoryRecords records = MemoryRecords.withIdempotentRecords(RecordBatch.MAGIC_VALUE_V2, 10L,
+                Compression.of(compressionType).build(), 1234L, (short) 1, 100, 7, simpleRecords);
+        DefaultRecordBatch batch = new DefaultRecordBatch(records.buffer());
+        if (timestampType == TimestampType.LOG_APPEND_TIME)
+            batch.setMaxTimestamp(TimestampType.LOG_APPEND_TIME, 99L);
+
+        List<Record> expected = new ArrayList<>();
+        batch.iterator().forEachRemaining(expected::add);
+        assertEquals(simpleRecords.length, expected.size());
+
+        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create())) {
+            for (Record expectedRecord : expected) {
+                assertTrue(iterator.hasNext());
+                Record record = iterator.next();
+                assertEquals(expectedRecord.offset(), record.offset());
+                assertEquals(expectedRecord.sequence(), record.sequence());
+                assertEquals(expectedRecord.timestamp(), record.timestamp());
+                assertEquals(expectedRecord.sizeInBytes(), record.sizeInBytes());
+                assertEquals(expectedRecord.hasKey(), record.hasKey());
+                assertEquals(expectedRecord.keySize(), record.keySize());
+                assertEquals(expectedRecord.key(), record.key());
+                assertEquals(expectedRecord.hasValue(), record.hasValue());
+                assertEquals(expectedRecord.valueSize(), record.valueSize());
+                assertEquals(expectedRecord.value(), record.value());
+                assertArrayEquals(expectedRecord.headers(), record.headers());
+            }
+            assertFalse(iterator.hasNext());
+        }
+    }
+
+    private static Stream<Arguments> testReusingIteratorReadsTheSameRecordsAsIterator() {
+        return Arrays.stream(CompressionType.values()).flatMap(compressionType -> Stream.of(
+                Arguments.of(compressionType, TimestampType.CREATE_TIME),
+                Arguments.of(compressionType, TimestampType.LOG_APPEND_TIME)));
+    }
+
+    @Test
+    public void testReusingIteratorKeepsTheBuffersOfEarlierRecords() {
+        MemoryRecords records = MemoryRecords.withRecords(RecordBatch.MAGIC_VALUE_V2, 0L,
+                Compression.lz4().build(), TimestampType.CREATE_TIME,
+                new SimpleRecord(1L, "a".getBytes(), "1".getBytes(), new Header[] {new RecordHeader("h", "x".getBytes())}),
+                new SimpleRecord(2L, "b".getBytes(), "2".getBytes(), new Header[] {new RecordHeader("h", "y".getBytes())}));
+        DefaultRecordBatch batch = new DefaultRecordBatch(records.buffer());
+
+        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create())) {
+            Record first = iterator.next();
+            ByteBuffer key = first.key();
+            ByteBuffer value = first.value();
+            Header[] headers = first.headers();
+            Record second = iterator.next();
+
+            // the iterator returns one object, but the buffers it gave out for the first record stay the same
+            assertSame(first, second);
+            assertEquals(1L, second.offset());
+            assertEquals(ByteBuffer.wrap("a".getBytes()), key);
+            assertEquals(ByteBuffer.wrap("1".getBytes()), value);
+            assertArrayEquals("x".getBytes(), headers[0].value());
+        }
+    }
+
+    @ParameterizedTest
+    @MethodSource
+    public void testReusingIteratorWithInvalidRecordCount(CompressionType compressionType, int invalidCount) {
+        DefaultRecordBatch batch = recordsWithInvalidRecordCount(RecordBatch.MAGIC_VALUE_V2,
+                System.currentTimeMillis(), compressionType, invalidCount);
+        try (CloseableIterator<Record> iterator = batch.reusingIterator(BufferSupplier.create())) {
+            assertThrows(InvalidRecordException.class, () -> iterator.forEachRemaining(Record::ensureValid));
+        }
+    }
+
+    private static Stream<Arguments> testReusingIteratorWithInvalidRecordCount() {
+        return Stream.of(
+                Arguments.of(CompressionType.NONE, 5),
+                Arguments.of(CompressionType.NONE, 2),
+                Arguments.of(CompressionType.GZIP, 5),
+                Arguments.of(CompressionType.GZIP, 2));
     }
 
     @ParameterizedTest

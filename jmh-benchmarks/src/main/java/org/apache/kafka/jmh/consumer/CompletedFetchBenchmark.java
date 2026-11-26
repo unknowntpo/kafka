@@ -34,6 +34,7 @@ import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.CompressionType;
+import org.apache.kafka.common.record.internal.DefaultRecordBatch;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.internal.Record;
@@ -89,8 +90,10 @@ import java.util.concurrent.TimeUnit;
  *   <li>{@code fetchRecords}: the real consumer path, {@code CompletedFetch.fetchRecords} with
  *       {@code max.poll.records = 500} and {@code check.crcs = true} (the default).</li>
  *   <li>{@code fetchRecordsNoCrc}: the same path with {@code check.crcs = false}.</li>
- *   <li>{@code iterateOnly}: only {@link RecordBatch#streamingIterator(BufferSupplier)}, the iterator
- *       {@link CompletedFetch} uses; isolates the {@link Record} materialisation.</li>
+ *   <li>{@code iterateOnly}: only {@link RecordBatch#streamingIterator(BufferSupplier)}, which creates one
+ *       {@link Record} object for each record.</li>
+ *   <li>{@code iterateReusing}: only {@link DefaultRecordBatch#reusingIterator(BufferSupplier)}, the iterator
+ *       {@link CompletedFetch} uses, which reuses one {@link Record} object for all records of a batch.</li>
  *   <li>{@code floor}: a hand-written single pass that builds each {@link ConsumerRecord} with one
  *       value copy; a lower bound for the current public API. Only meaningful for {@code NONE}.</li>
  * </ul>
@@ -301,6 +304,17 @@ public class CompletedFetchBenchmark {
         MemoryRecords records = MemoryRecords.readableRecords(responseBuffer.duplicate());
         for (RecordBatch batch : records.batches()) {
             try (CloseableIterator<Record> it = batch.streamingIterator(decompressionBufferSupplier)) {
+                while (it.hasNext())
+                    bh.consume(it.next());
+            }
+        }
+    }
+
+    @Benchmark
+    public void iterateReusing(Blackhole bh) {
+        MemoryRecords records = MemoryRecords.readableRecords(responseBuffer.duplicate());
+        for (RecordBatch batch : records.batches()) {
+            try (CloseableIterator<Record> it = ((DefaultRecordBatch) batch).reusingIterator(decompressionBufferSupplier)) {
                 while (it.hasNext())
                     bh.consume(it.next());
             }

@@ -29,6 +29,7 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.message.FetchResponseData;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.record.internal.ControlRecordType;
+import org.apache.kafka.common.record.internal.DefaultRecordBatch;
 import org.apache.kafka.common.record.internal.Record;
 import org.apache.kafka.common.record.internal.RecordBatch;
 import org.apache.kafka.common.requests.FetchRequest;
@@ -223,7 +224,11 @@ public class CompletedFetch {
                     }
                 }
 
-                records = currentBatch.streamingIterator(decompressionBufferSupplier);
+                // For magic v2 batches, read the records without creating a new Record object for each one
+                if (currentBatch instanceof DefaultRecordBatch)
+                    records = ((DefaultRecordBatch) currentBatch).reusingIterator(decompressionBufferSupplier);
+                else
+                    records = currentBatch.streamingIterator(decompressionBufferSupplier);
             } else {
                 Record record = records.next();
                 // skip any records out of range
@@ -281,9 +286,9 @@ public class CompletedFetch {
                 if (lastRecord == null)
                     break;
 
-                Optional<Integer> leaderEpoch = maybeLeaderEpoch(currentBatch.partitionLeaderEpoch());
+                // lastEpoch is the leader epoch of the current batch, so all its records can share it
                 TimestampType timestampType = currentBatch.timestampType();
-                ConsumerRecord<K, V> record = parseRecord(deserializers, partition, leaderEpoch, timestampType, lastRecord);
+                ConsumerRecord<K, V> record = parseRecord(deserializers, partition, lastEpoch, timestampType, lastRecord);
                 records.add(record);
                 recordsRead++;
                 bytesRead += lastRecord.sizeInBytes();

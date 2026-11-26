@@ -55,6 +55,25 @@ public class RecordHeadersTest {
     }
 
     @Test
+    public void testAddToHeadersCreatedEmpty() {
+        Headers fromArray = new RecordHeaders(new Header[0]);
+        Headers fromNull = new RecordHeaders((Iterable<Header>) null);
+        Headers other = new RecordHeaders();
+
+        fromArray.remove("key");
+        fromArray.add(new RecordHeader("key", "value".getBytes()));
+        fromNull.add(new RecordHeader("key2", "value2".getBytes()));
+
+        assertHeader("key", "value", fromArray.lastHeader("key"));
+        assertEquals(1, getCount(fromArray));
+        assertHeader("key2", "value2", fromNull.lastHeader("key2"));
+        assertEquals(1, getCount(fromNull));
+        // empty headers do not share their list
+        assertEquals(0, getCount(other));
+        assertEquals(new RecordHeaders(), other);
+    }
+
+    @Test
     public void testAddHeadersPreserveOrder() {
         Headers headers = new RecordHeaders();
         headers.add(new RecordHeader("key", "value".getBytes()));

@@ -33,6 +33,7 @@ import java.io.InputStream;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -363,6 +364,43 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
             return uncompressedIterator();
     }
 
+    /**
+     * Returns an iterator over the records of this batch that does not create a new {@link Record} for each record.
+     * {@code next()} always returns the same object, updated to describe the next record, so a caller must not use
+     * a record after the next call to {@code next()}. The buffers returned by {@link Record#key()},
+     * {@link Record#value()} and {@link Record#headers()} stay valid after that call.
+     *
+     * <p>A compressed batch is decompressed in full when this method is called.
+     */
+    public CloseableIterator<Record> reusingIterator(BufferSupplier bufferSupplier) {
+        final ByteBuffer records;
+        if (isCompressed()) {
+            records = decompressedRecords(bufferSupplier);
+        } else {
+            records = this.buffer.duplicate();
+            records.position(RECORDS_OFFSET);
+        }
+        return new ReusingRecordIterator(records);
+    }
+
+    private ByteBuffer decompressedRecords(BufferSupplier bufferSupplier) {
+        byte[] out = new byte[Math.max(1024, 4 * sizeInBytes())];
+        int size = 0;
+        try (InputStream in = recordInputStream(bufferSupplier)) {
+            while (true) {
+                if (size == out.length)
+                    out = Arrays.copyOf(out, 2 * out.length);
+                int read = in.read(out, size, out.length - size);
+                if (read < 0)
+                    break;
+                size += read;
+            }
+        } catch (IOException e) {
+            throw new KafkaException("Failed to decompress record stream", e);
+        }
+        return ByteBuffer.wrap(out, 0, size);
+    }
+
     @Override
     public void setLastOffset(long offset) {
         buffer.putLong(BASE_OFFSET_OFFSET, offset - lastOffsetDelta());
@@ -619,6 +657,203 @@ public class DefaultRecordBatch extends AbstractRecordBatch implements MutableRe
             throw new UnsupportedOperationException();
         }
 
+    }
+
+    private final class ReusingRecordIterator extends RecordIterator {
+        private final ByteBuffer buffer;
+        private final ReusableRecord record;
+
+        ReusingRecordIterator(ByteBuffer buffer) {
+            super();
+            this.buffer = buffer;
+            this.record = new ReusableRecord(buffer);
+        }
+
+        @Override
+        protected Record readNext(long baseOffset, long baseTimestamp, int baseSequence, Long logAppendTime) {
+            try {
+                record.readFrom(baseOffset, baseTimestamp, baseSequence, logAppendTime);
+                return record;
+            } catch (BufferUnderflowException e) {
+                throw new InvalidRecordException("Incorrect declared batch size, premature EOF reached");
+            }
+        }
+
+        @Override
+        protected boolean ensureNoneRemaining() {
+            return !buffer.hasRemaining();
+        }
+
+        @Override
+        public void close() {}
+    }
+
+    /**
+     * A record that is read from a buffer of uncompressed records without copying the key, the value or the
+     * headers. It follows the record format that {@link DefaultRecord#readFrom(ByteBuffer, long, long, int, Long)}
+     * reads, and does the same checks.
+     */
+    private static final class ReusableRecord implements Record {
+        private final ByteBuffer buffer;
+        private int sizeInBytes;
+        private long offset;
+        private long timestamp;
+        private int sequence;
+        private int keyPosition;
+        private int keySize;
+        private int valuePosition;
+        private int valueSize;
+        private Header[] headers;
+
+        ReusableRecord(ByteBuffer buffer) {
+            this.buffer = buffer;
+        }
+
+        /**
+         * Reads the record at the position of the buffer and moves the buffer to the next record.
+         */
+        void readFrom(long baseOffset, long baseTimestamp, int baseSequence, Long logAppendTime) {
+            int sizeOfBodyInBytes = ByteUtils.readVarint(buffer);
+            if (buffer.remaining() < sizeOfBodyInBytes)
+                throw new InvalidRecordException("Invalid record size: expected " + sizeOfBodyInBytes +
+                    " bytes in record payload, but instead the buffer has only " + buffer.remaining() +
+                    " remaining bytes.");
+            try {
+                int recordStart = buffer.position();
+                buffer.get(); // record attributes are not used
+                long timestampDelta = ByteUtils.readVarlong(buffer);
+                timestamp = logAppendTime != null ? logAppendTime : baseTimestamp + timestampDelta;
+
+                int offsetDelta = ByteUtils.readVarint(buffer);
+                offset = baseOffset + offsetDelta;
+                sequence = baseSequence >= 0 ?
+                        incrementSequence(baseSequence, offsetDelta) :
+                        RecordBatch.NO_SEQUENCE;
+
+                keySize = ByteUtils.readVarint(buffer);
+                keyPosition = skip(keySize);
+                keySize = Math.max(keySize, -1);
+
+                valueSize = ByteUtils.readVarint(buffer);
+                valuePosition = skip(valueSize);
+                valueSize = Math.max(valueSize, -1);
+
+                int numHeaders = ByteUtils.readVarint(buffer);
+                if (numHeaders < 0)
+                    throw new InvalidRecordException("Found invalid number of record headers " + numHeaders);
+                if (numHeaders > buffer.remaining())
+                    throw new InvalidRecordException("Found invalid number of record headers. " + numHeaders + " is larger than the remaining size of the buffer");
+                headers = numHeaders == 0 ? Record.EMPTY_HEADERS : DefaultRecord.readHeaders(buffer, numHeaders);
+
+                // validate whether we have read all header bytes in the current record
+                if (buffer.position() - recordStart != sizeOfBodyInBytes)
+                    throw new InvalidRecordException("Invalid record size: expected to read " + sizeOfBodyInBytes +
+                            " bytes in record payload, but instead read " + (buffer.position() - recordStart));
+
+                sizeInBytes = ByteUtils.sizeOfVarint(sizeOfBodyInBytes) + sizeOfBodyInBytes;
+            } catch (BufferUnderflowException | IllegalArgumentException e) {
+                throw new InvalidRecordException("Found invalid record structure", e);
+            }
+        }
+
+        /**
+         * Moves the buffer past a field of the given size and returns the position where the field starts.
+         * A negative size means a null field, which takes no bytes.
+         */
+        private int skip(int size) {
+            int position = buffer.position();
+            if (size > 0)
+                buffer.position(position + size);
+            return position;
+        }
+
+        private ByteBuffer slice(int position, int size) {
+            if (size < 0)
+                return null;
+            ByteBuffer slice = buffer.duplicate();
+            slice.limit(position + size);
+            slice.position(position);
+            return slice.slice();
+        }
+
+        @Override
+        public long offset() {
+            return offset;
+        }
+
+        @Override
+        public int sequence() {
+            return sequence;
+        }
+
+        @Override
+        public int sizeInBytes() {
+            return sizeInBytes;
+        }
+
+        @Override
+        public long timestamp() {
+            return timestamp;
+        }
+
+        @Override
+        public void ensureValid() {}
+
+        @Override
+        public int keySize() {
+            return keySize;
+        }
+
+        @Override
+        public boolean hasKey() {
+            return keySize >= 0;
+        }
+
+        @Override
+        public ByteBuffer key() {
+            return slice(keyPosition, keySize);
+        }
+
+        @Override
+        public int valueSize() {
+            return valueSize;
+        }
+
+        @Override
+        public boolean hasValue() {
+            return valueSize >= 0;
+        }
+
+        @Override
+        public ByteBuffer value() {
+            return slice(valuePosition, valueSize);
+        }
+
+        @Override
+        public boolean hasMagic(byte magic) {
+            return magic >= MAGIC_VALUE_V2;
+        }
+
+        @Override
+        public boolean isCompressed() {
+            return false;
+        }
+
+        @Override
+        public boolean hasTimestampType(TimestampType timestampType) {
+            return false;
+        }
+
+        @Override
+        public Header[] headers() {
+            return headers;
+        }
+
+        @Override
+        public String toString() {
+            return String.format("ReusableRecord(offset=%d, timestamp=%d, keySize=%d, valueSize=%d)",
+                    offset, timestamp, keySize, valueSize);
+        }
     }
 
     // visible for testing
