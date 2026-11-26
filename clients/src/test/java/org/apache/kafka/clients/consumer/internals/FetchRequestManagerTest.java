@@ -144,12 +144,14 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -280,6 +282,99 @@ public class FetchRequestManagerTest {
             assertEquals(offset, record.offset());
             offset += 1;
         }
+    }
+
+    /**
+     * The buffer of a response goes back to the pool only after every partition of the response was read.
+     */
+    @Test
+    public void testReceiveBufferIsReusedAfterEveryFetchOfTheResponseIsRead() {
+        buildFetcher(4);
+        ReceiveBufferPool pool = new ReceiveBufferPool(64 * 1024 * 1024);
+        try {
+            doReturn(pool).when(networkClientDelegate).receiveBufferPool();
+            assignFromUser(Set.of(tp0, tp1));
+            subscriptions.seek(tp0, 1);
+            subscriptions.seek(tp1, 1);
+            assertEquals(1, sendFetches());
+
+            ByteBuffer response = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            client.prepareResponse(pooledFetchResponse(response));
+            networkClientDelegate.poll(time.timer(0));
+
+            List<ConsumerRecord<byte[], byte[]>> consumed = new ArrayList<>();
+            // the first partition and one record of the second
+            fetchRecordsInto(consumed);
+            assertEquals(4, consumed.size());
+            assertTrue(pool.handedOut(response.array()));
+
+            fetchRecordsInto(consumed);
+            assertEquals(6, consumed.size());
+            assertFalse(pool.handedOut(response.array()));
+
+            ByteBuffer next = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            assertSame(response.array(), next.array());
+            Arrays.fill(next.array(), (byte) 0x7F);
+            for (ConsumerRecord<byte[], byte[]> record : consumed) {
+                assertArrayEquals("key".getBytes(), record.key());
+                assertArrayEquals(("value-" + record.offset()).getBytes(), record.value());
+            }
+        } finally {
+            pool.close();
+        }
+    }
+
+    /**
+     * A partition whose data is thrown away without being read keeps the buffer of the whole response out of the
+     * pool.
+     */
+    @Test
+    public void testReceiveBufferIsNotReusedWhenAFetchIsDiscarded() {
+        buildFetcher(4);
+        ReceiveBufferPool pool = new ReceiveBufferPool(64 * 1024 * 1024);
+        try {
+            doReturn(pool).when(networkClientDelegate).receiveBufferPool();
+            assignFromUser(Set.of(tp0, tp1));
+            subscriptions.seek(tp0, 1);
+            subscriptions.seek(tp1, 1);
+            assertEquals(1, sendFetches());
+
+            ByteBuffer response = pool.tryAllocate(ReceiveBufferPool.MIN_POOLED_BYTES);
+            client.prepareResponse(pooledFetchResponse(response));
+            networkClientDelegate.poll(time.timer(0));
+
+            // the data of tp1 no longer starts at the position, so it is thrown away
+            subscriptions.seek(tp1, 0);
+            List<ConsumerRecord<byte[], byte[]>> consumed = new ArrayList<>();
+            fetchRecordsInto(consumed);
+            fetchRecordsInto(consumed);
+            assertEquals(3, consumed.size());
+            assertFalse(fetcher.hasCompletedFetches());
+            assertTrue(pool.handedOut(response.array()));
+        } finally {
+            pool.close();
+        }
+    }
+
+    /**
+     * A response for tp0 and tp1 whose records are in the given buffer, as the network layer would have read them.
+     */
+    private FetchResponse pooledFetchResponse(ByteBuffer response) {
+        Map<TopicIdPartition, FetchResponseData.PartitionData> partitions = new LinkedHashMap<>();
+        int position = 0;
+        for (TopicIdPartition tp : List.of(tidp0, tidp1)) {
+            ByteBuffer slice = response.duplicate();
+            slice.position(position);
+            slice.put(records.buffer().duplicate());
+            slice.limit(slice.position()).position(position);
+            position = slice.limit();
+            partitions.put(tp, new FetchResponseData.PartitionData()
+                    .setPartitionIndex(tp.partition())
+                    .setHighWatermark(100)
+                    .setLogStartOffset(0)
+                    .setRecords(MemoryRecords.readableRecords(slice.slice())));
+        }
+        return FetchResponse.of(Errors.NONE, 0, INVALID_SESSION_ID, new LinkedHashMap<>(partitions), List.of());
     }
 
     /**

@@ -21,10 +21,12 @@ import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.SaslConfigs;
 import org.apache.kafka.common.internals.ClusterResourceListeners;
+import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.network.ChannelBuilder;
 import org.apache.kafka.common.network.ChannelBuilders;
+import org.apache.kafka.common.network.NetworkReceive;
 import org.apache.kafka.common.network.Selector;
 import org.apache.kafka.common.security.JaasContext;
 import org.apache.kafka.common.security.auth.SecurityProtocol;
@@ -41,6 +43,7 @@ import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 import static org.apache.kafka.common.utils.Utils.closeQuietly;
@@ -271,16 +274,47 @@ public final class ClientUtils {
                                                     HostResolver hostResolver,
                                                     Sensor throttleTimeSensor,
                                                     ClientTelemetrySender clientTelemetrySender) {
+        return createNetworkClient(config, bootstrapServers, clientId, metrics, metricsGroupPrefix, logContext,
+                apiVersions, time, maxInFlightRequestsPerConnection, requestTimeoutMs, metadata, metadataUpdater,
+                hostResolver, throttleTimeSensor, clientTelemetrySender, MemoryPool.NONE);
+    }
+
+    /**
+     * @param memoryPool where the buffers that responses are read into come from
+     */
+    public static NetworkClient createNetworkClient(AbstractConfig config,
+                                                    List<String> bootstrapServers,
+                                                    String clientId,
+                                                    Metrics metrics,
+                                                    String metricsGroupPrefix,
+                                                    LogContext logContext,
+                                                    ApiVersions apiVersions,
+                                                    Time time,
+                                                    int maxInFlightRequestsPerConnection,
+                                                    int requestTimeoutMs,
+                                                    Metadata metadata,
+                                                    MetadataUpdater metadataUpdater,
+                                                    HostResolver hostResolver,
+                                                    Sensor throttleTimeSensor,
+                                                    ClientTelemetrySender clientTelemetrySender,
+                                                    MemoryPool memoryPool) {
         ChannelBuilder channelBuilder = null;
         Selector selector = null;
 
         try {
             channelBuilder = ClientUtils.createChannelBuilder(config, time, logContext);
-            selector = new Selector(config.getLong(CommonClientConfigs.CONNECTIONS_MAX_IDLE_MS_CONFIG),
+            // The same settings as Selector(long, Metrics, Time, String, ChannelBuilder, LogContext), plus the pool
+            selector = new Selector(NetworkReceive.UNLIMITED,
+                    config.getLong(CommonClientConfigs.CONNECTIONS_MAX_IDLE_MS_CONFIG),
+                    Selector.NO_FAILED_AUTHENTICATION_DELAY,
                     metrics,
                     time,
                     metricsGroupPrefix,
+                    Map.of(),
+                    true,
+                    false,
                     channelBuilder,
+                    memoryPool,
                     logContext);
             BootstrapConfiguration bootstrapConfiguration = bootstrapConfiguration(config, bootstrapServers);
 

@@ -89,6 +89,20 @@ public class CompletedFetch {
     private boolean exhausted = false;
     private boolean initialized = false;
 
+    // The buffer of the response may go back to the pool only if no object that outlives this fetch points into
+    // it: no record, header or exception that was handed out. Records decoded by the reusing iterator keep
+    // copies of their key and value, but their headers point into the records. Records of the streaming iterator
+    // may point into the response with their key, value and headers.
+    //
+    // True once something that was handed out may point into the bytes of the response. Only the thread that
+    // reads the records uses it.
+    private boolean responseMayBeReferenced;
+    // True once all records were read and nothing that was handed out points into the response. It is set by
+    // the thread that reads the records and read by the thread that drains this fetch.
+    private volatile boolean responseReusable;
+    // Gives the buffer of the response back to the pool. Null if the response is not from a pool.
+    private ReceiveBufferPool.Lease receiveLease;
+
     /** The offset right after the last batch of this response. A prefetch for this partition continues here. */
     final long prefetchOffset;
     /** The size of the records of this response. It counts against the prefetch limit while they are buffered. */
@@ -159,6 +173,19 @@ public class CompletedFetch {
         return exhausted;
     }
 
+    /**
+     * Makes this fetch one part of the response that the lease tracks. Call it before the fetch is shared with
+     * other threads. {@link #drain()} releases the part.
+     *
+     * @param responseBytes the bytes of the records of this fetch, which are part of the response
+     */
+    void receiveLease(ReceiveBufferPool.Lease lease, ByteBuffer responseBytes) {
+        lease.attach(responseBytes);
+        synchronized (this) {
+            this.receiveLease = lease;
+        }
+    }
+
 
     /**
      * After each partition is parsed, we update the current metric totals with the total bytes
@@ -179,12 +206,33 @@ public class CompletedFetch {
             maybeCloseRecordStream();
             cachedRecordException = null;
             this.isConsumed = true;
+            releaseResponse();
             recordAggregatedMetrics(bytesRead, recordsRead);
 
             // we move the partition to the end if we received some bytes. This way, it's more likely that partitions
             // for the same topic can remain together (allowing for more efficient serialization).
             if (bytesRead > 0)
                 subscriptions.movePartitionToEnd(partition);
+        }
+    }
+
+    /**
+     * Releases the part of this fetch in the lease of the response. The buffer of the response may then go back to
+     * the pool, but only if all records of this fetch were read and none of them points into the buffer. A fetch
+     * that is dropped before its end, for example after a seek or when its partition is revoked, keeps the buffer
+     * out of the pool, because it is hard to prove that no record handed out points into it.
+     */
+    private void releaseResponse() {
+        ReceiveBufferPool.Lease lease;
+        // Under a lock, so that the part is released only once, whatever thread drains this fetch.
+        synchronized (this) {
+            lease = receiveLease;
+            receiveLease = null;
+        }
+        if (lease != null) {
+            if (!responseReusable)
+                lease.taint();
+            lease.release();
         }
     }
 
@@ -218,6 +266,9 @@ public class CompletedFetch {
                 DefaultRecordBatch.ReusingRecordIterator iterator = (DefaultRecordBatch.ReusingRecordIterator) records;
                 if (iterator.decompressionArray() != null)
                     decompressionArray = iterator.readHeaders() ? null : iterator.decompressionArray();
+                // Without compression, the headers point into the response itself.
+                else if (iterator.readHeaders())
+                    responseMayBeReferenced = true;
             }
             records.close();
             records = null;
@@ -238,6 +289,7 @@ public class CompletedFetch {
                     if (currentBatch != null)
                         nextFetchOffset = currentBatch.nextOffset();
                     exhausted = true;
+                    responseReusable = !responseMayBeReferenced;
                     return null;
                 }
 
@@ -268,8 +320,11 @@ public class CompletedFetch {
                     records = ((DefaultRecordBatch) currentBatch).reusingIterator(decompressionBufferSupplier, decompressionArray);
                     // the iterator owns the array until it is closed
                     decompressionArray = null;
-                } else
+                } else {
+                    // The records of this iterator, and their headers, may point into the response.
+                    responseMayBeReferenced = true;
                     records = currentBatch.streamingIterator(decompressionBufferSupplier);
+                }
             } else {
                 Record record = records.next();
                 // skip any records out of range
@@ -351,6 +406,10 @@ public class CompletedFetch {
                 throw new KafkaException("Received exception when fetching the next record from " + partition
                         + ". If needed, please seek past the record to "
                         + "continue consumption.", e);
+        } finally {
+            // An error may hold parts of the record, so the response is not reused after one.
+            if (cachedRecordException != null || corruptLastRecord)
+                responseMayBeReferenced = true;
         }
         return records;
     }
