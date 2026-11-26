@@ -65,6 +65,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -75,7 +76,6 @@ import static org.mockito.Mockito.mock;
 public class FetchRequestManagerConnectionsTest {
 
     private static final String TOPIC = "test";
-    private static final int PARTITIONS = 4;
     private static final int FETCH_SIZE = 1000;
     // A record this large makes a response "full": at least half of what the broker may send for the partition.
     private static final int FULL_VALUE_SIZE = 600;
@@ -102,6 +102,8 @@ public class FetchRequestManagerConnectionsTest {
     private FetchRequestManager fetcher;
     private Node broker;
     private int maxConnections = 4;
+    private int brokerCount = 1;
+    private int partitionCount = 4;
     private int nextSessionId = 100;
 
     private void setup() {
@@ -135,11 +137,11 @@ public class FetchRequestManagerConnectionsTest {
                 metricsManager, time);
 
         Set<TopicPartition> assigned = new LinkedHashSet<>();
-        for (int i = 0; i < PARTITIONS; i++)
+        for (int i = 0; i < partitionCount; i++)
             assigned.add(new TopicPartition(TOPIC, i));
         partitions.addAll(assigned);
         subscriptions.assignFromUser(assigned);
-        client.updateMetadata(RequestTestUtils.metadataUpdateWithIds(1, Map.of(TOPIC, PARTITIONS), Map.of(TOPIC, topicId)));
+        client.updateMetadata(RequestTestUtils.metadataUpdateWithIds(brokerCount, Map.of(TOPIC, partitionCount), Map.of(TOPIC, topicId)));
         for (TopicPartition tp : partitions)
             subscriptions.seekValidated(tp, new SubscriptionState.FetchPosition(0, Optional.empty(), metadata.currentLeader(tp)));
         broker = metadata.fetch().nodes().get(0);
@@ -227,11 +229,25 @@ public class FetchRequestManagerConnectionsTest {
         cycle(false, true);
         assertEquals(1, fetcher.connectionCount(broker.id()));
 
-        // All partitions are back on the broker's first connection.
+        // All partitions are back on the broker's first connection, and the session of the removed
+        // connection is closed at the broker and forgotten here.
+        String extraId = String.valueOf(AbstractFetch.connectionId(broker.id(), 1));
+        int extraSession = sessionIds.get(extraId);
         consumeAll();
         sendFetches();
         assertEquals(List.of(broker.idString()), destinations());
         assertEquals(new HashSet<>(partitions), sessionPartitions.get(broker.idString()));
+        assertEquals(Set.of(extraId), lastCloses.keySet());
+        assertEquals(FetchMetadata.FINAL_EPOCH, lastCloses.get(extraId).epoch());
+        assertEquals(extraSession, lastCloses.get(extraId).sessionId());
+        assertNull(fetcher.sessionHandler(Integer.parseInt(extraId)));
+
+        // The close is answered, and the session is not closed a second time.
+        respondToAll(false);
+        networkClientDelegate.poll(0, time.milliseconds());
+        consumeAll();
+        sendFetches();
+        assertEquals(Map.of(), lastCloses);
     }
 
     @Test
@@ -240,20 +256,22 @@ public class FetchRequestManagerConnectionsTest {
         growToTwoConnections();
         String extra = String.valueOf(AbstractFetch.connectionId(broker.id(), 1));
 
-        // The partitions with an odd number moved: the first connection's session forgets them, the new
-        // connection asks for them from the next offset.
+        // Half of the partitions moved: the first connection's session forgets them, the new connection asks
+        // for them from the next offset.
         Map<String, FetchRequest> requests = lastRequests;
-        FetchRequest first = requests.get(broker.idString());
-        assertFalse(first.metadata().isFull(), "the first connection keeps its fetch session");
-        assertEquals(Set.of(partitions.get(1), partitions.get(3)), forgotten(first));
-        assertEquals(Set.of(partitions.get(0), partitions.get(2)), sessionPartitions.get(broker.idString()));
-
         FetchRequest moved = requests.get(extra);
         assertTrue(moved.metadata().isFull(), "a new connection starts a fetch session of its own");
         Map<TopicPartition, Long> offsets = fetchOffsets(moved);
-        assertEquals(Set.of(partitions.get(1), partitions.get(3)), offsets.keySet());
+        assertEquals(2, offsets.size());
         for (Map.Entry<TopicPartition, Long> entry : offsets.entrySet())
             assertEquals(subscriptions.position(entry.getKey()).offset, entry.getValue());
+
+        Set<TopicPartition> stayed = new HashSet<>(partitions);
+        stayed.removeAll(offsets.keySet());
+        FetchRequest first = requests.get(broker.idString());
+        assertFalse(first.metadata().isFull(), "the first connection keeps its fetch session");
+        assertEquals(offsets.keySet(), forgotten(first));
+        assertEquals(stayed, sessionPartitions.get(broker.idString()));
     }
 
     @Test
@@ -261,6 +279,9 @@ public class FetchRequestManagerConnectionsTest {
         setup();
         growToTwoConnections();
         String extra = String.valueOf(AbstractFetch.connectionId(broker.id(), 1));
+        Set<TopicPartition> onFirst = new HashSet<>(sessionPartitions.get(broker.idString()));
+        Set<TopicPartition> onExtra = new HashSet<>(sessionPartitions.get(extra));
+        assertEquals(2, onExtra.size());
 
         // The extra connection keeps its request in flight while the responses of the first connection vote
         // the extra connection away.
@@ -281,7 +302,7 @@ public class FetchRequestManagerConnectionsTest {
         consumeAll();
         sendFetches();
         assertNoPartitionInTwoRequestsInFlight();
-        assertEquals(Set.of(partitions.get(0), partitions.get(2)), sessionPartitions.get(broker.idString()));
+        assertEquals(onFirst, sessionPartitions.get(broker.idString()));
         respond(requestTo(broker.idString()), false, 0);
         respond(stuck, false, 0);
         networkClientDelegate.poll(0, time.milliseconds());
@@ -291,7 +312,7 @@ public class FetchRequestManagerConnectionsTest {
         sendFetches();
         assertEquals(List.of(broker.idString()), destinations());
         Map<TopicPartition, Long> offsets = fetchOffsets(lastRequests.get(broker.idString()));
-        assertTrue(offsets.keySet().containsAll(Set.of(partitions.get(1), partitions.get(3))));
+        assertTrue(offsets.keySet().containsAll(onExtra));
         for (Map.Entry<TopicPartition, Long> entry : offsets.entrySet())
             assertEquals(subscriptions.position(entry.getKey()).offset, entry.getValue());
         assertEquals(new HashSet<>(partitions), sessionPartitions.get(broker.idString()));
@@ -300,19 +321,41 @@ public class FetchRequestManagerConnectionsTest {
     @Test
     public void testMovedPartitionWithDataThatCannotBePrefetchedIsNotFetched() {
         setup();
-        // The ninth response adds a second connection; partitions 1 and 3 move to it with the next requests.
+        // The ninth response adds a second connection. In topic and partition order, partitions 0 and 1 move
+        // to it with the next requests.
         for (int i = 0; i < 9; i++)
             cycle(true, true);
         assertEquals(2, fetcher.connectionCount(broker.id()));
 
-        // Partition 1 still has buffered data, and that data does not continue from the consumed position.
-        consumeAllBut(partitions.get(1), Set.of(partitions.get(0), partitions.get(2), partitions.get(3)));
-        fetchBuffer.invalidatePrefetch(partitions.get(1));
+        // Partition 0 still has buffered data, and that data does not continue from the consumed position.
+        consumeAllBut(partitions.get(0), Set.of(partitions.get(1), partitions.get(2), partitions.get(3)));
+        fetchBuffer.invalidatePrefetch(partitions.get(0));
 
-        // Partition 1 moves with its buffered data, so its new connection gets no request; the first one does.
+        // Partition 0 moves with its buffered data, so its new connection gets no request; the first one does.
         sendFetches();
         assertEquals(List.of(broker.idString()), destinations());
-        assertEquals(Set.of(partitions.get(0), partitions.get(2)), requestedPartitions(lastRequests.get(broker.idString())));
+        assertEquals(Set.of(partitions.get(2), partitions.get(3)), requestedPartitions(lastRequests.get(broker.idString())));
+    }
+
+    @Test
+    public void testPartitionsOfEachBrokerAreSpreadOverItsConnections() {
+        // Leaders are placed round-robin, so the partitions of one broker have the same number modulo 3.
+        brokerCount = 3;
+        partitionCount = 9;
+        maxConnections = 3;
+        setup();
+        for (int i = 0; i < 17; i++)
+            cycle(true, true);
+        for (Node node : metadata.fetch().nodes())
+            assertEquals(3, fetcher.connectionCount(node.id()));
+
+        // Every connection of every broker fetches one partition.
+        consumeAll();
+        sendFetches();
+        assertEquals(9, lastRequests.size());
+        for (FetchRequest request : lastRequests.values())
+            assertEquals(1, requestedPartitions(request).size());
+        assertNoPartitionInTwoRequestsInFlight();
     }
 
     @Test
@@ -334,25 +377,68 @@ public class FetchRequestManagerConnectionsTest {
         client.backoff(extra, 500);
         respond(requestTo(broker.idString()), false, 0);
         networkClientDelegate.poll(0, time.milliseconds());
+        assertEquals(1, fetcher.connectionCount(broker.id()));
         consumeAll();
 
-        // The first connection goes on fetching its partitions; the others wait.
+        // All partitions are fetched on the first connection with the next requests.
         sendFetches();
         assertEquals(List.of(broker.idString()), destinations());
-        assertEquals(Set.of(partitions.get(0), partitions.get(2)), requestedPartitions(lastRequests.get(broker.idString())));
-        respond(requestTo(broker.idString()), false, 0);
-        networkClientDelegate.poll(0, time.milliseconds());
-
-        // After the backoff the extra connection starts a new fetch session from the consumed positions.
-        time.sleep(500);
-        consumeAll();
-        sendFetches();
-        FetchRequest again = lastRequests.get(extraId);
-        assertTrue(again.metadata().isFull());
-        Map<TopicPartition, Long> offsets = fetchOffsets(again);
-        assertEquals(Set.of(partitions.get(1), partitions.get(3)), offsets.keySet());
+        assertEquals(new HashSet<>(partitions), sessionPartitions.get(broker.idString()));
+        assertNull(fetcher.sessionHandler(Integer.parseInt(extraId)), "the session of the broken connection is dropped");
+        assertEquals(Map.of(), lastCloses, "no close is sent over a connection that is not available");
+        Map<TopicPartition, Long> offsets = fetchOffsets(lastRequests.get(broker.idString()));
         for (Map.Entry<TopicPartition, Long> entry : offsets.entrySet())
             assertEquals(subscriptions.position(entry.getKey()).offset, entry.getValue());
+    }
+
+    @Test
+    public void testIdleExtraConnectionThatIsLost() {
+        setup();
+        growToTwoConnections();
+        String extraId = String.valueOf(AbstractFetch.connectionId(broker.id(), 1));
+        respondToAll(false);
+        networkClientDelegate.poll(0, time.milliseconds());
+
+        // The extra connection is lost while it has no request in flight, so no fetch fails.
+        client.disconnect(extraId);
+        client.backoff(new Node(Integer.parseInt(extraId), broker.host(), broker.port()), 500);
+        consumeAll();
+        sendFetches();
+        assertEquals(1, fetcher.connectionCount(broker.id()));
+        assertEquals(List.of(broker.idString()), destinations());
+        assertEquals(new HashSet<>(partitions), sessionPartitions.get(broker.idString()));
+    }
+
+    @Test
+    public void testExtraConnectionThatNeverConnects() {
+        setup();
+        Node extra = new Node(AbstractFetch.connectionId(broker.id(), 1), broker.host(), broker.port());
+        client.setUnreachable(extra, 600_000);
+        for (int i = 0; i < 9; i++)
+            cycle(true, true);
+        assertEquals(2, fetcher.connectionCount(broker.id()));
+
+        // The request to the extra connection fails, and the broker goes back to one connection at once.
+        consumeAll();
+        sendFetches();
+        assertEquals(1, fetcher.connectionCount(broker.id()));
+        respondToAll(true);
+        networkClientDelegate.poll(0, time.milliseconds());
+
+        // For the hold-off all partitions keep being fetched on the first connection, although the votes ask
+        // for more connections.
+        long start = time.milliseconds();
+        while (time.milliseconds() - start < 29_000) {
+            cycle(true, true, 1_000);
+            assertEquals(List.of(broker.idString()), destinations());
+            assertEquals(new HashSet<>(partitions), requestedPartitions(lastRequests.get(broker.idString())));
+            assertEquals(1, fetcher.connectionCount(broker.id()));
+        }
+
+        // After it the broker may get more connections again.
+        for (int i = 0; i < 20 && fetcher.connectionCount(broker.id()) == 1; i++)
+            cycle(true, true, 1_000);
+        assertEquals(2, fetcher.connectionCount(broker.id()));
     }
 
     @Test
@@ -423,6 +509,8 @@ public class FetchRequestManagerConnectionsTest {
     // ---- helpers
 
     private Map<String, FetchRequest> lastRequests = new HashMap<>();
+    // The requests that close the fetch session of a connection that is no longer used
+    private Map<String, FetchMetadata> lastCloses = new HashMap<>();
 
     private void growToTwoConnections() {
         for (int i = 0; i < 9; i++)
@@ -436,10 +524,14 @@ public class FetchRequestManagerConnectionsTest {
 
     /** One round: the application takes all data, waits if asked to, and every connection gets a response. */
     private void cycle(boolean full, boolean applicationWaits) {
+        cycle(full, applicationWaits, CYCLE_MS);
+    }
+
+    private void cycle(boolean full, boolean applicationWaits, long durationMs) {
         consumeAll();
         if (applicationWaits)
             fetchBuffer.awaitWakeup(time.timer(0));
-        time.sleep(CYCLE_MS);
+        time.sleep(durationMs);
         sendFetches();
         assertNoPartitionInTwoRequestsInFlight();
         respondToAll(full);
@@ -452,11 +544,17 @@ public class FetchRequestManagerConnectionsTest {
         networkClientDelegate.addAll(result.unsentRequests);
         networkClientDelegate.poll(0, time.milliseconds());
         lastRequests = new HashMap<>();
+        lastCloses = new HashMap<>();
         for (NetworkClientDelegate.UnsentRequest unsent : result.unsentRequests) {
             String destination = unsent.node().get().idString();
             FetchRequest request = ((FetchRequest.Builder) unsent.requestBuilder()).build(ApiKeys.FETCH.latestVersion());
-            lastRequests.put(destination, request);
-            applyToSession(destination, request);
+            if (request.metadata().epoch() == FetchMetadata.FINAL_EPOCH) {
+                lastCloses.put(destination, request.metadata());
+                sessionPartitions.remove(destination);
+            } else {
+                lastRequests.put(destination, request);
+                applyToSession(destination, request);
+            }
         }
     }
 
@@ -480,6 +578,8 @@ public class FetchRequestManagerConnectionsTest {
         if (request.metadata().epoch() == FetchMetadata.INITIAL_EPOCH) {
             sessionId = nextSessionId++;
             sessionIds.put(destination, sessionId);
+        } else if (request.metadata().epoch() == FetchMetadata.FINAL_EPOCH) {
+            sessionId = FetchMetadata.INVALID_SESSION_ID;
         } else {
             sessionId = sessionIds.get(destination);
         }

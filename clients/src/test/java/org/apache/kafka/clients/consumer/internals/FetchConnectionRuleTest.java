@@ -97,6 +97,24 @@ public class FetchConnectionRuleTest {
     }
 
     @Test
+    public void testWaitShareIsBetweenZeroAndOne() {
+        assertEquals(0.5, AbstractFetch.waitShare(5, 10));
+        assertEquals(1.0, AbstractFetch.waitShare(15, 10));
+        assertEquals(0.0, AbstractFetch.waitShare(-5, 10));
+    }
+
+    @Test
+    public void testNoMoreConnectionsThanTheIdsCanStandFor() {
+        int most = AbstractFetch.maxConnections(Integer.MAX_VALUE, Integer.MAX_VALUE);
+        assertTrue(most > 4 && most < 1000, "the cap is far above the default and below the encoding limit: " + most);
+        // the last connection of the largest broker id that may have several connections
+        int id = AbstractFetch.connectionId(9_999_999, most - 1);
+        assertTrue(id < -1, "the id must not overflow: " + id);
+        assertEquals(9_999_999, AbstractFetch.brokerIdOf(id));
+        assertEquals(most - 1, AbstractFetch.connectionIndexOf(id));
+    }
+
+    @Test
     public void testConnectionIds() {
         assertEquals(5, AbstractFetch.connectionId(5, 0));
         int extra = AbstractFetch.connectionId(5, 1);

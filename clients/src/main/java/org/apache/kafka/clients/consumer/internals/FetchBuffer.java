@@ -36,7 +36,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
@@ -124,11 +123,12 @@ public class FetchBuffer implements AutoCloseable {
     private static final long NOT_WAITING = Long.MIN_VALUE;
 
     private final Time time;
-    // The time the application thread spent without data, up to the last time it took data out of this buffer
-    private final LongAdder waitedNanos = new LongAdder();
-    // When the application thread last found nothing to consume, or NOT_WAITING while it has data.
-    // Written by the application thread only.
-    private volatile long waitingSinceNanos = NOT_WAITING;
+    // The time the application thread spent without data, up to the last time it took data out of this buffer.
+    // Guarded by the lock.
+    private long waitedNanos;
+    // When the application thread last found nothing to consume, or NOT_WAITING while it has data. Guarded by
+    // the lock, so that a reader sees a wait either as running or as added to waitedNanos, never as both.
+    private long waitingSinceNanos = NOT_WAITING;
 
     public FetchBuffer(final LogContext logContext) {
         this(logContext, Time.SYSTEM);
@@ -235,10 +235,9 @@ public class FetchBuffer implements AutoCloseable {
         try {
             lock.lock();
             CompletedFetch fetch = completedFetches.poll();
-            long since = waitingSinceNanos;
-            if (fetch != null && since != NOT_WAITING) {
+            if (fetch != null && waitingSinceNanos != NOT_WAITING) {
                 // the application thread has data again
-                waitedNanos.add(time.nanoseconds() - since);
+                waitedNanos += time.nanoseconds() - waitingSinceNanos;
                 waitingSinceNanos = NOT_WAITING;
             }
             return fetch;
@@ -253,8 +252,12 @@ public class FetchBuffer implements AutoCloseable {
      * also found nothing. The fetch code reads it to decide how many connections to use to a broker.
      */
     long waitedNanos() {
-        long since = waitingSinceNanos;
-        return waitedNanos.sum() + (since == NOT_WAITING ? 0 : time.nanoseconds() - since);
+        try {
+            lock.lock();
+            return waitedNanos + (waitingSinceNanos == NOT_WAITING ? 0 : time.nanoseconds() - waitingSinceNanos);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**
@@ -271,11 +274,11 @@ public class FetchBuffer implements AutoCloseable {
      * @param timer Timer that provides time to wait
      */
     void awaitWakeup(Timer timer) {
-        // the caller found nothing to consume
-        if (waitingSinceNanos == NOT_WAITING)
-            waitingSinceNanos = time.nanoseconds();
         try {
             lock.lock();
+            // the caller found nothing to consume
+            if (waitingSinceNanos == NOT_WAITING)
+                waitingSinceNanos = time.nanoseconds();
 
             while (!wokenup.compareAndSet(true, false)) {
                 // Update the timer before we head into the loop in case it took a while to get the lock.
