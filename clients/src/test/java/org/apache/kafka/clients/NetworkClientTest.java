@@ -206,6 +206,46 @@ public class NetworkClientTest {
         assertThrows(IllegalStateException.class, () -> client.send(request, now));
     }
 
+    /**
+     * The async consumer can open extra connections to a broker. Each one is a node with an id of its own that is
+     * not in the metadata, and the address of the broker.
+     */
+    @Test
+    public void testConnectionToANodeThatIsNotInTheMetadata() {
+        Metadata metadata = new Metadata(50, 50, 5000, new LogContext(), new ClusterResourceListeners());
+        metadata.updateWithCurrentRequestVersion(RequestTestUtils.metadataUpdateWith(1, Collections.emptyMap()), false, time.milliseconds());
+        NetworkClient client = createNetworkClientWithNoVersionDiscovery(metadata, true);
+        Node broker = metadata.fetch().nodes().get(0);
+        Node extra = new Node(-10_000_002, broker.host(), broker.port(), broker.rack());
+
+        while (!client.ready(extra, time.milliseconds()))
+            client.poll(1, time.milliseconds());
+        assertTrue(client.isReady(extra, time.milliseconds()));
+        assertFalse(client.isReady(broker, time.milliseconds()), "only the extra connection is opened");
+
+        short requestVersion = PRODUCE.latestVersion();
+        ProduceRequest.Builder builder = new ProduceRequest.Builder(requestVersion, requestVersion,
+                new ProduceRequestData().setAcks((short) 1).setTimeoutMs(1000));
+        TestCallbackHandler handler = new TestCallbackHandler();
+        ClientRequest request = client.newClientRequest(extra.idString(), builder, time.milliseconds(),
+                true, defaultRequestTimeoutMs, handler);
+        client.send(request, time.milliseconds());
+        client.poll(1, time.milliseconds());
+        ByteBuffer buffer = RequestTestUtils.serializeResponseWithHeader(new ProduceResponse(new ProduceResponseData()),
+                requestVersion, request.correlationId());
+        selector.completeReceive(new NetworkReceive(extra.idString(), buffer));
+        client.poll(1, time.milliseconds());
+        selector.clear();
+        assertTrue(handler.executed);
+        assertEquals(extra.idString(), handler.response.destination());
+
+        // The broker closes the extra connection: only that connection is lost.
+        selector.serverDisconnect(extra.idString());
+        client.poll(1, time.milliseconds());
+        assertTrue(client.connectionFailed(extra));
+        assertFalse(client.connectionFailed(broker));
+    }
+
     @Test
     public void testSimpleRequestResponse() {
         checkSimpleRequestResponse(client);

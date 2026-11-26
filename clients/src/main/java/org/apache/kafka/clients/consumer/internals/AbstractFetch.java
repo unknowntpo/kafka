@@ -48,12 +48,14 @@ import java.io.Closeable;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.kafka.clients.consumer.internals.FetchUtils.requestMetadataUpdate;
 
@@ -76,7 +78,8 @@ public abstract class AbstractFetch implements Closeable {
     protected final FetchBuffer fetchBuffer;
     protected final BufferSupplier decompressionBufferSupplier;
     protected final Set<Integer> nodesWithPendingFetchRequests;
-    // The size of the records in the last fetch response of each node. It is the prefetch limit of that node.
+    // The size of the records in the last fetch response of each connection. It is the prefetch limit of that
+    // connection. A broker with several connections has one limit per connection.
     private final Map<Integer, Long> lastResponseBytes = new HashMap<>();
 
     private final Map<Integer, FetchSessionHandler> sessionHandlers;
@@ -157,6 +160,9 @@ public abstract class AbstractFetch implements Closeable {
             final FetchSessionHandler handler = sessionHandler(fetchTarget.id());
 
             metricsManager.recordLatency(resp.destination(), resp.requestLatencyMs());
+            // Before the checks below: a throttled response to a full fetch request is empty and is dropped by them.
+            if (response.throttleTimeMs() > 0)
+                limitToOneConnection(fetchTarget.id());
 
             if (handler == null) {
                 log.error("Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
@@ -244,6 +250,7 @@ public abstract class AbstractFetch implements Closeable {
                 receiveLease.release();
 
             lastResponseBytes.put(fetchTarget.id(), responseBytes);
+            updateConnections(fetchTarget.id(), responseBytes, responseData.size());
 
             if (!partitionsWithUpdatedLeaderInfo.isEmpty()) {
                 List<Node> leaderNodes = new ArrayList<>();
@@ -285,6 +292,10 @@ public abstract class AbstractFetch implements Closeable {
                 handler.handleError(t);
                 handler.sessionTopicPartitions().forEach(subscriptions::clearPreferredReadReplica);
             }
+            // An extra connection that fails is not tried again for a while: its partitions go back to the
+            // broker's first connection.
+            if (extraConnectionNodes.containsKey(fetchTarget.id()))
+                holdToOneConnection(brokerIdOf(fetchTarget.id()), "a fetch over an extra connection failed");
         } finally {
             removePendingFetchRequest(fetchTarget, data.metadata().sessionId());
         }
@@ -399,8 +410,9 @@ public abstract class AbstractFetch implements Closeable {
             sessionHandler.notifyClose();
 
             // FetchTargetNode may not be available as it may have disconnected the connection. In such cases, we will
-            // skip sending the close request.
-            final Node fetchTarget = cluster.nodeById(fetchTargetNodeId);
+            // skip sending the close request. An extra connection to a broker is not in the metadata.
+            final Node extraConnection = extraConnectionNodes.get(fetchTargetNodeId);
+            final Node fetchTarget = extraConnection != null ? extraConnection : cluster.nodeById(fetchTargetNodeId);
 
             if (fetchTarget == null || isUnavailable(fetchTarget)) {
                 log.debug("Skip sending close session request to broker {} since it is not reachable", fetchTarget);
@@ -441,9 +453,13 @@ public abstract class AbstractFetch implements Closeable {
             // paused), the state will not change until some external event occurs, so an immediate wakeup
             // would only busy-loop the caller rather than allowing it to remain parked until bounded by other
             // mechanisms (such as heartbeat interval or poll timeout).
-            return new FetchRequestPreparationResult(Map.of(), false);
+            return new FetchRequestPreparationResult(Map.of(), false, sessionCloses());
         }
 
+        // First move partitions between the connections of a broker, if it has more than one. The blocked
+        // connections are then found with the partitions where they are now.
+        if (usesExtraConnections())
+            rebalanceConnections(fetchablePartitions, currentTimeMs);
         Set<Integer> blockedNodes = prefetchBlockedNodes(buffered, currentTimeMs);
 
         for (TopicPartition partition : fetchablePartitions) {
@@ -453,7 +469,7 @@ public abstract class AbstractFetch implements Closeable {
             if (nodeOpt.isEmpty())
                 continue;
 
-            Node node = nodeOpt.get();
+            Node node = currentConnectionNode(nodeOpt.get(), partition);
 
             if (isUnavailable(node)) {
                 maybeThrowAuthFailure(node);
@@ -508,7 +524,129 @@ public abstract class AbstractFetch implements Closeable {
                 break;
             }
         }
-        return new FetchRequestPreparationResult(convert(fetchable), fetchable.isEmpty() && hasConsumableBufferedData);
+        return new FetchRequestPreparationResult(convert(fetchable), fetchable.isEmpty() && hasConsumableBufferedData,
+                sessionCloses());
+    }
+
+    /** Whether some broker has more than one connection, or some partition is still on an extra connection. */
+    private boolean usesExtraConnections() {
+        return extraConnections > 0 || !partitionConnections.isEmpty();
+    }
+
+    private void setConnections(BrokerConnections state, int connections) {
+        extraConnections += connections - state.connections;
+        state.connections = connections;
+    }
+
+    private static final Comparator<TopicPartition> PARTITION_ORDER =
+            Comparator.comparing(TopicPartition::topic).thenComparingInt(TopicPartition::partition);
+
+    /**
+     * Spreads the fetchable partitions of every broker that has more than one connection evenly over its
+     * connections, and moves the partitions of removed connections back. A broker is looked at again only when
+     * its fetchable partitions or its number of connections changed, or when a move had to wait.
+     */
+    private void rebalanceConnections(List<TopicPartition> fetchablePartitions, long currentTimeMs) {
+        for (Map.Entry<Integer, BrokerConnections> entry : brokerConnections.entrySet())
+            holdToOneConnectionIfUnavailable(entry.getKey(), entry.getValue());
+        Map<Integer, List<TopicPartition>> byBroker = new HashMap<>();
+        for (TopicPartition partition : fetchablePartitions) {
+            Optional<Node> nodeOpt = maybeNodeForPosition(partition, positionForPartition(partition), currentTimeMs);
+            if (nodeOpt.isEmpty() || !mayUseConnections(nodeOpt.get()))
+                continue;
+            int brokerId = nodeOpt.get().id();
+            BrokerConnections state = brokerConnections.get(brokerId);
+            if ((state == null || state.connections <= 1) && !partitionConnections.containsKey(partition))
+                continue;
+            byBroker.computeIfAbsent(brokerId, id -> new ArrayList<>()).add(partition);
+        }
+        for (Map.Entry<Integer, List<TopicPartition>> entry : byBroker.entrySet()) {
+            BrokerConnections state = brokerConnections.computeIfAbsent(entry.getKey(), id -> new BrokerConnections());
+            List<TopicPartition> partitions = entry.getValue();
+            if (state.connections > 1)
+                state.partitions = partitions.size();
+            if (!state.movesWaiting && state.balancedConnections == state.connections && partitions.equals(state.balancedPartitions))
+                continue;
+            state.balancedPartitions = partitions;
+            state.balancedConnections = state.connections;
+            state.movesWaiting = assignConnections(entry.getKey(), state.connections, new ArrayList<>(partitions));
+        }
+        if (partitionConnections.size() > 2 * fetchablePartitions.size() + 16)
+            partitionConnections.keySet().removeIf(tp -> !subscriptions.isAssigned(tp));
+    }
+
+    /**
+     * Spreads the given partitions of one broker evenly over its connections. A partition stays where it is
+     * unless its connection was removed, or its connection has two or more partitions more than the connection
+     * with the fewest. So a partition that is paused, resumed, assigned or revoked moves at most one other
+     * partition. A partition changes connection only when its current connection has no request in flight, so
+     * the same partition is never in two fetch requests at once. The next request of the old connection
+     * removes the partition from its fetch session.
+     *
+     * @return whether a partition should move but has to wait for the response of its connection
+     */
+    private boolean assignConnections(int brokerId, int connections, List<TopicPartition> partitions) {
+        partitions.sort(PARTITION_ORDER);
+        int[] counts = new int[connections];
+        for (TopicPartition partition : partitions) {
+            int current = partitionConnections.getOrDefault(partition, 0);
+            if (current < connections)
+                counts[current]++;
+        }
+        boolean waiting = false;
+        for (TopicPartition partition : partitions) {
+            int current = partitionConnections.getOrDefault(partition, 0);
+            int fewest = 0;
+            for (int i = 1; i < connections; i++) {
+                if (counts[i] < counts[fewest])
+                    fewest = i;
+            }
+            boolean move = current >= connections || counts[current] - counts[fewest] > 1;
+            if (!move)
+                continue;
+            if (nodesWithPendingFetchRequests.contains(connectionId(brokerId, current))) {
+                waiting = true;
+                continue;
+            }
+            if (current < connections)
+                counts[current]--;
+            counts[fewest]++;
+            if (fewest == 0)
+                partitionConnections.remove(partition);
+            else
+                partitionConnections.put(partition, fewest);
+        }
+        return waiting;
+    }
+
+    /**
+     * Finds the extra connections whose index is no longer used, that have a fetch session and no request in
+     * flight. Their fetch session is dropped, and closed at the broker when the connection is still available.
+     */
+    private Map<Node, FetchSessionHandler.FetchRequestData> sessionCloses() {
+        Map<Node, FetchSessionHandler.Builder> closes = closeRemovedConnections();
+        return closes.isEmpty() ? Map.of() : convert(closes);
+    }
+
+    private Map<Node, FetchSessionHandler.Builder> closeRemovedConnections() {
+        if (extraConnectionNodes.isEmpty())
+            return Map.of();
+        Map<Node, FetchSessionHandler.Builder> closes = new HashMap<>();
+        for (Map.Entry<Integer, Node> entry : extraConnectionNodes.entrySet()) {
+            int id = entry.getKey();
+            BrokerConnections state = brokerConnections.get(brokerIdOf(id));
+            if (state == null || connectionIndexOf(id) < state.connections || nodesWithPendingFetchRequests.contains(id))
+                continue;
+            FetchSessionHandler handler = sessionHandlers.remove(id);
+            if (handler == null)
+                continue;
+            lastResponseBytes.remove(id);
+            if (isUnavailable(entry.getValue()))
+                continue;
+            handler.notifyClose();
+            closes.put(entry.getValue(), handler.newBuilder());
+        }
+        return closes;
     }
 
     /**
@@ -534,6 +672,265 @@ public abstract class AbstractFetch implements Closeable {
         return null;
     }
 
+    // The most connections to one broker that are used to fetch, unless a subclass says otherwise
+    static final int MAX_CONNECTIONS_PER_BROKER = Math.max(1, Math.min(4, Runtime.getRuntime().availableProcessors() / 2));
+    // The ids of the extra connections of a broker are -(index * CONNECTION_ID_STRIDE + brokerId + 2): negative,
+    // like the ids of the bootstrap servers, but far from them. A broker with an id this large or larger keeps
+    // one connection.
+    private static final int CONNECTION_ID_STRIDE = 10_000_000;
+    // The most connections to one broker that the ids can stand for
+    private static final int MAX_ENCODABLE_CONNECTIONS = (Integer.MAX_VALUE - 2) / CONNECTION_ID_STRIDE - 1;
+    // The score that adds or removes a connection; see updateConnections
+    private static final int ADD_CONNECTION_SCORE = 8;
+    private static final int REMOVE_CONNECTION_SCORE = -64;
+    // A vote is cast at most once in this time
+    private static final long VOTE_WINDOW_NANOS = TimeUnit.MILLISECONDS.toNanos(10);
+    // One more connection is voted for only if the application thread was without data this share of the time
+    static final double ADD_CONNECTION_WAIT_SHARE = 0.25;
+    // A connection needs at least this many partitions
+    static final int MIN_PARTITIONS_PER_CONNECTION = 1;
+    // For this long a broker keeps one connection after it throttled a fetch of this consumer, or after an
+    // extra connection to it failed. A broker that throttles holds the consumer to a quota, and more connections
+    // do not raise a quota. The broker measures a quota over about 11 seconds by default, so a consumer at its
+    // quota is throttled again well inside this time. An extra connection may fail because the broker limits
+    // the connections per client address; trying it again soon would only fail again.
+    static final long THROTTLE_MEMORY_NANOS = TimeUnit.SECONDS.toNanos(30);
+
+    /** How many connections are used to fetch from one broker, and the evidence for changing that. */
+    private static final class BrokerConnections {
+        int connections = 1;
+        int score;                // goes up while the connections are the limit, down while they are not
+        boolean bufferFull;       // a connection had to wait for the application since the last vote
+        boolean windowStarted;    // whether windowStartNanos and windowStartWaited are set
+        long windowStartNanos;    // start of the time over which the application's waiting is measured
+        long windowStartWaited;   // FetchBuffer.waitedNanos() at that time
+        int partitions;           // fetchable partitions of this broker, while it has more than one connection
+        List<TopicPartition> balancedPartitions = List.of(); // the partitions when they were last spread
+        int balancedConnections;  // the number of connections then
+        boolean movesWaiting;     // a partition should have moved then but its connection had a request in flight
+        boolean limited;          // the broker throttled, or an extra connection to it failed, at least once
+        long limitedNanos;        // when it last did
+    }
+
+    // All of these are used by the thread that prepares the fetch requests and handles their responses only.
+    // Per broker id
+    private final Map<Integer, BrokerConnections> brokerConnections = new HashMap<>();
+    // The node of each extra connection, by its id
+    private final Map<Integer, Node> extraConnectionNodes = new HashMap<>();
+    // The connection index of every partition that is not on the first connection of its broker
+    private final Map<TopicPartition, Integer> partitionConnections = new HashMap<>();
+    // The number of extra connections of all brokers together
+    private int extraConnections;
+
+    /**
+     * The most connections to one broker. The partitions of one broker are spread over at most this many
+     * connections, so that their fetch round trips run at the same time.
+     */
+    protected int maxConnectionsPerBroker() {
+        return prefetch() ? MAX_CONNECTIONS_PER_BROKER : 1;
+    }
+
+    /** The broker id of a connection id. */
+    static int brokerIdOf(int nodeId) {
+        return nodeId >= 0 ? nodeId : (-nodeId - 2) % CONNECTION_ID_STRIDE;
+    }
+
+    /** The index of a connection: 0 for the broker's first connection. */
+    static int connectionIndexOf(int nodeId) {
+        return nodeId >= 0 ? 0 : (-nodeId - 2) / CONNECTION_ID_STRIDE;
+    }
+
+    /** The id of a connection to a broker: the broker id for the first connection (index 0). */
+    static int connectionId(int brokerId, int index) {
+        return index == 0 ? brokerId : -(index * CONNECTION_ID_STRIDE + brokerId + 2);
+    }
+
+    /** Whether the partitions of this node may be spread over several connections. */
+    private boolean mayUseConnections(Node node) {
+        return maxConnectionsPerBroker() > 1 && node.id() >= 0 && node.id() < CONNECTION_ID_STRIDE;
+    }
+
+    /**
+     * Returns the connection over which the partition is fetched now from {@code node}. Every extra connection
+     * is a {@link Node} with its own id and the address of the broker, the same way the classic consumer keeps
+     * a separate connection to its group coordinator. A connection has its own fetch session, in-flight request
+     * and prefetch limit, because all of them are kept by node id.
+     */
+    private Node currentConnectionNode(Node node, TopicPartition partition) {
+        if (partitionConnections.isEmpty() || !mayUseConnections(node))
+            return node;
+        int index = partitionConnections.getOrDefault(partition, 0);
+        return index == 0 ? node : extraConnectionNode(node, index);
+    }
+
+    private Node extraConnectionNode(Node node, int index) {
+        int id = connectionId(node.id(), index);
+        Node connection = extraConnectionNodes.get(id);
+        if (connection == null || !connection.host().equals(node.host()) || connection.port() != node.port()) {
+            connection = new Node(id, node.host(), node.port(), node.rack());
+            extraConnectionNodes.put(id, connection);
+        }
+        return connection;
+    }
+
+    /**
+     * One vote on the number of connections to a broker: +1 for one more, -1 for one less, 0 for no opinion.
+     *
+     * <p>One more connection helps only when the connections are the limit. The sign of that is an application
+     * thread that waits for data although the responses come back full. An application thread that hardly ever
+     * waits is itself the limit: one more connection would only buffer more data. One less is voted for only
+     * when the responses are not full, that is when the broker has less data than the connections can carry.
+     *
+     * @param full          the response was at least half of what the broker may send in one response
+     * @param bufferFull    a connection had to stop prefetching because the application had not consumed
+     * @param waitShare     the share of the time the application thread spent waiting for data, 0 to 1
+     */
+    static int connectionVote(boolean full, boolean bufferFull, double waitShare) {
+        if (!full)
+            return -1;
+        if (bufferFull || waitShare < ADD_CONNECTION_WAIT_SHARE)
+            return 0;
+        return 1;
+    }
+
+    /** The share of {@code elapsedNanos} that the application thread spent waiting for data, from 0 to 1. */
+    static double waitShare(long waitedNanos, long elapsedNanos) {
+        return Math.max(0, Math.min(1, (double) waitedNanos / elapsedNanos));
+    }
+
+    /** The most connections worth having to a broker that this consumer fetches {@code partitions} from. */
+    static int maxConnections(int partitions, int maxConnectionsPerBroker) {
+        int most = Math.min(Math.min(maxConnectionsPerBroker, MAX_ENCODABLE_CONNECTIONS), partitions / MIN_PARTITIONS_PER_CONNECTION);
+        return Math.max(1, most);
+    }
+
+    /** Whether a broker that last limited this consumer {@code nanosSinceThrottle} ago still keeps it to one connection. */
+    static boolean brokerLimits(boolean throttled, long nanosSinceThrottle) {
+        return throttled && nanosSinceThrottle < THROTTLE_MEMORY_NANOS;
+    }
+
+    /**
+     * Remembers that the broker answered a fetch with a throttle time. It gets no more connections for a while,
+     * and loses one with every vote until one is left.
+     */
+    private void limitToOneConnection(int brokerId) {
+        BrokerConnections state = brokerConnections(brokerId);
+        if (state != null) {
+            state.limited = true;
+            state.limitedNanos = time.nanoseconds();
+        }
+    }
+
+    /** Goes back to the broker's first connection now, and does not add connections for a while. */
+    private void holdToOneConnection(int brokerId, String reason) {
+        BrokerConnections state = brokerConnections.get(brokerId);
+        if (state == null)
+            return;
+        limitToOneConnection(brokerId);
+        state.score = 0;
+        if (state.connections > 1) {
+            log.info("Fetching from broker {} over one connection, because {}", brokerId, reason);
+            setConnections(state, 1);
+        }
+    }
+
+    private void holdToOneConnectionIfUnavailable(int brokerId, BrokerConnections state) {
+        for (int index = 1; index < state.connections; index++) {
+            Node connection = extraConnectionNodes.get(connectionId(brokerId, index));
+            if (connection != null && isUnavailable(connection)) {
+                holdToOneConnection(brokerId, "an extra connection to it is not available");
+                return;
+            }
+        }
+    }
+
+    /**
+     * Decides whether the broker needs one more or one less connection. Called after every fetch response that
+     * the fetch session accepts; it votes at most once per {@link #VOTE_WINDOW_NANOS} (see {@link #connectionVote}).
+     */
+    private void updateConnections(int nodeId, long responseBytes, int responsePartitions) {
+        BrokerConnections state = brokerConnections(nodeId);
+        if (state == null)
+            return;
+        long nowNanos = time.nanoseconds();
+        if (!state.windowStarted) {
+            state.windowStarted = true;
+            state.windowStartNanos = nowNanos;
+            state.windowStartWaited = fetchBuffer.waitedNanos();
+            return;
+        }
+        long elapsed = nowNanos - state.windowStartNanos;
+        if (elapsed < VOTE_WINDOW_NANOS)
+            return;
+        long fullBytes = Math.min(fetchConfig.maxBytes, (long) responsePartitions * fetchConfig.fetchSize) / 2;
+        boolean full = responsePartitions > 0 && responseBytes >= fullBytes;
+        // The share of the time since the last vote that the application thread spent waiting for data
+        long waited = fetchBuffer.waitedNanos();
+        double waitShare = waitShare(waited - state.windowStartWaited, elapsed);
+        state.windowStartNanos = nowNanos;
+        state.windowStartWaited = waited;
+        state.score += connectionVote(full, state.bufferFull, waitShare);
+        state.bufferFull = false;
+        if (state.connections <= 1 && state.score < ADD_CONNECTION_SCORE)
+            return;
+        // A broker with one connection is not looked at by rebalanceConnections, so its partitions are counted
+        // here, when the score asks for one more connection.
+        if (state.connections <= 1)
+            state.partitions = countFetchablePartitions(brokerIdOf(nodeId));
+        resize(state, brokerIdOf(nodeId), nowNanos);
+    }
+
+    /** Adds or removes one connection of a broker when its score or its limit asks for it. */
+    private void resize(BrokerConnections state, int brokerId, long nowNanos) {
+        int maxConnections = brokerLimits(state.limited, nowNanos - state.limitedNanos)
+                ? 1 : maxConnections(state.partitions, maxConnectionsPerBroker());
+        if (state.score >= ADD_CONNECTION_SCORE) {
+            state.score = 0;
+            if (state.connections < maxConnections) {
+                setConnections(state, state.connections + 1);
+                log.debug("Fetching from broker {} over {} connections", brokerId, state.connections);
+            }
+        } else if (state.score <= REMOVE_CONNECTION_SCORE || state.connections > maxConnections) {
+            state.score = 0;
+            if (state.connections > 1) {
+                setConnections(state, state.connections - 1);
+                log.debug("Fetching from broker {} over {} connections", brokerId, state.connections);
+            }
+        }
+    }
+
+    /**
+     * The state of the broker behind this connection, created when it is first needed. Null for a broker that
+     * cannot have more than one connection.
+     */
+    private BrokerConnections brokerConnections(int nodeId) {
+        if (maxConnectionsPerBroker() <= 1 || nodeId >= CONNECTION_ID_STRIDE || (nodeId < 0 && !extraConnectionNodes.containsKey(nodeId)))
+            return null;
+        int brokerId = brokerIdOf(nodeId);
+        return brokerConnections.computeIfAbsent(brokerId, id -> new BrokerConnections());
+    }
+
+    /** The number of fetchable partitions that are fetched from the broker. */
+    private int countFetchablePartitions(int brokerId) {
+        long currentTimeMs = time.milliseconds();
+        int count = 0;
+        for (TopicPartition partition : subscriptions.fetchablePartitions(tp -> true)) {
+            SubscriptionState.FetchPosition position = subscriptions.position(partition);
+            if (position == null)
+                continue;
+            Optional<Node> nodeOpt = maybeNodeForPosition(partition, position, currentTimeMs);
+            if (nodeOpt.isPresent() && nodeOpt.get().id() == brokerId)
+                count++;
+        }
+        return count;
+    }
+
+    // Visible for testing
+    int connectionCount(int brokerId) {
+        BrokerConnections state = brokerConnections.get(brokerId);
+        return state != null ? state.connections : 1;
+    }
+
     /**
      * The result of preparing fetch requests via {@link #prepareFetchRequests()} or
      * {@link #prepareCloseFetchSessionRequests()}.
@@ -542,13 +939,31 @@ public abstract class AbstractFetch implements Closeable {
 
         private final Map<Node, FetchSessionHandler.FetchRequestData> requests;
         private final boolean canWakeBufferIfNoFetchRequestsToSend;
+        private final Map<Node, FetchSessionHandler.FetchRequestData> sessionCloses;
 
         FetchRequestPreparationResult(
                 Map<Node, FetchSessionHandler.FetchRequestData> requests,
                 boolean canWakeBufferIfNoFetchRequestsToSend
         ) {
+            this(requests, canWakeBufferIfNoFetchRequestsToSend, Map.of());
+        }
+
+        FetchRequestPreparationResult(
+                Map<Node, FetchSessionHandler.FetchRequestData> requests,
+                boolean canWakeBufferIfNoFetchRequestsToSend,
+                Map<Node, FetchSessionHandler.FetchRequestData> sessionCloses
+        ) {
             this.requests = requests;
             this.canWakeBufferIfNoFetchRequestsToSend = canWakeBufferIfNoFetchRequestsToSend;
+            this.sessionCloses = sessionCloses;
+        }
+
+        /**
+         * The requests that close the fetch sessions of connections that are no longer used. They are answered
+         * like the requests of {@link #prepareCloseFetchSessionRequests()}.
+         */
+        Map<Node, FetchSessionHandler.FetchRequestData> sessionCloses() {
+            return sessionCloses;
         }
 
         /**
@@ -677,6 +1092,11 @@ public abstract class AbstractFetch implements Closeable {
      * for the application follows the size of the responses, and it is about two responses per node.
      * </p>
      *
+     * <p>
+     * Here a node is one connection: a broker with several connections (see {@link #currentConnectionNode}) has one such
+     * limit for each of them, and the partitions are counted on the connection that they are fetched on now.
+     * </p>
+     *
      * @param buffered Buffered data for each partition
      * @param currentTimeMs Current timestamp
      *
@@ -696,12 +1116,16 @@ public abstract class AbstractFetch implements Closeable {
             if (nodeOpt.isEmpty())
                 continue;
 
-            int nodeId = nodeOpt.get().id();
+            int nodeId = currentConnectionNode(nodeOpt.get(), partition).id();
             FetchBuffer.BufferedState state = entry.getValue();
-            if (!prefetch() || !state.eligible)
+            if (!prefetch() || !state.eligible) {
                 ids.add(nodeId);
-            else if (bufferedBytes.merge(nodeId, state.bytes, Long::sum) > lastResponseBytes.getOrDefault(nodeId, 0L))
+            } else if (bufferedBytes.merge(nodeId, state.bytes, Long::sum) > lastResponseBytes.getOrDefault(nodeId, 0L)) {
                 ids.add(nodeId);
+                BrokerConnections connections = brokerConnections.get(brokerIdOf(nodeId));
+                if (connections != null)
+                    connections.bufferFull = true;
+            }
         }
 
         return ids;

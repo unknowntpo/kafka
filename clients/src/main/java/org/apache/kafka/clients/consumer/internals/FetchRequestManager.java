@@ -28,13 +28,13 @@ import org.apache.kafka.common.requests.FetchRequest;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.internals.LogContext;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
-import java.util.stream.Collectors;
 
 /**
  * {@code FetchRequestManager} is responsible for generating {@link FetchRequest} that represent the
@@ -165,8 +165,9 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         try {
             FetchRequestPreparationResult result = fetchRequestPreparer.prepare();
             Map<Node, FetchSessionHandler.FetchRequestData> fetchRequests = result.requests();
+            Map<Node, FetchSessionHandler.FetchRequestData> sessionCloses = result.sessionCloses();
 
-            if (fetchRequests.isEmpty()) {
+            if (fetchRequests.isEmpty() && sessionCloses.isEmpty()) {
                 if (result.canWakeBufferIfNoFetchRequestsToSend()) {
                     // If there's nothing to fetch because every fetchable partition already has buffered data,
                     // wake up the FetchBuffer so it doesn't needlessly wait for a wakeup that won't come until
@@ -177,19 +178,12 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
                 return PollResult.EMPTY;
             }
 
-            List<UnsentRequest> requests = fetchRequests.entrySet().stream().map(entry -> {
-                final Node fetchTarget = entry.getKey();
-                final FetchSessionHandler.FetchRequestData data = entry.getValue();
-                final FetchRequest.Builder request = createFetchRequest(fetchTarget, data);
-                final BiConsumer<ClientResponse, Throwable> responseHandler = (clientResponse, error) -> {
-                    if (error != null)
-                        errorHandler.handle(fetchTarget, data, error);
-                    else
-                        successHandler.handle(fetchTarget, data, clientResponse);
-                };
-
-                return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
-            }).collect(Collectors.toList());
+            List<UnsentRequest> requests = new ArrayList<>(fetchRequests.size() + sessionCloses.size());
+            fetchRequests.forEach((fetchTarget, data) ->
+                    requests.add(unsentRequest(fetchTarget, data, successHandler, errorHandler)));
+            // The fetch sessions of connections that are no longer used
+            sessionCloses.forEach((fetchTarget, data) ->
+                    requests.add(unsentRequest(fetchTarget, data, this::handleCloseFetchSessionSuccess, this::handleCloseFetchSessionFailure)));
 
             pendingFetchRequestFuture.complete(null);
             return new PollResult(requests);
@@ -202,6 +196,20 @@ public class FetchRequestManager extends AbstractFetch implements RequestManager
         } finally {
             pendingFetchRequestFuture = null;
         }
+    }
+
+    private UnsentRequest unsentRequest(Node fetchTarget,
+                                        FetchSessionHandler.FetchRequestData data,
+                                        ResponseHandler<ClientResponse> successHandler,
+                                        ResponseHandler<Throwable> errorHandler) {
+        final FetchRequest.Builder request = createFetchRequest(fetchTarget, data);
+        final BiConsumer<ClientResponse, Throwable> responseHandler = (clientResponse, error) -> {
+            if (error != null)
+                errorHandler.handle(fetchTarget, data, error);
+            else
+                successHandler.handle(fetchTarget, data, clientResponse);
+        };
+        return new UnsentRequest(request, Optional.of(fetchTarget)).whenComplete(responseHandler);
     }
 
     /**
