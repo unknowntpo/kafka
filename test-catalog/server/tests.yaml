@@ -32,6 +32,9 @@ org.apache.kafka.network.SocketServerConfigsTest:
 - testListenerListToEndPointsWithOneEndpoint
 - testListenerListToEndPointsWithUnderscores
 - testListenerListToEndPointsWithWildcard
+org.apache.kafka.network.metrics.RequestMetricsTest:
+- testDeprecatedRequestRateMetersAreLimited
+- testDeprecatedRequestRateTagsAreTruncated
 org.apache.kafka.security.authorizer.AuthorizerTest:
 - testAccessAllowedIfAllowAclExistsOnPrefixedResource
 - testAccessAllowedIfAllowAclExistsOnWildcardResource
@@ -167,6 +170,7 @@ org.apache.kafka.server.BrokerFeaturesTest:
 - testEmpty
 - testIncompatibilitiesDueToAbsentFeature
 - testIncompatibilitiesDueToIncompatibleFeature
+- testMirrorVersionRequiresUnstableFeatures
 org.apache.kafka.server.BrokerRegistrationRequestTest:
 - shouldRegisterWhenSupportedRangeAndNotMigrating
 - shouldRejectRegistrationWhenFeatureLevelTooHigh
@@ -314,6 +318,7 @@ org.apache.kafka.server.ForwardingManagerTest:
 - testForwardingManagerMetricsOnTimeout
 - testForwardingTimeoutAfterRetry
 - testForwardingTimeoutWaitingForControllerDiscovery
+- testRequestVersionFollowsRequestHeaderVersionChange
 - testResponseCorrelationIdMismatch
 - testUnsupportedVersionFromNetworkClient
 - testUnsupportedVersions
@@ -357,6 +362,7 @@ org.apache.kafka.server.KRaftTopicCreatorTest:
 - testEnvelopeResponseSuccessfulParsing
 - testEnvelopeResponseWithEnvelopeError
 - testEnvelopeResponseWithTopicErrors
+- testRequestVersionFollowsRequestHeaderVersionChange
 - testTimeoutException
 - testUnexpectedResponseType
 - testVersionMismatchException
@@ -402,6 +408,9 @@ org.apache.kafka.server.NodeToControllerRequestThreadTest:
 - testRetryTimeoutWhileControllerNotAvailable
 - testThreadNotStarted
 - testUnsupportedVersionHandling
+org.apache.kafka.server.ProcessRoleTest:
+- testFromString
+- testFromStringWithInvalidRole
 org.apache.kafka.server.RaftClusterSnapshotTest:
 - testSnapshotsGenerated
 org.apache.kafka.server.ReconfigurableQuorumIntegrationTest:
@@ -463,6 +472,8 @@ org.apache.kafka.server.logger.RuntimeLoggerManagerTest:
 - testValidateRemoveRootLogLevelConfigNotAllowed
 - testValidateSetLogLevelConfig
 - testValidateSetRootLogLevelConfig
+org.apache.kafka.server.metrics.BrokerMetricNamesTest:
+- testMetrics
 org.apache.kafka.server.metrics.BrokerServerMetricsTest:
 - testIgnoredStaticVoters
 - testLastAppliedRecordOffset
@@ -671,6 +682,7 @@ org.apache.kafka.server.share.dlq.ShareGroupDLQRecordFetcherTest:
 - testUncompressedBatchStopsMidBatchOnceBudgetReached
 - testWantedBatchAfterOutOfOrderBatchIsStillCollected
 org.apache.kafka.server.share.dlq.ShareGroupDLQStateManagerTest:
+- testCoalesceProduceRequestsBuildsTopicIdVersionForRequestHeaderVersion
 - testCoalesceProduceRequestsDefersHandlersThatExceedPartitionBudget
 - testCoalesceProduceRequestsKeepsDifferentDlqTopicsSeparate
 - testCoalesceProduceRequestsMergesPartitionsForSameDlqTopic
@@ -719,7 +731,10 @@ org.apache.kafka.server.share.dlq.ShareGroupDLQStateManagerTest:
 - testDlqProduceFatalErrorFailsFuture
 - testDlqProduceNotLeaderOrFollowerExhaustsAndRecordsFailure
 - testDlqProducePartialFailuresThenSucceeds
+- testDlqProduceRequestVersionFollowsRequestHeaderVersion
+- testDlqProduceRequestVersionFollowsRequestHeaderVersionChange
 - testDlqProduceRetriesExhaustedFailsWithNetworkException
+- testDlqProduceUsesLatestVersionSupportedByLeader
 - testDlqRecordCopyFirstProduceRoundGoesOutBeforeLaterRoundResolves
 - testDlqRecordCopyRetryOfSameRoundDoesNotRefetchButNewRoundDoes
 - testDlqRecordCopyRoundBudgetResetAcrossMultipleProduceRounds

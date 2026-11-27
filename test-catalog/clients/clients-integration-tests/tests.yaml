@@ -131,6 +131,7 @@ org.apache.kafka.clients.admin.DescribeProducersWithBrokerIdTest:
 - testDescribeProducersFromFollower
 - testDescribeProducersWithInvalidBrokerId
 org.apache.kafka.clients.admin.DynamicBrokerConfigTest:
+- testChannelBuildersRemovedOnNetworkThreadShrink
 - testIncreaseNumIoThreads
 org.apache.kafka.clients.admin.DynamicGroupConfigIntegrationTest:
 - testDescribeGroupConfigSynonymsWithBrokerSynonym
@@ -163,6 +164,7 @@ org.apache.kafka.clients.consumer.ConsumerBounceTest:
 - testClassicConsumerConsumptionWithBrokerFailures
 - testClassicConsumerReceivesFatalExceptionWhenGroupPassesMaxSize
 - testClassicConsumerSeekAndCommitWithBrokerFailures
+- testClassicRebalanceCompletesWhenOverCapacityMemberIsRejected
 - testClassicSubscribeWhenTopicUnavailable
 org.apache.kafka.clients.consumer.ConsumerIntegrationTest:
 - testAsyncConsumerWithConsumerProtocolDisabled

@@ -138,7 +138,9 @@ org.apache.kafka.server.common.MetadataVersionTest:
 - testAssignReplicasToDirsRequestHeaderVersion
 - testControllerRegistrationRequestHeaderVersion
 - testDirectoryAssignmentSupported
+- testEnvelopeRequestHeaderVersion
 - testFeatureLevels
+- testFetchRequestVersion
 - testFromShortVersionString
 - testFromVersionString
 - testFromVersionStringUnstableDisabled
@@ -150,10 +152,22 @@ org.apache.kafka.server.common.MetadataVersionTest:
 - testPartitionChangeRecordVersion
 - testPartitionRecordVersion
 - testPrevious
+- testProduceRequestHeaderVersion
 - testProductionMetadataDontUseUnstableApiVersion
 - testRegisterBrokerRecordVersion
 - testShortVersion
 - testVersion
+org.apache.kafka.server.common.MirrorVersionTest:
+- testDisabledByDefaultInProduction
+- testFeatureLevels
+- testFeatureNameAndLevel
+- testIsEnabled
+- testMetadataVersionDependency
+- testMetadataVersionMapping
+- testMissingMetadataVersionDependency
+- testUnknownFeatureLevel
+- testUnstableMetadataVersionMapping
+- testUnstableVersionRequiresOptIn
 org.apache.kafka.server.common.ProducerIdsBlockTest:
 - testClaimNextId
 - testDynamicBlock
@@ -279,6 +293,14 @@ org.apache.kafka.server.metrics.KafkaYammerMetricsTest:
 org.apache.kafka.server.metrics.TimeRatioTest:
 - testRatio
 - testRatioMisalignedWindow
+org.apache.kafka.server.mirror.MirrorPartitionMetadataTest:
+- testBuilder
+- testCopyBuilderChangesOnlyTheSetFields
+- testEmpty
+- testEquality
+- testNonRetryableError
+- testNullFieldsAreRejected
+- testPartialBuilderKeepsDefaults
 org.apache.kafka.server.mirror.MirrorPartitionStateTest:
 - testAllStatesAreCoveredByTable
 - testFromValue
