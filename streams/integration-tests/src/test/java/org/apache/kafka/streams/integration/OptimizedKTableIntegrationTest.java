@@ -229,27 +229,36 @@ public class OptimizedKTableIntegrationTest {
 
         // the input is written after the gate is set, so the standby cannot read past offset 950 before the gate exists
         standbyPolls.gate.set(950L);
-        produceValueRange(topic, 1, 0, 1_000);
+        produceValueRange(topic, 1, 0, 950);
 
         try (final Admin admin = CLUSTER.createAdminClient()) {
-            // the gate keeps the standby 50 records behind the committed offset of the active task (the limit of the standby)
+            // the limit of the standby is a cached copy of the committed offset of the active task, and the standby
+            // refreshes it only while it has buffered records. After the standby applied all 950 records, its limit stays at 950
             TestUtils.waitForCondition(
-                () -> standbyNextOffset.get() == 950L && committedOffset(admin, applicationId, partition) == 1_000L,
+                () -> standbyNextOffset.get() == 950L && committedOffset(admin, applicationId, partition) == 950L,
                 () -> "Standby did not reach the gate or the active task did not commit, next offset of the standby: " + standbyNextOffset.get());
 
-            // the active task stops making progress, so its committed offset (the limit of the standby) stays at 1,000
+            // the gate drops these 50 records, so the standby buffers nothing and its limit stays at 950
+            // while the committed offset of the active task moves to 1,000
+            produceValueRange(topic, 1, 950, 1_000);
+            TestUtils.waitForCondition(
+                () -> committedOffset(admin, applicationId, partition) == 1_000L,
+                "Active task did not commit offset 1,000");
+
+            // the active task stops making progress, so its committed offset stays at 1,000
             active.pause();
             produceValueRange(topic, 1, 1_000, 2_000);
             final long polledBefore = standbyPolls.records.get();
             standbyPolls.gate.set(Long.MAX_VALUE);
 
-            // the next poll returns records before and beyond the limit. The standby must pause the partition
-            // instead of fetching all new records, and must still apply the 50 records before the limit
+            // the next poll returns only records at or beyond the stale limit of 950, so the standby pauses the partition
+            // before it applies anything. It must still refresh the limit and apply the 50 records before offset 1,000,
+            // and must not fetch all new records
             TestUtils.waitForCondition(
                 () -> standbyNextOffset.get() == 1_000L && standbyPolls.paused.contains(partition),
                 () -> "Standby did not apply the records before the limit or did not pause the partition, next offset: "
                     + standbyNextOffset.get() + ", records polled: " + (standbyPolls.records.get() - polledBefore));
-            // one poll of 100 records: the 50 records before the limit and 50 records beyond it
+            // one poll of 100 records: the 50 records before offset 1,000 and 50 records beyond it
             final long polled = standbyPolls.records.get() - polledBefore;
             assertTrue(polled <= 100, "Standby polled " + polled + " records after the gate was removed");
 
