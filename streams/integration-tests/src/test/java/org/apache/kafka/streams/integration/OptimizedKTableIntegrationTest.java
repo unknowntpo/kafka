@@ -266,8 +266,10 @@ public class OptimizedKTableIntegrationTest {
         }
     }
 
-    // records returned by the restore consumer, the partitions it currently has paused,
-    // and a gate: the restore consumer returns only records before the gate offset
+    /**
+     * Tracks the records a restore consumer returned and the partitions it has paused.
+     * It can also hold the consumer back: while a gate is set, the consumer returns only records before the gate offset.
+     */
     private static final class RestorePolls {
         private final AtomicLong records = new AtomicLong();
         private final Set<TopicPartition> paused = ConcurrentHashMap.newKeySet();
