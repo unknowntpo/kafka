@@ -78,6 +78,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static org.apache.kafka.streams.integration.utils.IntegrationTestUtils.startApplicationAndWaitUntilRunning;
 import static org.apache.kafka.streams.utils.TestUtils.safeUniqueTestName;
@@ -203,7 +204,6 @@ public class OptimizedKTableIntegrationTest {
         final String topic = "standby-limit-input-topic";
         final TopicPartition partition = new TopicPartition(topic, 0);
         CLUSTER.createTopic(topic, 1, 1);
-        produceValueRange(topic, 1, 0, 1_000);
 
         final StreamsBuilder builder = new StreamsBuilder();
         builder.table(topic, Consumed.with(Serdes.Integer(), Serdes.Integer()),
@@ -211,15 +211,25 @@ public class OptimizedKTableIntegrationTest {
 
         final String safeTestName = safeUniqueTestName(testInfo);
         final AtomicLong standbyNextOffset = new AtomicLong();
-        // which client gets the standby task is only known after the start, so both restore consumers share one gate.
-        // The gate is harmless for the active task at first start: nothing is committed yet, so it has nothing to restore
-        final AtomicLong gate = new AtomicLong(950L);
-        final RestorePolls restorePolls1 = new RestorePolls(gate);
-        final RestorePolls restorePolls2 = new RestorePolls(gate);
+        final RestorePolls restorePolls1 = new RestorePolls();
+        final RestorePolls restorePolls2 = new RestorePolls();
         final KafkaStreams kafkaStreams1 = createKafkaStreams(builder, streamsConfiguration(safeTestName), restorePolls1, standbyNextOffset);
         final KafkaStreams kafkaStreams2 = createKafkaStreams(builder, streamsConfiguration(safeTestName), restorePolls2, standbyNextOffset);
         startApplicationAndWaitUntilRunning(Arrays.asList(kafkaStreams1, kafkaStreams2), Duration.ofSeconds(60));
         final String applicationId = "app-" + safeTestName;
+
+        // which client gets the standby task is only known after the start
+        TestUtils.waitForCondition(
+            () -> Stream.of(kafkaStreams1, kafkaStreams2)
+                .anyMatch(streams -> streams.metadataForLocalThreads().stream().anyMatch(t -> !t.standbyTasks().isEmpty())),
+            "No client got the standby task");
+        final boolean firstIsActive = kafkaStreams1.metadataForLocalThreads().stream().anyMatch(t -> !t.activeTasks().isEmpty());
+        final KafkaStreams active = firstIsActive ? kafkaStreams1 : kafkaStreams2;
+        final RestorePolls standbyPolls = firstIsActive ? restorePolls2 : restorePolls1;
+
+        // the input is written after the gate is set, so the standby cannot read past offset 950 before the gate exists
+        standbyPolls.gate.set(950L);
+        produceValueRange(topic, 1, 0, 1_000);
 
         // one admin client for all lookups of the committed offset: the lookups run every 100 ms while the test waits
         try (final Admin admin = CLUSTER.createAdminClient()) {
@@ -229,15 +239,11 @@ public class OptimizedKTableIntegrationTest {
                 () -> "Standby did not reach the gate or the active task did not commit, next offset of the standby: " + standbyNextOffset.get());
             assertEquals(950L, standbyNextOffset.get());
 
-            final boolean firstIsActive = kafkaStreams1.metadataForLocalThreads().stream().anyMatch(t -> !t.activeTasks().isEmpty());
-            final KafkaStreams active = firstIsActive ? kafkaStreams1 : kafkaStreams2;
-            final RestorePolls standbyPolls = firstIsActive ? restorePolls2 : restorePolls1;
-
             // the active task stops making progress, so its committed offset (the limit of the standby) stays at 1,000
             active.pause();
             produceValueRange(topic, 1, 1_000, 2_000);
             final long polledBefore = standbyPolls.records.get();
-            gate.set(Long.MAX_VALUE);
+            standbyPolls.gate.set(Long.MAX_VALUE);
 
             // the next poll returns records before and beyond the limit. The standby must pause the partition
             // instead of fetching all new records, and must still apply the 50 records before the limit
@@ -264,15 +270,11 @@ public class OptimizedKTableIntegrationTest {
     }
 
     // records returned by the restore consumer, the partitions it currently has paused,
-    // and a gate shared by all restore consumers: they return only records before the gate offset
+    // and a gate: the restore consumer returns only records before the gate offset
     private static final class RestorePolls {
         private final AtomicLong records = new AtomicLong();
         private final Set<TopicPartition> paused = ConcurrentHashMap.newKeySet();
-        private final AtomicLong gate;
-
-        private RestorePolls(final AtomicLong gate) {
-            this.gate = gate;
-        }
+        private final AtomicLong gate = new AtomicLong(Long.MAX_VALUE);
 
         // drops the records at or after the gate offset and seeks back to it, so they are fetched again after the gate is removed
         private ConsumerRecords<byte[], byte[]> applyGate(final Consumer<byte[], byte[]> consumer,
