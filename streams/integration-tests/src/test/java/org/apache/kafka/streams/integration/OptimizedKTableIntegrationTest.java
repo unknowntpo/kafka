@@ -16,8 +16,16 @@
  */
 package org.apache.kafka.streams.integration;
 
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.IntegerSerializer;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
@@ -33,6 +41,9 @@ import org.apache.kafka.streams.integration.utils.EmbeddedKafkaCluster;
 import org.apache.kafka.streams.integration.utils.IntegrationTestUtils;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.Materialized;
+import org.apache.kafka.streams.processor.StandbyUpdateListener;
+import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.internals.DefaultKafkaClientSupplier;
 import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.QueryableStoreTypes;
 import org.apache.kafka.streams.state.ReadOnlyKeyValueStore;
@@ -54,13 +65,20 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static org.apache.kafka.streams.integration.utils.IntegrationTestUtils.startApplicationAndWaitUntilRunning;
 import static org.apache.kafka.streams.utils.TestUtils.safeUniqueTestName;
@@ -126,7 +144,7 @@ public class OptimizedKTableIntegrationTest {
         try {
             startApplicationAndWaitUntilRunning(kafkaStreamsList, Duration.ofSeconds(60));
 
-            produceValueRange(key, 0, batch1NumMessages);
+            produceValueRange(INPUT_TOPIC_NAME, key, 0, batch1NumMessages);
 
             // Assert that all messages in the first batch were processed in a timely manner
             assertTrue(semaphore.tryAcquire(batch1NumMessages, 60, TimeUnit.SECONDS));
@@ -166,7 +184,7 @@ public class OptimizedKTableIntegrationTest {
 
             final int totalNumMessages = batch1NumMessages + batch2NumMessages;
 
-            produceValueRange(key, batch1NumMessages, totalNumMessages);
+            produceValueRange(INPUT_TOPIC_NAME, key, batch1NumMessages, totalNumMessages);
 
             // Assert that all messages in the second batch were processed in a timely manner
             assertTrue(semaphore.tryAcquire(batch2NumMessages, 60, TimeUnit.SECONDS));
@@ -181,19 +199,182 @@ public class OptimizedKTableIntegrationTest {
         }
     }
 
-    private void produceValueRange(final int key, final int start, final int endExclusive) {
+    @Test
+    public void shouldNotFetchBeyondCommittedOffsetForStandby(final TestInfo testInfo) throws Exception {
+        final String topic = "standby-limit-input-topic";
+        final TopicPartition partition = new TopicPartition(topic, 0);
+        CLUSTER.createTopic(topic, 1, 1);
+
+        final StreamsBuilder builder = new StreamsBuilder();
+        builder.table(topic, Consumed.with(Serdes.Integer(), Serdes.Integer()),
+            Materialized.<Integer, Integer, KeyValueStore<Bytes, byte[]>>as(TABLE_NAME).withCachingDisabled());
+
+        final String safeTestName = safeUniqueTestName(testInfo);
+        final AtomicLong standbyNextOffset = new AtomicLong();
+        final RestorePolls restorePolls1 = new RestorePolls();
+        final RestorePolls restorePolls2 = new RestorePolls();
+        final KafkaStreams kafkaStreams1 = createKafkaStreams(builder, streamsConfiguration(safeTestName), restorePolls1, standbyNextOffset);
+        final KafkaStreams kafkaStreams2 = createKafkaStreams(builder, streamsConfiguration(safeTestName), restorePolls2, standbyNextOffset);
+        startApplicationAndWaitUntilRunning(Arrays.asList(kafkaStreams1, kafkaStreams2), Duration.ofSeconds(60));
+        final String applicationId = "app-" + safeTestName;
+
+        // which client gets the standby task is only known after the start
+        TestUtils.waitForCondition(
+            () -> Stream.of(kafkaStreams1, kafkaStreams2)
+                .anyMatch(streams -> streams.metadataForLocalThreads().stream().anyMatch(t -> !t.standbyTasks().isEmpty())),
+            "No client got the standby task");
+        final boolean firstIsActive = kafkaStreams1.metadataForLocalThreads().stream().anyMatch(t -> !t.activeTasks().isEmpty());
+        final KafkaStreams active = firstIsActive ? kafkaStreams1 : kafkaStreams2;
+        final RestorePolls standbyPolls = firstIsActive ? restorePolls2 : restorePolls1;
+
+        // the input is written after the gate is set, so the standby cannot read past offset 950 before the gate exists
+        standbyPolls.gate.set(950L);
+        produceValueRange(topic, 1, 0, 950);
+
+        try (final Admin admin = CLUSTER.createAdminClient()) {
+            // the limit of the standby is a cached copy of the committed offset of the active task, and the standby
+            // refreshes it only while it has buffered records. After the standby applied all 950 records, its limit stays at 950
+            TestUtils.waitForCondition(
+                () -> standbyNextOffset.get() == 950L && committedOffset(admin, applicationId, partition) == 950L,
+                () -> "Standby did not reach the gate or the active task did not commit, next offset of the standby: " + standbyNextOffset.get());
+
+            // the gate drops these 50 records, so the standby buffers nothing and its limit stays at 950
+            // while the committed offset of the active task moves to 1,000
+            produceValueRange(topic, 1, 950, 1_000);
+            TestUtils.waitForCondition(
+                () -> committedOffset(admin, applicationId, partition) == 1_000L,
+                "Active task did not commit offset 1,000");
+
+            // the active task stops making progress, so its committed offset stays at 1,000
+            active.pause();
+            produceValueRange(topic, 1, 1_000, 2_000);
+            final long polledBefore = standbyPolls.records.get();
+            standbyPolls.gate.set(Long.MAX_VALUE);
+
+            // the next poll returns only records at or beyond the stale limit of 950, so the standby pauses the partition
+            // before it applies anything. It must still refresh the limit and apply the 50 records before offset 1,000,
+            // and must not fetch all new records
+            TestUtils.waitForCondition(
+                () -> standbyNextOffset.get() == 1_000L && standbyPolls.paused.contains(partition),
+                () -> "Standby did not apply the records before the limit or did not pause the partition, next offset: "
+                    + standbyNextOffset.get() + ", records polled: " + (standbyPolls.records.get() - polledBefore));
+            // one poll of 100 records: the 50 records before offset 1,000 and 50 records beyond it
+            final long polled = standbyPolls.records.get() - polledBefore;
+            assertTrue(polled <= 100, "Standby polled " + polled + " records after the gate was removed");
+
+            // the active task commits the new records, so the limit of the standby moves forward
+            // and the standby must resume the partition
+            active.resume();
+            TestUtils.waitForCondition(
+                () -> !standbyPolls.paused.contains(partition),
+                () -> "Standby did not resume the partition after the committed offset of the active task moved forward");
+
+            TestUtils.waitForCondition(
+                () -> committedOffset(admin, applicationId, partition) == 2_000L && standbyNextOffset.get() == 2_000L,
+                () -> "Active or standby task did not reach offset 2,000, next offset of the standby: " + standbyNextOffset.get());
+        }
+    }
+
+    /**
+     * Tracks the records a restore consumer returned and the partitions it has paused.
+     * It can also hold the consumer back: while a gate is set, the consumer returns only records before the gate offset.
+     */
+    private static final class RestorePolls {
+        private final AtomicLong records = new AtomicLong();
+        private final Set<TopicPartition> paused = ConcurrentHashMap.newKeySet();
+        private final AtomicLong gate = new AtomicLong(Long.MAX_VALUE);
+
+        // drops the records at or after the gate offset and seeks back to it, so they are fetched again after the gate is removed
+        private ConsumerRecords<byte[], byte[]> applyGate(final Consumer<byte[], byte[]> consumer,
+                                                          final ConsumerRecords<byte[], byte[]> records) {
+            final long gateOffset = gate.get();
+            if (gateOffset == Long.MAX_VALUE) {
+                return records;
+            }
+            final Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> kept = new HashMap<>();
+            for (final TopicPartition partition : records.partitions()) {
+                final List<ConsumerRecord<byte[], byte[]>> partitionRecords = records.records(partition);
+                final List<ConsumerRecord<byte[], byte[]>> beforeGate = partitionRecords.stream()
+                    .filter(record -> record.offset() < gateOffset)
+                    .collect(Collectors.toList());
+                if (beforeGate.size() < partitionRecords.size()) {
+                    consumer.seek(partition, gateOffset);
+                }
+                if (!beforeGate.isEmpty()) {
+                    kept.put(partition, beforeGate);
+                }
+            }
+            return new ConsumerRecords<>(kept, Map.of());
+        }
+    }
+
+    // -1 if the group has not committed an offset for the partition yet
+    private long committedOffset(final Admin admin, final String groupId, final TopicPartition partition) throws Exception {
+        final OffsetAndMetadata committed = admin.listConsumerGroupOffsets(groupId)
+            .partitionsToOffsetAndMetadata().get(30, TimeUnit.SECONDS).get(partition);
+        return committed == null ? -1L : committed.offset();
+    }
+
+    private void produceValueRange(final String topic, final int key, final int start, final int endExclusive) {
         final Properties producerProps = new Properties();
         producerProps.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, CLUSTER.bootstrapServers());
         producerProps.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class);
         producerProps.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class);
 
         IntegrationTestUtils.produceKeyValuesSynchronously(
-            INPUT_TOPIC_NAME,
+            topic,
             IntStream.range(start, endExclusive)
                 .mapToObj(i -> KeyValue.pair(key, i))
                 .collect(Collectors.toList()),
             producerProps,
             mockTime);
+    }
+
+    private KafkaStreams createKafkaStreams(final StreamsBuilder builder,
+                                            final Properties config,
+                                            final RestorePolls restorePolls,
+                                            final AtomicLong standbyNextOffset) {
+        final KafkaStreams streams = new KafkaStreams(builder.build(config), config, new DefaultKafkaClientSupplier() {
+            @Override
+            public Consumer<byte[], byte[]> getRestoreConsumer(final Map<String, Object> consumerConfig) {
+                return new KafkaConsumer<>(consumerConfig, new ByteArrayDeserializer(), new ByteArrayDeserializer()) {
+                    @Override
+                    public ConsumerRecords<byte[], byte[]> poll(final Duration timeout) {
+                        final ConsumerRecords<byte[], byte[]> records = restorePolls.applyGate(this, super.poll(timeout));
+                        restorePolls.records.addAndGet(records.count());
+                        return records;
+                    }
+
+                    @Override
+                    public void pause(final Collection<TopicPartition> partitions) {
+                        super.pause(partitions);
+                        restorePolls.paused.addAll(partitions);
+                    }
+
+                    @Override
+                    public void resume(final Collection<TopicPartition> partitions) {
+                        super.resume(partitions);
+                        restorePolls.paused.removeAll(partitions);
+                    }
+                };
+            }
+        });
+        streams.setStandbyUpdateListener(new StandbyUpdateListener() {
+            @Override
+            public void onUpdateStart(final TopicPartition topicPartition, final String storeName, final long startingOffset) { }
+
+            @Override
+            public void onBatchLoaded(final TopicPartition topicPartition, final String storeName, final TaskId taskId,
+                                      final long batchEndOffset, final long batchSize, final long currentEndOffset) {
+                standbyNextOffset.accumulateAndGet(batchEndOffset + 1, Math::max);
+            }
+
+            @Override
+            public void onUpdateSuspended(final TopicPartition topicPartition, final String storeName, final long storeOffset,
+                                          final long currentEndOffset, final SuspendReason reason) { }
+        });
+        streamsToCleanup.add(streams);
+        return streams;
     }
 
     private KafkaStreams createKafkaStreams(final StreamsBuilder builder, final Properties config) {

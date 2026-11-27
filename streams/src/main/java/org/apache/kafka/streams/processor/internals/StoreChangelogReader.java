@@ -162,6 +162,11 @@ public class StoreChangelogReader implements ChangelogReader {
             this.bufferedRecords.clear();
         }
 
+        // buffered records at or after bufferedLimitIndex are beyond the limit and cannot be applied yet
+        private boolean hasBufferedRecordsBeyondLimit() {
+            return bufferedRecords.size() > bufferedLimitIndex;
+        }
+
         private void transitTo(final ChangelogState newState) {
             if (newState.prevStates.contains(changelogState.ordinal())) {
                 changelogState = newState;
@@ -592,9 +597,15 @@ public class StoreChangelogReader implements ChangelogReader {
         final Set<TopicPartition> restoringChangelogs,
         final Set<TopicPartition> fetchableChangelogs
     ) {
+        // fetching more for a partition whose buffer holds records beyond the limit would only grow the buffer,
+        // so it is paused but stays fetchable: restore still applies its buffered records up to the limit.
+        // This is evaluated before every poll, so it also re-pauses partitions resumed by transitToUpdateStandby()
+        final Set<TopicPartition> toResume = fetchableChangelogs.stream()
+            .filter(partition -> !changelogs.get(partition).hasBufferedRecordsBeyondLimit())
+            .collect(Collectors.toSet());
         final Set<TopicPartition> toPause = new HashSet<>(restoringChangelogs);
-        toPause.removeAll(fetchableChangelogs);
-        restoreConsumer.resume(fetchableChangelogs);
+        toPause.removeAll(toResume);
+        restoreConsumer.resume(toResume);
         restoreConsumer.pause(toPause);
     }
 
@@ -668,6 +679,9 @@ public class StoreChangelogReader implements ChangelogReader {
             // changelogs of paused tasks, which are not in tasks, are skipped: they are not restored until resumed, so
             // their limit offsets are not needed, and their tasks shouldn't have their task timeout started when the
             // lookup of committed offsets fails
+            //
+            // A partition paused by pauseResumePartitions() resumes only through this update. The update is not
+            // skipped for it: the partition was paused because it has buffered records beyond the limit.
             final Set<TopicPartition> changelogsWithLimitOffsets = changelogs.entrySet().stream()
                 .filter(entry -> entry.getValue().stateManager.taskType() == Task.TaskType.STANDBY &&
                     entry.getValue().stateManager.changelogAsSource(entry.getKey()) &&
