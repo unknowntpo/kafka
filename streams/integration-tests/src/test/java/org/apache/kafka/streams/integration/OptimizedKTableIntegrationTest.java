@@ -221,44 +221,46 @@ public class OptimizedKTableIntegrationTest {
         startApplicationAndWaitUntilRunning(Arrays.asList(kafkaStreams1, kafkaStreams2), Duration.ofSeconds(60));
         final String applicationId = "app-" + safeTestName;
 
-        // the gate keeps the standby 50 records behind the committed offset of the active task (the limit of the standby)
-        TestUtils.waitForCondition(
-            () -> standbyNextOffset.get() >= 950L && committedOffset(applicationId, partition) == 1_000L,
-            () -> "Standby did not reach the gate or the active task did not commit, next offset of the standby: " + standbyNextOffset.get());
-        assertEquals(950L, standbyNextOffset.get());
+        // one admin client for all lookups of the committed offset: the lookups run every 100 ms while the test waits
+        try (final Admin admin = CLUSTER.createAdminClient()) {
+            // the gate keeps the standby 50 records behind the committed offset of the active task (the limit of the standby)
+            TestUtils.waitForCondition(
+                () -> standbyNextOffset.get() >= 950L && committedOffset(admin, applicationId, partition) == 1_000L,
+                () -> "Standby did not reach the gate or the active task did not commit, next offset of the standby: " + standbyNextOffset.get());
+            assertEquals(950L, standbyNextOffset.get());
 
-        final boolean firstIsActive = kafkaStreams1.metadataForLocalThreads().stream().anyMatch(t -> !t.activeTasks().isEmpty());
-        final KafkaStreams active = firstIsActive ? kafkaStreams1 : kafkaStreams2;
-        final RestorePolls standbyPolls = firstIsActive ? restorePolls2 : restorePolls1;
+            final boolean firstIsActive = kafkaStreams1.metadataForLocalThreads().stream().anyMatch(t -> !t.activeTasks().isEmpty());
+            final KafkaStreams active = firstIsActive ? kafkaStreams1 : kafkaStreams2;
+            final RestorePolls standbyPolls = firstIsActive ? restorePolls2 : restorePolls1;
 
-        // the active task stops making progress, so its committed offset (the limit of the standby) stays at 1,000
-        active.pause();
-        produceValueRange(topic, 1, 1_000, 2_000);
-        final long polledBefore = standbyPolls.records.get();
-        // remove the gate
-        gate.set(Long.MAX_VALUE);
+            // the active task stops making progress, so its committed offset (the limit of the standby) stays at 1,000
+            active.pause();
+            produceValueRange(topic, 1, 1_000, 2_000);
+            final long polledBefore = standbyPolls.records.get();
+            gate.set(Long.MAX_VALUE);
 
-        // the next poll returns records before and beyond the limit. The standby must pause the partition
-        // instead of fetching all new records, and must still apply the 50 records before the limit
-        TestUtils.waitForCondition(
-            () -> standbyNextOffset.get() >= 1_000L && standbyPolls.paused.contains(partition),
-            () -> "Standby did not apply the records before the limit or did not pause the partition, next offset: "
-                + standbyNextOffset.get() + ", records polled: " + (standbyPolls.records.get() - polledBefore));
-        assertEquals(1_000L, standbyNextOffset.get());
-        // one poll of 100 records: the 50 records before the limit and 50 records beyond it
-        final long polled = standbyPolls.records.get() - polledBefore;
-        assertTrue(polled <= 100, "Standby polled " + polled + " records after the gate was removed");
+            // the next poll returns records before and beyond the limit. The standby must pause the partition
+            // instead of fetching all new records, and must still apply the 50 records before the limit
+            TestUtils.waitForCondition(
+                () -> standbyNextOffset.get() >= 1_000L && standbyPolls.paused.contains(partition),
+                () -> "Standby did not apply the records before the limit or did not pause the partition, next offset: "
+                    + standbyNextOffset.get() + ", records polled: " + (standbyPolls.records.get() - polledBefore));
+            assertEquals(1_000L, standbyNextOffset.get());
+            // one poll of 100 records: the 50 records before the limit and 50 records beyond it
+            final long polled = standbyPolls.records.get() - polledBefore;
+            assertTrue(polled <= 100, "Standby polled " + polled + " records after the gate was removed");
 
-        // the active task commits the new records, so the limit of the standby moves forward
-        // and the standby must resume the partition
-        active.resume();
-        TestUtils.waitForCondition(
-            () -> !standbyPolls.paused.contains(partition),
-            () -> "Standby did not resume the partition after the committed offset of the active task moved forward");
+            // the active task commits the new records, so the limit of the standby moves forward
+            // and the standby must resume the partition
+            active.resume();
+            TestUtils.waitForCondition(
+                () -> !standbyPolls.paused.contains(partition),
+                () -> "Standby did not resume the partition after the committed offset of the active task moved forward");
 
-        TestUtils.waitForCondition(
-            () -> committedOffset(applicationId, partition) == 2_000L && standbyNextOffset.get() >= 2_000L,
-            () -> "Active or standby task did not reach offset 2,000, next offset of the standby: " + standbyNextOffset.get());
+            TestUtils.waitForCondition(
+                () -> committedOffset(admin, applicationId, partition) == 2_000L && standbyNextOffset.get() >= 2_000L,
+                () -> "Active or standby task did not reach offset 2,000, next offset of the standby: " + standbyNextOffset.get());
+        }
     }
 
     // records returned by the restore consumer, the partitions it currently has paused,
@@ -297,12 +299,10 @@ public class OptimizedKTableIntegrationTest {
     }
 
     // -1 if the group has not committed an offset for the partition yet
-    private long committedOffset(final String groupId, final TopicPartition partition) throws Exception {
-        try (final Admin admin = CLUSTER.createAdminClient()) {
-            final OffsetAndMetadata committed = admin.listConsumerGroupOffsets(groupId)
-                .partitionsToOffsetAndMetadata().get(30, TimeUnit.SECONDS).get(partition);
-            return committed == null ? -1L : committed.offset();
-        }
+    private long committedOffset(final Admin admin, final String groupId, final TopicPartition partition) throws Exception {
+        final OffsetAndMetadata committed = admin.listConsumerGroupOffsets(groupId)
+            .partitionsToOffsetAndMetadata().get(30, TimeUnit.SECONDS).get(partition);
+        return committed == null ? -1L : committed.offset();
     }
 
     private void produceValueRange(final String topic, final int key, final int start, final int endExclusive) {

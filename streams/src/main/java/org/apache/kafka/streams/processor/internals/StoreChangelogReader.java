@@ -680,9 +680,8 @@ public class StoreChangelogReader implements ChangelogReader {
             // their limit offsets are not needed, and their tasks shouldn't have their task timeout started when the
             // lookup of committed offsets fails
             //
-            // This update is also what resumes a partition paused by pauseResumePartitions() for having buffered
-            // records beyond the limit. Such a partition always has buffered records, so it passes the check below.
-            // It stays paused until bufferedLimitIndex moves past all of them.
+            // A partition paused by pauseResumePartitions() resumes only through this update. The update is not
+            // skipped for it: the partition was paused because it has buffered records beyond the limit.
             final Set<TopicPartition> changelogsWithLimitOffsets = changelogs.entrySet().stream()
                 .filter(entry -> entry.getValue().stateManager.taskType() == Task.TaskType.STANDBY &&
                     entry.getValue().stateManager.changelogAsSource(entry.getKey()) &&
