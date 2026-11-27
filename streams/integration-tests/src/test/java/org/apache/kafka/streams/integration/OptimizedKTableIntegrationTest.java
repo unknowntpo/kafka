@@ -234,9 +234,8 @@ public class OptimizedKTableIntegrationTest {
         try (final Admin admin = CLUSTER.createAdminClient()) {
             // the gate keeps the standby 50 records behind the committed offset of the active task (the limit of the standby)
             TestUtils.waitForCondition(
-                () -> standbyNextOffset.get() >= 950L && committedOffset(admin, applicationId, partition) == 1_000L,
+                () -> standbyNextOffset.get() == 950L && committedOffset(admin, applicationId, partition) == 1_000L,
                 () -> "Standby did not reach the gate or the active task did not commit, next offset of the standby: " + standbyNextOffset.get());
-            assertEquals(950L, standbyNextOffset.get());
 
             // the active task stops making progress, so its committed offset (the limit of the standby) stays at 1,000
             active.pause();
@@ -247,10 +246,9 @@ public class OptimizedKTableIntegrationTest {
             // the next poll returns records before and beyond the limit. The standby must pause the partition
             // instead of fetching all new records, and must still apply the 50 records before the limit
             TestUtils.waitForCondition(
-                () -> standbyNextOffset.get() >= 1_000L && standbyPolls.paused.contains(partition),
+                () -> standbyNextOffset.get() == 1_000L && standbyPolls.paused.contains(partition),
                 () -> "Standby did not apply the records before the limit or did not pause the partition, next offset: "
                     + standbyNextOffset.get() + ", records polled: " + (standbyPolls.records.get() - polledBefore));
-            assertEquals(1_000L, standbyNextOffset.get());
             // one poll of 100 records: the 50 records before the limit and 50 records beyond it
             final long polled = standbyPolls.records.get() - polledBefore;
             assertTrue(polled <= 100, "Standby polled " + polled + " records after the gate was removed");
@@ -263,7 +261,7 @@ public class OptimizedKTableIntegrationTest {
                 () -> "Standby did not resume the partition after the committed offset of the active task moved forward");
 
             TestUtils.waitForCondition(
-                () -> committedOffset(admin, applicationId, partition) == 2_000L && standbyNextOffset.get() >= 2_000L,
+                () -> committedOffset(admin, applicationId, partition) == 2_000L && standbyNextOffset.get() == 2_000L,
                 () -> "Active or standby task did not reach offset 2,000, next offset of the standby: " + standbyNextOffset.get());
         }
     }
