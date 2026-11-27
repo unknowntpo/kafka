@@ -231,7 +231,6 @@ public class OptimizedKTableIntegrationTest {
         standbyPolls.gate.set(950L);
         produceValueRange(topic, 1, 0, 1_000);
 
-        // one admin client for all lookups of the committed offset: the lookups run every 100 ms while the test waits
         try (final Admin admin = CLUSTER.createAdminClient()) {
             // the gate keeps the standby 50 records behind the committed offset of the active task (the limit of the standby)
             TestUtils.waitForCondition(
