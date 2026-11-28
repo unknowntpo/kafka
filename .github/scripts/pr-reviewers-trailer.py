@@ -24,7 +24,6 @@
 # CLI and `git` to be available. No-op (exit 0) when REVIEWER_LOGIN is unset
 # or equal to the PR author.
 
-from collections import defaultdict
 import json
 import logging
 import os
@@ -33,7 +32,9 @@ import subprocess
 import shlex
 import sys
 import tempfile
-from typing import Dict, List, Optional, TextIO
+from typing import List, Optional
+
+from pr_trailers import format_trailers, parse_trailers
 
 logger = logging.getLogger()
 logger.setLevel(logging.DEBUG)
@@ -50,29 +51,6 @@ def get_env(key: str, fn = str) -> Optional:
     else:
         logger.debug(f"Read env {key}: {value}")
         return fn(value)
-
-
-def write_commit(io: TextIO, title: str, body: str):
-    io.write(title.encode())
-    io.write(b"\n\n")
-    io.write(body.encode())
-    io.flush()
-
-
-def parse_trailers(title, body) -> Dict:
-    trailers = defaultdict(list)
-
-    with tempfile.NamedTemporaryFile() as fp:
-        write_commit(fp, title, body)
-        cmd = f"git interpret-trailers --trim-empty --parse {fp.name}"
-        p = subprocess.run(shlex.split(cmd), capture_output=True)
-        fp.close()
-
-    for line in p.stdout.decode().splitlines():
-        key, value = line.split(":", 1)
-        trailers[key].append(value.strip())
-
-    return trailers
 
 
 def resolve_reviewer(login: str) -> tuple:
@@ -189,7 +167,7 @@ def update_reviewers_trailer(body: str, trailer: str) -> str:
         fp.close()
 
     if p.returncode == 0:
-        return p.stdout.decode()
+        return format_trailers(p.stdout.decode())
     return body
 
 
