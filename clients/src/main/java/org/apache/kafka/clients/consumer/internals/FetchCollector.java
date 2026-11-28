@@ -112,8 +112,13 @@ public class FetchCollector<K, V> {
                             // The first condition ensures that the completedFetches is not stuck with the same completedFetch
                             // in cases such as the TopicAuthorizationException, and the second condition ensures that no
                             // potential data loss due to an exception in a following record.
-                            if (fetch.isEmpty() && FetchResponse.recordsOrFail(completedFetch.partitionData).sizeInBytes() == 0)
+                            // A completedFetch that stays in the queue will be read again, so it is reported to the
+                            // metric aggregator only when it is removed. The aggregator treats the fetch response as
+                            // complete once every partition has reported.
+                            if (fetch.isEmpty() && FetchResponse.recordsOrFail(completedFetch.partitionData).sizeInBytes() == 0) {
                                 fetchBuffer.poll();
+                                completedFetch.recordAggregatedMetrics(0, 0);
+                            }
 
                             throw e;
                         }
@@ -222,12 +227,15 @@ public class FetchCollector<K, V> {
     protected CompletedFetch initialize(final CompletedFetch completedFetch) {
         final TopicPartition tp = completedFetch.partition;
         final Errors error = Errors.forCode(completedFetch.partitionData.errorCode());
-        boolean recordMetrics = true;
+        // The metrics are recorded here only when the fetch is dropped. When this method throws, the caller
+        // decides whether the fetch leaves the queue, and records the metrics if it does.
+        boolean recordMetrics = false;
 
         try {
             if (!subscriptions.hasValidPosition(tp)) {
                 // this can happen when a rebalance happened while fetch is still in-flight
                 log.debug("Ignoring fetched records for partition {} since it no longer has valid position", tp);
+                recordMetrics = true;
                 return null;
             } else if (error == Errors.NONE) {
                 final CompletedFetch ret = handleInitializeSuccess(completedFetch);
@@ -235,6 +243,7 @@ public class FetchCollector<K, V> {
                 return ret;
             } else {
                 handleInitializeErrors(completedFetch, error);
+                recordMetrics = true;
                 return null;
             }
         } finally {

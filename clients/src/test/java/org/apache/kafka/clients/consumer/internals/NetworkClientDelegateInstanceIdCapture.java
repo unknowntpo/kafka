@@ -40,7 +40,7 @@ public class NetworkClientDelegateInstanceIdCapture {
     public static void assertGenerated(Supplier<? extends AutoCloseable> consumerFactory) {
         ClientInstanceIdCapture.assertGenerated(NetworkClientDelegate.class,
             captor -> () -> NetworkClientDelegate.supplier(any(), any(), any(), any(), any(), captor.capture(), any(),
-                any(), any(), any(), anyBoolean(), any()),
+                any(), any(), any(), anyBoolean(), any(), any()),
             consumerFactory);
     }
 }

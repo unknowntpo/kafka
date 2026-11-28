@@ -111,6 +111,7 @@ import org.apache.kafka.common.errors.UnsupportedEndpointTypeException;
 import org.apache.kafka.common.errors.UnsupportedSaslMechanismException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.internals.KafkaFutureImpl;
+import org.apache.kafka.common.memory.MemoryPool;
 import org.apache.kafka.common.message.AddRaftVoterRequestData;
 import org.apache.kafka.common.message.AlterPartitionReassignmentsRequestData;
 import org.apache.kafka.common.message.AlterPartitionReassignmentsRequestData.ReassignableTopic;
@@ -631,7 +632,8 @@ public class KafkaAdminClient extends AdminClient {
                 metadataManager.updater(),
                 (hostResolver == null) ? new DefaultHostResolver() : hostResolver,
                 null,
-                clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null));
+                clientTelemetryReporter.map(ClientTelemetryReporter::telemetrySender).orElse(null),
+                MemoryPool.NONE);
             return new KafkaAdminClient(config, clientId, time, metadataManager, metrics, networkClient,
                 timeoutProcessorFactory, logContext, clientTelemetryReporter);
         } catch (Throwable exc) {

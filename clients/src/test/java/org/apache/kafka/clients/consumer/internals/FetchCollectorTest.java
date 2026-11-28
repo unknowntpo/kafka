@@ -57,6 +57,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Stream;
 
@@ -259,8 +260,10 @@ public class FetchCollectorTest {
         };
 
         // Add the CompletedFetch to the FetchBuffer queue
+        AtomicInteger completions = new AtomicInteger();
         CompletedFetch completedFetch = completedFetchBuilder
                 .recordCount(recordCount)
+                .metricsAggregator(new FetchMetricsAggregator(metricsManager, partitions(topicAPartition0), completions::incrementAndGet))
                 .build();
         fetchBuffer.add(completedFetch);
 
@@ -274,6 +277,9 @@ public class FetchCollectorTest {
         // remove it from the queue. If there are records in the CompletedFetch, FetchCollector.collectFetch will
         // leave it on the queue.
         assertEquals(recordCount == 0, fetchBuffer.isEmpty());
+
+        // The fetch response is complete only when the fetch has left the queue.
+        assertEquals(recordCount == 0 ? 1 : 0, completions.get());
     }
 
     @Test
@@ -728,6 +734,72 @@ public class FetchCollectorTest {
         assertEquals(new OffsetAndMetadata(startOffset + recordCount + 1, Optional.of(0), ""), fetch.nextOffsets().get(topicAPartition0));
     }
 
+    /**
+     * A fetch that fails to initialize and still has data stays in the buffer. Its response is not complete until
+     * the fetch leaves the buffer, even when every other partition of the response has been drained.
+     */
+    @Test
+    public void testFetchResponseIsNotCompleteWhileAFailedFetchIsStillBuffered() {
+        buildDependencies();
+        assign(topicAPartition0, topicAPartition1);
+        subscriptions.seek(topicAPartition0, 0);
+        subscriptions.seek(topicAPartition1, 0);
+
+        AtomicInteger completions = new AtomicInteger();
+        FetchMetricsAggregator aggregator = new FetchMetricsAggregator(metricsManager,
+                partitions(topicAPartition0, topicAPartition1), completions::incrementAndGet);
+
+        // The first partition has good records. The second has bytes but no complete batch, which fails to initialize.
+        fetchBuffer.add(new CompletedFetchBuilder().metricsAggregator(aggregator).build());
+        fetchBuffer.add(new CompletedFetchBuilder()
+                .partition(topicAPartition1)
+                .partitionData(new FetchResponseData.PartitionData()
+                        .setHighWatermark(1000)
+                        .setRecords(MemoryRecords.readableRecords(ByteBuffer.allocate(10))))
+                .metricsAggregator(aggregator)
+                .build());
+
+        // The failure is not thrown because the same call returns the records of the first partition.
+        assertEquals(DEFAULT_RECORD_COUNT, fetchCollector.collectFetch(fetchBuffer).numRecords());
+        assertFalse(fetchBuffer.isEmpty());
+        assertEquals(0, completions.get(), "the failed fetch is still buffered and will be read again");
+
+        // The failed fetch is read again and fails again.
+        assertThrows(KafkaException.class, () -> fetchCollector.collectFetch(fetchBuffer));
+        assertFalse(fetchBuffer.isEmpty());
+        assertEquals(0, completions.get());
+
+        // After a seek the fetch is stale, so it is removed from the buffer.
+        subscriptions.seek(topicAPartition1, 5);
+        assertEquals(0, fetchCollector.collectFetch(fetchBuffer).numRecords());
+        assertTrue(fetchBuffer.isEmpty());
+        assertEquals(1, completions.get());
+    }
+
+    /**
+     * An {@link Error} thrown while a fetch is initialized leaves the fetch in the buffer, so its response is
+     * not complete.
+     */
+    @Test
+    public void testFetchResponseIsNotCompleteWhenInitializeThrowsAnError() {
+        buildDependencies();
+        assignAndSeek(topicAPartition0);
+
+        ConsumerSubscriptionState failingSubscriptions = spy(subscriptions);
+        when(failingSubscriptions.hasValidPosition(topicAPartition0)).thenThrow(new StackOverflowError());
+        fetchCollector = new FetchCollector<>(logContext, metadata, failingSubscriptions, fetchConfig, deserializers,
+                metricsManager, time);
+
+        AtomicInteger completions = new AtomicInteger();
+        FetchMetricsAggregator aggregator = new FetchMetricsAggregator(metricsManager,
+                partitions(topicAPartition0), completions::incrementAndGet);
+        fetchBuffer.add(new CompletedFetchBuilder().metricsAggregator(aggregator).build());
+
+        assertThrows(StackOverflowError.class, () -> fetchCollector.collectFetch(fetchBuffer));
+        assertFalse(fetchBuffer.isEmpty());
+        assertEquals(0, completions.get());
+    }
+
     private List<FetchResponseData.AbortedTransaction> createAbortedTransaction(final long firstOffset) {
         FetchResponseData.AbortedTransaction abortedTransaction = new FetchResponseData.AbortedTransaction();
         abortedTransaction.setFirstOffset(firstOffset);
@@ -901,6 +973,13 @@ public class FetchCollectorTest {
 
         private Errors error = null;
 
+        private FetchMetricsAggregator metricsAggregator = null;
+
+        private CompletedFetchBuilder metricsAggregator(FetchMetricsAggregator metricsAggregator) {
+            this.metricsAggregator = metricsAggregator;
+            return this;
+        }
+
         private CompletedFetchBuilder fetchOffset(long fetchOffset) {
             this.fetchOffset = fetchOffset;
             return this;
@@ -943,14 +1022,16 @@ public class FetchCollectorTest {
             if (error != null)
                 partitionData.setErrorCode(error.code());
 
-            FetchMetricsAggregator metricsAggregator = new FetchMetricsAggregator(metricsManager, allPartitions);
+            FetchMetricsAggregator aggregator = metricsAggregator != null
+                    ? metricsAggregator
+                    : new FetchMetricsAggregator(metricsManager, allPartitions);
             return new CompletedFetch(
                     logContext.logger(CompletedFetch.class),
                     subscriptions,
                     BufferSupplier.create(),
                     topicPartition,
                     partitionData,
-                    metricsAggregator,
+                    aggregator,
                     fetchOffset);
         }
     }
